@@ -48,7 +48,7 @@ impl ProtocolFrameLimit {
 pub(super) struct ProviderStreamIngress {
     pub(super) delegate: Option<Arc<native_provider::NativeDelegate>>,
     pub(super) request_hooks: Option<Arc<provider_hooks::ProviderHooksJob>>,
-    pub(super) sender: mpsc::Sender<api_v03::ProviderStreamEvent>,
+    pub(super) sender: mpsc::Sender<api_v04::ProviderStreamEvent>,
     pub(super) next_sequence: usize,
     pub(super) terminal: bool,
 }

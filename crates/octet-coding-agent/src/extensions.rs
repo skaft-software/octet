@@ -188,6 +188,10 @@ const MAX_LIVE_REGISTRATION_NOTICES: usize = 8;
 /// Total per-extension deadline for the typed post-mutation hook. A timeout
 /// drops only that extension's rescan request after the host mutation settled.
 const POST_MUTATION_RPC_DEADLINE: Duration = Duration::from_millis(250);
+/// Post-reload notifications go to processes that were just started; their
+/// first reply can miss the warm-process deadline on a loaded machine, which
+/// silently dropped the reload's rescan. Still bounded.
+const POST_RELOAD_MUTATION_RPC_DEADLINE: Duration = Duration::from_secs(2);
 const MAX_SEEN_POST_MUTATION_IDS: usize = 256;
 const MAX_PENDING_POST_MUTATION_RESCANS: usize = 256;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
@@ -351,8 +355,8 @@ pub(crate) struct DeferredExtensionStartup {
     descriptors: BTreeMap<String, DiscoveredExtension>,
     /// Tool-name clashes already resolved during discovery.
     tool_clashes: BTreeMap<String, String>,
-    /// Whether a pending `octet-subagents` was admitted with `subagent_spawn`.
-    /// Keeps delegation readiness honest while its handshake is in flight.
+    /// Whether a pending first-party child-session owner was admitted with
+    /// `subagent_spawn`, so its runtime can be prepared before attach.
     agent_sessions_pending: bool,
     pi_preparation: Option<lifecycle::DeferredPiPreparation>,
     /// Activation tasks; aborting cancels the still-starting processes.
@@ -597,7 +601,6 @@ impl ExecutableExtensions {
             .map(|(name, reason)| startup_failure_notice(name, reason))
             .collect()
     }
-
 }
 
 fn shutdown_telemetry_observer(observer: octet_agent::TelemetryObserver) {

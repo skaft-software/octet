@@ -652,8 +652,8 @@ impl ExtensionProcess {
             {
                 return Ok(());
             }
-            let params = api_v03::SessionHookParams::SessionStart {
-                payload: api_v03::SessionStart {
+            let params = api_v04::SessionHookParams::SessionStart {
+                payload: api_v04::SessionStart {
                     binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
                 },
             };
@@ -677,8 +677,8 @@ impl ExtensionProcess {
         outcome: ExtensionLifecycleOutcome,
         reason: &'static str,
     ) -> Result<(), ExtensionRuntimeError> {
-        let params = api_v03::SessionHookParams::SessionEnd {
-            payload: api_v03::SessionEnd {
+        let params = api_v04::SessionHookParams::SessionEnd {
+            payload: api_v04::SessionEnd {
                 binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
                 outcome: session_hook_outcome(outcome).to_owned(),
                 reason: reason.to_owned(),
@@ -747,7 +747,7 @@ impl ExtensionProcess {
         &self,
         endpoint: &LifecycleEndpoint,
         session_id: &str,
-        params: api_v03::SessionHookParams,
+        params: api_v04::SessionHookParams,
         start_reason: Option<&'static str>,
     ) -> Result<(), ExtensionRuntimeError> {
         endpoint
@@ -756,16 +756,23 @@ impl ExtensionProcess {
         // Pi awaits session_start, and it runs off the startup path here, so it
         // gets the ordinary request deadline. Only the end finalizer keeps the
         // short cap, so exit and reload never wait on an extension.
-        let ending = matches!(&params, api_v03::SessionHookParams::SessionEnd { .. });
+        let ending = matches!(&params, api_v04::SessionHookParams::SessionEnd { .. });
         let deadline = match params {
-            api_v03::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
-            api_v03::SessionHookParams::SessionEnd { .. } => {
+            api_v04::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
+            api_v04::SessionHookParams::SessionEnd { .. } => {
                 self.inner.config.request_timeout.min(SESSION_HOOK_DEADLINE)
             }
         };
         let params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
-        let params = api_v03::parse_session_hook_params(params).map_err(api_v03_protocol_error)?;
+        let params = api_v04::parse_session_hook_params(params).map_err(|error| {
+            // Preserve the existing diagnostic as well as the wire payload in
+            // this ownership-only change.
+            ExtensionRuntimeError::Protocol(format!(
+                "API 0.3 contract error {}: {}",
+                error.code, error.message
+            ))
+        })?;
         let mut params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let resource_owner = ExtensionResourceOwner {

@@ -236,7 +236,7 @@ jobs:
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
@@ -251,7 +251,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       # Published-package verification installs, updates, and removes the
       # attached bundles from the settled release with this launcher; release
       # jobs build from clean runner state, never a mutable cache.
@@ -276,7 +276,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       # Extension release bundles and their smoke-test launcher are built from
       # clean runner state for the same trust reason as the audit jobs.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1

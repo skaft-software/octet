@@ -456,9 +456,9 @@ the output's ownership visible without adding another indentation level.
 
 Bash and PowerShell headers wrap at whitespace where possible and hard-wrap
 oversized words by terminal cell width without splitting graphemes. Collapsed
-headers show up to six rendered command rows with an exact hidden-row count;
+headers show up to twelve rendered command rows with an exact hidden-row count;
 Ctrl+O reveals the complete retained command. Generic tool headers retain their
-selected argument with newlines intact and use the same six-row preview, rather
+selected argument with newlines intact and use the same twelve-row preview, rather
 than truncating at a fixed character count. Semantic copy preserves the full
 sanitized input, never the raw argument envelope. Collapsed output keeps
 both its head and tail within the visual-row budget, with an exact omitted-middle

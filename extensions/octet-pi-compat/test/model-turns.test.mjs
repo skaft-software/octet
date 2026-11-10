@@ -186,8 +186,20 @@ test('turn observations ignore results and report problems once per extension/ev
   await peer.close();
 });
 
+test('headless model-hook confirmation settles without a reverse-dialog barrier', async t => {
+  const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
+  const reply = await peer.request('hook/run', params(peer, start(), 'wait')).response;
+  assert.deepEqual(reply.result, expected);
+  await notification(peer, 'model-start:0:1050');
+  assert.equal(peer.seen.some(frame => frame.method === 'confirmation/request' || frame.method === 'ui/open'), false);
+  await peer.close();
+});
+
 test('cancelled model hook cannot publish a late successful turn reply', async t => {
-  const peer = launch(t, [factory], { hold: ['confirmation/request'] }); await peer.init(['session_entries']); await peer.start();
+  // Pi's headless confirm resolves false, so cancellation needs a real UI
+  // barrier: pi-reference/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:132-135.
+  const peer = launch(t, [factory], { hold: ['confirmation/request'] });
+  await peer.init(['session_entries', 'remote_ui']); await peer.start({ has_ui: true });
   const request = peer.request('hook/run', params(peer, start(), 'wait'));
   const barrier = await peer.wait(frame => frame.method === 'confirmation/request');
   peer.notify('$/cancelRequest', { id: request.id });

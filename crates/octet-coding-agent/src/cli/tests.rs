@@ -213,7 +213,10 @@ mod pi_codemode_tests {
         // Derive the pin from the shipped manifest: a hardcoded version silently
         // turned this case into a valid manifest after the last release bump.
         let pinned = format!("requires_octet = \"={}\"", env!("CARGO_PKG_VERSION"));
-        assert!(valid.contains(&pinned), "bundle pin must match this release");
+        assert!(
+            valid.contains(&pinned),
+            "bundle pin must match this release"
+        );
         for invalid in [
             "not a TOML manifest".to_owned(),
             valid.replace("name = \"octet-codemode\"", "name = \"different-name\""),
@@ -612,6 +615,9 @@ mod pi_codemode_tests {
             "trusted_extensions = ['octet-codemode']\n",
         )
         .unwrap();
+        // The child clears its environment and must not discover an unrelated
+        // repository above TMPDIR as its workspace.
+        std::fs::create_dir(fixture.workspace.join(".git")).unwrap();
         let home = fixture.global.parent().unwrap();
         let pi = home.join(".pi/agent");
         std::fs::create_dir_all(&pi).unwrap();
@@ -1581,15 +1587,24 @@ fn disabling_records_a_saved_off_entry_and_enabling_clears_it() {
     // alone cannot express "off". The write still has to record it.
     persist_extension_enabled_to_path(CODEMODE_EXTENSION, false, &path).unwrap();
     let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
-    assert_eq!(saved.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
-    assert_eq!(saved.enabled_extensions, Some(vec!["octet-web-search".into()]));
+    assert_eq!(
+        saved.disabled_extensions,
+        Some(vec![CODEMODE_EXTENSION.into()])
+    );
+    assert_eq!(
+        saved.enabled_extensions,
+        Some(vec!["octet-web-search".into()])
+    );
 
     persist_extension_enabled_to_path(CODEMODE_EXTENSION, true, &path).unwrap();
     let saved = read_layer(&path, ConfigSourceKind::Global).unwrap().values;
     assert_eq!(saved.disabled_extensions, None);
     let mut enabled = saved.enabled_extensions.unwrap();
     enabled.sort();
-    assert_eq!(enabled, vec![CODEMODE_EXTENSION.to_owned(), "octet-web-search".into()]);
+    assert_eq!(
+        enabled,
+        vec![CODEMODE_EXTENSION.to_owned(), "octet-web-search".into()]
+    );
 }
 
 #[test]
@@ -1603,8 +1618,14 @@ fn a_project_layer_cannot_silence_an_extension() {
         disabled_extensions: Some(vec![CODEMODE_EXTENSION.into()]),
         ..ConfigLayer::default()
     });
-    assert_eq!(layer.disabled_extensions, Some(vec![CODEMODE_EXTENSION.into()]));
-    assert_eq!(layer.enabled_extensions, Some(vec!["octet-web-search".into()]));
+    assert_eq!(
+        layer.disabled_extensions,
+        Some(vec![CODEMODE_EXTENSION.into()])
+    );
+    assert_eq!(
+        layer.enabled_extensions,
+        Some(vec!["octet-web-search".into()])
+    );
 }
 
 #[test]

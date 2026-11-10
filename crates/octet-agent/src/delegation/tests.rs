@@ -1562,6 +1562,34 @@ async fn detaching_workers_waits_for_every_live_task_to_park() {
     );
     assert_eq!(binding.detach_workers(Duration::from_millis(50)).await, 1);
     assert!(manager.state.lock().unwrap().records[&stuck.id].live_task);
+    let original = directory.path().join("replacement-refused.jsonl");
+    let mut root = Agent::new(AgentConfig {
+        client: manager.template.client.clone(),
+        model: manager.template.model(),
+        session: Session::create(&original).unwrap(),
+        system: "test".into(),
+        sandbox: manager.template.sandbox.clone(),
+        effect_broker: manager.template.effect_broker.clone(),
+        extensions: manager.template.extensions.clone(),
+        max_turns: Some(4),
+        reasoning: manager.template.reasoning.read().unwrap().clone(),
+        reasoning_mode: manager.template.reasoning_mode,
+        cache_retention: manager.template.cache_retention,
+        session_id: None,
+    })
+    .unwrap();
+    root.set_delegation_binding(binding).unwrap();
+    let bytes = std::fs::read(&original).unwrap();
+    let replacement = Session::create(directory.path().join("replacement.jsonl")).unwrap();
+    let reason = root
+        .replace_session_at_idle(replacement)
+        .unwrap_err()
+        .to_string();
+    assert!(reason.contains("workers still running"), "{reason}");
+    assert!(reason.contains("stop them, then retry"), "{reason}");
+    assert_eq!(root.session().path(), original);
+    assert_eq!(std::fs::read(&original).unwrap(), bytes);
+    assert_eq!(root.active_delegated_worker_count(), 1);
 }
 
 /// A durable record reconstructed from the roster: detached, with its

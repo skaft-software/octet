@@ -38,6 +38,63 @@ const sessionStartSetters = `export default pi => {
 
 const count = (peer, match) => peer.seen.filter(match).length;
 
+test('a responsive host admits a presentation slot before its parent hook settles', async t => {
+  const entry = await fixture(t, `export default pi => {
+    pi.on('session_start', (_, ctx) => {
+      ctx.ui.setFooter(() => ({ render: () => ['ADMITTED FOOTER'], invalidate() {} }));
+    });
+  };`);
+  const peer = launch(t, [entry], { hold: ['ui/open'] });
+  await peer.init(['remote_ui', 'composer']);
+  const pending = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() });
+  let settled = false;
+  pending.response.then(() => { settled = true; });
+  const open = await peer.wait(f => f.method === 'ui/open');
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(settled, false, 'the parent must remain live while the mount is admitted');
+  peer.send({ jsonrpc: '2.0', id: open.id, result: { columns: 80, rows: 24 } });
+  const response = await pending.response;
+  assert.ok(response.result, JSON.stringify(response));
+  const frame = await peer.wait(f => f.method === 'ui/frame' && f.params.lines.join('').includes('ADMITTED FOOTER'));
+  assert.equal(frame.params.surface_id, open.params.surface_id);
+  await peer.close();
+});
+
+test('a dropped disclosure read has a bounded fallback and does not poison the transport', async t => {
+  const entry = await fixture(t, `export default pi => {
+    pi.on('session_start', (_, ctx) => console.log('disclosure:' + ctx.ui.getToolsExpanded()));
+  };`);
+  const peer = launch(t, [entry], { hold: ['ui/chrome'] });
+  await peer.init(['remote_ui']);
+  const started = Date.now();
+  const response = await peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() }).response;
+  assert.ok(response.result, JSON.stringify(response));
+  assert.ok(Date.now() - started < 3000, 'read-only timeout must not wait for a mutation watchdog');
+  await peer.waitStderr(/disclosure:false/);
+  const request = await peer.wait(f => f.method === 'ui/chrome' && f.params.chrome.kind === 'get');
+  await peer.wait(f => f.method === '$/cancelRequest' && f.params.id === request.id);
+  // A subsequent host request still succeeds on the same transport.
+  const again = await peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() }).response;
+  assert.ok(again.result, JSON.stringify(again));
+  await peer.close();
+});
+
+test('reading tool disclosure while painting a Pi component never asks the host', async t => {
+  const entry = await fixture(t, `export default pi => {
+    pi.on('session_start', (_, ctx) => {
+      ctx.ui.setFooter(() => ({ render: () => ['EXPANDED:' + ctx.ui.getToolsExpanded()], invalidate() {} }));
+    });
+  };`);
+  const peer = launch(t, [entry]);
+  await peer.init(['remote_ui', 'composer']);
+  const response = await peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() }).response;
+  assert.ok(response.result, JSON.stringify(response));
+  await peer.wait(f => f.method === 'ui/frame' && f.params.lines.join('').includes('EXPANDED:'));
+  assert.equal(count(peer, f => f.method === 'ui/chrome' && f.params?.chrome?.kind === 'get'), 0,
+    'a paint path must read the local value, not block on a host round trip');
+  await peer.close();
+});
+
 test('a chrome request the host never answers does not hold or fail session_start', async t => {
   const entry = await fixture(t, sessionStartSetters);
   // `ui/chrome` and `ui/open` are never answered: before the fix the first

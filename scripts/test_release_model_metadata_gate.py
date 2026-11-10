@@ -573,26 +573,28 @@ class GitHubTransportTests(unittest.TestCase):
 
 
 class WorkflowWiringTests(unittest.TestCase):
-    def test_quality_runs_offline_tests_and_gate_before_compilation(self) -> None:
-        workflow = (SCRIPT.parent.parent / ".github/workflows/ci.yml").read_text()
-        quality = workflow.split("  quality:\n", 1)[1].split("\n  first-party-extension-tests:", 1)[0]
+    def test_quality_keeps_offline_tests_but_not_live_freshness(self) -> None:
+        workflows = SCRIPT.parent.parent / ".github/workflows"
+        ci = (workflows / "ci.yml").read_text()
+        quality = ci.split("  quality:\n", 1)[1].split("\n  first-party-extension-tests:", 1)[0]
         preflight = quality.split("      - uses: dtolnay/rust-toolchain@", 1)[0]
-        self.assertIn("fetch-depth: 0", preflight)
-        self.assertIn("persist-credentials: false", preflight)
         self.assertIn("python3 scripts/test_refresh_models_dev_metadata.py", preflight)
         self.assertIn("python3 scripts/test_release_model_metadata_gate.py", preflight)
-        self.assertIn('MODEL_METADATA_BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.before }}"',
-                      preflight)
-        self.assertIn("run: python3 scripts/check-release-model-metadata.py", preflight)
-        self.assertIn("- name: Check pre-release model metadata freshness\n"
-                      "        timeout-minutes: 2\n", preflight)
-        self.assertNotIn("if:", preflight)
+        self.assertNotIn("scripts/check-release-model-metadata.py", ci)
+        self.assertNotIn("scripts/refresh-models-dev-pricing.py --check", ci)
+        self.assertNotIn("MODEL_METADATA_GITHUB_TOKEN", ci)
+        self.assertNotIn("actions: read", quality)
+        self.assertNotIn("pull-requests: read", quality)
+
+    def test_live_check_is_separate_scheduled_and_read_only(self) -> None:
+        workflow = (SCRIPT.parent.parent / ".github/workflows/models-dev-freshness.yml").read_text()
+        self.assertIn("  schedule:\n", workflow)
+        self.assertIn('    - cron: "23 4 * * *"', workflow)
+        self.assertIn("  workflow_dispatch:\n", workflow)
         self.assertIn("permissions:\n  contents: read\n", workflow)
-        self.assertIn("    permissions:\n      contents: read\n      actions: read\n      pull-requests: read\n", quality)
-        self.assertEqual(workflow.count('MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"'), 1)
-        step = preflight.split("      - name: Check pre-release model metadata freshness\n", 1)[1]
-        self.assertIn('MODEL_METADATA_GITHUB_TOKEN: "${{ github.token }}"', step)
-        self.assertIn('MODEL_METADATA_AFTER_SHA: "${{ github.event.after }}"', step)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("timeout-minutes: 2", workflow)
+        self.assertIn("run: python3 scripts/refresh-models-dev-pricing.py --check", workflow)
 
 
 if __name__ == "__main__":

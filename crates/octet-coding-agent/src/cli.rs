@@ -924,7 +924,9 @@ pub(crate) fn apply_extension_toggle(config: &mut Config, name: &str, enabled: b
     if enabled {
         config.enabled_extensions.push(name.to_owned());
     }
-    config.disabled_extensions.retain(|disabled| disabled != name);
+    config
+        .disabled_extensions
+        .retain(|disabled| disabled != name);
     if !enabled {
         config.disabled_extensions.push(name.to_owned());
     }
@@ -1374,7 +1376,7 @@ fn persist_extension_enabled_to_path(
     // a mirrored extension is missing from `enabled_extensions`, so its off
     // entry is new even though no saved name changed.
     let persisted = document.contains_key("enabled_extensions")
-        && document.contains_key("disabled_extensions") == !disabled.is_empty();
+        && document.contains_key("disabled_extensions") != disabled.is_empty();
     if !changed && persisted {
         return Ok(names.into_iter().collect());
     }
@@ -2353,7 +2355,8 @@ fn build_config_with_global_path_and_diagnostics(
     let mut enabled_extensions = values.enabled_extensions.unwrap_or_default();
     enabled_extensions.extend(cli.enable_extensions);
     let enabled_extensions = normalize_extension_names(enabled_extensions)?;
-    let disabled_extensions = normalize_extension_names(values.disabled_extensions.unwrap_or_default())?;
+    let disabled_extensions =
+        normalize_extension_names(values.disabled_extensions.unwrap_or_default())?;
     let trusted_extensions =
         normalize_extension_trust_grants(values.trusted_extensions.unwrap_or_default())?;
     let invocation_trusted_extensions = normalize_extension_names(cli.trust_extensions)?;

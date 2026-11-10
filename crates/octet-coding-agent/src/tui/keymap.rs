@@ -191,7 +191,7 @@ pub(crate) fn parse_extension_shortcut(value: &str) -> Result<ExtensionShortcutK
         // Pi allows a bare SHIFT on a non-text key: `shift+down` extends a
         // selection and cannot be produced by typing. SHIFT with a character is
         // still refused, because that is text entry, not a shortcut.
-        && !(modifiers == KeyModifiers::SHIFT && !matches!(code, KeyCode::Char(_)))
+        && (modifiers != KeyModifiers::SHIFT || matches!(code, KeyCode::Char(_)))
     {
         return Err("shortcut must include ctrl, alt, or super".into());
     }

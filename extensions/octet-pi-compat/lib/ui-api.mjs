@@ -11,6 +11,7 @@ import { Loader } from '../node_modules/@earendil-works/pi-tui/dist/components/l
 import { CancellableLoader } from '../node_modules/@earendil-works/pi-tui/dist/components/cancellable-loader.js';
 import { getKeybindings } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
 import { keyHint } from './keybinding-hints.mjs';
+import { rendering } from './ui-delivery.mjs';
 
 // Public Pi authoring helpers, adapted from Pi 1.0.2's interactive components.
 // Copyright (c) 2025 Mario Zechner; MIT, see ../LICENSE.pi.
@@ -55,16 +56,17 @@ export class BorderedLoader extends Container {
 // and a failure is one bounded diagnostic instead of a hook failure or a retry.
 const chromeChannels = new WeakMap();
 const CHROME_DELIVERY_TIMEOUT_MS = 2000;
+const CHROME_READ_TIMEOUT_MS = 250;
 function chromeChannel(state) {
   let channel = chromeChannels.get(state);
-  if (!channel) chromeChannels.set(state, channel = { pending: new Map(), scheduled: false, reported: new Set() });
+  if (!channel) chromeChannels.set(state, channel = { pending: new Map(), scheduled: false, reported: new Set(), expandedVersion: 0, expandedPending: false });
   return channel;
 }
 
 export function chromeAPI(runtime, store) {
-  // The same synchronous transport used for durable append provides a real
-  // shell receipt. Getters never invent state, and set/get in one callback sees
-  // the committed value even when a native Ctrl+O happened between callbacks.
+  // Read the shell for native Ctrl+O changes, but preserve Pi's immediate
+  // set/get behavior while an asynchronous setter is still being delivered.
+  // If a read times out, retain the last observed local value.
   //
   // A host without an interactive frontend is Pi's print/headless mode: its UI
   // context still exists and presentation setters do nothing, because there is
@@ -93,22 +95,32 @@ export function chromeAPI(runtime, store) {
     if (operation.kind === 'tools_expanded') store.state.host.tools_expanded = operation.expanded;
   };
   const deliver = operation => {
-    if (runtime.stopping || !store.state.alive) return;
+    // Re-check authority at delivery: the foreground may change while queued.
+    // Request cancellation is deliberately not a fence: Pi keeps ctx.ui usable
+    // after the capturing request is aborted, so a tool clearing its status in
+    // `finally` after Esc must still reach the host.
+    if (runtime.stopping || !store.state.alive || store.state !== runtime.foreground) return;
+    const channel = chromeChannel(store.state);
+    const version = channel.expandedVersion;
+    const settleExpanded = () => {
+      if (operation.kind === 'tools_expanded' && channel.expandedVersion === version) channel.expandedPending = false;
+    };
     let request;
     try {
       // No store controller signal and no `parent`: a chrome update outlives the
       // hook that requested it, exactly as Pi's local state does.
       request = runtime.transport.request('ui/chrome', { parent_request_id: store.id, resource_owner: store.state.owner, chrome: operation },
         { timeout: CHROME_DELIVERY_TIMEOUT_MS });
-    } catch (error) { report(operation.kind, error); return; }
+    } catch (error) { settleExpanded(); report(operation.kind, error); return; }
     request.then(result => {
+      settleExpanded();
       if (['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) return;
       try {
         fields(result, ['tools_expanded', 'theme'], 'UI chrome receipt');
         if (typeof result.tools_expanded !== 'boolean') invalid('UI chrome tools_expanded receipt');
         if (result.theme != null) { nativeTheme(result.theme); store.state.host.theme = result.theme; }
       } catch (error) { report(operation.kind, error); }
-    }, error => report(operation.kind, error));
+    }, error => { settleExpanded(); report(operation.kind, error); });
   };
   const flush = () => {
     const channel = chromeChannel(store.state);
@@ -122,15 +134,18 @@ export function chromeAPI(runtime, store) {
     });
   };
   const queue = operation => {
+    runtime.assertOwner(store);
     if (headless()) return headlessReceipt(operation);
     runtime.require('remote_ui');
     applyLocal(operation);
-    chromeChannel(store.state).pending.set(operation.kind, operation);
+    const channel = chromeChannel(store.state);
+    if (operation.kind === 'tools_expanded') { channel.expandedVersion++; channel.expandedPending = true; }
+    channel.pending.set(operation.kind, operation);
     flush();
     return undefined;
   };
-  // A real host contract that returns a value Pi reads (the theme catalog) still
-  // blocks like Pi's own theme selection does, but it is never joined to a hook.
+  // Values Pi reads synchronously need a host receipt. Disclosure reads are
+  // bounded and read-only; theme selection retains its committed receipt.
   const call = operation => {
     runtime.assertOwner(store);
     store.controller.signal.throwIfAborted();
@@ -138,7 +153,8 @@ export function chromeAPI(runtime, store) {
     runtime.require('remote_ui');
     const result = runtime.transport.requestSync('ui/chrome', {
       parent_request_id: store.id, resource_owner: store.state.owner, chrome: operation,
-    }, { parent: store.live ? store.id : undefined, signal: store.controller.signal });
+    }, { parent: store.live ? store.id : undefined, signal: store.controller.signal,
+      ...(operation.kind === 'get' ? { timeout: CHROME_READ_TIMEOUT_MS } : {}) });
     applyLocal(operation);
     if (!['theme_get', 'theme_list', 'theme_set'].includes(operation.kind)) {
       fields(result, ['tools_expanded', 'theme'], 'UI chrome receipt');
@@ -201,10 +217,22 @@ export function chromeAPI(runtime, store) {
       if (label !== undefined) bounded(label, 'hidden thinking label', 4096);
       queue({ kind: 'hidden_thinking', label: label ?? null });
     },
-    // Pi reads its own local expanded flag; no round trip on a render path.
     getToolsExpanded() {
       runtime.assertOwner(store);
-      return store.state.host.tools_expanded === true;
+      store.controller.signal.throwIfAborted();
+      // A setter is immediate from Pi's perspective, even before its coalesced
+      // delivery, and a paint path never waits on the host. Otherwise (command
+      // and hook handlers) query the shell so native Ctrl+O is observable.
+      if (headless() || rendering() || chromeChannel(store.state).expandedPending) return store.state.host.tools_expanded === true;
+      try {
+        const expanded = call({ kind: 'get' }).tools_expanded;
+        store.state.host.tools_expanded = expanded;
+        return expanded;
+      } catch (error) {
+        store.controller.signal.throwIfAborted();
+        report('tools_expanded_get', error);
+        return store.state.host.tools_expanded === true;
+      }
     },
     setToolsExpanded(expanded) {
       if (typeof expanded !== 'boolean') invalid('tools expanded');

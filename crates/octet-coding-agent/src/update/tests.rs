@@ -850,7 +850,10 @@ async fn accepts_a_realistic_thirty_asset_release_payload() {
     let status = check_url(&format!("{}/latest", server.uri()), "0.10.0")
         .await
         .expect("a realistic 30-asset release payload must be accepted");
-    assert!(matches!(status, UpdateStatus::Available { .. }), "{status:?}");
+    assert!(
+        matches!(status, UpdateStatus::Available { .. }),
+        "{status:?}"
+    );
 }
 
 #[tokio::test]

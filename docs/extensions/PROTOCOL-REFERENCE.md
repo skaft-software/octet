@@ -12,9 +12,11 @@ Native publication does not publish SDK registries.
 > **Version scope:** API `0.4` is current and uses the feature-negotiated wire
 > retained from supported API `0.2`; API `0.1` stays frozen. Versioned examples
 > below retain their original IDs. API `0.3` is a distinct canonical wire in the
-> [generated reference](API-0.4-REFERENCE.md); its deferred entries do not remove
+> retained schema (`protocol/extension-api-v0.3.schema.json`); its deferred entries do not remove
 > dynamic tools, presentation, or child sessions from the feature-negotiated wire.
-> These low-level contracts and safety tests remain live, but only an actual
+> The [hand-maintained 0.4 reference](API-0.4-REFERENCE.md) separates current
+> negotiation and data from that schema. These low-level contracts and safety
+> tests remain live, but only an actual
 > host offer and frontend binding make a service available. Pi mappings below
 > are historical implementation notes, not a shipping bridge or a release gate.
 >
