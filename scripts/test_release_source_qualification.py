@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests of the release workflow's exact-source CI gate; no GitHub writes."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -351,7 +352,8 @@ PY
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual("", output)
 
-    def run_attach(self, *, draft=None, body=None, assets="", upload="ok", prerelease="false"):
+    def run_attach(self, *, draft=None, body=None, assets="", upload="ok", prerelease="false",
+                   existing=None, ref_type="tag", workflow_tag="v0.10.3", workflow_commit=None):
         step = self.workflow.split('      - name: Attach assets to canonical release\n', 1)[1]
         script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('\n  verify-published:', 1)[0])
         stubs = r'''
@@ -371,6 +373,20 @@ gh() {
       if [[ "$*" == *'--json assets'* ]]; then cat "$TEST_ASSETS"
       elif [[ "$*" == *'--json body'* ]]; then cat "$TEST_BODY"
       else printf '%s\t%s\t%s\n' "$RELEASE_TAG" "$(cat "$TEST_RELEASE")" "$TEST_PRERELEASE"; fi ;;
+    'release download')
+      shift 3
+      destination= pattern=
+      while (($#)); do
+        case "$1" in
+          --pattern) pattern=$2; shift 2 ;;
+          --dir) destination=$2; shift 2 ;;
+          --clobber) shift ;;
+          *) return 98 ;;
+        esac
+      done
+      [[ -f "$TEST_EXISTING/$pattern" ]] || return 1
+      mkdir -p "$destination"
+      cp "$TEST_EXISTING/$pattern" "$destination/$pattern" ;;
     'release create')
       [[ "$*" == *'--verify-tag'* && "$*" == *'--draft'* && "$*" == *'--notes-file'* ]] || return 1
       cp "${@: -1}" "$TEST_BODY"
@@ -385,31 +401,63 @@ gh() {
         printf '%s\tsha256:%s\n' "${file##*/}" "$digest" >> "$TEST_ASSETS"
       done ;;
     'release edit')
-      [[ "$*" == *'--draft=false --latest'* ]] || return 99
+      [[ "$*" == *'--draft=false --latest=false'* ]] || return 99
       printf false > "$TEST_RELEASE" ;;
     *) return 99 ;;
   esac
+}
+cosign() {
+  printf 'cosign %s\n' "$*" >> "$TEST_REQUESTS"
+  [[ "$1" == verify-blob ]] || return 97
+  shift
+  bundle= identity= sha= blob=
+  while (($#)); do
+    case "$1" in
+      --bundle) bundle=$2; shift 2 ;;
+      --certificate-identity) identity=$2; shift 2 ;;
+      --certificate-oidc-issuer) shift 2 ;;
+      --certificate-github-workflow-name) shift 2 ;;
+      --certificate-github-workflow-repository) shift 2 ;;
+      --certificate-github-workflow-sha) sha=$2; shift 2 ;;
+      *) blob=$1; shift ;;
+    esac
+  done
+  [[ -f "$bundle" && -f "$blob" && "$sha" == "$SOURCE_COMMIT" \
+    && "$identity" == "$TEST_COSIGN_IDENTITY" ]] || return 1
+  grep -Fxq VALID "$bundle"
 }
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "release-assets").mkdir()
             (root / "release-assets" / "artifact").write_text("fixture")
+            (root / "release-assets" / "artifact.sigstore.json").write_text("fresh signature\n")
             (root / "docs/releases").mkdir(parents=True)
             (root / "docs/releases/v0.10.3.md").write_text("Release notes\n")
+            if existing:
+                (root / "existing").mkdir()
+                lines = []
+                for name, content in existing.items():
+                    (root / "existing" / name).write_bytes(content)
+                    lines.append(f"{name}\tsha256:{hashlib.sha256(content).hexdigest()}")
+                assets = "\n".join(lines) + "\n"
             requests, state, body_file, asset_file = (root / x for x in ("requests", "state", "body", "assets"))
             if draft is not None:
                 state.write_text(str(draft).lower())
             marker = f"<!-- octet-binary-release-run:skaft-software/octet:123:{SOURCE}:{SOURCE} -->"
             body_file.write_text(marker + "\n" if body is None else body)
             asset_file.write_text(assets)
-            env = {"PATH": os.defpath, "GITHUB_EVENT_NAME": "push", "GITHUB_REF_TYPE": "tag",
+            env = {"PATH": os.defpath, "GITHUB_EVENT_NAME": "push", "GITHUB_REF_TYPE": ref_type,
                    "GITHUB_REPOSITORY": "skaft-software/octet", "GITHUB_RUN_ID": "123",
-                   "RELEASE_TAG": "v0.10.3", "SOURCE_COMMIT": SOURCE, "WORKFLOW_COMMIT": SOURCE,
-                   "WORKFLOW_TAG": "v0.10.3", "INPUT_FORCE_RELEASE": "", "INPUT_FORCE_REASON": "",
+                   "RELEASE_TAG": "v0.10.3", "SOURCE_COMMIT": SOURCE,
+                   "WORKFLOW_COMMIT": workflow_commit or SOURCE,
+                   "WORKFLOW_TAG": workflow_tag, "INPUT_FORCE_RELEASE": "", "INPUT_FORCE_REASON": "",
+                   "COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/v0.10.3",
+                   "WORKFLOW_REPOSITORY": "skaft-software/octet",
+                   "TEST_COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/v0.10.3",
                    "RUNNER_TEMP": temporary, "TEST_RELEASE": str(state), "TEST_REQUESTS": str(requests),
                    "TEST_BODY": str(body_file), "TEST_ASSETS": str(asset_file), "TEST_UPLOAD": upload,
-                   "TEST_PRERELEASE": prerelease}
+                   "TEST_EXISTING": str(root / "existing"), "TEST_PRERELEASE": prerelease}
             result = subprocess.run(["bash", "-c", stubs + script], cwd=root, env=env,
                                     capture_output=True, text=True)
             return result, requests.read_text() if requests.exists() else "", state.read_text() if state.exists() else None
@@ -420,11 +468,187 @@ gh() {
         self.assertEqual("false", state)
         self.assertIn('release create v0.10.3 --verify-tag --draft', calls)
         self.assertIn('release upload v0.10.3', calls)
-        self.assertIn('release edit v0.10.3 --draft=false --latest', calls)
+        self.assertIn('release edit v0.10.3 --draft=false --latest=false', calls)
         self.assertLess(calls.index('release create'), calls.index('release upload'))
         self.assertLess(calls.index('release upload'), calls.rindex('--json assets'))
         self.assertLess(calls.rindex('--json assets'), calls.index('release edit'))
-        self.assertTrue(calls.rstrip().endswith('release edit v0.10.3 --draft=false --latest'))
+        self.assertTrue(calls.rstrip().endswith('release edit v0.10.3 --draft=false --latest=false'))
+
+    def test_rerun_converges_on_fresh_signature_bundles(self):
+        existing = {"artifact": b"fixture", "artifact.sigstore.json": b"VALID\n"}
+        result, calls, state = self.run_attach(draft=True, existing=existing)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("false", state)
+        self.assertEqual([], [line for line in calls.splitlines() if line.startswith("release upload")])
+        self.assertIn("cosign verify-blob", calls)
+        self.assertIn("verified existing immutable release signature: artifact.sigstore.json", result.stdout)
+
+    def test_rerun_rejects_a_signature_that_does_not_verify(self):
+        existing = {"artifact": b"fixture", "artifact.sigstore.json": b"INVALID\n"}
+        result, calls, state = self.run_attach(draft=True, existing=existing)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("does not verify the immutable candidate", result.stderr)
+        self.assertEqual("true", state)
+        self.assertNotIn("release edit", calls)
+
+    def test_rerun_rejects_a_changed_deterministic_asset(self):
+        existing = {"artifact": b"different bytes", "artifact.sigstore.json": b"VALID\n"}
+        result, calls, state = self.run_attach(draft=True, existing=existing)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("immutable release asset differs from the existing asset", result.stderr)
+        self.assertEqual("true", state)
+
+    def test_rerun_of_a_published_release_keeps_its_verified_signature(self):
+        existing = {"artifact": b"fixture", "artifact.sigstore.json": b"VALID\n"}
+        result, calls, state = self.run_attach(draft=False, existing=existing)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("false", state)
+        self.assertNotIn("--draft=false", calls)
+        self.assertNotIn("release edit", calls)
+
+    def test_branch_dispatch_verifies_only_the_canonical_tag(self):
+        result, calls, state = self.run_attach(draft=False, ref_type="branch", workflow_tag="main")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("refs/tags/main", calls)
+        result, calls, state = self.run_attach(draft=False, ref_type="branch", workflow_tag="main",
+                                             workflow_commit="b" * 40)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("is not the immutable source", result.stderr)
+        self.assertNotIn("release upload", calls)
+
+    def run_npm_evidence(self, *, existing=None):
+        step = self.workflow.split('      - name: Sign and attach npm evidence to the canonical release\n', 1)[1]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('\n  verify-npm-published:', 1)[0])
+        stubs = r'''
+set -euo pipefail
+gh() {
+  printf '%s\n' "$*" >> "$TEST_REQUESTS"
+  case "$1 $2" in
+    'release view')
+      if [[ "$*" == *'--json assets'* ]]; then cat "$TEST_ASSETS"; else return 1; fi ;;
+    'release download')
+      shift 3
+      destination= pattern=
+      while (($#)); do
+        case "$1" in
+          --pattern) pattern=$2; shift 2 ;;
+          --dir) destination=$2; shift 2 ;;
+          --clobber) shift ;;
+          *) return 98 ;;
+        esac
+      done
+      [[ -f "$TEST_EXISTING/$pattern" ]] || return 1
+      mkdir -p "$destination"
+      cp "$TEST_EXISTING/$pattern" "$destination/$pattern" ;;
+    'release upload')
+      shift 3
+      for file in "$@"; do
+        printf '%s\tsha256:%s\n' "${file##*/}" "$(sha256sum "$file" | awk '{print $1}')" >> "$TEST_ASSETS"
+      done ;;
+    *) return 99 ;;
+  esac
+}
+cosign() {
+  printf 'cosign %s\n' "$*" >> "$TEST_REQUESTS"
+  if [[ "$1" == sign-blob ]]; then
+    bundle=
+    while (($#)); do
+      case "$1" in
+        --bundle) bundle=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'VALID fresh %s\n' "$bundle" > "$bundle"
+    return 0
+  fi
+  [[ "$1" == verify-blob ]] || return 97
+  shift
+  bundle= identity= sha= blob=
+  while (($#)); do
+    case "$1" in
+      --bundle) bundle=$2; shift 2 ;;
+      --certificate-identity) identity=$2; shift 2 ;;
+      --certificate-oidc-issuer) shift 2 ;;
+      --certificate-github-workflow-name) shift 2 ;;
+      --certificate-github-workflow-repository) shift 2 ;;
+      --certificate-github-workflow-sha) sha=$2; shift 2 ;;
+      *) blob=$1; shift ;;
+    esac
+  done
+  [[ -f "$bundle" && -f "$blob" && "$sha" == "$WORKFLOW_COMMIT" \
+    && "$identity" == "$TEST_COSIGN_IDENTITY" ]] || return 1
+  grep -q '^VALID' "$bundle"
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "npm-assets").mkdir()
+            local = {
+                "octet-0.10.3.tgz": b"launcher fixture\n",
+                "OCTET_NPM_SHA256SUMS": b"npm sums fixture\n",
+                "OCTET_NPM_MANIFEST.json": b"npm manifest fixture\n",
+            }
+            for name, content in local.items():
+                (root / "npm-assets" / name).write_bytes(content)
+            lines = []
+            if existing:
+                (root / "existing").mkdir()
+                for name, content in existing.items():
+                    (root / "existing" / name).write_bytes(content)
+                    lines.append(f"{name}\tsha256:{hashlib.sha256(content).hexdigest()}")
+            asset_file = root / "assets"
+            asset_file.write_text("\n".join(lines) + ("\n" if lines else ""))
+            requests = root / "requests"
+            env = {
+                "PATH": os.defpath, "HOME": temporary, "RUNNER_TEMP": temporary,
+                "GITHUB_REPOSITORY": "skaft-software/octet", "RELEASE_TAG": "v0.10.3",
+                "WORKFLOW_COMMIT": SOURCE, "WORKFLOW_REPOSITORY": "skaft-software/octet",
+                "COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-octet.yml@refs/heads/main",
+                "TEST_COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-octet.yml@refs/heads/main",
+                "TEST_REQUESTS": str(requests), "TEST_ASSETS": str(asset_file),
+                "TEST_EXISTING": str(root / "existing"),
+            }
+            result = subprocess.run(["bash", "-c", stubs + script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            return result, requests.read_text() if requests.exists() else ""
+
+    def test_npm_evidence_upload_converges_after_a_partial_failure(self):
+        result, calls = self.run_npm_evidence()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        uploads = [line for line in calls.splitlines() if line.startswith("release upload")]
+        self.assertEqual(1, len(uploads))
+        for name in ("octet-0.10.3.tgz", "OCTET_NPM_SHA256SUMS", "OCTET_NPM_MANIFEST.json"):
+            self.assertIn(name, uploads[0])
+        existing = {
+            "octet-0.10.3.tgz": b"launcher fixture\n",
+            "octet-0.10.3.tgz.sigstore.json": b"VALID\n",
+            "OCTET_NPM_SHA256SUMS": b"npm sums fixture\n",
+            "OCTET_NPM_SHA256SUMS.sigstore.json": b"VALID\n",
+            "OCTET_NPM_MANIFEST.json": b"npm manifest fixture\n",
+            "OCTET_NPM_MANIFEST.json.sigstore.json": b"VALID\n",
+        }
+        result, calls = self.run_npm_evidence(existing=existing)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([], [line for line in calls.splitlines() if line.startswith("release upload")])
+        self.assertEqual(3, sum(1 for line in calls.splitlines()
+                                 if line.startswith("cosign verify-blob")
+                                 and "existing-npm-signatures" in line))
+        existing["OCTET_NPM_MANIFEST.json.sigstore.json"] = b"INVALID\n"
+        result, calls = self.run_npm_evidence(existing=existing)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("does not verify the immutable candidate", result.stderr)
+
+    def test_latest_moves_only_after_public_install_verification(self):
+        attach = self.workflow.split('      - name: Attach assets to canonical release\n', 1)[1]
+        attach = attach.split('\n  verify-published:', 1)[0]
+        self.assertIn('--draft=false --latest=false', attach)
+        self.assertNotIn('--draft=false --latest\n', attach)
+        promote = self.workflow.split('\n  promote-latest:\n', 1)[1].split('\n  package-npm:', 1)[0]
+        self.assertIn("needs: [resolve, publish, verify-published]", promote)
+        self.assertIn("needs['verify-published'].result == 'success'", promote)
+        self.assertIn('gh release edit "$RELEASE_TAG" --latest', promote)
+        self.assertIn('commits/$RELEASE_TAG', promote)
+        self.assertNotIn('id-token: write', promote)
 
     def test_draft_failures_leave_latest_untouched(self):
         import hashlib
@@ -441,18 +665,21 @@ gh() {
                 result, calls, state = self.run_attach(**options)
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual("true", state)
-                self.assertNotIn('--draft=false --latest', calls)
+                self.assertNotIn("--draft=false", calls)
         result, calls, state = self.run_attach(draft=True, assets=f"artifact\tsha256:{good}\n")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("false", state)
-        self.assertNotIn("release upload", calls)
+        uploads = [line for line in calls.splitlines() if line.startswith("release upload")]
+        self.assertEqual(1, len(uploads))
+        self.assertIn("release-assets/artifact.sigstore.json", uploads[0])
+        self.assertNotIn("release-assets/artifact ", uploads[0] + " ")
 
     def test_existing_published_release_can_keep_unrelated_extension_assets(self):
         result, calls, state = self.run_attach(draft=False, assets="extension\tsha256:unrelated\n")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("false", state)
         self.assertIn("release upload", calls)
-        self.assertNotIn("--draft=false --latest", calls)
+        self.assertNotIn("--draft=false", calls)
 
     def test_release_notes_waiver_preserves_existing_text_and_is_idempotent(self):
         start = self.workflow.index('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then',

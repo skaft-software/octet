@@ -208,6 +208,139 @@ gh() {
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual("", output)
 
+    def run_publish(self, *, existing=None):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is required")
+        step = self.workflow.split("      - name: Attach assets to the canonical octet release\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n  verify-published:", 1)[0])
+        stubs = r'''
+set -euo pipefail
+git() {
+  case "$1" in
+    fetch) printf 'git %s\n' "$*" >> "$TEST_REQUESTS" ;;
+    rev-parse) printf '%s\n' "$SOURCE_COMMIT" ;;
+    *) return 98 ;;
+  esac
+}
+gh() {
+  printf '%s\n' "$*" >> "$TEST_REQUESTS"
+  case "$1 $2" in
+    'release view')
+      if [[ "$*" == *'--json assets'* ]]; then cat "$TEST_ASSETS"
+      else printf '%s\tfalse\tfalse\n' "$RELEASE_TAG"; fi ;;
+    'release download')
+      shift 3
+      destination= pattern=
+      while (($#)); do
+        case "$1" in
+          --pattern) pattern=$2; shift 2 ;;
+          --dir) destination=$2; shift 2 ;;
+          --clobber) shift ;;
+          *) return 98 ;;
+        esac
+      done
+      [[ -f "$TEST_EXISTING/$pattern" ]] || return 1
+      mkdir -p "$destination"
+      cp "$TEST_EXISTING/$pattern" "$destination/$pattern" ;;
+    'release upload')
+      shift 3
+      for file in "$@"; do
+        printf '%s\tsha256:%s\n' "${file##*/}" "$(sha256sum "$file" | awk '{print $1}')" >> "$TEST_ASSETS"
+      done ;;
+    *) return 99 ;;
+  esac
+}
+cosign() {
+  printf 'cosign %s\n' "$*" >> "$TEST_REQUESTS"
+  [[ "$1" == verify-blob ]] || return 97
+  shift
+  bundle= identity= sha= blob=
+  while (($#)); do
+    case "$1" in
+      --bundle) bundle=$2; shift 2 ;;
+      --certificate-identity) identity=$2; shift 2 ;;
+      --certificate-oidc-issuer) shift 2 ;;
+      --certificate-github-workflow-name) shift 2 ;;
+      --certificate-github-workflow-repository) shift 2 ;;
+      --certificate-github-workflow-sha) sha=$2; shift 2 ;;
+      *) blob=$1; shift ;;
+    esac
+  done
+  [[ -f "$bundle" && -f "$blob" && "$sha" == "$SOURCE_COMMIT" \
+    && "$identity" == "$TEST_COSIGN_IDENTITY" ]] || return 1
+  grep -Fxq VALID "$bundle"
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            local = root / "release-assets"
+            local.mkdir()
+            names = {
+                "octet-mcp-0.8.2.tar.gz": b"bundle fixture\n",
+                "octet-mcp-0.8.2.tar.gz.sigstore.json": b"fresh signature\n",
+                "SHA256SUMS": b"sums fixture\n",
+                "SHA256SUMS.sigstore.json": b"fresh signature\n",
+            }
+            for name, content in names.items():
+                (local / name).write_bytes(content)
+            assets = root / "assets"
+            assets.write_text("")
+            if existing:
+                (root / "existing").mkdir()
+                lines = []
+                for name, content in existing.items():
+                    (root / "existing" / name).write_bytes(content)
+                    lines.append(f"{name}\tsha256:{__import__('hashlib').sha256(content).hexdigest()}")
+                assets.write_text("\n".join(lines) + "\n")
+            requests = root / "requests"
+            env = {
+                "PATH": os.defpath, "HOME": temporary, "RUNNER_TEMP": temporary,
+                "GITHUB_REPOSITORY": "skaft-software/octet", "RELEASE_TAG": "v0.8.2",
+                "SOURCE_COMMIT": SOURCE, "WORKFLOW_COMMIT": SOURCE, "WORKFLOW_TAG": "v0.8.2",
+                "COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-serve.yml@refs/tags/v0.8.2",
+                "TEST_COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-serve.yml@refs/tags/v0.8.2",
+                "WORKFLOW_REPOSITORY": "skaft-software/octet",
+                "TEST_REQUESTS": str(requests), "TEST_ASSETS": str(assets),
+                "TEST_EXISTING": str(root / "existing"),
+            }
+            result = subprocess.run([bash, "-c", stubs + script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            return result, requests.read_text() if requests.exists() else ""
+
+    def test_fresh_publish_uploads_every_extension_asset(self):
+        result, calls = self.run_publish()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        uploads = [line for line in calls.splitlines() if line.startswith("release upload")]
+        self.assertEqual(1, len(uploads))
+        for name in ("octet-mcp-0.8.2.tar.gz", "SHA256SUMS", "SHA256SUMS.sigstore.json"):
+            self.assertIn(name, uploads[0])
+
+    def test_rerun_converges_after_a_partial_upload(self):
+        existing = {
+            "octet-mcp-0.8.2.tar.gz": b"bundle fixture\n",
+            "octet-mcp-0.8.2.tar.gz.sigstore.json": b"VALID\n",
+            "SHA256SUMS": b"sums fixture\n",
+            "SHA256SUMS.sigstore.json": b"VALID\n",
+        }
+        result, calls = self.run_publish(existing=existing)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([], [line for line in calls.splitlines() if line.startswith("release upload")])
+        self.assertEqual(2, calls.count("cosign verify-blob"))
+
+    def test_rerun_rejects_changed_or_unverifiable_evidence(self):
+        for existing, message in (
+            ({"octet-mcp-0.8.2.tar.gz": b"changed bundle\n"},
+             "immutable release asset differs from the existing asset"),
+            ({"octet-mcp-0.8.2.tar.gz.sigstore.json": b"INVALID\n"},
+             "does not verify the immutable candidate"),
+        ):
+            with self.subTest(message=message):
+                result, calls = self.run_publish(existing=existing)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(message, result.stderr)
+                self.assertEqual([], [line for line in calls.splitlines() if line.startswith("release upload")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -810,8 +810,40 @@ jobs:
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
           INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
           INPUT_FORCE_REASON: ${{ inputs.force_reason }}
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          verify=(
+            --certificate-identity "$COSIGN_IDENTITY"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-github-workflow-name "octet binary release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          # Sigstore bundles are freshly signed on every run, so a resumed run
+          # cannot require byte equality for them. Accept an existing bundle
+          # only when it verifies the identical candidate artifact under this
+          # workflow's exact identity; anything else stops publication.
+          verify_existing_bundle() {
+            name=$1
+            artifact=${name%.sigstore.json}
+            if [[ ! -f "release-assets/$artifact" ]]; then
+              echo "existing release signature has no candidate asset: $name" >&2
+              exit 1
+            fi
+            signature_directory="$RUNNER_TEMP/existing-signatures"
+            mkdir -p "$signature_directory"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$signature_directory" --clobber
+            if ! cosign verify-blob \
+              --bundle "$signature_directory/$name" \
+              "${verify[@]}" \
+              "release-assets/$artifact"; then
+              echo "existing release signature does not verify the immutable candidate: $name" >&2
+              exit 1
+            fi
+            echo "verified existing immutable release signature: $name"
+          }
           verify_release_refs() {
             phase=$1
             git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
@@ -819,9 +851,16 @@ jobs:
               echo "canonical tag moved while release artifacts were $phase" >&2
               exit 1
             fi
-            git fetch --force origin "refs/tags/$WORKFLOW_TAG:refs/tags/$WORKFLOW_TAG"
-            if [[ "$(git rev-parse "$WORKFLOW_TAG^{commit}")" != "$WORKFLOW_COMMIT" ]]; then
-              echo "release workflow tag moved while release artifacts were $phase" >&2
+            if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+              git fetch --force origin "refs/tags/$WORKFLOW_TAG:refs/tags/$WORKFLOW_TAG"
+              if [[ "$(git rev-parse "$WORKFLOW_TAG^{commit}")" != "$WORKFLOW_COMMIT" ]]; then
+                echo "release workflow tag moved while release artifacts were $phase" >&2
+                exit 1
+              fi
+            elif [[ "$WORKFLOW_COMMIT" != "$SOURCE_COMMIT" ]]; then
+              # resolve only allows a non-canonical workflow commit on its exact
+              # tooling tag, so a branch dispatch must run the source itself.
+              echo "workflow commit $WORKFLOW_COMMIT is not the immutable source and this run is not on a tag" >&2
               exit 1
             fi
           }
@@ -855,15 +894,6 @@ jobs:
               echo "canonical release $RELEASE_TAG is a draft owned by another run" >&2
               exit 1
             fi
-            draft_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
-            while IFS=$'\t' read -r name digest; do
-              [[ -n "$name" ]] || continue
-              if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ || ! -f "release-assets/$name" \
-                || "$digest" != "sha256:$(sha256sum "release-assets/$name" | awk '{print $1}')" ]]; then
-                echo "draft contains an unexpected or mismatched asset: $name" >&2
-                exit 1
-              fi
-            done <<< "$draft_digests"
           fi
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then
             waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
@@ -874,6 +904,7 @@ jobs:
             fi
           fi
           existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          declare -A accepted=()
           uploads=()
           for asset in release-assets/*; do
             name=${asset##*/}
@@ -883,15 +914,29 @@ jobs:
                 exit 1
               fi
               local_digest=$(sha256sum "$asset" | awk '{print $1}')
-              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+              if [[ "$existing_digest" == "sha256:$local_digest" ]]; then
+                echo "verified existing immutable release asset: $name"
+              elif [[ "$name" == *.sigstore.json ]]; then
+                verify_existing_bundle "$name"
+                accepted["$name"]=$existing_digest
+              else
                 echo "immutable release asset differs from the existing asset: $name" >&2
                 exit 1
               fi
-              echo "verified existing immutable release asset: $name"
             else
               uploads+=("$asset")
             fi
           done
+          if [[ "$draft" == true ]]; then
+            # A draft is owned by this run, so it may contain only candidates.
+            while IFS=$'\t' read -r name digest; do
+              [[ -n "$name" ]] || continue
+              if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ || ! -f "release-assets/$name" ]]; then
+                echo "draft contains an unexpected asset: $name" >&2
+                exit 1
+              fi
+            done <<< "$existing_digests"
+          fi
           if ((${#uploads[@]})); then
             gh release upload "$RELEASE_TAG" "${uploads[@]}"
           else
@@ -905,21 +950,21 @@ jobs:
           for asset in release-assets/*; do
             name=${asset##*/}
             local_digest=$(sha256sum "$asset" | awk '{print $1}')
-            if ! awk -F '\t' -v wanted="$name" -v digest="sha256:$local_digest" \
-              '$1 == wanted { count++; if ($2 != digest) bad=1 } END { exit !(count == 1 && !bad) }' <<< "$published_digests"; then
-              echo "uploaded release asset is missing or has a mismatched digest: $name" >&2
+            if ! observed=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$published_digests"); then
+              echo "uploaded release asset is missing: $name" >&2
               exit 1
             fi
+            if [[ "$observed" == "sha256:$local_digest" ]]; then
+              continue
+            fi
+            if [[ -n "${accepted[$name]:-}" && "$observed" == "${accepted[$name]}" ]]; then
+              echo "verified existing immutable release signature: $name"
+              continue
+            fi
+            echo "uploaded release asset has a mismatched digest: $name" >&2
+            exit 1
           done
           if [[ "$draft" == true ]]; then
-            while IFS=$'\t' read -r name digest; do
-              [[ -n "$name" ]] || continue
-              if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ || ! -f "release-assets/$name" \
-                || "$digest" != "sha256:$(sha256sum "release-assets/$name" | awk '{print $1}')" ]]; then
-                echo "draft contains an unexpected or mismatched asset: $name" >&2
-                exit 1
-              fi
-            done <<< "$published_digests"
             release_state=$(gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease \
               --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
             if [[ "$release_state" != "$RELEASE_TAG"$'\t'true$'\t'false ]] \
@@ -927,7 +972,9 @@ jobs:
               echo "draft release state or ownership changed before publication" >&2
               exit 1
             fi
-            gh release edit "$RELEASE_TAG" --draft=false --latest
+            # Publish without moving the repository's Latest pointer. The
+            # promote job sets it only after the published-install smoke passes.
+            gh release edit "$RELEASE_TAG" --draft=false --latest=false
           fi
 
   verify-published:
@@ -1014,6 +1061,41 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"published-smoke","command":"hello"}' \
             | HOME="$test_home" "$host_binary" \
             | grep -F '"type":"hello"' >/dev/null
+
+  promote-latest:
+    name: Mark the verified release as Latest
+    needs: [resolve, publish, verify-published]
+    # Latest drives `octet update`, the startup notice and generic installers,
+    # so it moves only after every published-install smoke job has succeeded.
+    if: needs.resolve.result == 'success' && needs.publish.result == 'success' && needs['verify-published'].result == 'success' && needs.resolve.outputs.mode == 'binaries'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Promote the immutable release that passed public installation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          release_state=$(gh release view "$RELEASE_TAG" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
+          if [[ "$release_state" != "$RELEASE_TAG"$'\t'false$'\t'false ]]; then
+            echo "release $RELEASE_TAG is not a published stable release" >&2
+            exit 1
+          fi
+          tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+          if [[ "$tag_commit" != "$SOURCE_COMMIT" ]]; then
+            echo "tag $RELEASE_TAG no longer resolves to the immutable source $SOURCE_COMMIT" >&2
+            exit 1
+          fi
+          # Idempotent: re-running a resumed workflow only reasserts Latest.
+          gh release edit "$RELEASE_TAG" --latest
+          echo "release $RELEASE_TAG is Latest after the published-install smoke passed"
 
   package-npm:
     name: Package verified npm artifacts
@@ -1341,10 +1423,11 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
           set -euo pipefail
           verify=(
-            --certificate-identity "https://github.com/${{ github.workflow_ref }}"
+            --certificate-identity "$COSIGN_IDENTITY"
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
             --certificate-github-workflow-name "octet binary release"
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
@@ -1357,7 +1440,29 @@ jobs:
           cosign sign-blob --yes --bundle npm-assets/OCTET_NPM_MANIFEST.json.sigstore.json npm-assets/OCTET_NPM_MANIFEST.json
           cosign verify-blob --bundle npm-assets/OCTET_NPM_SHA256SUMS.sigstore.json "${verify[@]}" npm-assets/OCTET_NPM_SHA256SUMS
           cosign verify-blob --bundle npm-assets/OCTET_NPM_MANIFEST.json.sigstore.json "${verify[@]}" npm-assets/OCTET_NPM_MANIFEST.json
+          # A resumed run produces fresh signature bundles. Accept an existing
+          # bundle only when it verifies the identical candidate artifact.
+          verify_existing_bundle() {
+            name=$1
+            artifact=${name%.sigstore.json}
+            if [[ ! -f "npm-assets/$artifact" ]]; then
+              echo "existing npm evidence signature has no candidate asset: $name" >&2
+              exit 1
+            fi
+            signature_directory="$RUNNER_TEMP/existing-npm-signatures"
+            mkdir -p "$signature_directory"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$signature_directory" --clobber
+            if ! cosign verify-blob \
+              --bundle "$signature_directory/$name" \
+              "${verify[@]}" \
+              "npm-assets/$artifact"; then
+              echo "existing npm evidence signature does not verify the immutable candidate: $name" >&2
+              exit 1
+            fi
+            echo "verified existing immutable npm evidence signature: $name"
+          }
           existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          declare -A accepted=()
           uploads=()
           for asset in npm-assets/*.tgz npm-assets/*.sigstore.json npm-assets/OCTET_NPM_SHA256SUMS npm-assets/OCTET_NPM_MANIFEST.json; do
             name=${asset##*/}
@@ -1367,11 +1472,15 @@ jobs:
                 exit 1
               fi
               local_digest=$(sha256sum "$asset" | awk '{print $1}')
-              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+              if [[ "$existing_digest" == "sha256:$local_digest" ]]; then
+                echo "verified existing immutable release asset: $name"
+              elif [[ "$name" == *.sigstore.json ]]; then
+                verify_existing_bundle "$name"
+                accepted["$name"]=$existing_digest
+              else
                 echo "immutable release asset differs from the existing asset: $name" >&2
                 exit 1
               fi
-              echo "verified existing immutable release asset: $name"
             else
               uploads+=("$asset")
             fi
@@ -1381,6 +1490,23 @@ jobs:
           else
             echo "all npm evidence assets already match the immutable candidate"
           fi
+          published_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          for asset in npm-assets/*.tgz npm-assets/*.sigstore.json npm-assets/OCTET_NPM_SHA256SUMS npm-assets/OCTET_NPM_MANIFEST.json; do
+            name=${asset##*/}
+            local_digest=$(sha256sum "$asset" | awk '{print $1}')
+            if ! observed=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$published_digests"); then
+              echo "uploaded npm evidence asset is missing: $name" >&2
+              exit 1
+            fi
+            if [[ "$observed" == "sha256:$local_digest" ]]; then
+              continue
+            fi
+            if [[ -n "${accepted[$name]:-}" && "$observed" == "${accepted[$name]}" ]]; then
+              continue
+            fi
+            echo "uploaded npm evidence asset has a mismatched digest: $name" >&2
+            exit 1
+          done
 
   verify-npm-published:
     name: Verify published npm provenance

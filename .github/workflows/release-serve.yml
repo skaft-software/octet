@@ -465,14 +465,46 @@ jobs:
             "${verify[@]}" \
             SHA256SUMS
       - name: Attach assets to the canonical octet release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           WORKFLOW_TAG: ${{ github.ref_name }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          verify=(
+            --certificate-identity "$COSIGN_IDENTITY"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-github-workflow-name "octet extension release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          # A resumed run produces fresh signature bundles. Accept an existing
+          # bundle only when it verifies the identical candidate artifact under
+          # this workflow's exact identity; anything else stops publication.
+          verify_existing_bundle() {
+            name=$1
+            artifact=${name%.sigstore.json}
+            if [[ ! -f "release-assets/$artifact" ]]; then
+              echo "existing release signature has no candidate asset: $name" >&2
+              exit 1
+            fi
+            signature_directory="$RUNNER_TEMP/existing-signatures"
+            mkdir -p "$signature_directory"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$signature_directory" --clobber
+            if ! cosign verify-blob \
+              --bundle "$signature_directory/$name" \
+              "${verify[@]}" \
+              "release-assets/$artifact"; then
+              echo "existing release signature does not verify the immutable candidate: $name" >&2
+              exit 1
+            fi
+            echo "verified existing immutable release signature: $name"
+          }
           verify_release_refs() {
             phase=$1
             git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
@@ -498,15 +530,55 @@ jobs:
             echo "canonical release $RELEASE_TAG is no longer a published stable release" >&2
             exit 1
           fi
-          existing_assets=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          # Reconcile with any assets an interrupted earlier attempt uploaded:
+          # deterministic archives must match byte for byte and signatures must
+          # verify, so a rerun converges instead of blocking on its own output.
+          existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          declare -A accepted=()
+          uploads=()
           for asset in release-assets/*; do
             name=${asset##*/}
-            if grep -Fx "$name" <<< "$existing_assets" >/dev/null; then
-              echo "refusing to replace existing immutable release asset: $name" >&2
-              exit 1
+            if existing_digest=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$existing_digests"); then
+              if [[ -z "$existing_digest" ]]; then
+                echo "existing release asset has no immutable digest: $name" >&2
+                exit 1
+              fi
+              local_digest=$(sha256sum "$asset" | awk '{print $1}')
+              if [[ "$existing_digest" == "sha256:$local_digest" ]]; then
+                echo "verified existing immutable release asset: $name"
+              elif [[ "$name" == *.sigstore.json ]]; then
+                verify_existing_bundle "$name"
+                accepted["$name"]=$existing_digest
+              else
+                echo "immutable release asset differs from the existing asset: $name" >&2
+                exit 1
+              fi
+            else
+              uploads+=("$asset")
             fi
           done
-          gh release upload "$RELEASE_TAG" release-assets/*
+          if ((${#uploads[@]})); then
+            gh release upload "$RELEASE_TAG" "${uploads[@]}"
+          else
+            echo "all extension release assets already match the immutable candidate"
+          fi
+          published_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            local_digest=$(sha256sum "$asset" | awk '{print $1}')
+            if ! observed=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$published_digests"); then
+              echo "uploaded extension release asset is missing: $name" >&2
+              exit 1
+            fi
+            if [[ "$observed" == "sha256:$local_digest" ]]; then
+              continue
+            fi
+            if [[ -n "${accepted[$name]:-}" && "$observed" == "${accepted[$name]}" ]]; then
+              continue
+            fi
+            echo "uploaded extension release asset has a mismatched digest: $name" >&2
+            exit 1
+          done
           verify_release_refs publishing
 
   verify-published:
