@@ -13311,6 +13311,9 @@ async fn run_interactive_once(
             refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
             update_status(&mut shell, &app);
             request_extension_ui(&mut shell, &mut app);
+            // Commands registered by the settled extension must reach an open
+            // `/name` completion menu now, not on the user's next keystroke.
+            shell.render();
         }
         for notice in startup_progress.notices {
             shell.notice(notice);

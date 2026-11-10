@@ -962,4 +962,4 @@ pub(crate) fn with_copy_test_hook<T>(hook: Option<CopyTestHook>, run: impl FnOnc
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -77,7 +77,9 @@ fn clipboard(output: &[u8]) -> Option<String> {
 
 #[test]
 fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Omit --mouse entirely: the real CLI/settings fallback must choose Auto.
     let (mut octet, mut parser, mut consumed) = history(MouseMode::Default, 100, 24);
     settle(&mut octet, &mut parser, &mut consumed);
@@ -135,7 +137,9 @@ fn default_mouse_owner_decision_preserves_native_scrollback_and_selection() {
 
 #[test]
 fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // No --mouse and no saved screen policy: the real defaults (fullscreen
     // surface, mouse = auto). The alternate screen has no terminal scrollback,
     // so without capture the trackpad could not scroll anything.
@@ -255,7 +259,7 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     }
 }
 
-fn renderer_reentered(output: &[u8]) -> bool {
+pub(super) fn renderer_reentered(output: &[u8]) -> bool {
     // Leaving fullscreen also changes the modes during suspension. The next
     // renderer enables bracketed paste anew; only its completed paint is ready
     // for another command, after raw mode has been restored.
@@ -275,7 +279,9 @@ fn surface_transition_fence_waits_for_the_resumed_renderer() {
 
 #[test]
 fn fullscreen_mouse_policy_follows_live_screen_switches() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for mode in [
         MouseMode::Default,
         MouseMode::App,
@@ -347,7 +353,9 @@ fn fullscreen_mouse_policy_follows_live_screen_switches() {
 
 #[test]
 fn default_fullscreen_wheel_scrollbar_drag_selection_and_copy() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut octet = PtyOctet::spawn_default_fullscreen(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         MouseMode::Default,
@@ -370,7 +378,9 @@ fn default_fullscreen_wheel_scrollbar_drag_selection_and_copy() {
 
 #[test]
 fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (fullscreen, hyperlinks) in [(true, true), (true, false), (false, true), (false, false)] {
         let (mut octet, mut parser, mut consumed) = if fullscreen {
             (
@@ -453,7 +463,9 @@ fn plain_link_click_opens_once_on_release_and_drag_still_copies() {
 
 #[test]
 fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (mut octet, mut parser, mut consumed) = history(MouseMode::App, 100, 24);
     for mode in [1000, 1002, 1003, 1006] {
         assert!(contains_bytes(
@@ -568,7 +580,9 @@ fn wrapped_multirow_copy(octet: &mut PtyOctet, parser: &mut vt100::Parser, consu
 
 #[test]
 fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (columns, rows) in [(137, 48), (80, 24), (46, 12)] {
         let (mut octet, mut parser, mut consumed) = history(MouseMode::App, columns, rows);
         octet.pty.write_input(b"draft-private");
