@@ -10,7 +10,7 @@ import { entryPayload, leafGrant, appendReply } from '../lib/session-leaf.mjs';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const grant = (id = 'a', head = null) => ({ grant_id: id.repeat(64), activation_epoch: 7, operation_id: 'native-operation', owner, expected_head: head });
 const ack = (id = 'native-entry', successor = grant('b', id)) => ({ entry_id: id, head: id, successor });
-async function fixture(t) {
+async function fixture(t, { ui = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'octet-pi-sync-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const entry = join(dir, 'sync.ts');
   await writeFile(entry, `export default pi => {
@@ -29,9 +29,10 @@ async function fixture(t) {
     pi.registerCommand('alongside', {async handler(_,ctx){const question=ctx.ui.confirm('Real async question');append('',ctx);ctx.ui.notify('question:'+await question)}});
     pi.on('tool_call', (event,ctx) => {append(event.input.mode,ctx)});
   };`);
-  const peer = launch(t, [entry], { hold: ['session/append_entry'] }); await peer.init(['session_entries']);
+  const peer = launch(t, [entry], { hold: ['session/append_entry'] });
+  await peer.init(['session_entries', ...(ui ? ['remote_ui'] : [])]);
   peer.snapshot = { session_entries: [], session_branch: [], session_leaf_id: null };
-  await peer.start(peer.snapshot);
+  await peer.start({ ...peer.snapshot, ...(ui ? { has_ui: true } : {}) });
   peer.invoke = (mode = '', leaf = grant()) => peer.request('hook/run', { hook: 'before_tool_call', payload: {name:'test',arguments:{mode}}, context: peer.context(peer.snapshot), ...(leaf === undefined ? {} : {session_leaf:leaf}) });
   let reportsRead = 0;
   peer.report = async () => {
@@ -137,13 +138,25 @@ test('entry limits match native private envelope: LF/CR/TAB values only, strict 
 });
 
 test('async reverse replies and serialized notifications remain intact alongside a blocking append', async t => {
-  const peer=await fixture(t), parent=peer.command('alongside',[],peer.snapshot);
+  // Pi headless confirm has no reverse reply (pi-reference/node_modules/@earendil-works/
+  // pi-coding-agent/dist/core/extensions/runner.js:132-135). The append remains
+  // synchronous (dist/core/agent-session.js:2685-2691); only this test needs UI.
+  const peer=await fixture(t, { ui: true }), parent=peer.command('alongside',[],peer.snapshot);
   const question=await peer.wait(f=>f.method==='confirmation/request'), append=await peer.wait(f=>f.method==='session/append_entry');
+  assert.equal(question.params.parent_request_id,parent.id);
+  assert.equal(append.params.parent_request_id,parent.id);
+  assert.deepEqual(append.params.resource_owner,owner);
   peer.send({jsonrpc:'2.0',id:question.id,result:{confirmed:true}});
   await sleep(40);assert.ok(!peer.seen.some(f=>f.method==='notification'));
   peer.send({jsonrpc:'2.0',id:append.id,result:{entry_id:'durable-alongside'}});
-  assert.equal((await peer.report()).entries[0].id,'durable-alongside');
-  await peer.wait(f=>f.method==='notification'&&f.params.message==='question:true');assert.ok((await parent.response).result);await peer.close();
+  const report=await peer.report();
+  assert.equal(report.error,undefined);assert.equal(report.voidReturn,true);
+  assert.equal(report.entries[0].id,'durable-alongside');assert.deepEqual(report.entries,report.branch);
+  assert.equal(report.leaf,'durable-alongside');
+  await peer.wait(f=>f.method==='notification'&&f.params.message==='question:true');assert.ok((await parent.response).result);
+  assert.equal(peer.seen.filter(f=>f.method==='session/append_entry').length,1,'append never replays');
+  assert.equal(peer.seen.filter(f=>f.method==='notification'&&f.params.message==='question:true').length,1);
+  await peer.close();
 });
 test('shutdown is read while synchronous factory is blocked and child cancellation waits for definitive native refusal', async t => {
   const peer=await fixture(t), parent=peer.invoke();parent.response.catch(()=>{});

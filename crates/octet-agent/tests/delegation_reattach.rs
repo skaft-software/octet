@@ -543,6 +543,93 @@ async fn a_restarted_session_reattaches_and_continues_its_worker() {
         .contains("continue after the restart"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_place_session_switch_retains_children_for_an_explicit_return() {
+    let server = MockServer::start().await;
+    let first_state = Arc::new(ScriptState::default());
+    mount_script(
+        &server,
+        FirstOwnerScript {
+            state: Arc::clone(&first_state),
+        },
+    )
+    .await;
+    let rig = Rig::new();
+    let original = rig.session_path();
+    Session::create(&original).unwrap();
+    let mut root = rig.open_agent(&server, &original);
+    assert_eq!(
+        root.complete("spawn the survivor").await.unwrap().text,
+        "first owning session complete"
+    );
+    let spawned = parse_result(&tool_results(root.session()), "spawn-survivor");
+    assert_eq!(spawned["agent_id"], "agent-1", "{spawned}");
+    let original_team = root.delegation_team_directory().unwrap().to_owned();
+    assert_eq!(
+        root.detach_delegated_workers(Duration::from_secs(10)).await,
+        0
+    );
+    let parked = wait_for_parked_record(&rig.roster_path(), "agent-1").await;
+    let child_path = PathBuf::from(parked["session_path"].as_str().unwrap());
+    let child_bytes = std::fs::read(&child_path).unwrap();
+    let original_bytes = std::fs::read(&original).unwrap();
+
+    let other = rig.sessions.path().join("other.jsonl");
+    root.replace_session_at_idle(Session::create(&other).unwrap())
+        .unwrap();
+    assert_eq!(root.session().path(), other);
+    assert_ne!(root.delegation_team_directory().unwrap(), original_team);
+    assert_eq!(root.active_delegated_worker_count(), 0);
+    assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+    assert_eq!(std::fs::read(&child_path).unwrap(), child_bytes);
+
+    // Return with the same Agent and native tool catalog: no rebuild, no
+    // duplicate instructions, and no replay of the child's delivered task.
+    assert_eq!(
+        root.detach_delegated_workers(Duration::from_secs(10)).await,
+        0
+    );
+    root.replace_session_at_idle(Session::open(&original).unwrap())
+        .unwrap();
+    server.reset().await;
+    let returned_state = Arc::new(ScriptState::default());
+    mount_script(
+        &server,
+        RestartedOwnerScript {
+            state: Arc::clone(&returned_state),
+        },
+    )
+    .await;
+    assert_eq!(
+        root.complete("reattach the survivor").await.unwrap().text,
+        "second owning session complete"
+    );
+    let results = tool_results(root.session());
+    let restored = parse_result(&results, "list-reattached");
+    assert_eq!(restored["agents"].as_array().unwrap().len(), 1);
+    let restored = &restored["agents"][0];
+    assert_eq!(restored["agent_id"], "agent-1");
+    assert_eq!(restored["status"]["state"], "completed");
+    assert_eq!(restored["status"]["output"], "survivor first task complete");
+    assert_eq!(restored["completed_at_ms"], parked["completed_at_ms"]);
+    assert_eq!(restored["turn_count"], 1);
+    assert_eq!(restored["live_task"], false);
+    let continued = parse_result(&results, "list-after-continue");
+    assert_eq!(continued["agents"][0]["session"], restored["session"]);
+    assert_eq!(continued["agents"][0]["turn_count"], 2);
+    assert!(first_state.unexpected.lock().unwrap().is_empty());
+    assert!(returned_state.unexpected.lock().unwrap().is_empty());
+    let requests = returned_state.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request_system(request).contains("You are /root/survivor"))
+            .count(),
+        1,
+        "only the explicit follow-up may run the child"
+    );
+}
+
 /// Two live sessions over the same durable store: the second is refused by name
 /// and never starts the first session's worker a second time. Both sessions
 /// share the mock server, so the script routes on the owning session's own

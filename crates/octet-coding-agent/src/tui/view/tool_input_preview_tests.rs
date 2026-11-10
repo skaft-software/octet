@@ -194,7 +194,8 @@ fn tool_input_preview_global_disclosure_reveals_and_recovers_live_and_completed_
     use octet_agent::{AgentEvent, ToolOutput};
     use std::time::Duration;
 
-    let input = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nLAST_COMMAND";
+    let input =
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nLAST_COMMAND";
     for name in ["bash", "powershell", "remote_shell"] {
         let mut shell = InteractiveShell::test_shell();
         let id = ToolCallId("live-input".into());

@@ -28,6 +28,9 @@ async fn fixture() -> (tempfile::TempDir, MockServer) {
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(home.join(".octet/credentials")).unwrap();
     std::fs::create_dir_all(workspace.join("nested")).unwrap();
+    // Keep workspace discovery inside this fixture even if an ancestor of
+    // TMPDIR is itself a project on the machine running the tests.
+    std::fs::create_dir(workspace.join(".git")).unwrap();
     std::fs::write(workspace.join("README.md"), "unrelated\n").unwrap();
     std::fs::write(workspace.join("nested/needle.txt"), format!("{MARKER}\n")).unwrap();
     let server = MockServer::start().await;

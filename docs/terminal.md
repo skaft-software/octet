@@ -335,8 +335,8 @@ and completed reasoning disappears again once collapsed.
 ## Tool output and workers
 
 Bash and PowerShell commands wrap to the available width. In terse mode, they
-show up to six rendered command rows, then a count of hidden rows. Generic tool
-input previews use the same six-row limit for their selected argument, preserving
+show up to twelve rendered command rows, then a count of hidden rows. Generic tool
+input previews use the same twelve-row limit for their selected argument, preserving
 newlines. Ctrl+O expands the full retained input and collapses it again. That
 doesn't change tool execution or the separate output preview.
 

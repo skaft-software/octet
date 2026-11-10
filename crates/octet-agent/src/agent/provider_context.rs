@@ -120,7 +120,11 @@ fn request_descriptor(request: &Request) -> String {
         request.messages.len(),
         request.tools.len(),
         kib(schema_bytes),
-        if largest.is_empty() { "none".to_owned() } else { largest },
+        if largest.is_empty() {
+            "none".to_owned()
+        } else {
+            largest
+        },
         kib(request_bytes),
     )
 }
@@ -445,9 +449,9 @@ async fn project_context_hooks(
                         .find(|original| original.name == tool.name)
                     else {
                         return Err(refused_owned(format!(
-                        "loadout introduced unregistered tool {}",
-                        bounded_name(&tool.name)
-                    )));
+                            "loadout introduced unregistered tool {}",
+                            bounded_name(&tool.name)
+                        )));
                     };
                     let mut unchanged = tool.clone();
                     unchanged.description = original.description.clone();
@@ -456,9 +460,9 @@ async fn project_context_hooks(
                             != serde_json::to_value(original).expect("canonical tool serializes")
                     {
                         return Err(refused_owned(format!(
-                        "loadout changed the authority of tool {}",
-                        bounded_name(&tool.name)
-                    )));
+                            "loadout changed the authority of tool {}",
+                            bounded_name(&tool.name)
+                        )));
                     }
                 }
                 request.tools = tools;
@@ -491,7 +495,12 @@ async fn project_context_hooks(
             let mut tools = request
                 .tools
                 .iter()
-                .map(|t| (t.name.clone(), serde_json::to_string(t).map_or(0, |s| s.len())))
+                .map(|t| {
+                    (
+                        t.name.clone(),
+                        serde_json::to_string(t).map_or(0, |s| s.len()),
+                    )
+                })
                 .collect::<Vec<_>>();
             tools.sort_by(|a, b| b.1.cmp(&a.1));
             let record = serde_json::json!({
@@ -504,7 +513,11 @@ async fn project_context_hooks(
                     .map(|e| e.to_string()),
             });
             use std::io::Write as _;
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = writeln!(file, "{record}");
             }
         }

@@ -1,0 +1,22 @@
+name: models.dev freshness (advisory)
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  models-dev-freshness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check live models.dev metadata
+        timeout-minutes: 2
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 scripts/refresh-models-dev-pricing.py --check

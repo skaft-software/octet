@@ -16,8 +16,8 @@ frozen. What an extension can actually use depends on its exact manifest
 selection, the host's offers and the frontend bindings, not on the API number
 alone.
 
-The [generated reference](extensions/API-0.4-REFERENCE.md) keeps the version
-policy and the live canonical schema and models. The [feature-negotiated wire
+The [hand-maintained 0.4 reference](extensions/API-0.4-REFERENCE.md) keeps the
+current version policy, feature negotiation and independently owned data shapes. The [feature-negotiated wire
 reference](extensions/PROTOCOL-REFERENCE.md) keeps commands, hooks, status,
 presentation, dynamic tools, artifacts, `agent_sessions`, approvals and the
 other existing low-level services. Those contracts and their safety and
@@ -39,7 +39,7 @@ flags = [
 ```
 
 The host resolves these options before startup and passes their values in
-`initialize.params.flag_values` (the shared generated
+`initialize.params.flag_values` (the hand-maintained 0.4
 [`InitializeFlagValue`](extensions/API-0.4-REFERENCE.md#initializeflagvalue)
 shape). The rules are under [CLI flags](#api-04-cli-flags).
 
@@ -420,22 +420,12 @@ depth are rejected before dispatch. The frame limit excludes the LF. A frame at
 the limit is accepted, and one byte over ends the stream. After initialization,
 the negotiated limits replace the offered ones, in both directions, atomically.
 
-Build against these reference sections, not a legacy JSON example:
-
-- [Canonical
-  envelopes](extensions/API-0.4-REFERENCE.md#canonical-framing-and-json-rpc-envelopes)
-  and [all bounds](extensions/API-0.4-REFERENCE.md#bounds).
-- [Host offer](extensions/API-0.4-REFERENCE.md#contractoffer),
-  [selection](extensions/API-0.4-REFERENCE.md#contractselection) and
-  [initialization fields](extensions/API-0.4-REFERENCE.md#initializerequest).
-- [Capabilities](extensions/API-0.4-REFERENCE.md#capabilities), [method
-  directions and terminal
-  semantics](extensions/API-0.4-REFERENCE.md#methods-and-terminal-semantics) and
-  [exact error code/message pairs](extensions/API-0.4-REFERENCE.md#errors).
-- [Tool arguments](extensions/API-0.4-REFERENCE.md#toolcallparams),
-  [results](extensions/API-0.4-REFERENCE.md#toolcallresult),
-  [cancellation](extensions/API-0.4-REFERENCE.md#cancelrequestparams) and
-  [shutdown](extensions/API-0.4-REFERENCE.md#shutdownparams).
+Build against the retained 0.3 schema (`protocol/extension-api-v0.3.schema.json`)
+and [generated bindings](../sdk/typescript/README.md#retained-canonical-api-03-bindings),
+not a feature-negotiated JSON example. They define the canonical envelopes,
+offer/selection, bounds, capabilities, methods, exact error pairs and model
+records. The [0.4 reference](extensions/API-0.4-REFERENCE.md) deliberately does
+not describe those as the current wire.
 
 <details>
 <summary>What's deferred on the 0.3 wire</summary>
