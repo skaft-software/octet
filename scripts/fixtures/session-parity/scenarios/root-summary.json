@@ -1,0 +1,11 @@
+{
+  "name": "root-summary",
+  "operations": [
+    {
+      "op": "summary",
+      "as": "summary",
+      "target": null,
+      "summary": "from root"
+    }
+  ]
+}

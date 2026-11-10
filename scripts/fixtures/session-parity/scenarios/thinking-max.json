@@ -1,0 +1,19 @@
+{
+  "name": "thinking-max",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "thinking",
+      "as": "thinking",
+      "level": "max"
+    }
+  ]
+}

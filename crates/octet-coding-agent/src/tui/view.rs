@@ -9406,6 +9406,23 @@ impl InteractiveShell {
         Ok(())
     }
 
+    /// A handle to the shell's subagent roster label that stays usable while
+    /// another borrow of the shell is live (the idle prompt owns `&mut self`).
+    #[cfg(test)]
+    pub(crate) fn subagent_label_probe(&self) -> impl Fn() -> Option<String> {
+        let state = self.state.clone();
+        move || {
+            state
+                .borrow()
+                .transcript
+                .iter()
+                .find_map(|block| match block {
+                    TranscriptBlock::Subagents(summary) => Some(summary.label()),
+                    _ => None,
+                })
+        }
+    }
+
     /// Human-readable state used by headless unit tests and regression checks.
     #[cfg(test)]
     pub fn debug_snapshot(&self) -> String {

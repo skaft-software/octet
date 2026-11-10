@@ -61,7 +61,9 @@ fn keyboard_state(output: &[u8]) -> (bool, Vec<u8>, Vec<u8>) {
 
 #[test]
 fn fullscreen_requests_shift_enter_on_the_active_keyboard_stack() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut octet = PtyOctet::spawn_default_fullscreen(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         MouseMode::Default,
@@ -118,7 +120,9 @@ fn fullscreen_requests_shift_enter_on_the_active_keyboard_stack() {
 
 #[test]
 fn modified_enter_survives_live_screen_switches_and_inline() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")), MouseMode::Default);
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 0);
     let mut consumed = 0;
@@ -147,7 +151,7 @@ fn modified_enter_survives_live_screen_switches_and_inline() {
                     && parser.screen().alternate_screen() == fullscreen
                     && primary.last().is_some_and(|flags| flags & 1 != 0)
                     && (!fullscreen || alternate.last().is_some_and(|flags| flags & 1 != 0))
-                    && contains_bytes(&octet.pty.output[before..], FRAME_END)
+                    && super::mouse::renderer_reentered(&octet.pty.output[before..])
                 {
                     break;
                 }
@@ -224,7 +228,9 @@ fn modified_enter_survives_live_screen_switches_and_inline() {
 
 #[test]
 fn signal_shutdown_restores_both_keyboard_stacks() {
-    let _lock = pty_test_lock().lock().unwrap();
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut octet = PtyOctet::spawn_default_fullscreen(
         Path::new(env!("CARGO_BIN_EXE_octet")),
         MouseMode::Default,

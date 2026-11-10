@@ -438,10 +438,12 @@ hooks = {hooks}
                 .start_session_hook_binding("session-owner")
                 .await
                 .unwrap();
-            process
-                .settle_session_hook_binding("session-owner", ExtensionLifecycleOutcome::Completed)
-                .await
-                .unwrap();
+            crate::extension_process::tests::settle_session_hook_after_delivery(
+                &process,
+                "session-owner",
+                ExtensionLifecycleOutcome::Completed,
+            )
+            .await;
             assert!(process.shutdown().await);
             continue;
         }
@@ -469,10 +471,12 @@ hooks = {hooks}
         start.await.unwrap().unwrap();
         assert_eq!(process.take_remote_ui_frames()[0].lines, vec!["footer"]);
         assert!(process.remote_ui_surface_is_current(&owner, "footer"));
-        process
-            .settle_session_hook_binding("session-owner", ExtensionLifecycleOutcome::Completed)
-            .await
-            .unwrap();
+        crate::extension_process::tests::settle_session_hook_after_delivery(
+            &process,
+            "session-owner",
+            ExtensionLifecycleOutcome::Completed,
+        )
+        .await;
         assert!(!process.remote_ui_surface_is_current(&owner, "footer"));
         assert!(
             !lock_std_mutex(&read_std_lock(&process.inner.connection).issued_resource_owners)

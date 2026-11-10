@@ -1,0 +1,20 @@
+{
+  "name": "empty-summary",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "summary",
+      "as": "summary",
+      "target": "u",
+      "summary": ""
+    }
+  ]
+}

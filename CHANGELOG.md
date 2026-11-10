@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- A partially typed `/command` completion menu now includes commands that an
+  extension registers after the keystroke as soon as the extension finishes
+  starting, instead of waiting for the next key press.
+
 - An extension CLI flag may reuse the name of a subcommand option (Pi's
   `preset.ts` registers `--preset`, which `octet setup` also has), instead of
   failing startup with a conflict. Only top-level options reserve a name; a real
