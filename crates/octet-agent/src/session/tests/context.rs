@@ -157,7 +157,7 @@ fn compaction_reconstruction_matches_design_example() {
     assert_eq!(
         texts,
         vec![
-            "[summary of earlier conversation]\nwhat came before".to_string(),
+            "The conversation history before this point was compacted into the following summary:\n\n<summary>\nwhat came before\n</summary>".to_string(),
             "E2".to_string(),
             "E3".to_string(),
             "E5".to_string(),
@@ -188,7 +188,7 @@ fn successive_compactions_expose_only_the_newest_summary() {
     assert_eq!(
         texts,
         [
-            "[summary of earlier conversation]\nreplacement summary including prior history",
+            "The conversation history before this point was compacted into the following summary:\n\n<summary>\nreplacement summary including prior history\n</summary>",
             "recent assistant",
         ]
     );
@@ -225,7 +225,7 @@ fn compaction_survives_reopen() {
     assert_eq!(
         texts,
         vec![
-            "[summary of earlier conversation]\nsummary text".to_string(),
+            "The conversation history before this point was compacted into the following summary:\n\n<summary>\nsummary text\n</summary>".to_string(),
             "kept".to_string(),
         ]
     );

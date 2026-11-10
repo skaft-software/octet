@@ -2799,7 +2799,7 @@ async fn repeated_context_rejection_advances_compaction_without_spending_turns()
         .unwrap()
         .iter()
         .filter(|message| {
-            matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::Text(text) if text.starts_with("[summary of earlier conversation]"))))
+            matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::Text(text) if text.starts_with("The conversation history before this point was compacted into the following summary:"))))
         })
         .count();
     assert_eq!(visible_summaries, 1, "older overlapping summary leaked");

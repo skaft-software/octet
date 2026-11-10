@@ -372,69 +372,6 @@
       "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
     },
     {
-      "scenario": "compaction",
-      "step": "*",
-      "check": "context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "compaction",
-      "step": "*",
-      "check": "import-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "compaction",
-      "step": "*",
-      "check": "reopen-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "repeated-compaction",
-      "step": "*",
-      "check": "context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "repeated-compaction",
-      "step": "*",
-      "check": "import-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "repeated-compaction",
-      "step": "*",
-      "check": "reopen-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "fork-compaction",
-      "step": "*",
-      "check": "context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "fork-compaction",
-      "step": "*",
-      "check": "import-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
-      "scenario": "fork-compaction",
-      "step": "*",
-      "check": "reopen-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:\\n\\n<summary>\\n...\\n</summary>\"; octet emits \"[summary of earlier conversation]\\n...\" (octet-agent session/context.rs compaction_parts)."
-    },
-    {
       "scenario": "multiple-roots",
       "step": "*",
       "check": "context",
@@ -600,21 +537,14 @@
       "step": "*",
       "check": "context",
       "fingerprint": "context.0.content.0.text",
-      "reason": "Two known causes produce a different first model-visible message: Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:...\" while octet emits \"[summary of earlier conversation]...\" (octet-agent session/context.rs compaction_parts); and after a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
-      "check": "import-context",
-      "fingerprint": "context.0.content.0.text",
-      "reason": "Two known causes produce a different first model-visible message: Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:...\" while octet emits \"[summary of earlier conversation]...\" (octet-agent session/context.rs compaction_parts); and after a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
+      "reason": "After a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
     },
     {
       "scenario": "*",
       "step": "*",
       "check": "reopen-context",
       "fingerprint": "context.0.content.0.text",
-      "reason": "Two known causes produce a different first model-visible message: Pi wraps a compaction summary as \"The conversation history before this point was compacted into the following summary:...\" while octet emits \"[summary of earlier conversation]...\" (octet-agent session/context.rs compaction_parts); and after a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
+      "reason": "After a reopen or branch Pi selects the last appended entry while octet restores the persisted head, so a different branch's first message can be selected."
     }
   ]
 }

@@ -147,7 +147,7 @@ fn fork_to_stops_at_the_compaction_boundary_and_reroots_the_span() {
     assert_eq!(
         texts(&fork_context),
         vec![
-            "[summary of earlier conversation]\nsummary of the replaced history".to_string(),
+            "The conversation history before this point was compacted into the following summary:\n\n<summary>\nsummary of the replaced history\n</summary>".to_string(),
             "second prompt".to_string(),
             "second answer".to_string(),
             "third prompt".to_string(),

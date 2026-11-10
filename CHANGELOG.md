@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- The model now sees a compaction summary wrapped in the same text Pi uses
+  ("The conversation history before this point was compacted into the following
+  summary: ..."), so a session compacted in either tool reads the same.
+
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 
