@@ -302,11 +302,6 @@ impl Native {
 
     fn rename(&mut self, op: &Value) -> Result<(), String> {
         let name = text(op, "name");
-        // Pi replaces line breaks with spaces; octet refuses control characters
-        // outright. That refusal is the observed divergence.
-        if name.chars().any(char::is_control) {
-            return Err("name:control-characters".into());
-        }
         let id = self.id().map_err(|error| format!("name:{error}"))?;
         self.store
             .rename(&id, name)

@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Renaming a session replaces line breaks in the name with spaces and trims it,
+  as Pi does, instead of refusing the name.
+
 - Forking a session now keeps the entry labels (bookmarks) of the entries the
   fork retains.
 

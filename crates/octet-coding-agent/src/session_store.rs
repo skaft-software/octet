@@ -1022,7 +1022,23 @@ fn confine_delegated_session_path(
 }
 
 fn sanitize_session_name(name: &str) -> anyhow::Result<Option<String>> {
-    let name = name.trim();
+    // Pi replaces each run of line breaks with one space, then trims, and an
+    // empty result clears the name
+    // (pi-session-1-5-0/dist/core/session-manager.js:926-936,939-947).
+    let mut flattened = String::with_capacity(name.len());
+    let mut in_break = false;
+    for character in name.chars() {
+        if matches!(character, '\r' | '\n') {
+            if !in_break {
+                flattened.push(' ');
+            }
+            in_break = true;
+        } else {
+            in_break = false;
+            flattened.push(character);
+        }
+    }
+    let name = flattened.trim();
     if name.is_empty() {
         return Ok(None);
     }

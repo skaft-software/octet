@@ -67,13 +67,6 @@
       "scenario": "*",
       "step": "*",
       "check": "capability",
-      "fingerprint": "refused:name",
-      "reason": "Pi replaces line breaks in a session name with spaces; octet's sanitize_session_name rejects control characters outright (session_store.rs)."
-    },
-    {
-      "scenario": "*",
-      "step": "*",
-      "check": "capability",
       "fingerprint": "refused:summary",
       "reason": "octet refuses an empty branch summary, a branch summary whose details object omits readFiles/modifiedFiles (both fields are required by CompactionDetails), and branch-with-summary on an empty session; Pi accepts all three (octet-agent session.rs validate_branch_summary, compaction.rs CompactionDetails)."
     },
