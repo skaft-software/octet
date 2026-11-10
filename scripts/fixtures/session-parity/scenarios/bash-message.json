@@ -1,0 +1,27 @@
+{
+  "name": "bash-message",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "bash",
+      "message": {
+        "role": "bashExecution",
+        "command": "printf sample",
+        "output": "sample",
+        "exitCode": 0,
+        "cancelled": false,
+        "truncated": false,
+        "timestamp": 0
+      }
+    }
+  ]
+}

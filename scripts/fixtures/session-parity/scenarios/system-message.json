@@ -1,0 +1,29 @@
+{
+  "name": "system-message",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "system",
+      "message": {
+        "role": "system",
+        "content": "exact system prompt",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "compaction",
+      "as": "summary",
+      "summary": "summary",
+      "firstKept": "u"
+    }
+  ]
+}

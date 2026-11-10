@@ -1,5 +1,6 @@
-// Test-only oracle. Import the published, unmodified narrow modules: the package
-// root also loads unrelated optional UI/tool integrations. No Pi CLI or user config.
+// Test-only oracle: replay one scenario through the published, unmodified
+// SessionManager. Imports narrow modules because the package root also loads
+// optional UI/tool integrations. Reads only the fixture's own directories.
 import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,18 +44,22 @@ function snapshot(manager) {
     entries, treeOrder, labels, leaf: manager.getLeafId(),
     path: manager.getBranch().map(e => e.id),
     context: convertToLlm(context.messages),
-    settings: { model: context.model ? `${context.model.provider}/${context.model.modelId}` : null,
-      thinking: context.thinkingLevel },
+    settings: {
+      model: context.model ? `${context.model.provider}/${context.model.modelId}` : null,
+      thinking: context.thinkingLevel,
+    },
     name: manager.getSessionName() ?? null,
   };
 }
 
 const results = [];
 for (const test of cases) {
-  const dir = join(directory, test.name);
-  mkdirSync(dir, { recursive: true });
-  const cwd = dir;
-  let manager = test.memory ? SessionManager.inMemory(cwd) : SessionManager.create(cwd, dir);
+  const root = join(directory, test.name);
+  const cwd = join(root, 'work');
+  const sessionDir = join(root, 'sessions');
+  const checkpointDir = join(root, 'checkpoints');
+  for (const path of [cwd, sessionDir, checkpointDir]) mkdirSync(path, { recursive: true });
+  let manager = SessionManager.create(cwd, sessionDir);
   const ids = new Map();
   const slots = new Map();
   const steps = [];
@@ -80,22 +85,29 @@ for (const test of cases) {
         case 'reset': manager.resetLeaf(); break;
         case 'summary': result = manager.branchWithSummary(op.target === null ? null : target(op.target), op.summary, op.details, op.fromHook, op.usage); break;
         case 'compaction': result = manager.appendCompaction(op.summary, op.firstKept === null ? null : target(op.firstKept), op.tokensBefore ?? 0, op.details, op.fromHook, op.usage); break;
-        case 'reopen': manager = SessionManager.open(manager.getSessionFile(), dir); break;
-        case 'fork': manager.createBranchedSession(target(op.target)); break;
-        case 'fork_all': manager = SessionManager.forkFrom(manager.getSessionFile(), cwd, dir); break;
+        case 'reopen':
+          // Pi keeps a setup-only session in memory and writes no file; there is
+          // nothing on disk to reopen yet. Record that instead of creating one.
+          if (!existsSync(manager.getSessionFile())) { error = 'unpersisted'; break; }
+          manager = SessionManager.open(manager.getSessionFile(), sessionDir);
+          break;
+        case 'fork': {
+          const path = manager.createBranchedSession(target(op.target));
+          assert.ok(existsSync(path), 'a branched session with conversation is written');
+          manager = SessionManager.open(path, sessionDir);
+          break;
+        }
+        case 'fork_all': manager = SessionManager.forkFrom(manager.getSessionFile(), cwd, sessionDir); break;
         case 'new':
           slots.set(op.slot, manager.getSessionFile());
           manager.newSession();
           break;
         case 'switch': manager.setSessionFile(slots.get(op.slot)); break;
-        case 'recent': manager = SessionManager.continueRecent(cwd, dir); break;
+        case 'recent': manager = SessionManager.continueRecent(cwd, sessionDir); break;
         case 'probe': {
-          assert.equal(SessionManager.findById(cwd, manager.getSessionId(), dir), manager.getSessionFile());
-          const listed = await SessionManager.list(cwd, dir);
-          assert.ok(listed.some(s => s.id === manager.getSessionId()));
-          // Explicit roots prevent any read of the actual user session directories.
-          const all = await SessionManager.listAll(dir);
-          assert.ok(all.some(s => s.id === manager.getSessionId()));
+          assert.equal(SessionManager.findById(cwd, manager.getSessionId(), sessionDir), manager.getSessionFile());
+          assert.ok((await SessionManager.list(cwd, sessionDir)).some(s => s.id === manager.getSessionId()));
+          assert.ok((await SessionManager.listAll(sessionDir)).some(s => s.id === manager.getSessionId()));
           break;
         }
         case 'context': break;
@@ -106,7 +118,7 @@ for (const test of cases) {
         ids.set(op.as, result);
       }
     } catch (e) {
-      // Invalid-operation scenarios exercise real refusal semantics too.
+      // Rejection semantics are part of the contract too.
       if (!op.reject) throw e;
       error = 'rejected';
     }
@@ -116,14 +128,14 @@ for (const test of cases) {
     let disk = null;
     const file = manager.getSessionFile();
     if (file && existsSync(file)) {
-      const copy = join(dir, `checkpoint-${index}.jsonl`);
+      const copy = join(checkpointDir, `${index}.jsonl`);
       copyFileSync(file, copy);
       const before = readFileSync(copy);
-      disk = { file: copy, state: { ...snapshot(SessionManager.open(copy, dir)), aliases } };
+      disk = { state: { ...snapshot(SessionManager.open(copy, sessionDir)), aliases } };
       assert.deepEqual(readFileSync(copy), before, 'opening a current Pi file changed its bytes');
     }
     steps.push({ state, error, disk });
   }
-  results.push({ name: test.name, steps });
+  results.push({ name: test.name, file: manager.getSessionFile(), steps });
 }
 process.stdout.write(JSON.stringify({ version, results }));

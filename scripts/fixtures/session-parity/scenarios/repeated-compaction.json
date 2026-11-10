@@ -1,0 +1,76 @@
+{
+  "name": "repeated-compaction",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "a"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "kept",
+      "message": {
+        "role": "user",
+        "content": "kept",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "compaction",
+      "as": "first",
+      "summary": "first",
+      "firstKept": "kept"
+    },
+    {
+      "op": "message",
+      "as": "next",
+      "message": {
+        "role": "user",
+        "content": "next",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "compaction",
+      "as": "second",
+      "summary": "second",
+      "firstKept": "kept"
+    }
+  ]
+}
