@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Runtime } from '../lib/runtime.mjs';
 import { excludedIssue, formatIssues, loadIssue } from '../lib/issues.mjs';
+import { PI_SUPPORTED_RANGE } from '../lib/pi-modules.mjs';
 import { rpcError, strict } from '../lib/errors.mjs';
 import { launch, owner, root } from './helper.mjs';
 
@@ -220,4 +221,12 @@ test('a factory code is named; its message and any other text stay redacted', ()
   assert.equal(loadIssue({ entry: '/x/a.ts', error: 'pkg_missing_peer: needs foo' }).reason,
     'skipped: failed while loading ("pkg_missing_peer")');
   assert.match(loadIssue({ entry: '/x/a.ts', error: 'boom' }).reason, /(?:left out: could not be loaded|skipped: failed while loading)$/);
+});
+
+// The missing-install action states the range the shipped manifests compute, so
+// adding a Pi release cannot leave the notice naming an older supported range.
+test('the unsupported-install action states the computed Pi range', () => {
+  const issue = loadIssue({ entry: '/x/a.ts', code: -32031, error: 'installed Pi 2.0.0 is outside the supported range' });
+  assert.equal(issue.reason, 'skipped: needs a Pi install that is missing or unsupported');
+  assert.equal(issue.next, `Install Pi ${PI_SUPPORTED_RANGE}, or disable.`);
 });

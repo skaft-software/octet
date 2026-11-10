@@ -9,6 +9,8 @@
 
 #![cfg(unix)]
 
+mod pty_teardown;
+
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -454,10 +456,11 @@ impl Pane {
                 return;
             }
             if Instant::now() >= deadline {
-                unsafe {
-                    let _ = libc::kill(self.pid(), libc::SIGKILL);
-                }
-                let _ = self.child.wait();
+                pty_teardown::kill_and_reap(
+                    &mut self.child,
+                    &mut self.pty.master,
+                    SHUTDOWN_TIMEOUT,
+                );
                 panic!(
                     "pane did not stop after Ctrl-D: {}",
                     visible(&self.pty.output)
@@ -471,10 +474,7 @@ impl Pane {
 impl Drop for Pane {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            unsafe {
-                let _ = libc::kill(self.pid(), libc::SIGKILL);
-            }
-            let _ = self.child.wait();
+            pty_teardown::kill_and_reap(&mut self.child, &mut self.pty.master, SHUTDOWN_TIMEOUT);
         }
     }
 }

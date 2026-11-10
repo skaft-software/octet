@@ -4,6 +4,8 @@
 
 #![cfg(unix)]
 
+mod pty_teardown;
+
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::FromRawFd;
@@ -225,8 +227,7 @@ impl PtyOctet {
 impl Drop for PtyOctet {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            pty_teardown::kill_and_reap(&mut self.child, &mut self.master, TIMEOUT);
         }
     }
 }

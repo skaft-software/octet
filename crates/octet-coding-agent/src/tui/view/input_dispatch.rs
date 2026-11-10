@@ -842,6 +842,42 @@ mod tests {
     }
 
     #[test]
+    fn shift_enter_and_ctrl_j_edit_without_submitting_on_both_screens() {
+        for fullscreen in [false, true] {
+            for active in [false, true] {
+                for newline in [
+                    key(KeyCode::Enter, KeyModifiers::SHIFT),
+                    key(KeyCode::Char('j'), KeyModifiers::CONTROL),
+                ] {
+                    let mut shell = InteractiveShell::test_shell();
+                    shell.set_tui_fullscreen(fullscreen).unwrap();
+                    shell.prefill_editor("firstsecond".into());
+                    shell.state.borrow_mut().editor.set_cursor(5);
+                    let action = shell.translate_input(Some(newline), active);
+                    assert_eq!(action, InputAction::Edit(EditAction::Newline));
+                    if let InputAction::Edit(edit) = action {
+                        shell.apply_edit(edit);
+                    }
+                    assert_eq!(
+                        shell.pending(),
+                        "first\nsecond",
+                        "fullscreen={fullscreen} active={active}"
+                    );
+                    assert_eq!(
+                        shell
+                            .translate_input(Some(key(KeyCode::Enter, KeyModifiers::NONE)), active),
+                        if active {
+                            InputAction::Steer("first\nsecond".into())
+                        } else {
+                            InputAction::Submit("first\nsecond".into())
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn thinking_submission_is_bounded_exactly_once_and_keeps_attachments_and_later_draft() {
         let mut shell = thinking_shell();
         let payload = "large pasted payload\n".repeat(100);

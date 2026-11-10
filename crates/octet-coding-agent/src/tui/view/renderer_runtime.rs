@@ -125,31 +125,29 @@ impl SharedState {
         self.frame_written_at(None);
     }
 
+    /// Read-only navigation can use prepared layout before the terminal write
+    /// returns: a key may arrive as soon as its frame becomes visible. Approval
+    /// and pointer input must still require the completed-write receipts.
+    pub(super) fn prepared_geometry(
+        &self,
+    ) -> Option<Arc<super::renderer_geometry::RenderedGeometry>> {
+        self.1.lock().expect("geometry receipt poisoned").clone()
+    }
+
     pub(super) fn frame_written_at(&self, native_viewport_top: Option<usize>) {
+        // Navigation holds the state lock while reading prepared geometry. Make
+        // its handoff to painted receipts atomic, with no empty-receipt window.
+        let mut state = self.0.lock().expect("shell state mutex poisoned");
         let geometry = self.1.lock().expect("geometry receipt poisoned").take();
         let Some(geometry) = geometry else {
             return;
         };
-        let mut state = self.0.lock().expect("shell state mutex poisoned");
         if let Some(panel) = geometry
             .panel
             .as_ref()
             .filter(|panel| panel.is_current(&state))
         {
-            if panel.document_anchor.is_some()
-                && state.pending_panel_document_top == panel.document_anchor
-            {
-                if let (
-                    Some(scroll),
-                    Some(super::Panel::ReadOnlyDocument {
-                        scroll_from_bottom, ..
-                    }),
-                ) = (panel.document_scroll, state.panel.as_mut())
-                {
-                    *scroll_from_bottom = scroll;
-                }
-                state.pending_panel_document_top = None;
-            }
+            panel.apply_document_anchor(&mut state);
             // This completed frame replaces the previous visible consent even
             // if input changed the selected action while its write was blocked.
             state.painted_panel = panel.selection_is_current(&state).then(|| panel.clone());

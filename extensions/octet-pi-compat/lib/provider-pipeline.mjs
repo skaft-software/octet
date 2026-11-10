@@ -18,6 +18,35 @@ function headers(value, deleting = false) {
   }
   return plainJSON(result, 'provider headers', 65536);
 }
+// Pi passes handler-mutated headers to fetch, which stringifies numbers and
+// booleans. Mirror that, and drop (with one report) any entry fetch would
+// reject, instead of rejecting the whole request.
+function normalizeHeaders(value, reportDropped) {
+  const result = Object.create(null);
+  let dropped = false;
+  for (const [key, entry] of Object.entries(value && typeof value === 'object' ? value : {})) {
+    if (entry === undefined) continue;
+    if (entry === null) { result[key.toLowerCase()] = null; continue; }
+    const values = (Array.isArray(entry) ? entry : [entry]).map(item => typeof item === 'number' || typeof item === 'boolean' || typeof item === 'bigint' ? String(item) : item);
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(key) || !values.length || values.length > 128
+      || values.some(item => typeof item !== 'string' || item.length > 16384 || /[\x00-\x08\x0a-\x1f\x7f]/u.test(item))) { dropped = true; continue; }
+    // Header names are case-insensitive; the latest assignment wins, as when
+    // a handler sets `Authorization` over an existing `authorization`.
+    result[key.toLowerCase()] = Array.isArray(entry) ? values : values[0];
+  }
+  if (dropped) reportDropped();
+  return result;
+}
+// Pi sends JSON.stringify(payload): undefined members disappear and Dates
+// become strings. Normalize the same way; a non-object replacement or one that
+// cannot be encoded keeps the previous payload (Pi would fail at send time).
+function normalizePayload(value) {
+  let encoded;
+  try { encoded = JSON.stringify(value); } catch { return undefined; }
+  if (encoded === undefined) return undefined;
+  const parsed = JSON.parse(encoded);
+  return parsed && typeof parsed === 'object' ? parsed : undefined;
+}
 export async function providerPipeline(runtime, params, store) {
   runtime.require('pipeline_hooks_v1');
   const hook = params.hook;
@@ -53,22 +82,30 @@ export async function providerPipeline(runtime, params, store) {
         live();
         // These callbacks see private wire material. Never echo their exception
         // text, JSON payloads or headers to diagnostic/UI/session channels.
-        if (Number.isInteger(error?.code)) throw rpcError(error.code, 'provider pipeline callback refused');
+        // A host refusal reached through an octet call (a JSON-RPC error code)
+        // propagates. Anything else is the handler's own failure: Pi reports
+        // it and continues with the current value (runner.ts
+        // emitBeforeProvider*). A DOMException's small positive `code`, as from
+        // an aborted fetch, is not a host refusal.
+        if (Number.isInteger(error?.code) && error.code <= -32000 && error.code >= -32899) throw rpcError(error.code, 'provider pipeline callback refused');
         runtime.reportCallbackError(hook, entry.factory, error); continue;
       }
       live();
-      if (hook === 'before_provider_request' && result !== undefined) payload = plainJSON(result, 'provider payload', 786432);
+      if (hook === 'before_provider_request' && result !== undefined) {
+        const next = normalizePayload(result);
+        if (next === undefined) runtime.reportCallbackError(hook, entry.factory, new TypeError('provider payload replacement must be a JSON object'));
+        else payload = next;
+      }
       // Pi header/response callback return values have no semantic effect;
       // headers are changed in place, and response arrival is observation only.
     }
     budget.finish();
     await cancellable(runtime.flush(store), signal); live();
     if (hook === 'before_provider_request') {
-      if (!payload || typeof payload !== 'object') invalid('provider payload replacement must be JSON object/array');
-      return { provider_payload: payload };
+      return { provider_payload: plainJSON(payload, 'provider payload', 786432) };
     }
     if (hook === 'before_provider_headers') {
-      const final = headers(mutableHeaders, true), patch = {};
+      const final = headers(normalizeHeaders(mutableHeaders, () => runtime.reportCallbackError(hook, 'provider headers', new TypeError('a header value could not be sent and was dropped'))), true), patch = {};
       for (const key of new Set([...Object.keys(originalHeaders), ...Object.keys(final)])) {
         if (!Object.hasOwn(final, key)) patch[key] = null;
         else if (JSON.stringify(originalHeaders[key]) !== JSON.stringify(final[key])) patch[key] = final[key];

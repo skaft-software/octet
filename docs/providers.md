@@ -69,8 +69,8 @@ and aren't offered as one-field API-key setup, so use their documented
 configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and the
-[CLI alternatives](cli.md#provider-setup). This setup flow is part of the current
-0.10.0 source candidate; availability in older published versions differs.
+[CLI alternatives](cli.md#provider-setup). This setup flow is part of octet
+0.10.3; availability in older published versions differs.
 
 ## Cloud setup
 
