@@ -478,7 +478,8 @@ impl Session {
             }
             cursor = entry.parent.as_ref();
             #[cfg(test)]
-            self.snapcompact_walk_entries.set(self.snapcompact_walk_entries.get() + 1);
+            self.snapcompact_walk_entries
+                .set(self.snapcompact_walk_entries.get() + 1);
         };
         *self.snapcompact_cache.borrow_mut() = Some(verdict);
         Ok(verdict)
