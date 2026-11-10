@@ -17,12 +17,11 @@ set -g extended-keys-format csi-u
 
 Then restart tmux fully (`tmux kill-server && tmux`).
 
-octet asks capable terminals for unambiguous modified controls at startup with
-`\x1b[>7u` (Kitty keyboard flags 1|2|4) followed by a device-attributes query;
-when the terminal is not in the Kitty family it falls back to
-`modifyOtherKeys` (`\x1b[>4;2m`). Both use the terminal's normal input path for
-ordinary text (`KITTY_NEGOTIATION_QUERY` and `MODIFY_OTHER_KEYS_ENABLE` in
-`crates/sexy-tui-rs/src/terminal.rs`).
+On Unix, octet requests Kitty keyboard flags 1|4 (`\x1b[>5u`) on the active
+screen, without changing the ordinary text path. It does not query support or
+request `modifyOtherKeys` mode. If a terminal or multiplexer emits xterm
+`modifyOtherKeys` for modified Enter, octet also decodes that form
+(`Shift+Enter` → `\x1b[27;2;13~`).
 
 - `set -g extended-keys on` makes tmux forward modified keys at all.
 - `extended-keys-format csi-u` (tmux **3.5+**) forwards them as CSI-u
@@ -41,7 +40,9 @@ keys (Ghostty, Kitty, iTerm2, WezTerm, Windows Terminal, …) is also required.
 | Alt/Option+Enter | `\x1b\r` | `\x1b[13;3u` |
 
 This affects the default bindings (`Enter` submits, `Shift+Enter` inserts a
-newline) and any modified-Enter binding — see
+newline) and any modified-Enter binding. If both keys arrive as `\r`, octet
+cannot distinguish them and Shift+Enter may submit; Ctrl+J inserts a newline
+instead. See [terminal support](terminal.md#shiftenter-terminal-support) and
 [Commands and keys](commands.md#keys).
 
 ## Detection and separate behaviors

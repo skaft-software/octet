@@ -172,7 +172,22 @@ While octet works:
   Escape had armed. Failures and closing leave follow-ups unsent.
 - Ctrl+D closes octet from any input, after active work and child processes are
   cleaned up.
-- Shift+Enter adds a newline if your terminal reports enhanced keys.
+- Shift+Enter adds a newline when the terminal reports it distinctly. Ctrl+J
+  also inserts a newline.
+
+### Shift+Enter terminal support
+
+On Unix, octet requests Kitty keyboard disambiguation on both the primary and
+alternate screens. Shift+Enter must arrive as CSI-u/Kitty `\x1b[13;2u` (optionally
+with a Kitty event type) or xterm `modifyOtherKeys` `\x1b[27;2;13~`. Octet accepts
+both forms, but does not request `modifyOtherKeys` mode: the terminal or
+multiplexer must be configured to send it. See [tmux setup](tmux.md).
+
+Some terminals send the same carriage return (`\r`) for Enter and Shift+Enter.
+Octet cannot distinguish those keys: Shift+Enter will act as Enter and may submit
+rather than insert a newline. Use Ctrl+J instead, or configure a distinguishable
+encoding. Native Windows uses console key records rather than these byte
+encodings; Shift+Enter depends on the console host ([Windows](windows.md#terminal)).
 
 Pi custom editors use the same native submission rules, including slash and
 extension commands. Their resolved Enter/follow-up keybindings are honored, and

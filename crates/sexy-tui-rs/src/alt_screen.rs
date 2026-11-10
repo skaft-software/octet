@@ -130,7 +130,7 @@ impl AlternateScreen {
         } else {
             ""
         };
-        terminal.write(&format!(
+        terminal.enter_alternate_screen(&format!(
             "{ENTER_ALT_SCREEN}{DISABLE_AUTOWRAP}{mouse}\x1b[2J\x1b[H\x1b[?25l"
         ));
         self.active = true;
@@ -306,7 +306,7 @@ impl AlternateScreen {
         if self.options.synchronized_output {
             buffer.push_str(END_SYNCHRONIZED_OUTPUT);
         }
-        terminal.write(&buffer);
+        terminal.leave_alternate_screen(&buffer);
         self.active = false;
         self.window.clear();
         self.last_size = None;
