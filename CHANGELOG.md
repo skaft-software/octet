@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- A partially typed `/command` completion menu now includes commands that an
+  extension registers after the keystroke as soon as the extension finishes
+  starting, instead of waiting for the next key press.
+
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 
