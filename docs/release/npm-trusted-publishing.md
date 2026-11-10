@@ -102,7 +102,9 @@ supporting trusted publishing) before requesting OIDC provenance. It:
 
 npm versions are immutable. After an upload timeout, inspect
 `npm view name@version dist.integrity` and the provenance field. Never blindly
-republish or overwrite a version.
+republish or overwrite a version. Re-running the job converges: already
+published packages are verified against the candidate integrity and skipped, and
+uploaded evidence is verified rather than replaced.
 
 ## Partial publication recovery
 

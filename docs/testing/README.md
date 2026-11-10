@@ -50,9 +50,11 @@ PYTHONPATH='.' python3 -m unittest discover -s tests -t .
 ## CI tiers
 
 Every pull request runs the fast tier: `dependency-review`, `dependencies`,
-`quality`, and `test (ubuntu-24.04)`. A PR labeled `ci:full`, a merge-group
-candidate, a push to `main`, or a manual CI dispatch also runs the full tier.
-The dispatch-only `release-candidate` job retains its narrower trigger.
+`quality`, and `test (ubuntu-24.04)`. A PR labeled `ci:full`, a push to `main`,
+or a manual CI dispatch also runs the full tier. Main takes direct pushes and
+squash PRs; the workflow still declares a `merge_group` trigger for
+compatibility, but no merge queue produces those runs. The dispatch-only
+`release-candidate` job retains its narrower trigger.
 
 | Lane | Tier / runner | What it proves |
 | --- | --- | --- |

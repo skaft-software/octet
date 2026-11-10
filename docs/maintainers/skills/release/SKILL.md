@@ -57,13 +57,17 @@ release workflows; no prior GitHub Release or second tooling tag is needed.
 
 On a canonical tag push, the binary workflow waits up to 75 minutes for the
 latest exact-source `main` push CI run, then requires its successful conclusion
-and all required lanes. Repairs also accept exact-source merge-group and manual
-CI runs. A failed run or timeout stops publication; inspect the failure rather
-than treating it as qualified. If no main push run exists, a tag-push run cannot
-use dispatch evidence: keep the tag immutable and use manual recovery. After the existing protected publish approval,
-the workflow creates a draft GitHub Release from the checked-in notes, attaches
-signed binary assets, verifies their GitHub digests, and only then publishes it as
-Latest. A failed upload leaves the previous Latest release available.
+and all required lanes. A manual dispatch or repair accepts the latest
+exact-source main push or manual CI run. A failed run or timeout stops
+publication; inspect the failure rather than treating it as qualified. If no
+main push run exists, a tag-push run cannot use dispatch evidence: keep the tag
+immutable and use manual recovery. After the existing protected publish
+approval, the workflow creates a draft GitHub Release from the checked-in notes,
+attaches signed binary assets, verifies their GitHub digests, and then publishes
+it as a stable release. A separate job marks it Latest only after every
+published-install smoke passes, so `octet update` and the startup notice never
+advertise assets that failed public installation. A failed upload leaves the
+previous Latest release available.
 The extension workflow waits for that exact binary tag-push run to succeed before
 building and attaching the six official bundles. Its wait is bounded at 350
 minutes, including binary build and approval time. Signing, environment approval,
@@ -104,7 +108,10 @@ records **Source CI qualification WAIVED: <reason> by <actor>**. The protected
 binary and installer publish jobs also put the waiver first in the release notes;
 npm-only dispatches record it in the summary. This waives only the source CI
 gate, not main ancestry, version, audit, protected publishing or signing.
-A binary draft is owned by its workflow run; reruns can resume it only when its
-existing assets match the new candidate's digests. Otherwise stop and inspect
-it rather than publishing or replacing assets. Inspect failed jobs before recovery
-and never replace immutable assets or silently relabel a waiver as a CI pass.
+A binary draft is owned by its workflow run. A rerun resumes it when every
+existing asset matches the new candidate byte for byte or, for the freshly
+signed Sigstore bundles, still verifies the identical candidate under the exact
+workflow identity; the extension and npm evidence uploads follow the same rule.
+Anything else stops for inspection instead of replacing assets. Inspect failed
+jobs before recovery and never replace immutable assets or silently relabel a
+waiver as a CI pass.

@@ -67,11 +67,13 @@ The release workflows don't publish every source package automatically:
 Normal native and extension publication starts with the single canonical
 `vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
 creates a draft GitHub Release from the checked-in notes, verifies the uploaded
-signed native assets' GitHub digests, then publishes the native release; the
-extension workflow waits for that binary run before publishing its
-bundles. The protected environment must admit the canonical tag without removing
-required reviewers. Dedicated binary and extension tooling tags remain available
-for workflow-only repairs. See the
+signed native assets' GitHub digests, then publishes the native release; a
+separate job marks it Latest only after the published-install smoke passes, so
+`octet update` never advertises an asset set that failed public installation.
+The extension workflow waits for that binary run before publishing its bundles.
+The protected environment must admit the canonical tag without removing required
+reviewers. Dedicated binary and extension tooling tags remain available for
+workflow-only repairs. See the
 [release runbook](maintainers/skills/release/SKILL.md). The currently observed
 protected-environment policy does not yet allow `v*` tags; an authorized
 administrator must update it separately before the one-tag flow can publish.
