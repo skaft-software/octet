@@ -21,7 +21,7 @@ Then it imports every Pi-written file through octet's real
 `session_commands::import_session` and compares the imported session the same
 way. Nothing is mocked; nothing reads `~/.pi` or `~/.octet`.
 
-Install the oracle once:
+Install the oracle once (the harness needs Node 22.19+ first on `PATH`):
 
 ```sh
 npm ci --prefix scripts/fixtures/pi-reference --ignore-scripts --no-audit --no-fund
@@ -92,11 +92,11 @@ than the three required checks: resolved model/thinking selection (Pi's
 `buildSessionContext().model/thinkingLevel` versus octet's catalog projection,
 the same reader resume uses) and the session name.
 
-Pi's driver reopens every checkpoint from disk before recording it; the harness
-asserts the reopened state equals the live state (oracle sanity) and that
-octet's read-only reopen equals its live state (octet invariant). A Pi file that
-does not exist yet (Pi keeps setup-only sessions in memory) is recorded as
-`unpersisted`.
+Pi's driver copies every checkpoint file and reopens the copy to record the
+disk state (asserting that opening a current Pi file leaves its bytes unchanged).
+The harness compares that reopened Pi state with octet's read-only reopen of its
+own file. A Pi file that does not exist yet (Pi keeps setup-only sessions in
+memory) is recorded as `unpersisted`.
 
 ## Import check
 
@@ -110,9 +110,11 @@ compared through the label map.
 ## Known gaps ledger
 
 `known-gaps.json` is the only permitted form of "known gap". Every mismatch is
-identified by `scenario | step | check | fingerprint`; a failing test names the
-mismatches that are not in the ledger, and a ledger entry that no longer
-matches anything also fails, so a fix must delete its line. `scenario` and
+identified by `scenario | step | check | fingerprint`; the fixed-scenario test
+names the mismatches that are not in the ledger, and a ledger entry that no
+longer matches anything in those scenarios also fails, so a fix must delete its
+line. (The seeded random run only reports divergences outside the ledger; it
+does not own ledger coverage.) `scenario` and
 `step` may be `"*"` for a divergence that is identical in every scenario;
 `fingerprint` must match exactly, so a *new* divergence never hides behind a
 wildcard. `reason` states what differs and why it is accepted for now.
