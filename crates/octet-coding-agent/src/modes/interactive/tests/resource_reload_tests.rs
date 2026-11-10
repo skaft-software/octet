@@ -390,13 +390,38 @@ async fn idle_prompt_observes_worker_settlement_without_input_or_extension_polli
     assert_eq!(app.agent.busy_delegated_worker_count(), 1);
     let mut shell = InteractiveShell::test_shell();
     shell.extension_set_editor("untouched draft".into());
-    shell.set_subagent_telemetry(telemetry.borrow_and_update().as_ref(), true);
+    // `spawn_agent` returns once the child is queued; the pending -> running
+    // transition is published by the child's own task, so wait for that
+    // publication instead of assuming it already happened.
+    let running = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = telemetry.borrow_and_update().clone();
+            if let Some(snapshot) = snapshot.filter(|snapshot| {
+                snapshot
+                    .children
+                    .iter()
+                    .any(|child| child.state == "running")
+            }) {
+                return snapshot;
+            }
+            telemetry
+                .changed()
+                .await
+                .expect("root settlement must not close a session observer");
+        }
+    })
+    .await
+    .expect("the delegated worker starts running");
+    shell.set_subagent_telemetry(Some(&running), true);
     let before = shell.debug_snapshot();
     assert!(before.contains("Subagents · 1 running"), "{before}");
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_secs(60));
     let (watcher, mut reload, mut reload_tick) = test_reload();
+    // The idle prompt owns `&mut shell`; this handle observes the same state.
+    let settled_row = shell.subagent_label_probe();
+    let painted = || settled_row().is_some_and(|label| label.contains("1 completed"));
     {
         let idle = wait_for_prompt(
             &mut shell,
@@ -424,9 +449,17 @@ async fn idle_prompt_observes_worker_settlement_without_input_or_extension_polli
                     }
                 }
             }
-            // Drain the ready idle observation without sending a key, starting
-            // another root run, or waiting for the extension polling interval.
-            assert!(futures_util::poll!(&mut idle).is_pending());
+            // The test's fresh `changed()` can observe the new version before
+            // `watch` has finished waking the idle prompt's older, suspended
+            // `changed()` (the version is bumped, then waiters are notified),
+            // so one poll proves nothing. Keep driving the idle prompt, with
+            // no key and no extension tick, until the shell paints the settled
+            // row. The task is re-woken by the notification itself; the outer
+            // timeout only bounds a real hang.
+            while !painted() {
+                assert!(futures_util::poll!(&mut idle).is_pending());
+                tokio::task::yield_now().await;
+            }
         }).await.expect("the local worker settles while the root stays idle");
     }
     let after = shell.debug_snapshot();

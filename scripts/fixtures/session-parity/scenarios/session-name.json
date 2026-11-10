@@ -1,0 +1,24 @@
+{
+  "name": "session-name",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "name",
+      "as": "name",
+      "name": "  one\n two  "
+    },
+    {
+      "op": "name",
+      "as": "clear",
+      "name": ""
+    }
+  ]
+}

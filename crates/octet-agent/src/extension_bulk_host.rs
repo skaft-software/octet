@@ -229,7 +229,9 @@ mod tests {
             .await
             .unwrap();
         drop(storage);
-        let storage = BulkStorage::with_root_and_limits(&root, BulkLimits::default()).unwrap();
+        let storage = crate::extension_bulk::tests::reopen_after_drop(|| {
+            BulkStorage::with_root_and_limits(&root, BulkLimits::default())
+        });
         owner.generation += 1;
         assert_eq!(
             storage.lock().prepare_read(&owner, &reference).err(),

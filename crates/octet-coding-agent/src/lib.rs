@@ -49,6 +49,8 @@ mod resource_resolver;
 mod resources;
 mod session_catalog;
 mod session_commands;
+#[cfg(test)]
+mod session_parity;
 mod session_store;
 mod session_tree;
 mod tui;

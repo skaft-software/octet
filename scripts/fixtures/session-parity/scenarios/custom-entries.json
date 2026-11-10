@@ -1,0 +1,27 @@
+{
+  "name": "custom-entries",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "custom",
+      "as": "state",
+      "customType": "fixture",
+      "data": {
+        "counter": 2,
+        "nested": [
+          false,
+          null,
+          "text\n"
+        ]
+      }
+    }
+  ]
+}

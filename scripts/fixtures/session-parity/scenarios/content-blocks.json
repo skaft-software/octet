@@ -1,0 +1,77 @@
+{
+  "name": "content-blocks",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "blocks",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "first\n"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          },
+          {
+            "type": "text",
+            "text": "last"
+          }
+        ],
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "reason"
+          },
+          {
+            "type": "text",
+            "text": "one"
+          },
+          {
+            "type": "text",
+            "text": "two"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    }
+  ]
+}

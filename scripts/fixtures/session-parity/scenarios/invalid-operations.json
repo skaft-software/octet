@@ -1,0 +1,38 @@
+{
+  "name": "invalid-operations",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "model",
+      "as": "model",
+      "provider": "openai",
+      "modelId": "fixture"
+    },
+    {
+      "op": "edit",
+      "target": "model",
+      "replacement": null,
+      "reject": true
+    },
+    {
+      "op": "branch",
+      "target": "u"
+    },
+    {
+      "op": "edit",
+      "target": "u",
+      "replacement": {
+        "wrong": "shape"
+      },
+      "reject": true
+    }
+  ]
+}

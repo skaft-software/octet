@@ -1,0 +1,380 @@
+{
+  "name": "tool-images",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a0",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "c0",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t0",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "c0",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "0"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t0"
+        },
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a1",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "c1",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t1",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "c1",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "1"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t1"
+        },
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a2",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "c2",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t2",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "c2",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "2"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t2"
+        },
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a3",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "c3",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t3",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "c3",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "3"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t3"
+        },
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a4",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "c4",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t4",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "c4",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "4"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t4"
+        },
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "a5",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "toolCall",
+            "id": "c5",
+            "name": "read",
+            "arguments": {
+              "path": "one"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "message",
+      "as": "t5",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "c5",
+        "toolName": "read",
+        "content": [
+          {
+            "type": "text",
+            "text": "5"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "details": {
+          "n": "t5"
+        },
+        "timestamp": 0
+      }
+    }
+  ]
+}

@@ -64,30 +64,56 @@ The release workflows don't publish every source package automatically:
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
-Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
-canonical release commit, or at a descendant that changes only release workflows.
-Its metadata generator requires that ref, and the protected environment must admit
-the tag without removing required reviewers.
+Normal native and extension publication starts with the single canonical
+`vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
+creates a draft GitHub Release from the checked-in notes, verifies the uploaded
+signed native assets' GitHub digests, then publishes the native release; a
+separate job marks it Latest only after the published-install smoke passes, so
+`octet update` never advertises an asset set that failed public installation.
+The extension workflow waits for that binary run before publishing its bundles.
+The protected environment must admit the canonical tag without removing required
+reviewers. Dedicated binary and extension tooling tags remain available for
+workflow-only repairs. See the
+[release runbook](maintainers/skills/release/SKILL.md). The currently observed
+protected-environment policy does not yet allow `v*` tags; an authorized
+administrator must update it separately before the one-tag flow can publish.
+
+The npm, Homebrew and installer-repair handoffs accept native signatures from
+either the canonical tag (with workflow commit equal to the source commit) or
+the legacy binary tooling tag. They remain separate publication channels.
+
+The maintainer pushes directly to `main`; contributors use squash PRs gated by
+`ci-required`, not a merge queue. PRs run the fast CI tier (or the full tier with
+`ci:full`); main pushes and manual `ci.yml` dispatches run the full matrix.
+Tag a main commit with a completed, successful full-tier **main push** run. GitHub
+runs push CI only for the pushed head, not intermediate commits. If the desired
+commit has no such run, dispatch `ci.yml` on that exact ref, verify its full-tier
+success, then manually dispatch the release workflows from the unchanged
+canonical tag (or the dedicated workflow-only repair tags). A canonical tag-push
+run deliberately waits only for main push CI and cannot use that dispatch.
 
 The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with
-`force_release=true` on a manual dispatch. It defaults to false and has no effect
-on tag-push runs. The run records the actor, immutable source, tooling commit and
-**WAIVED, not passed** status. Source/version checks, dependency audits, release
-build checks, protected publishing and Sigstore verification still apply.
+`force_release=true` on a manual dispatch, with a non-empty `force_reason`. It
+defaults to false and has no effect on tag-push runs. The job summary records the
+reason, actor and **WAIVED, not passed** status. The protected binary and
+installer publish jobs also put the waiver first in the release notes; npm-only
+dispatches record it in the summary. Main-ancestry and source/version checks,
+dependency audits, release build checks, protected publishing and Sigstore
+verification still apply.
 
 For a workflow-only repair, keep the canonical tag unchanged, put the reviewed
 release workflow on its dedicated tooling tag, and dispatch that exact tag:
 
 ```sh
 gh workflow run release-octet.yml --ref octet-binaries-v0.10.3 \
-  -f release_tag=v0.10.3 -f force_release=true
+  -f release_tag=v0.10.3 -f force_release=true -f force_reason='explain the CI incident'
 ```
 
 This does not restart product CI or turn failed CI into a pass. Record the
 remaining qualification limitations in the release notes.
 
-Cargo can build the published canonical tag's exact source (Rust 1.88+;
+Cargo can build the published canonical tag's exact source (Rust 1.89+;
 ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
@@ -197,9 +223,10 @@ architecture URLs and rejection of a changed digest.
 
 ## Release handoff and tap publication
 
-Rendering and publishing the formula need an explicit dispatch from the matching
-`octet-binaries-vX.Y.Z` tooling tag. Finishing a binary release never changes
-the tap, and the workflow only ever opens a protected tap pull request. If an
+Rendering and publishing the formula need an explicit dispatch from the native
+signer's matching `vX.Y.Z` or `octet-binaries-vX.Y.Z` tag. Finishing a binary
+release never changes the tap, and the workflow only ever opens a protected tap
+pull request. If an
 update used a wrong or incomplete release, close the pull request unmerged and
 regenerate from the same immutable metadata. Never edit SHA-256 values by hand.
 
