@@ -2,8 +2,10 @@
   "name": "octet-pi-reference-fixture",
   "version": "0.0.0",
   "private": true,
-  "description": "Test-only: the pinned supported-reference Pi provider package (Pi 1.0.2) that installed-Pi acceptance tests resolve. Never shipped.",
+  "description": "Test-only: pinned Pi provider and SessionManager references. Never shipped.",
   "dependencies": {
-    "@earendil-works/pi-ai": "1.0.2"
+    "@earendil-works/pi-ai": "1.0.2",
+    "pi-session-1-0-2": "npm:@earendil-works/pi-coding-agent@1.0.2",
+    "pi-session-1-5-0": "npm:@earendil-works/pi-coding-agent@1.5.0"
   }
 }
