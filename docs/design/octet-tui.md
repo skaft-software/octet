@@ -370,7 +370,7 @@ Every accepted run opens a `Working` row immediately. After the provider emits
 an actual reasoning delta, collapsed reasoning uses a bold `Thinking` activity
 label with a quieter model-adaptive shimmer than `Working`. A real semantic ATX
 or standalone-bold heading occupies the aligned detail row with a subdued
-`Ctrl+O` hint. Without a heading, the compiled default puts the hint on the
+`Ctrl+T` hint. Without a heading, the compiled default puts the hint on the
 activity row when it fits, retaining a detail row on narrow terminals. Ordinary
 body prose is never inferred as a label, and provider text is sanitized before
 display. The shimmer uses a monotonic 80 ms clock on the renderer thread,
@@ -471,9 +471,10 @@ both its head and tail within the visual-row budget, with an exact omitted-middl
 count distinct from irrecoverable capture-byte loss. Local-shell output remains
 tail-only. The command is independent of the output budget.
 
-Ctrl+O toggles the global disclosure mode for retained reasoning, compaction,
-retained tool output, Bash/local-shell output, and edit/write diffs.
-`/verbose [on|off]` controls the same mode. Expansion cannot recover capture bytes that the tool
+Ctrl+O toggles the global disclosure mode for compaction, retained tool output,
+Bash/local-shell output, and edit/write diffs. Retained reasoning keeps its own
+Ctrl+T toggle, stored per block and carried to later traces, so neither key
+overrides the other. `/verbose [on|off]` steers both. Expansion cannot recover capture bytes that the tool
 already discarded.
 
 Codemode renders its documented JavaScript `code` field with literal syntax

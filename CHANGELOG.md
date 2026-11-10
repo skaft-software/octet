@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Ctrl+T now toggles the thinking traces on its own. It previously ran the same
+  global disclosure mode as Ctrl+O, so the key labelled "Toggle thinking
+  blocks" could not hide reasoning without also hiding tool output. Reasoning
+  display is now per-trace state that Ctrl+T flips for every trace, including
+  the live one, and that new traces follow; Ctrl+O keeps owning compaction,
+  subagent activity, tool and shell output. The collapsed hint names the
+  thinking key again, and `/verbose [on|off]` still steers both.
+
 ## [0.10.4] - Release candidate
 
 ### Changed

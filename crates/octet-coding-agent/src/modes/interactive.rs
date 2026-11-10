@@ -831,6 +831,10 @@ where
                         shell.toggle_disclosure();
                         shell.render();
                     }
+                    InputAction::ToggleThinking => {
+                        shell.toggle_thinking();
+                        shell.render();
+                    }
                     InputAction::CycleThinking => return Ok(Idle::CycleThinking),
                     InputAction::EditQueued => {
                         shell.edit_queued_message();
@@ -1397,6 +1401,9 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::ClearEditor => shell.clear_editor(),
         InputAction::Edit(action) => shell.apply_edit(action),
         InputAction::ToggleDisclosure => shell.toggle_disclosure(),
+        InputAction::ToggleThinking => {
+            shell.toggle_thinking();
+        }
         InputAction::ShowCompactionSummary => shell.show_compaction_summary(),
         InputAction::Scroll(direction) => shell.scroll(direction),
         InputAction::ScrollLines(direction) => shell.scroll_lines(direction),
@@ -3106,6 +3113,9 @@ where
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
             shell.set_verbose_tools(enabled);
+            // `/verbose` remains the one command for the whole transcript, so it
+            // steers thinking too. Ctrl+O and Ctrl+T stay independent.
+            shell.set_thinking_expanded(enabled);
             shell.notice(format!(
                 "verbose transcript {}",
                 if enabled { "enabled" } else { "disabled" }
@@ -4964,6 +4974,10 @@ where
                     }
                     InputAction::ToggleDisclosure => {
                         shell.toggle_disclosure();
+                        shell.render();
+                    }
+                    InputAction::ToggleThinking => {
+                        shell.toggle_thinking();
                         shell.render();
                     }
                     InputAction::CycleThinking => {
@@ -11041,6 +11055,9 @@ async fn run_idle_command_inner(
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
             shell.set_verbose_tools(enabled);
+            // `/verbose` remains the one command for the whole transcript, so it
+            // steers thinking too. Ctrl+O and Ctrl+T stay independent.
+            shell.set_thinking_expanded(enabled);
             shell.notice(format!(
                 "verbose transcript {}",
                 if enabled { "enabled" } else { "disabled" }

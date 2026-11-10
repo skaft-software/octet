@@ -261,7 +261,7 @@ fn hidden_reasoning_stream_does_not_grow_native_scrollback() {
     let visible = terminal.screen().contents();
     assert!(visible.contains("Thinking"), "{visible:?}");
     assert!(!visible.contains("Working"), "{visible:?}");
-    assert!(visible.contains("Ctrl+O expand"), "{visible:?}");
+    assert!(visible.contains("Ctrl+T expand"), "{visible:?}");
     assert!(!visible.contains("private sentinel"), "{visible:?}");
     let state = shell.state.borrow();
     let TranscriptBlock::Reasoning(reasoning) = state.transcript.last().unwrap() else {

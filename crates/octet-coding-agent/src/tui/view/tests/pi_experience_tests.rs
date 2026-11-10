@@ -355,7 +355,8 @@ fn pi_sources_render_uniform_transcript_padding_italic_reasoning_and_list_bullet
                 render_block(None, block, &theme, &rich, &thinking, width, true)
             };
             let reasoning = TranscriptBlock::Reasoning(Box::new(
-                AssistantBlock::finalized_reasoning("Plan\n\n- item".into()),
+                AssistantBlock::finalized_reasoning("Plan\n\n- item".into())
+                    .with_reasoning_expanded(true),
             ));
             let rows = render(&reasoning);
             assert_content_cell(&rows, "Plan", 1, true, width);
@@ -457,9 +458,10 @@ fn custom_themes_render_overrides_and_keep_other_themes_upright() {
         let theme = test_theme_from_source(&source);
         let rich = theme.rich_renderer();
         let thinking = theme.reasoning_renderer();
-        let block = TranscriptBlock::Reasoning(Box::new(AssistantBlock::finalized_reasoning(
-            "Plan\n\n- item".into(),
-        )));
+        let block = TranscriptBlock::Reasoning(Box::new(
+            AssistantBlock::finalized_reasoning("Plan\n\n- item".into())
+                .with_reasoning_expanded(true),
+        ));
         let rows = render_block(None, &block, &theme, &rich, &thinking, 40, true);
         assert_content_cell(&rows, "Plan", padding, italic, 40);
         assert_content_cell(&rows, &format!("{bullet} item"), padding, italic, 40);
@@ -479,8 +481,9 @@ fn custom_themes_render_overrides_and_keep_other_themes_upright() {
         bold = true
     "##,
     );
-    let block =
-        TranscriptBlock::Reasoning(Box::new(AssistantBlock::finalized_reasoning("Plan".into())));
+    let block = TranscriptBlock::Reasoning(Box::new(
+        AssistantBlock::finalized_reasoning("Plan".into()).with_reasoning_expanded(true),
+    ));
     let rows = render_block(
         None,
         &block,
@@ -585,8 +588,9 @@ fn legacy_pi_snapshots_keep_explicit_spacing_without_silently_applying_the_new_p
     assert_eq!(theme.layout().block_padding_x, None);
     assert!(!theme.semantic_style("thinking").attributes.italic);
     assert!(!theme.surface_for_width("user", 80).prompt_marker);
-    let reasoning =
-        TranscriptBlock::Reasoning(Box::new(AssistantBlock::finalized_reasoning("Plan".into())));
+    let reasoning = TranscriptBlock::Reasoning(Box::new(
+        AssistantBlock::finalized_reasoning("Plan".into()).with_reasoning_expanded(true),
+    ));
     let rows = render_block(
         None,
         &reasoning,
