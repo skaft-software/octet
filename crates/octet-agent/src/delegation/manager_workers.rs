@@ -1169,7 +1169,9 @@ impl DelegationManager {
         )?;
         agent.set_completion_policy(runtime.completion_policy);
         agent.set_output_modalities(runtime.output_modalities);
-        agent.set_tool_schema_budget_bytes(runtime.tool_schema_budget_bytes);
+        if let Some(max_bytes) = runtime.tool_schema_budget_bytes {
+            agent.set_tool_schema_budget_bytes(max_bytes);
+        }
         if let Some(policy) = extension_policy {
             agent.inherit_max_output_tokens(
                 runtime

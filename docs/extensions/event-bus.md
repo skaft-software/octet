@@ -9,7 +9,7 @@ two real Python process fixtures and product discovery/bus tests cover the
 bounded transport. **A real active-session switch A→B→A with both surviving
 processes, and fenced incoming requests across that switch, are still not
 captured as product evidence**, so surviving-peer recovery is not claimed as
-qualified behavior. See the [generated contract](API-0.4-REFERENCE.md) for exact
+qualified behavior. See the retained 0.3 schema (`protocol/extension-api-v0.3.schema.json`) for exact
 wire models.
 Current API `0.4` uses a different feature-negotiated wire: the canonical bus
 contract below does not become available by changing a manifest version.
@@ -131,8 +131,8 @@ wire these helpers to an ordinary canonical API `0.3` process loop. Recreating a
 still is not a substitute for consuming `bus/lifecycle`, and no publication is
 replayed: a peer that misses a notice is retired, not silently resynchronized.
 
-The schema generates Rust, Python and TypeScript models, canonical fixtures and
-the API reference. Regenerate/check with:
+The schema generates Rust, Python and TypeScript models and canonical fixtures;
+it does not generate the hand-maintained API 0.4 reference. Regenerate/check with:
 
 ```console
 python3 scripts/generate-extension-api-v03.py --check

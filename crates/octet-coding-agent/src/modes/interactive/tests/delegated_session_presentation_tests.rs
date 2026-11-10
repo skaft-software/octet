@@ -255,6 +255,7 @@ fn delegated_session_hydrates_main_transcript_tool_cards_and_results() {
                     )],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             },
         )))

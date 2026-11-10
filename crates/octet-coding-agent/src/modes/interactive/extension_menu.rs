@@ -2103,8 +2103,8 @@ async fn set_extension_enabled_fenced(
             }
         }
     }
-    let persisted = match crate::cli::persist_extension_enabled(name, enabled) {
-        Ok(persisted) => persisted,
+    match crate::cli::persist_extension_enabled(name, enabled) {
+        Ok(_) => {}
         Err(error) => {
             if let Some(grant) = &grant {
                 crate::cli::persist_extension_host_authority(grant, false)?;
@@ -2116,7 +2116,11 @@ async fn set_extension_enabled_fenced(
             return Ok((app, false));
         }
     };
-    app.config.enabled_extensions = persisted;
+    // The returned saved list does not contain names another
+    // activation source contributed (the mirrored Pi codemode preference, for
+    // one) and it may still contain a name the user switched off. Apply the
+    // toggle to this one extension and keep every other source intact.
+    crate::cli::apply_extension_toggle(&mut app.config, name, enabled);
     app = match reload_resources(app, shell, input).await {
         Ok((app, _)) => app,
         Err(error) => {

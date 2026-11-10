@@ -31,6 +31,11 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn(".zip", workflow)
         self.assertIn("octet-host.exe", workflow)
 
+    def test_release_refuses_a_stale_powershell_installer_pin(self):
+        workflow = (ROOT / ".github/workflows/release-octet.yml").read_text()
+        self.assertIn("PowerShell installer version does not match the release version", workflow)
+        self.assertIn("[string] \\$Version = '${{ needs.resolve.outputs.version }}'", workflow)
+
     def test_msvc_artifact_is_qualified_before_upload_and_signing(self):
         workflow = (ROOT / ".github/workflows/release-octet.yml").read_text()
         job = workflow.split("\n  build-windows:\n", 1)[1].split("\n  publish:\n", 1)[0]

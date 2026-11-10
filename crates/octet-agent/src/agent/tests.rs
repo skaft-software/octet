@@ -4,8 +4,12 @@ use base64::Engine as _;
 
 #[path = "builtin_override_replay_tests.rs"]
 mod builtin_override_replay;
+#[path = "delegation_session_replacement_tests.rs"]
+mod delegation_session_replacement_tests;
 #[path = "pending_messages_tests.rs"]
 mod pending_messages_tests;
+#[path = "tool_schema_budget_tests.rs"]
+mod tool_schema_budget_tests;
 
 fn image_input_fixture(large: bool) -> InputPart {
     let encoded = if large {
@@ -768,7 +772,7 @@ async fn provider_compaction_refuses_invalid_summary_without_discarding_context(
 
 struct ToolBudgetTransport {
     calls: std::sync::atomic::AtomicUsize,
-    expected_tool_count: usize,
+    expected_tools: Vec<ToolDef>,
 }
 
 #[async_trait::async_trait]
@@ -779,7 +783,10 @@ impl octet_ai::HostStreamTransport for ToolBudgetTransport {
         request: Request,
         _: Vec<octet_ai::Diagnostic>,
     ) -> Result<octet_ai::ResponseStream, AiError> {
-        assert_eq!(request.tools.len(), self.expected_tool_count);
+        assert_eq!(
+            serde_json::to_value(&request.tools).unwrap(),
+            serde_json::to_value(&self.expected_tools).unwrap()
+        );
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::iter([
             Ok(StreamEvent::Started { response_id: None }),
@@ -804,7 +811,7 @@ impl octet_ai::HostStreamTransport for ToolBudgetTransport {
 
 #[test]
 fn tool_schema_budget_counts_exact_json_and_refuses_without_tool_rewriting() {
-    require_tool_schema_budget(&[], 0).expect("zero budget permits no provider tools");
+    require_tool_schema_budget(&[], Some(0)).expect("zero budget permits no provider tools");
     let tools = vec![ToolDef {
         async_execution: false,
         name: "schema-tool".into(),
@@ -813,8 +820,8 @@ fn tool_schema_budget_counts_exact_json_and_refuses_without_tool_rewriting() {
         constrained_sampling: None,
     }];
     let bytes = tool_schema_bytes(&tools);
-    require_tool_schema_budget(&tools, bytes).expect("exactly at budget is accepted");
-    let error = require_tool_schema_budget(&tools, bytes - 1).unwrap_err();
+    require_tool_schema_budget(&tools, Some(bytes)).expect("exactly at budget is accepted");
+    let error = require_tool_schema_budget(&tools, Some(bytes - 1)).unwrap_err();
     assert!(matches!(
         &error,
         AgentError::ToolSchemaBudgetExceeded {
@@ -838,11 +845,11 @@ async fn tool_schema_budget_preflight_refuses_without_persisting_the_prompt_or_c
         Session::create(directory.path().join("schema-budget.jsonl")).unwrap(),
         extensions,
     );
-    let tool_count = agent.registered_tool_definitions().len();
-    let budget = tool_schema_bytes(&agent.registered_tool_definitions());
+    let expected_tools = agent.registered_tool_definitions();
+    let budget = tool_schema_bytes(&expected_tools);
     let transport = Arc::new(ToolBudgetTransport {
         calls: std::sync::atomic::AtomicUsize::new(0),
-        expected_tool_count: tool_count,
+        expected_tools,
     });
     agent
         .client
@@ -2710,6 +2717,7 @@ fn canonical_capacity_overbounds_coalesced_tool_results_without_a_full_scan() {
                 content: vec![ToolResultPart::Text(text.into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }))
     }
@@ -3942,6 +3950,7 @@ fn provider_usage_suffix_matches_reference_across_branches_and_boundaries() {
                 content: vec![ToolResultPart::Text("tool result λ".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .unwrap();
@@ -4331,6 +4340,7 @@ fn compaction_boundaries_include_each_completed_tool_episode() {
                     content: vec![ToolResultPart::Text(text.into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -4849,7 +4859,7 @@ mod prepared_authority {
     fn script() -> Arc<ToolBudgetTransport> {
         Arc::new(ToolBudgetTransport {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            expected_tool_count: 0,
+            expected_tools: Vec::new(),
         })
     }
 

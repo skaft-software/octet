@@ -588,6 +588,7 @@ fn model_label_uses_friendly_metadata_without_wire_id_noise() {
         cache_write_5m: octet_ai::TokenRate(1_250_000),
         cache_write_1h: None,
         reasoning: None,
+        windows: Default::default(),
         tiers: Vec::new(),
     });
     assert_eq!(compact_rate_value(octet_ai::TokenRate(0)), "$0");

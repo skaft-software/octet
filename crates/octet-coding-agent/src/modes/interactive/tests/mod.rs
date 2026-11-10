@@ -56,6 +56,7 @@ mod session_compaction_service_tests;
 mod session_head_reconfig_and_startup_tests;
 mod session_tree_tests;
 mod shell_escape_and_scoped_models_tests;
+mod startup_pump_tests;
 mod support;
 mod terminal_theme_tests;
 mod thinking_and_consent_controls_tests;

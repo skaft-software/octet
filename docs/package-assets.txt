@@ -49,17 +49,15 @@
 # private docs/maintainers/pi-usability-wip/S-commits/0002-fix-pi-compat-a-quit-stops-waiting-for-a-slow-sessio.patch
 # private docs/maintainers/pi-usability-wip/S-uncommitted.patch
 # private docs/maintainers/pi-v0.10-perf-handoff.md
+text AGENTS.md
 text CHANGELOG.md
+text CLAUDE.md
 text CONTRIBUTING.md
 text LICENSE
 text README.md
 text SECURITY.md
 text THIRD_PARTY_NOTICES.md
-asset docs/assets/octet/readme/rss.jpg
-asset docs/assets/octet/readme/tape-light.jpg
-asset docs/assets/octet/readme/tape.jpg
 asset docs/assets/octet/readme/terminal.png
-asset docs/assets/octet/readme/wall-clock.jpg
 text docs/assets/fonts/GUST-FONT-LICENSE.txt
 text docs/assets/fonts/LOCAL-NOTICE.md
 asset docs/assets/fonts/LocalGrotesk-Regular.woff2
@@ -77,6 +75,7 @@ text crates/sexy-tui-rs/docs/rich-rendering.md
 text crates/sexy-tui-rs/upstream/pi-tui-1.0.2.json
 text docs/CHANGELOG-POLICY.md
 text docs/README.md
+text docs/pi-compat-deviations.md
 text docs/assets/evidence/README.md
 text docs/assets/evidence/codex-tb21-submission.json
 text docs/assets/evidence/export.py
@@ -161,27 +160,6 @@ text docs/benchmarks/baseline-v0.6.2.md
 text docs/benchmarks/failure-report-v0.6.2-2026-08-28.md
 text docs/benchmarks/idle-model-switch-2026-10-22/README.md
 text docs/benchmarks/idle-model-switch-2026-10-22/samples.json
-text docs/benchmarks/runtime-footprint-2026-08-29.md
-text docs/benchmarks/runtime-footprint-2026-08-29/SHA256SUMS
-text docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-1.json
-text docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-2.json
-text docs/benchmarks/runtime-footprint-2026-08-29/codex-concurrency-4.json
-text docs/benchmarks/runtime-footprint-2026-08-29/codex-runtime.json
-text docs/benchmarks/runtime-footprint-2026-08-29/manifest.json
-text docs/benchmarks/runtime-footprint-2026-08-29/opencode-concurrency-1.json
-text docs/benchmarks/runtime-footprint-2026-08-29/opencode-concurrency-2.json
-text docs/benchmarks/runtime-footprint-2026-08-29/opencode-concurrency-4.json
-text docs/benchmarks/runtime-footprint-2026-08-29/opencode-runtime.json
-text docs/benchmarks/runtime-footprint-2026-08-29/pi-concurrency-1.json
-text docs/benchmarks/runtime-footprint-2026-08-29/pi-concurrency-2.json
-text docs/benchmarks/runtime-footprint-2026-08-29/pi-concurrency-4.json
-text docs/benchmarks/runtime-footprint-2026-08-29/pi-runtime.json
-text docs/benchmarks/runtime-footprint-2026-08-29/summary.json
-text docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-1.json
-text docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-2.json
-text docs/benchmarks/runtime-footprint-2026-08-29/ygg-concurrency-4.json
-text docs/benchmarks/runtime-footprint-2026-08-29/ygg-custom-provider.json
-text docs/benchmarks/runtime-footprint-2026-08-29/ygg-runtime.json
 text docs/benchmarks/startup-phase-audit.py
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/.gitignore
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/README.md
@@ -314,6 +292,9 @@ text docs/releases/v0.9.4.md
 text docs/releases/v0.9.5.md
 text docs/releases/v0.9.6.md
 text docs/releases/v0.10.0.md
+text docs/releases/v0.10.3.md
+text docs/releases/v0.10.2.md
+text docs/releases/v0.10.1.md
 text docs/resources.md
 text docs/sdk.md
 text docs/session-format.md
@@ -436,7 +417,6 @@ text docs/migrations/README.md
 text docs/migrations/external-products.json
 
 # Combined RC public documentation from the stacked follow-ups.
-text docs/benchmarks/startup-fx-2026-10-08.md
 text docs/benchmarks/startup-resume-2026-10-02/README.md
 text docs/benchmarks/startup-resume-2026-10-02/SHA256SUMS
 text docs/benchmarks/startup-resume-2026-10-02/after-build.log

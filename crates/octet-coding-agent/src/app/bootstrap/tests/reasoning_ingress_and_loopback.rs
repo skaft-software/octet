@@ -229,6 +229,7 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
             content: vec![ToolResultPart::Text("actual fixture result".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }));
     request.reasoning = ReasoningConfig::Off;

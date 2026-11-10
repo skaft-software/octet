@@ -1,0 +1,65 @@
+{
+  "name": "branch-label",
+  "operations": [
+    {
+      "op": "message",
+      "as": "u",
+      "message": {
+        "role": "user",
+        "content": "u",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "label",
+      "as": "label",
+      "target": "u",
+      "label": "bookmark"
+    },
+    {
+      "op": "message",
+      "as": "a",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "a"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "fixture",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 0
+      }
+    },
+    {
+      "op": "branch",
+      "target": "label"
+    },
+    {
+      "op": "message",
+      "as": "new",
+      "message": {
+        "role": "user",
+        "content": "new",
+        "timestamp": 0
+      }
+    }
+  ]
+}

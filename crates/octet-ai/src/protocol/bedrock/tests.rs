@@ -417,6 +417,7 @@ fn continuation(response: crate::types::Response) -> Request {
                 content: vec![ToolResultPart::Text("actual supplied result".into())],
                 is_error: true,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }));
     request

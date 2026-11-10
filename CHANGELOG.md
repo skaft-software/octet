@@ -2,6 +2,142 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A partially typed `/command` completion menu now includes commands that an
+  extension registers after the keystroke as soon as the extension finishes
+  starting, instead of waiting for the next key press.
+
+- A Pi extension that starts a new session from its own command (`ctx.newSession`,
+  and likewise fork or switch) no longer ends octet with "Error: stale resource
+  candidate". Retiring the old session's resource binding left extension resource
+  discovery permanently disabled for the replacement session, and the withdrawal
+  fallback then treated the stale binding as fatal. The replacement owner now gets a
+  live binding, and a withdrawal baseline for a binding that has since moved is
+  dropped instead of ending the application.
+
+- Tool results now record the name of the tool that produced them, including
+  when imported from a Pi session. The name is stored for the session only and
+  never sent to a provider.
+
+- Renaming a session replaces line breaks in the name with spaces and trims it,
+  as Pi does, instead of refusing the name.
+
+- Forking a session now keeps the entry labels (bookmarks) of the entries the
+  fork retains.
+
+- Resuming a session with no model change on its branch now selects the model
+  of the last assistant message, as Pi does, instead of the configured default.
+  Pi-imported assistant messages now record the `provider/model` route id.
+
+- Session listing and resume no longer fail on a session that contains a
+  branch summary record, including sessions imported from Pi.
+
+- The model now sees a compaction summary wrapped in the same text Pi uses
+  ("The conversation history before this point was compacted into the following
+  summary: ..."), so a session compacted in either tool reads the same.
+
+- An extension CLI flag may reuse the name of a subcommand option (Pi's
+  `preset.ts` registers `--preset`, which `octet setup` also has), instead of
+  failing startup with a conflict. Only top-level options reserve a name; a real
+  conflict now tells the user to rename the flag or disable the named extension.
+
+- `octet-pi-compat` configure writes a valid manifest default for a Pi flag
+  registered without one (such as `preset.ts`'s `--preset`) instead of
+  `default = undefined`.
+
+- Pi extension commands that await `ctx.ui.select(...)` and then `ctx.ui.confirm(...)`
+  or `ctx.ui.input(...)` (Pi's `commands.ts` example) no longer fail with
+  `not_foreground_owner ... requires a live request`; the later dialog opens on a
+  remote selector or input surface like Pi's.
+
+- Read-only reports and document panels no longer drop scrolling keys pressed
+  just after their first frame appears, including during streaming responses.
+
+- Shift+Enter inserts a newline in fullscreen mode on terminals that report the
+  kitty keyboard protocol or `modifyOtherKeys`, including right after octet
+  enters fullscreen. Ctrl+J remains the portable newline.
+
+- The extension API 0.4 reference now documents its actual feature-negotiated
+  wire, provider/session data and service-specific errors instead of presenting
+  canonical API 0.3 models as the current contract. Public provider-registry Rust
+  types now come from the independently maintained `extension_api_v04` module;
+  the generated `extension_api_v03` surface remains live. Wire behavior and
+  version eligibility are unchanged.
+
+- Pi extension new/switch/fork session requests work with V2 delegation enabled.
+  Workers park before replacement, outgoing child sessions remain recoverable,
+  and the retained extension process receives the new session's delegation
+  service without duplicate tools or instructions. A worker-parking timeout
+  names the refusal and asks users to wait or stop the workers before retrying.
+- Pi background contexts retain session reads without gaining foreground UI or
+  write authority. Coalesced chrome updates recheck ownership and cancellation
+  before native delivery; retained same-session contexts still survive turns.
+
+## [0.10.3] - 2026-11-06
+
+### Fixed
+
+- An extension context projection that the provider cannot represent no longer
+  ends the session. The validated request that reached the hook is restored and
+  the run continues with one notice per session naming the real validator reason;
+  identity, loadout, host-authority and opaque-replay refusals remain fatal.
+- A read-only context observation no longer fails closed on history containing an
+  assistant turn from another model or protocol. That refusal used to reach Pi's
+  tool-call guard and block every tool call with `unsupported_feature context
+  opaque reasoning continuation`. Observation keeps the visible reasoning text and
+  drops only the unrepresentable signature; replay stays strict.
+- `--model <provider>/<model>` resolves when the provider exposes the model.
+
+### Known limitations
+
+- `@gotgenes/pi-permission-system` still stalls a `--print` tool call for ~30 s
+  before the host timeout, and the run exits 0. Cause identified: a synchronous
+  `tools/snapshot` wait headless never answers; fix scheduled next.
+- The published `octet-codemode` bundle ships only its launcher shim and cannot
+  start without a built runner.
+- Cold startup with a full Pi mirror can exceed 10 s.
+- Extension bundles are pinned per host: run `octet extension update <name>` after
+  updating octet.
+
+## [0.10.2] - 2026-11-06
+
+### Fixed
+
+- `octet update` refused every healthy release with `release metadata exceeds
+  the 65536-byte limit`. The bound was applied to GitHub's whole releases
+  payload, which carries all 30 asset entries plus the release notes: the live
+  v0.10.1 response measured 75,595 bytes. The bound is 256 KiB, with the size
+  limit, timeout and strict response validation retained, and a regression test
+  builds a realistic 30-asset payload. Binaries shipped before this fix cannot
+  inherit it; the v0.10.1 release description is shortened so its payload fits
+  the old bound and those installs can still update.
+- `--workspace` accepts an invocation directory outside the workspace, resolving
+  relative paths against the workspace without changing trust admission or
+  confinement.
+- Terse tool-call previews show 12 input rows before truncating (was 6).
+- The README badge, documentation index and Pi compatibility counts name 0.10.2.
+
+### Known limitations
+
+- Binaries published before 0.10.2 keep the 64 KiB release-response bound and
+  cannot read this fix; update with the version-pinned installer if
+  `octet update` reports a size-limit error.
+- `@gotgenes/pi-permission-system` blocks a `--print` tool call for ~30 seconds
+  before the host request timeout ends it, and the run still exits 0. See
+  [Pi compatibility deviations](docs/pi-compat-deviations.md).
+- Cold startup with a full 23-package Pi mirror can exceed 10 seconds; the
+  startup-phase work is scheduled for 0.10.3.
+
+## [0.10.1] - 2026-11-06
+
+### Release tooling
+
+- Add a default-off `force_release` manual input to waive source CI qualification
+  explicitly, with an actor/source audit summary. Immutable source checks,
+  dependency audits, release build checks and protected signing remain required;
+  workflow-only repairs can be dispatched from their dedicated tooling tag.
+
 ### Security
 
 - Update pulldown-cmark from 0.13.5 to 0.13.6 for RUSTSEC-2026-0433 (quadratic
@@ -10,6 +146,60 @@
 
 ### Fixed
 
+- A Pi theme you selected, and Pi's built-in palettes, load as they do in Pi
+  instead of ending a reload with `rejected resource path: untrusted workspace
+  resource has no explicit path grant` and `default theme was not an admitted
+  theme file`. A palette under your Pi agent directory (or `OCTET_PI_AGENT_DIR`,
+  `~/.octet`, `~/.agents`) is a user resource, so it is never classified as a
+  project resource even when the workspace contains it (for example when you
+  start octet from your home directory), and it therefore needs no workspace
+  trust grant. Project palettes still require trust, and a refused theme now
+  names the file and the reason.
+- Pi prompt hooks no longer run under an Octet-only deadline. `input`,
+  `before_agent_start` and context collection await handlers the way Pi does, so
+  a handler that waits for a user answer still delivers its prompt transform or
+  system-prompt replacement instead of having it silently dropped.
+- The Pi bridge can create native child agent sessions, so `createAgentSession`
+  callers work under the same owner, generation, cancellation and accounting
+  fences as the delegation extension. No other extension name receives it.
+- Print and plain modes run Pi input hooks before template/skill expansion and
+  prompt composition. Transforms retain images; handled input starts no provider
+  request and saves no user prompt, matching Pi's print path.
+- A failing Pi context hook no longer ends the run with
+  `provider context preparation refused: hook refused preparation`. Handler
+  failures, malformed projections and remote refusals are isolated the way Pi
+  isolates them: the extension's changes are skipped, one warning is reported per
+  session, and the request proceeds unmodified. Any remaining refusal now names
+  the request shape, for example `40 messages, 40 tools, 118.0 KiB tool schema
+  (largest: mcp_ableton_get_session_info 9.1 KiB), request 214.0 KiB`, instead of
+  an unactionable reason.
+- `/extensions` can switch any extension off again. A mirrored Pi `codemode`
+  preference used to mark activation as overridden and make every row read-only;
+  it is now an ordinary enable, and a Disable is recorded in
+  `disabled_extensions`, which outranks project, environment, CLI and mirrored
+  activation on the next launch. A project layer cannot silence an extension.
+- `--no-extensions` (`-ne`) also covers the mirrored Pi codemode preference. The
+  clear ran before Pi settings were applied, so codemode stayed active; native
+  activation is now applied last.
+- `--model <provider>/<model>` resolves when that provider exposes the model, so
+  the two-column model list can be pasted as one value. An unavailable model no
+  longer claims a resume is in flight when none is.
+- Pi UI dialogs in print and plain modes answer the way Pi's `noOpUIContext`
+  does (`custom`/`select`/`input` → `undefined`, `confirm` → `false`) instead of
+  mounting a surface nobody can see and holding the hook open until the transport
+  timed out.
+- Documented the headless `@gotgenes/pi-permission-system` tool-hook stall, its
+  30 s timeout, and the misleading zero exit status in
+  [docs/pi-compat-deviations.md](docs/pi-compat-deviations.md).
+- Startup failures retain owner/instance/generation attribution and safe remote
+  error codes when resource discovery is blocked after process reload. Private
+  remote messages remain redacted; discovery still requires successful startup.
+- Informational theme-discovery skips no longer become red reload failures.
+  Ungranted extension resource paths are still rejected and reported.
+- Large Pi/MCP tool fleets are no longer refused by a default 128 KiB tool-schema
+  quota. Complete definitions remain unchanged and subject to full-request model
+  context admission; Rust hosts can still set an explicit byte quota, inherited
+  by delegated agents.
 - Pi session-name writes acknowledge the committed, normalized name, including
   clears, even without a custom footer, editor or widget. Concurrent host
   snapshots cannot leave the adapter reading the old name until another shell

@@ -6,6 +6,7 @@ import { commandArgumentRequest, getAutocompleteProvider } from './completions.m
 import { piPosition } from './autocomplete-edits.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 import { isKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
+import { inRender } from './ui-delivery.mjs';
 
 const CURSOR_MARKER = '\x1b_pi:c\x07';
 const MAX_CAPTURE_READMISSIONS = 8;
@@ -542,7 +543,7 @@ export class RemoteUI {
     // readiness or a publication barrier, which would delay frames under load.
     const columns = surface.columns, rows = surface.rows;
     let lines;
-    try { lines = this.runtime.scope.run(surface.store, () => surface.tui.render(columns)); }
+    try { lines = this.runtime.scope.run(surface.store, () => inRender(() => surface.tui.render(columns))); }
     catch (error) {
       if (nativeRetirements.get(error) === surface) return;
       // History-reading components cannot render a missing publication as an

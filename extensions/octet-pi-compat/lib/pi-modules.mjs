@@ -1,43 +1,31 @@
-// The Pi extension API this adapter emulates, and the module specifiers Pi's own
-// extension loader resolves for every extension (Pi 1.4.0,
-// packages/coding-agent/src/core/extensions/loader.ts getAliases). Both the
-// emulated path and the installed-Pi fallback resolve exactly these names, so
-// an extension sees the same module graph it sees in Pi.
+// The Pi extension API this adapter emulates, derived from the per-release
+// capability manifests in ../shims/manifests/. Both the emulated path and the
+// installed-Pi fallback resolve exactly the specifiers Pi's own extension loader
+// resolves, so an extension sees the same module graph it sees in Pi.
+//
+// Nothing here names a Pi release or a version range. `PI_VERSION` is the
+// highest manifest this build ships (what the shims emulate when no installed Pi
+// answers a module) and `PI_SUPPORTED_RANGE` is computed from the shipped
+// manifests. Adding a release is adding shims/manifests/<version>.json.
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { PI_MANIFEST_VERSIONS, piManifest, piRelease, piReleaseSupported, piSupportedRange } from './pi-manifests.mjs';
 
-export const PI_VERSION = '1.4.0';
-// Installed Pi releases the fallback and `--from-pi` accept. 1.0.2 through
-// 1.4.x share the install layout, settings and package-manager APIs, and module
-// table; only new export names differ, and unclassified names stay refused.
-export const PI_SUPPORTED_RANGE = '>=1.0.2 <1.5.0';
-export function piReleaseSupported(version) {
-  const match = /^1\.(\d+)\.(\d+)$/.exec(version);
-  if (!match) return false;
-  const [minor, patch] = [Number(match[1]), Number(match[2])];
-  return minor <= 4 && (minor > 0 || patch >= 2);
-}
-export const PI_PREFIXES = ['@earendil-works', '@mariozechner'];
+export { piRelease, piReleaseSupported, PI_MANIFEST_VERSIONS };
 
-// Specifier (after the scope) -> the Pi package and export it resolves to, and
-// the octet shim that stands in for it on the emulated path (none: the module
-// is only available through the installed-Pi fallback). Pi resolves the bare
-// pi-ai root to its compat entry, a strict superset of the core entry.
-export const PI_MODULES = {
-  'pi-coding-agent': { pkg: 'pi-coding-agent', key: 'coding-agent', exportKey: '.', shim: 'coding-agent' },
-  'pi-agent-core': { pkg: 'pi-agent-core', key: 'agent-core', exportKey: '.', shim: 'agent-core' },
-  'pi-tui': { pkg: 'pi-tui', key: 'tui', exportKey: '.', shim: 'tui' },
-  'pi-ai': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
-  'pi-ai/compat': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
-  // Pi 1.4 aliases pi-ai/models too. Its names are a subset of compat in every
-  // supported release, so it is served by the same guarded namespace.
-  'pi-ai/models': { pkg: 'pi-ai', key: 'ai', exportKey: './compat', shim: 'ai' },
-  'pi-ai/oauth': { pkg: 'pi-ai', key: 'ai-oauth', exportKey: './oauth' },
-  'pi-ai/providers/all': { pkg: 'pi-ai', key: 'ai-providers', exportKey: './providers/all', shim: 'ai-providers' },
-};
+/** Supported-version statement computed from the shipped manifests. */
+export const PI_SUPPORTED_RANGE = piSupportedRange();
+/** The release the shims emulate when no installed Pi answers a module. */
+export const PI_VERSION = PI_MANIFEST_VERSIONS[PI_MANIFEST_VERSIONS.length - 1];
+export const PI_MANIFEST = piManifest(PI_VERSION);
+export const PI_PREFIXES = PI_MANIFEST.scopes;
 
-// Pi resolves both TypeBox spellings to its single TypeBox 1.x install.
-const TYPEBOX_SPELLINGS = ['typebox', '@sinclair/typebox'];
+// Specifier (after the scope) -> the installed Pi package and export it resolves
+// to, and the octet shim that stands in for it on the emulated path (none: the
+// module is only available through the installed-Pi fallback).
+export const PI_MODULES = Object.fromEntries(Object.entries(PI_MANIFEST.routes).map(([name, route]) => [name, {
+  pkg: route.package, exportKey: route.export, ...(route.shim ? { shim: route.shim } : {}),
+}]));
 
 /** Splits a specifier into its Pi module descriptor, or null if it is not one. */
 export function piModule(specifier) {
@@ -51,16 +39,16 @@ export function piModule(specifier) {
   return null;
 }
 
-// Node resolves bare specifiers through realpath, so an alias target that goes
-// through a symlinked directory (pnpm layouts, a linked node_modules) would load
-// a second copy of the same module. Aliases therefore point at real paths.
+// A module reached through a symlinked directory (pnpm layouts, a linked
+// node_modules) would load a second copy of the same module, so aliases point at
+// real paths.
 const real = path => { try { return realpathSync(path); } catch { return path; } };
 const shimFile = shim => real(fileURLToPath(new URL(`../shims/${shim}.mjs`, import.meta.url)));
 // Imported on the emulated path in place of a Pi module octet does not
 // emulate; loading it fails, and the load is retried on the installed Pi.
 export const UNAVAILABLE_MODULE = real(fileURLToPath(new URL('../shims/unavailable.mjs', import.meta.url)));
 
-/** Emulated-path aliases for every Pi specifier Pi resolves. */
+/** Emulated-path aliases for every Pi specifier the manifest routes. */
 export function emulatedPiAliases() {
   const aliases = {};
   for (const prefix of PI_PREFIXES) {
@@ -75,13 +63,13 @@ const pick = target => typeof target === 'string' ? target
   : target && (pick(target.import) ?? pick(target.default) ?? pick(target.node));
 
 /**
- * TypeBox aliases from the adapter's pinned TypeBox (the version Pi 1.0.2
- * through 1.4.0 ship). Pi aliases the root, `compile` and `value`; the other exported
- * subpaths (`system`, `guard`, ...) are resolved too, because a bare alias
- * would otherwise turn `typebox/system` into a path below the root file.
+ * TypeBox aliases from the adapter's pinned TypeBox. Pi aliases the root,
+ * `compile` and `value`; the other exported subpaths (`system`, `guard`, ...)
+ * are resolved too, because a bare alias would otherwise turn `typebox/system`
+ * into a path below the root file.
  */
 export function typeboxAliases() {
-  const root = new URL('../node_modules/typebox/', import.meta.url);
+  const root = new URL(`../node_modules/${PI_MANIFEST.typebox.package}/`, import.meta.url);
   const exportsMap = JSON.parse(readFileSync(new URL('package.json', root), 'utf8')).exports ?? {};
   const aliases = {};
   for (const [key, target] of Object.entries(exportsMap)) {
@@ -89,7 +77,7 @@ export function typeboxAliases() {
     const file = pick(target);
     if (typeof file !== 'string') continue;
     const subpath = key === '.' ? '' : key.slice(1);
-    for (const spelling of TYPEBOX_SPELLINGS) aliases[`${spelling}${subpath}`] = real(fileURLToPath(new URL(file, root)));
+    for (const spelling of PI_MANIFEST.typebox.spellings) aliases[`${spelling}${subpath}`] = real(fileURLToPath(new URL(file, root)));
   }
   return aliases;
 }

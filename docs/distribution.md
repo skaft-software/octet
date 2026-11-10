@@ -1,12 +1,12 @@
 # Distribution channels
 
-The [version-pinned v0.10.0 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.0)
+The [version-pinned v0.10.3 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.3)
 records actual channel availability, immutable assets, signatures and source
-qualification. The [release notes](releases/v0.10.0.md) describe octet's first
-Pi-compatible launch. Native binaries and the six optional extension bundles
-are separate downloads; installation never enables an extension.
+qualification. The [0.10.0 release notes](releases/v0.10.0.md) describe octet's
+first Pi-compatible launch. Native binaries and the six optional extension
+bundles are separate downloads; installation never enables an extension.
 
-The planned npm channel is `@skaft/octet@0.10.0` (launcher plus four signed platform
+The planned npm channel is `@skaft/octet@0.10.3` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
 separate, unpublished channels. Native publication does not publish them.
 
@@ -17,7 +17,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-The distribution target is **0.10.0**. The distribution version does not change independent API and schema versions. The [0.7.6
+The distribution target is **0.10.3**. The distribution version does not change independent API and schema versions. The [0.7.6
 release](releases/v0.7.6.md) keeps its historical version-matched assets and
 channel evidence.
 
@@ -30,7 +30,7 @@ channel evidence.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.0`; installed compatibility `requires_octet = "=0.10.0"`; independent Rust SDK remains `0.8.2` |
+| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.3`; installed compatibility `requires_octet = "=0.10.3"`; independent Rust SDK remains `0.8.2` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -39,8 +39,8 @@ Current extension authoring and the six bundle manifests target API
 `0.4`, the feature-negotiated wire the Python `Extension` runtime supports
 alongside the retained `0.1` and `0.2`. Canonical API `0.3` stays a separate
 supported wire, and the generated `0.3` types aren't a complete `0.3` process
-runtime. The minimal canonical process example and independent Aider adapter
-keep version `0.1.0` with exact `=0.8.0` host pins. The Pi adapter targets its documented public API;
+runtime. The minimal canonical process example keeps version `0.1.0` with exact
+`=0.8.0` host pins. The Pi adapter targets its documented public API;
 individual coverage is recorded in the [API ledger](pi-extension-api.md). Pi 1.0.2 and the private adapter npm version 0.1.0 remain independent.
 Installation/discovery are inert. Enabling the stock bridge automatically mirrors
 and runs enabled Pi factories with OS permissions; native credential disclosure
@@ -64,15 +64,60 @@ The release workflows don't publish every source package automatically:
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
-Native publication uses the matching `octet-binaries-vX.Y.Z` tooling tag at the
-canonical release commit. Its metadata generator requires that ref, and the
-protected environment must admit the tag without removing required reviewers.
+Normal native and extension publication starts with the single canonical
+`vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
+creates a draft GitHub Release from the checked-in notes, verifies the uploaded
+signed native assets' GitHub digests, then publishes the native release; a
+separate job marks it Latest only after the published-install smoke passes, so
+`octet update` never advertises an asset set that failed public installation.
+The extension workflow waits for that binary run before publishing its bundles.
+The protected environment must admit the canonical tag without removing required
+reviewers. Dedicated binary and extension tooling tags remain available for
+workflow-only repairs. See the
+[release runbook](maintainers/skills/release/SKILL.md). The currently observed
+protected-environment policy does not yet allow `v*` tags; an authorized
+administrator must update it separately before the one-tag flow can publish.
 
-Cargo can build the published canonical tag's exact source (Rust 1.88+;
+The npm, Homebrew and installer-repair handoffs accept native signatures from
+either the canonical tag (with workflow commit equal to the source commit) or
+the legacy binary tooling tag. They remain separate publication channels.
+
+The maintainer pushes directly to `main`; contributors use squash PRs gated by
+`ci-required`, not a merge queue. PRs run the fast CI tier (or the full tier with
+`ci:full`); main pushes and manual `ci.yml` dispatches run the full matrix.
+Tag a main commit with a completed, successful full-tier **main push** run. GitHub
+runs push CI only for the pushed head, not intermediate commits. If the desired
+commit has no such run, dispatch `ci.yml` on that exact ref, verify its full-tier
+success, then manually dispatch the release workflows from the unchanged
+canonical tag (or the dedicated workflow-only repair tags). A canonical tag-push
+run deliberately waits only for main push CI and cannot use that dispatch.
+
+The binary workflow normally requires successful CI for the exact canonical
+source. An authorized maintainer can explicitly waive **only that CI gate** with
+`force_release=true` on a manual dispatch, with a non-empty `force_reason`. It
+defaults to false and has no effect on tag-push runs. The job summary records the
+reason, actor and **WAIVED, not passed** status. The protected binary and
+installer publish jobs also put the waiver first in the release notes; npm-only
+dispatches record it in the summary. Main-ancestry and source/version checks,
+dependency audits, release build checks, protected publishing and Sigstore
+verification still apply.
+
+For a workflow-only repair, keep the canonical tag unchanged, put the reviewed
+release workflow on its dedicated tooling tag, and dispatch that exact tag:
+
+```sh
+gh workflow run release-octet.yml --ref octet-binaries-v0.10.3 \
+  -f release_tag=v0.10.3 -f force_release=true -f force_reason='explain the CI incident'
+```
+
+This does not restart product CI or turn failed CI into a pass. Record the
+remaining qualification limitations in the release notes.
+
+Cargo can build the published canonical tag's exact source (Rust 1.89+;
 ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.0 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.3 --bins octet-coding-agent
 ```
 
 The canonical tag pins the exact source.
@@ -81,16 +126,14 @@ aren't the supported Cargo path.
 
 The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.10.0 is not published to npm.** Only
-after verified publication, pin the version to reproduce one exact release:
-
-```sh
-npm install --global --ignore-scripts --no-audit --no-fund @skaft/octet@0.10.0
-```
-
-`npm install -g @skaft/octet` tracks the `latest` dist-tag instead; it is not an
-installation of an exact version. Published versions are immutable,
-so a pinned install can't be silently replaced.
+and registry provenance verification. **0.10.3 is not published to npm.** No
+0.10.x package exists yet, so this page gives no npm install command: use the
+version-pinned native release that [installation](installation.md) describes.
+Only after verified publication does the pinned `@skaft/octet@0.10.3` reproduce
+exactly one release; the `latest` dist-tag would track whichever version npm
+publishes as current, which is not an installation of an exact version.
+Published versions are immutable, so a pinned install can't be silently
+replaced.
 
 ## Unsigned dogfood candidates
 
@@ -130,21 +173,16 @@ unqualified; catalog inclusion does not close any partial API or workflow gate. 
 ## Reviewed model metadata
 
 Release preparation refreshes and reviews the checked-in models.dev names,
-pricing, capabilities and source identity together. On a pull request that
-changes the workspace product version, and on every explicit CI dispatch, CI
-runs the live models.dev `--check` gate. Stale snapshots must be refreshed and
-reviewed before the release source is frozen; the check never rewrites inputs.
+pricing, capabilities and source identity together. The separate
+`models-dev-freshness.yml` workflow checks the live catalog daily or on manual
+dispatch; its result is advisory, not a required CI or release check. Review and
+refresh stale snapshots before freezing release source; the check never rewrites
+inputs. Required CI retains deterministic offline metadata-tooling tests.
 
-On a version-changing main push, CI may reuse a successful exact-head dispatch
-only when Git and GitHub prove that a merged, protected PR delivered the same
-source tree and the dispatch's quality job ran the freshness step successfully.
-If that proof is unavailable or ambiguous, CI requires the live check instead.
-This does not replace PR checks, main CI, or release qualification.
-
-Ordinary compilation uses checked-in metadata without network access. This gate
-isn't an all-provider test or live-inference qualification. Interactive sessions
-separately refresh checked live records at runtime, with the reviewed snapshot
-as their fallback and baseline. See the [model-source
+Ordinary compilation uses checked-in metadata without network access. The
+advisory check isn't an all-provider test or live-inference qualification.
+Interactive sessions separately refresh checked live records at runtime, with
+the reviewed snapshot as their fallback and baseline. See the [model-source
 record](../crates/octet-ai/models/SOURCES.md) for metadata scope and
 limitations.
 
@@ -185,9 +223,10 @@ architecture URLs and rejection of a changed digest.
 
 ## Release handoff and tap publication
 
-Rendering and publishing the formula need an explicit dispatch from the matching
-`octet-binaries-vX.Y.Z` tooling tag. Finishing a binary release never changes
-the tap, and the workflow only ever opens a protected tap pull request. If an
+Rendering and publishing the formula need an explicit dispatch from the native
+signer's matching `vX.Y.Z` or `octet-binaries-vX.Y.Z` tag. Finishing a binary
+release never changes the tap, and the workflow only ever opens a protected tap
+pull request. If an
 update used a wrong or incomplete release, close the pull request unmerged and
 regenerate from the same immutable metadata. Never edit SHA-256 values by hand.
 
@@ -212,9 +251,9 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 ## Other channels
 
-The version-pinned v0.10.0 shell installer targets macOS arm64 and x64 and
+The version-pinned v0.10.3 shell installer targets macOS arm64 and x64 and
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
-Windows x86-64 and would publish as `@skaft/octet@0.10.0`. See the [npm release
+Windows x86-64 and would publish as `@skaft/octet@0.10.3`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

@@ -124,6 +124,7 @@ fn pricing_from_rates(rates: LivePricing) -> Pricing {
         // default (2x input) when this provider-specific field is absent.
         cache_write_1h: None,
         reasoning: rates.reasoning.map(TokenRate),
+        windows: Default::default(),
         tiers: Vec::new(),
     }
 }

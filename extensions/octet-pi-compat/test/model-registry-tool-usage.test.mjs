@@ -122,13 +122,14 @@ test('an earlier invocation cannot authorize a cached echo even when request id 
   assert.equal(value.calls.length, 1);
 });
 
-for (const kind of ['retired', 'other foreground', 'cancelled', 'generation changed']) {
+for (const kind of ['retired', 'other foreground', 'same-owner impostor', 'cancelled', 'generation changed']) {
   test(`a ${kind} owner cannot authorize a settled usage echo`, async t => {
     const value = fixture(t, async ({ consult, runtime }) => {
       const usage = structuredClone((await consult()).usage);
       const store = runtime.scope.getStore();
       if (kind === 'retired') store.state.alive = false;
-      if (kind === 'other foreground') runtime.foreground = { ...store.state };
+      if (kind === 'other foreground') runtime.foreground = { ...store.state, owner: { ...store.state.owner, session_id: 'other-session' } };
+      if (kind === 'same-owner impostor') runtime.foreground = { ...store.state };
       if (kind === 'cancelled') store.controller.abort();
       if (kind === 'generation changed') store.state.owner = { ...store.state.owner, process_generation: 2 };
       return response(usage);

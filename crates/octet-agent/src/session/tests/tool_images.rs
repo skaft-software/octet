@@ -24,6 +24,7 @@ fn screenshot_result(call_id: &str, label: &str) -> EntryValue {
             ],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })],
     }))
 }
@@ -171,6 +172,7 @@ fn coalesced_parallel_results_and_adjacent_media_share_one_window() {
                     content: vec![ToolResultPart::Text("old result".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 }),
                 UserPart::Media(png("adjacent-old")),
             ],

@@ -225,10 +225,7 @@ pub(super) fn dispatch_session_control(
         }
         ("session/reload", None) => ExtensionSessionLifecycleOperation::Reload,
         ("session/switch", Some(session_id))
-            if api_v03::parse_session_switch_params(
-                serde_json::json!({"session_id": session_id}),
-            )
-            .is_ok() =>
+            if session_id.len() <= api_v04::MAX_JSON_RPC_ID_BYTES =>
         {
             ExtensionSessionLifecycleOperation::Switch { session_id }
         }

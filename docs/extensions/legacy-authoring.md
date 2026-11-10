@@ -2,8 +2,9 @@
 
 This is a **retained wire and host-operations reference**, with API `0.1`/`0.2`
 examples and services reused by current API `0.4`. New authoring starts with
-[the current guide](../extensions.md). The [generated reference](API-0.4-REFERENCE.md)
-defines version policy and the distinct canonical API `0.3` models. Earlier
+[the current guide](../extensions.md). The [hand-maintained 0.4 reference](API-0.4-REFERENCE.md)
+defines current version policy; the distinct canonical API `0.3` models remain
+in the retained schema (`protocol/extension-api-v0.3.schema.json`). Earlier
 example versions remain intentional; these shared operations do not translate
 wires or make every low-level service a supported coding-product feature.
 
@@ -11,7 +12,7 @@ wires or make every low-level service a supported coding-product feature.
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 The Python/TypeScript source SDK distributions and six bundles
-are version `0.10.0`; the independent Rust SDK stays `0.8.2` and examples keep
+are version `0.10.3`; the independent Rust SDK stays `0.8.2` and examples keep
 their own versions. Native publication does not publish SDK registries; see
 [installation and availability](../installation.md).
 
@@ -69,7 +70,7 @@ Manifest-selected versions are exact:
   are conditional; parent-correlated ephemeral input is part of the base wire.
 - API `0.3` remains canonical and schema-generated, not an implicit upgrade
   of either legacy wire. Its bounds, methods, errors, capabilities, and
-  availability belong to the [generated reference](API-0.4-REFERENCE.md).
+  availability belong to the retained schema (`protocol/extension-api-v0.3.schema.json`).
   Its paired session hooks are distinct from feature-negotiated lifecycle
   observations; manifest flag support does not merge those wires.
 - API `0.4` is current and uses the feature-negotiated wire retained from `0.2`.
@@ -767,8 +768,8 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.10.0 availability, consult the
-[release notes](../releases/v0.10.0.md) and [installation](../installation.md).
+octet 0.10.3 availability, consult the
+[release notes](../releases/v0.10.3.md) and [installation](../installation.md).
 
 Executable bundles use runtime `extension.toml`. An archive has exactly one root
 named for the extension, all regular
@@ -791,9 +792,9 @@ unpackaged for legacy runtime compatibility. The current source bundle declares:
 
 ```toml
 name = "octet-web-search"
-version = "0.10.0"
+version = "0.10.3"
 api_version = "0.4"
-requires_octet = "=0.10.0"
+requires_octet = "=0.10.3"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when

@@ -189,6 +189,10 @@ fn static_extension_command() -> Command {
     Cli::command()
 }
 
+/// Top-level long options only. A subcommand's options (for example
+/// `octet setup --preset`) are parsed after the subcommand token, and an
+/// invocation with a subcommand never reaches the extension-flag parser, so they
+/// do not share the namespace extension flags are added to.
 fn collect_static_long_options(command: &Command, options: &mut BTreeSet<String>) {
     for argument in command.get_arguments() {
         if let Some(long) = argument.get_long() {
@@ -197,9 +201,6 @@ fn collect_static_long_options(command: &Command, options: &mut BTreeSet<String>
         if let Some(aliases) = argument.get_all_aliases() {
             options.extend(aliases.into_iter().map(str::to_owned));
         }
-    }
-    for subcommand in command.get_subcommands() {
-        collect_static_long_options(subcommand, options);
     }
 }
 
@@ -222,7 +223,7 @@ pub(super) fn register_extension_flags(
         for spelling in spellings {
             if !occupied.insert(spelling.clone()) {
                 anyhow::bail!(
-                    "extension CLI flag --{spelling} from {extension:?} conflicts with an existing option"
+                    "extension CLI flag --{spelling} from {extension:?} conflicts with an existing option; rename the flag in the extension or disable {extension:?} to start octet"
                 );
             }
         }

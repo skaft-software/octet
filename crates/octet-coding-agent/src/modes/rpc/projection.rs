@@ -467,8 +467,8 @@ fn rpc_history_messages(session: &Session) -> Vec<RpcHistoryMessage> {
         ..
     }) = compaction
     {
-        let mut content = vec![UserPart::Text(format!(
-            "[summary of earlier conversation]\n{summary}"
+        let mut content = vec![UserPart::Text(octet_agent::compaction_summary_text(
+            summary,
         ))];
         if let Some(snapcompact) = snapcompact {
             content.extend(snapcompact.frames.iter().cloned().map(UserPart::Media));

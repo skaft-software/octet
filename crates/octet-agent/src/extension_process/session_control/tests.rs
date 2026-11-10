@@ -134,6 +134,37 @@ async fn compact_frame(frames: &mut mpsc::Receiver<WriterFrame>) -> serde_json::
 }
 
 #[tokio::test]
+async fn replacement_refusals_preserve_actionable_errors_with_and_without_setup() {
+    for setup in [false, true] {
+        let (state, mut frames, mut receiver, owner) = compact_fixture();
+        super::super::tests::insert_test_parent(&state, 1, Some(owner.clone()));
+        handle_protocol_line(
+            &super::super::tests::wave1_line(
+                42,
+                "session/create",
+                serde_json::json!({
+                    "parent_request_id": 1, "resource_owner": owner, "setup": setup,
+                }),
+            ),
+            &state,
+        )
+        .unwrap();
+        let reason = "session replacement refused: subagent workers still running; wait for them to finish or stop them, then retry";
+        receiver
+            .try_next()
+            .unwrap()
+            .respond_replacement(Err(ExtensionSessionLifecycleError::Refused(reason.into())));
+        let response = compact_frame(&mut frames).await;
+        assert_eq!(response["id"], 42);
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["message"], reason);
+        assert!(response.get("result").is_none());
+        assert!(lock_std_mutex(&state.issued_resource_owners).contains(&owner));
+        assert!(lock_std_mutex(&state.pending).contains_key(&1));
+    }
+}
+
+#[tokio::test]
 async fn compaction_requires_consumer_features_bounds_and_an_authentic_retained_owner() {
     for case in 0..12 {
         let (mut state, mut frames, mut receiver, owner) = compact_fixture();

@@ -202,13 +202,14 @@ These Rust controls add no NDJSON protocol-v1 command or field. See the
 ### Tool-schema and compaction bounds
 
 Rust embedders can call `Agent::set_tool_schema_budget_bytes(usize)` before a
-run. The default is 128KiB for the exact serialized JSON array of
-provider-visible tool definitions. A non-empty set over the limit is refused
-before provider I/O; octet never silently drops, truncates, or rewrites tools.
-A zero budget permits only `[]`. This is an SDK setter, not a protocol v1 field,
-CLI flag, or persisted setting.
+run to opt into a quota for the exact serialized JSON array of provider-visible
+tool definitions. By default there is no separate schema-byte quota; full-request
+model context admission still applies. A non-empty set over an explicit quota is
+refused before provider I/O; octet never silently drops, truncates, or rewrites
+tools. A zero quota permits only `[]`. Delegated agents inherit the parent's policy.
+This is an SDK setter, not a protocol v1 field, CLI flag, or persisted setting.
 
-Local compaction similarly refuses empty, whitespace-only, or over-128KiB
+Local compaction similarly refuses empty, whitespace-only, or over-2MiB
 assembled handoffs before writing a checkpoint. The cap includes host-generated
 file-operation evidence; neither the model summary nor that evidence is
 truncated to fit.

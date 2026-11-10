@@ -240,6 +240,19 @@ impl DelegationBinding {
             .map_err(AgentError::Session)
     }
 
+    pub(crate) fn root_configuration(&self) -> (DelegationConfig, bool) {
+        (self.manager.config.clone(), self.manager.root_tools)
+    }
+
+    pub(crate) fn base_system(&self) -> String {
+        self.manager
+            .template
+            .base_system
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     pub(crate) fn system_instructions(&self) -> &str {
         &self.system_instructions
     }

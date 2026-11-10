@@ -286,6 +286,7 @@ fn flush_missing_function_responses(
                 )],
                 is_error: true,
                 added_tool_names: None,
+                tool_name: None,
             };
             function_response_part(&names[&id], &id, &result, include_tool_call_id)
         })

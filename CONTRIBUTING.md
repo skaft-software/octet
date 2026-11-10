@@ -6,7 +6,7 @@ changes small and back them with evidence.
 
 ## Development setup
 
-The octet source supports macOS and Linux and needs Rust 1.88 or newer. A native
+The octet source supports macOS and Linux and needs Rust 1.89 or newer. A native
 Windows x64 GNU build is tested in CI; the MSVC release channel remains a
 preview with separate qualification: see [Windows](docs/windows.md). Install Rust through
 [rustup](https://rustup.rs/). `rg` (ripgrep) is preferred for content search when
@@ -41,10 +41,10 @@ and the Docker context.
 ## Before opening a change
 
 1. Search existing issues and pull requests for the same behavior.
-2. Check the [project](https://github.com/orgs/skaft-software/projects/5).
-   Discuss substantial changes in an issue before writing a large patch. Broad
-   or unresolved ideas can start in
-   [Discussions](https://github.com/skaft-software/octet/discussions).
+2. Check the [project](https://github.com/orgs/skaft-software/projects/5), then
+   scope the change in an issue before starting and link it in the PR body
+   (for example, `Refs #` followed by its number). Broad or unresolved ideas can
+   start in [Discussions](https://github.com/skaft-software/octet/discussions).
 3. For security-sensitive findings, use the private reporting path in
    [SECURITY.md](SECURITY.md). Don't open a public issue first.
 4. Keep unrelated formatting, generated output, local notes, credentials and
@@ -71,7 +71,7 @@ and the Docker context.
 
 ## Tests
 
-For a first credential-free pass (Python 3.10+ and Rust 1.88+):
+For a first credential-free pass (Python 3.10+ and Rust 1.89+):
 
 ```sh
 cargo fetch --locked                 # one-time dependency download, if needed
@@ -164,11 +164,16 @@ fix: preserve tool output across reconnect
 
 A pull request should say what changed, why, the user or developer impact, a
 defect's root cause, the exact checks that passed, and any known limitation or
-compatibility effect.
+compatibility effect. A maintainer decides at review whether the change fits the
+agreed scope; an issue link does not guarantee acceptance. Contributors use squash
+PRs gated by `ci-required`; the maintainer may push directly to `main`. PRs run
+fast CI (or the full tier with the `ci:full` label). The full matrix runs on main
+pushes and manual workflow dispatches; there is no merge queue.
 
-Keep generated build artifacts, local reports, credentials, sessions,
-`AGENTS.md` and private research notes out of commits. The repository
-`.gitignore` lists the expected local-only paths.
+Keep generated build artifacts, local reports, credentials, sessions and
+private research notes out of commits. The repository `.gitignore` lists the
+expected private paths. Repository agent conventions are tracked in
+[AGENTS.md](AGENTS.md); update that source rather than keeping a separate mirror.
 
 ## Licensing
 

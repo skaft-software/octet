@@ -76,8 +76,10 @@ pub mod delegation;
 pub mod effect;
 pub mod events;
 pub mod extension;
+pub mod extension_api_policy;
 #[rustfmt::skip]
 pub mod extension_api_v03;
+pub mod extension_api_v04;
 pub(crate) mod extension_bulk;
 mod extension_bulk_host;
 pub mod extension_diagnostics;
@@ -265,12 +267,13 @@ pub use sandbox::{
     ShellSelection, ToolPolicyProvenance, DEFAULT_MAX_OUTPUT_BYTES,
 };
 pub use session::{
-    CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId, EntryMetadata, EntryValue,
-    ExtensionEntryMetadata, ExtensionMetadataProvenance, Session, SessionError, SessionRecord,
-    SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord, UsageRecordKind,
-    UsageUncertaintyBound, UsageUncertaintyRecord, MAX_EXTENSION_ENTRY_METADATA_BYTES,
-    MAX_EXTENSION_ENTRY_METADATA_NAMESPACES, MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES,
-    MODEL_VISIBLE_TOOL_IMAGE_LIMIT, TOOL_IMAGE_PLACEHOLDER,
+    compaction_summary_text, CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId,
+    EntryMetadata, EntryValue, ExtensionEntryMetadata, ExtensionMetadataProvenance, Session,
+    SessionError, SessionRecord, SessionRunOutcome, SessionRunOutcomeStatus, UsageRecord,
+    UsageRecordKind, UsageUncertaintyBound, UsageUncertaintyRecord,
+    MAX_EXTENSION_ENTRY_METADATA_BYTES, MAX_EXTENSION_ENTRY_METADATA_NAMESPACES,
+    MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES, MODEL_VISIBLE_TOOL_IMAGE_LIMIT,
+    TOOL_IMAGE_PLACEHOLDER,
 };
 pub use skills::{
     ContentHash, LoadedSkill, SkillActivationId, SkillDescriptor, SkillId, SkillLoadError,

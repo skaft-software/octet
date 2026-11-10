@@ -586,9 +586,14 @@ impl ExtensionProcess {
             self.dispatch_session_hook_end(binding, &binding.endpoint, outcome, reason)
         }))
         .await;
-        for result in results {
+        for (binding, result) in bindings.iter().zip(results) {
             if let Err(error) = result {
-                self.emit_session_hook_failure("session_end", &error);
+                self.emit_session_hook_failure(
+                    "session_end",
+                    binding,
+                    binding.endpoint.generation,
+                    &error,
+                );
             }
         }
     }
@@ -647,8 +652,8 @@ impl ExtensionProcess {
             {
                 return Ok(());
             }
-            let params = api_v03::SessionHookParams::SessionStart {
-                payload: api_v03::SessionStart {
+            let params = api_v04::SessionHookParams::SessionStart {
+                payload: api_v04::SessionStart {
                     binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
                 },
             };
@@ -661,7 +666,7 @@ impl ExtensionProcess {
             .await
         }
         .await;
-        attempt.finish(result.is_ok());
+        attempt.finish(&result);
         result
     }
 
@@ -672,8 +677,8 @@ impl ExtensionProcess {
         outcome: ExtensionLifecycleOutcome,
         reason: &'static str,
     ) -> Result<(), ExtensionRuntimeError> {
-        let params = api_v03::SessionHookParams::SessionEnd {
-            payload: api_v03::SessionEnd {
+        let params = api_v04::SessionHookParams::SessionEnd {
+            payload: api_v04::SessionEnd {
                 binding: session_hook_wire_binding(binding, &self.inner.instance_id)?,
                 outcome: session_hook_outcome(outcome).to_owned(),
                 reason: reason.to_owned(),
@@ -742,7 +747,7 @@ impl ExtensionProcess {
         &self,
         endpoint: &LifecycleEndpoint,
         session_id: &str,
-        params: api_v03::SessionHookParams,
+        params: api_v04::SessionHookParams,
         start_reason: Option<&'static str>,
     ) -> Result<(), ExtensionRuntimeError> {
         endpoint
@@ -751,16 +756,23 @@ impl ExtensionProcess {
         // Pi awaits session_start, and it runs off the startup path here, so it
         // gets the ordinary request deadline. Only the end finalizer keeps the
         // short cap, so exit and reload never wait on an extension.
-        let ending = matches!(&params, api_v03::SessionHookParams::SessionEnd { .. });
+        let ending = matches!(&params, api_v04::SessionHookParams::SessionEnd { .. });
         let deadline = match params {
-            api_v03::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
-            api_v03::SessionHookParams::SessionEnd { .. } => {
+            api_v04::SessionHookParams::SessionStart { .. } => self.inner.config.request_timeout,
+            api_v04::SessionHookParams::SessionEnd { .. } => {
                 self.inner.config.request_timeout.min(SESSION_HOOK_DEADLINE)
             }
         };
         let params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
-        let params = api_v03::parse_session_hook_params(params).map_err(api_v03_protocol_error)?;
+        let params = api_v04::parse_session_hook_params(params).map_err(|error| {
+            // Preserve the existing diagnostic as well as the wire payload in
+            // this ownership-only change.
+            ExtensionRuntimeError::Protocol(format!(
+                "API 0.3 contract error {}: {}",
+                error.code, error.message
+            ))
+        })?;
         let mut params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let resource_owner = ExtensionResourceOwner {
@@ -812,9 +824,33 @@ impl ExtensionProcess {
         Ok(())
     }
 
-    pub(super) fn emit_session_hook_failure(&self, phase: &str, error: &ExtensionRuntimeError) {
+    pub(super) fn session_hook_failure_message(
+        &self,
+        phase: &str,
+        session_owner: &str,
+        generation: u64,
+        failure: &str,
+    ) -> String {
+        format!(
+            "{phase} hook failed ({failure}; owner={session_owner}, instance={}, generation={generation})",
+            self.inner.instance_id,
+        )
+    }
+
+    pub(super) fn emit_session_hook_failure(
+        &self,
+        phase: &str,
+        binding: &ActiveSessionHookBinding,
+        generation: u64,
+        error: &ExtensionRuntimeError,
+    ) {
         let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-            message: format!("{phase} hook failed ({})", session_hook_error_kind(error)),
+            message: self.session_hook_failure_message(
+                phase,
+                &binding.session_id,
+                generation,
+                &session_hook_failure_summary(error),
+            ),
         });
     }
 
@@ -1255,7 +1291,14 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        self.request_typed_on_connection(
+        // Pi awaits `input` and `before_agent_start` handlers until they settle, so
+        // the transport must not end the wait on the extension's behalf.
+        let timeout = if hook == ExtensionHook::BeforePrompt {
+            PROMPT_HOOK_TRANSPORT_TIMEOUT
+        } else {
+            self.inner.config.request_timeout
+        };
+        self.request_typed_on_connection_with_timeout(
             connection,
             methods::HOOK_RUN,
             &HookRequest {
@@ -1264,6 +1307,7 @@ impl ExtensionProcess {
                 context,
             },
             resource_owner,
+            timeout,
         )
         .await
     }
@@ -1349,11 +1393,13 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        self.request_typed_on_connection(
+        // Pi awaits `context` and `context_with_system` handlers directly too.
+        self.request_typed_on_connection_with_timeout(
             connection,
             methods::CONTEXT_COLLECT,
             &ContextRequest { prompt, context },
             resource_owner,
+            PROMPT_HOOK_TRANSPORT_TIMEOUT,
         )
         .await
     }
@@ -2828,9 +2874,14 @@ impl ExtensionProcess {
                 }),
             )
             .await;
-            for result in session_hook_ends {
+            for (binding, result) in settled_session_hook_bindings.iter().zip(session_hook_ends) {
                 if let Err(error) = result {
-                    self.emit_session_hook_failure("session_end", &error);
+                    self.emit_session_hook_failure(
+                        "session_end",
+                        binding,
+                        binding.endpoint.generation,
+                        &error,
+                    );
                 }
             }
         }
@@ -3054,9 +3105,14 @@ impl ExtensionProcess {
                 }),
             )
             .await;
-            for result in session_hook_ends {
+            for (binding, result) in settled_session_hook_bindings.iter().zip(session_hook_ends) {
                 if let Err(error) = result {
-                    self.emit_session_hook_failure("session_end", &error);
+                    self.emit_session_hook_failure(
+                        "session_end",
+                        binding,
+                        replacement_endpoint.generation,
+                        &error,
+                    );
                 }
             }
         }
@@ -3071,9 +3127,17 @@ impl ExtensionProcess {
                 .map(|binding| self.dispatch_session_hook_start(binding)),
         )
         .await;
-        for result in session_hook_starts {
+        for (binding, result) in replacement_session_hook_bindings
+            .iter()
+            .zip(session_hook_starts)
+        {
             if let Err(error) = result {
-                self.emit_session_hook_failure("session_start", &error);
+                self.emit_session_hook_failure(
+                    "session_start",
+                    binding,
+                    binding.endpoint.generation,
+                    &error,
+                );
             }
         }
         let previous_shutdown_graceful = previous.shutdown().await;
@@ -3165,16 +3229,36 @@ impl ExtensionProcess {
         P: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        self.request_typed_on_connection_with_timeout(
+            connection,
+            method,
+            params,
+            resource_owner,
+            self.inner.config.request_timeout,
+        )
+        .await
+    }
+
+    /// [`Self::request_typed_on_connection`] with an explicit transport deadline.
+    /// Prompt phases Pi awaits directly pass [`PROMPT_HOOK_TRANSPORT_TIMEOUT`];
+    /// cancellation, owner fences and process supervision still bound the wait.
+    pub(super) async fn request_typed_on_connection_with_timeout<P, R>(
+        &self,
+        connection: Arc<ProcessConnection>,
+        method: &'static str,
+        params: &P,
+        resource_owner: Option<ExtensionResourceOwner>,
+        timeout: Duration,
+    ) -> Result<R, ExtensionRuntimeError>
+    where
+        P: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
         connection.require_api_v03_host_method(method)?;
         let params = serde_json::to_value(params)
             .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         let result = connection
-            .request_with_resource_owner(
-                method,
-                params,
-                self.inner.config.request_timeout,
-                resource_owner,
-            )
+            .request_with_resource_owner(method, params, timeout, resource_owner)
             .await?;
         serde_json::from_value(result).map_err(|error| {
             ExtensionRuntimeError::Protocol(format!(

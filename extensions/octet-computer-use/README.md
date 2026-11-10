@@ -1,10 +1,9 @@
 # octet computer-use
 
-**Source candidate distribution: 0.10.0.** This bundle requires exactly octet 0.10.0.
+**Distribution: 0.10.3.** This bundle requires exactly octet 0.10.3.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.10.0 candidate record](../../docs/releases/v0.10.0.md) for availability and
-remaining qualification. 0.10.0 assets are not published; use a reviewed source
-checkout with `--extension-dir ./extensions` until publication is approved.
+[0.10.3 release notes](../../docs/releases/v0.10.3.md) for published assets.
+A reviewed source checkout with `--extension-dir ./extensions` works too.
 Windows and Linux desktop parity remain unqualified.
 
 Operate native desktop applications on **macOS, Windows, and Linux** through a

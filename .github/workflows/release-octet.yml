@@ -3,6 +3,7 @@ name: octet binary release
 on:
   push:
     tags:
+      - "v*"
       - "octet-binaries-v*"
       - "octet-installer-v*"
   workflow_dispatch:
@@ -10,6 +11,15 @@ on:
       release_tag:
         description: Existing canonical stable octet tag to package
         required: true
+        type: string
+      force_release:
+        description: "Release even if source CI failed (manual override; signing still required)"
+        required: false
+        default: false
+        type: boolean
+      force_reason:
+        description: Reason for waiving source CI qualification (required with force_release)
+        required: false
         type: string
       require_provider_acceptance:
         description: Opt in to requiring approved live-provider acceptance (optional)
@@ -35,12 +45,14 @@ jobs:
   resolve:
     name: Resolve canonical release
     runs-on: ubuntu-24.04
+    timeout-minutes: 85
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       source_commit: ${{ steps.release.outputs.source_commit }}
       workflow_commit: ${{ steps.release.outputs.workflow_commit }}
       core_workflow_commit: ${{ steps.release.outputs.core_workflow_commit }}
+      core_workflow_tag: ${{ steps.release.outputs.core_workflow_tag }}
       mode: ${{ steps.release.outputs.mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -52,6 +64,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
           INPUT_REQUIRE_PROVIDER_ACCEPTANCE: ${{ inputs.require_provider_acceptance }}
           INPUT_PUBLISH_NPM: ${{ inputs.publish_npm }}
         run: |
@@ -61,6 +75,9 @@ jobs:
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
             case "$GITHUB_REF_NAME" in
+              v*)
+                tag=$GITHUB_REF_NAME
+                ;;
               octet-binaries-v*)
                 mode=binaries
                 tag=${GITHUB_REF_NAME#octet-binaries-}
@@ -70,7 +87,7 @@ jobs:
                 tag=${GITHUB_REF_NAME#octet-installer-}
                 ;;
               *)
-                echo "release tooling tags must start with octet-binaries- or octet-installer-" >&2
+                echo "release tags must be canonical vX.Y.Z or dedicated octet-binaries-/octet-installer- tags" >&2
                 exit 1
                 ;;
             esac
@@ -96,7 +113,12 @@ jobs:
             : # no additional constraint beyond release_tag being provided
           else
             case "$mode" in
-              binaries) expected_workflow_tag="octet-binaries-$tag" ;;
+              binaries)
+                expected_workflow_tag="octet-binaries-$tag"
+                if [[ "$GITHUB_REF_NAME" == "$tag" ]]; then
+                  expected_workflow_tag=$tag
+                fi
+                ;;
               installer) expected_workflow_tag="octet-installer-$tag" ;;
               *)
                 echo "invalid release mode: $mode" >&2
@@ -113,6 +135,11 @@ jobs:
 
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "$tag^{commit}")
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$source_commit" refs/remotes/origin/main; then
+            echo "release tags must point at a commit on main: $tag resolves to $source_commit" >&2
+            exit 1
+          fi
           workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
           if [[ "$workflow_commit" != "$source_commit" ]]; then
             if [[ "$mode" == npm ]]; then
@@ -121,7 +148,8 @@ jobs:
                 exit 1
               fi
             else
-              if [[ "$GITHUB_EVENT_NAME" != push \
+              expected_workflow_tag="octet-$mode-$tag"
+              if [[ ( "$GITHUB_EVENT_NAME" != push && "$GITHUB_EVENT_NAME" != workflow_dispatch ) \
                 || "$GITHUB_REF_TYPE" != tag \
                 || "$GITHUB_REF_NAME" != "$expected_workflow_tag" ]]; then
                 echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
@@ -156,23 +184,44 @@ jobs:
           fi
 
           core_workflow_commit=$workflow_commit
-          if [[ "$mode" == npm ]]; then
-            core_workflow_tag="octet-binaries-$tag"
+          core_workflow_tag=$GITHUB_REF_NAME
+          if [[ "$mode" == npm || "$mode" == installer ]]; then
+            # Metadata is only a hint here: select its exact allowed tag, resolve
+            # that tag independently, and verify the signature in the consuming
+            # job before trusting or using any native artifacts. This also works
+            # when both a canonical and a legacy tooling tag exist.
+            mkdir -p "$RUNNER_TEMP/core-release-identity"
+            gh release download "$tag" --dir "$RUNNER_TEMP/core-release-identity" \
+              --clobber --pattern OCTET_RELEASE_METADATA.json
+            core_workflow_tag=$(python3 - "$RUNNER_TEMP/core-release-identity/OCTET_RELEASE_METADATA.json" \
+              "$GITHUB_REPOSITORY" "$tag" "$source_commit" <<'PY'
+          import json
+          import sys
+
+          path, repository, tag, source = sys.argv[1:]
+          with open(path, encoding="utf-8") as stream:
+              metadata = json.load(stream)
+          prefix = f"{repository}/.github/workflows/release-octet.yml@refs/tags/"
+          ref = metadata.get("workflow_ref")
+          if (metadata.get("repository") != repository or metadata.get("tag") != tag
+                  or metadata.get("source_commit") != source
+                  or ref not in (prefix + tag, prefix + "octet-binaries-" + tag)):
+              raise SystemExit("native release metadata has an unexpected signing identity")
+          print(ref.removeprefix(prefix))
+          PY
+            )
             git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
             core_workflow_commit=$(git rev-parse "$core_workflow_tag^{commit}")
+            if [[ "$core_workflow_tag" == "$tag" && "$core_workflow_commit" != "$source_commit" ]]; then
+              echo "canonical native signer does not match the source commit" >&2
+              exit 1
+            fi
             if ! git merge-base --is-ancestor "$source_commit" "$core_workflow_commit"; then
               echo "native release tooling $core_workflow_commit does not descend from $source_commit" >&2
               exit 1
             fi
           fi
           if [[ "$mode" == installer ]]; then
-            core_workflow_tag="octet-binaries-$tag"
-            git fetch --force origin "refs/tags/$core_workflow_tag:refs/tags/$core_workflow_tag"
-            core_workflow_commit=$(git rev-parse "$core_workflow_tag^{commit}")
-            if ! git merge-base --is-ancestor "$source_commit" "$core_workflow_commit"; then
-              echo "core release tooling $core_workflow_commit does not descend from $source_commit" >&2
-              exit 1
-            fi
             if ! git merge-base --is-ancestor "$core_workflow_commit" "$workflow_commit"; then
               echo "installer repair tooling $workflow_commit does not descend from core tooling $core_workflow_commit" >&2
               exit 1
@@ -193,57 +242,118 @@ jobs:
             exit 1
           fi
 
-          if ! release_state=$(gh release view "$tag" \
+          if release_state=$(gh release view "$tag" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
-            echo "canonical release $tag does not exist" >&2
-            exit 1
-          fi
-          IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
-          if [[ "$release_tag" != "$tag" ]]; then
-            echo "resolved release tag $release_tag does not match $tag" >&2
-            exit 1
-          fi
-          if [[ "$draft" != false ]]; then
-            echo "canonical release $tag is still a draft" >&2
-            exit 1
-          fi
-          if [[ "$prerelease" != false ]]; then
-            echo "canonical release $tag is marked as a prerelease" >&2
+            IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
+            if [[ "$release_tag" != "$tag" || "$prerelease" != false ]]; then
+              echo "canonical release $tag is not a stable release" >&2
+              exit 1
+            fi
+            if [[ "$draft" == true ]]; then
+              marker="<!-- octet-binary-release-run:$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$source_commit:$workflow_commit -->"
+              if [[ "$mode" != binaries || "$GITHUB_REF_TYPE" != tag \
+                || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-binaries-$tag" ) ]] \
+                || ! gh release view "$tag" --json body --jq '.body // ""' | grep -Fxq -- "$marker"; then
+                echo "canonical release $tag is a draft owned by another run" >&2
+                exit 1
+              fi
+            elif [[ "$draft" != false ]]; then
+              echo "canonical release $tag has an invalid draft state" >&2
+              exit 1
+            fi
+          elif [[ "$mode" != binaries || "$GITHUB_REF_TYPE" != tag \
+            || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-binaries-$tag" ) ]]; then
+            echo "canonical release $tag does not exist; create it from a binary release tag" >&2
             exit 1
           fi
 
           # Qualification must name the immutable source, not this workflow's
-          # tooling SHA or a PR merge ref. Never accept an older successful run
-          # after a newer failure, or an incomplete/skipped required lane.
-          ci_run=$(gh api --method GET \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-            -f head_sha="$source_commit" -f per_page=100 \
-            --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty')
-          if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
-            echo "no source-bound CI qualification run for $source_commit" >&2
-            exit 1
-          fi
-          ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
-            --jq '[.head_sha, .status, .conclusion] | @tsv')
-          if [[ "$ci_identity" != "$source_commit"$'\tcompleted\tsuccess' ]]; then
-            echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
-            exit 1
-          fi
-          ci_jobs=$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
-            --jq '.jobs[] | [.name, .conclusion] | @tsv')
-          for check in dependencies quality 'test (ubuntu-24.04)' 'test (macos-15)' \
-            'windows (x86_64-pc-windows-gnu)' first-party-extension-tests \
-            extension-api-v03 msrv smoke-install; do
-            qualified=$(awk -F '\t' -v check="$check" \
-              '$1 == check { count++; if ($2 == "success") passed++ } END { print (count == 1 && passed == 1) ? "yes" : "no" }' <<< "$ci_jobs")
-            if [[ "$qualified" != yes ]]; then
-              echo "CI run $ci_run lacks a successful required lane: $check" >&2
+          # tooling SHA or a PR merge ref. Only an explicit manual override may
+          # waive this CI gate; source validation and signing remain mandatory.
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "${INPUT_FORCE_RELEASE:-false}" == true ]]; then
+            if [[ ! "${INPUT_FORCE_REASON:-}" =~ [^[:space:]] || "$INPUT_FORCE_REASON" == *$'\n'* || "$INPUT_FORCE_REASON" == *$'\r'* ]]; then
+              echo "force_release requires a non-empty, single-line force_reason" >&2
               exit 1
             fi
-          done
-          echo "qualified immutable source $source_commit with CI run $ci_run"
+            echo "::warning::Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR"
+            {
+              echo "## Manual CI override"
+              echo
+              printf '**Source CI qualification WAIVED: %s by %s**\n' "$INPUT_FORCE_REASON" "$GITHUB_ACTOR"
+              echo
+              echo "- Source CI qualification: **WAIVED, not passed** (force_release=true)"
+              echo "- Immutable source: \`$source_commit\`"
+              echo "- Release tooling: \`$workflow_commit\`"
+              echo "- Requested by: \`$GITHUB_ACTOR\`"
+              echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              echo "- Source checks, dependency audit, build checks, protected publishing and signatures remain required."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            # A main push run may not exist yet when its tag is pushed. Do not
+            # let earlier merge-group or dispatch runs race that canonical run.
+            # Repairs retain the latest exact-source push/merge-group/dispatch.
+            if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
+              ci_filter='[.workflow_runs[] | select(.event == "push" and .head_branch == "main")] | max_by(.id) | .id // empty'
+            else
+              ci_filter='[.workflow_runs[] | select((.event == "push" and .head_branch == "main") or .event == "merge_group" or .event == "workflow_dispatch")] | max_by(.id) | .id // empty'
+            fi
+            # GitHub runs push CI only for the pushed head of main, so a tag on an
+            # older main commit has no push run to wait for. Say what recovers it.
+            ci_recovery_hint() {
+              if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
+                echo "main push CI is the only accepted qualification for a canonical tag push." >&2
+                echo "Dispatch ci.yml on this exact commit, then dispatch release-octet.yml from the unchanged tag $tag with release_tag=$tag." >&2
+                echo "Keep the tag immutable; never re-tag or move it." >&2
+              fi
+            }
+            for attempt in {0..150}; do
+              ci_run=$(gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+                -f head_sha="$source_commit" -f per_page=100 \
+                --jq "$ci_filter")
+              if [[ "$ci_run" =~ ^[0-9]+$ ]]; then
+                ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
+                  --jq '[.head_sha, .status, .conclusion] | @tsv')
+                IFS=$'\t' read -r ci_sha ci_status ci_conclusion <<< "$ci_identity"
+                if [[ "$ci_sha" != "$source_commit" ]]; then
+                  echo "CI run $ci_run is not bound to $source_commit: $ci_identity" >&2
+                  exit 1
+                fi
+                if [[ "$ci_status" == completed ]]; then
+                  if [[ "$ci_conclusion" != success ]]; then
+                    echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+                    ci_recovery_hint
+                    exit 1
+                  fi
+                  break
+                fi
+                echo "waiting for CI run $ci_run for $source_commit: $ci_status"
+              else
+                echo "waiting for a source-bound CI run for $source_commit"
+              fi
+              if (( attempt == 150 )); then
+                echo "timed out after 75 minutes waiting for source CI for $source_commit" >&2
+                ci_recovery_hint
+                exit 1
+              fi
+              sleep 30
+            done
+            ci_jobs=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
+              --jq '.jobs[] | [.name, .conclusion] | @tsv')
+            for check in dependencies quality 'test (ubuntu-24.04)' 'test (macos-15)' \
+              'windows (x86_64-pc-windows-gnu)' first-party-extension-tests \
+              extension-api-v03 msrv smoke-install; do
+              qualified=$(awk -F '\t' -v check="$check" \
+                '$1 == check { count++; if ($2 == "success") passed++ } END { print (count == 1 && passed == 1) ? "yes" : "no" }' <<< "$ci_jobs")
+              if [[ "$qualified" != yes ]]; then
+                echo "CI run $ci_run lacks a successful required lane: $check" >&2
+                exit 1
+              fi
+            done
+            echo "qualified immutable source $source_commit with CI run $ci_run"
+          fi
 
           if [[ "$mode" != installer ]]; then
             if [[ "${INPUT_REQUIRE_PROVIDER_ACCEPTANCE:-false}" == true ]]; then
@@ -301,6 +411,7 @@ jobs:
             echo "source_commit=$source_commit"
             echo "workflow_commit=$workflow_commit"
             echo "core_workflow_commit=$core_workflow_commit"
+            echo "core_workflow_tag=$core_workflow_tag"
             echo "mode=$mode"
           } >> "$GITHUB_OUTPUT"
 
@@ -316,7 +427,7 @@ jobs:
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
@@ -345,7 +456,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_commit }}
           path: source
           fetch-depth: 0
-      # Keep release optimization independent from the workspace's 1.88 MSRV.
+      # Keep release optimization independent from the workspace's 1.89 MSRV.
       # This immutable action revision installs Rust 1.97.1.
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
         with:
@@ -602,6 +713,12 @@ jobs:
           grep -F "release_workflow_commit=\"$WORKFLOW_COMMIT\"" release-assets/install-octet.sh
           release-assets/install-octet.sh --help | grep -F "Install octet ${{ needs.resolve.outputs.version }}."
           cp scripts/install-octet.ps1 release-assets/install-octet.ps1
+          # The PowerShell installer embeds its target version. Publishing a
+          # stale copy would install a different release than the tag.
+          if ! grep -Fq "[string] \$Version = '${{ needs.resolve.outputs.version }}'" release-assets/install-octet.ps1; then
+            echo "PowerShell installer version does not match the release version" >&2
+            exit 1
+          fi
           ls -la release-assets/
           test "$(find release-assets -maxdepth 1 -name 'octet-*.tar.gz' | wc -l | tr -d ' ')" = 3
           test "$(find release-assets -maxdepth 1 -name 'octet-*.zip' | wc -l | tr -d ' ')" = 1
@@ -695,10 +812,44 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-          WORKFLOW_TAG: octet-binaries-${{ needs.resolve.outputs.tag }}
+          WORKFLOW_TAG: ${{ github.ref_name }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          verify=(
+            --certificate-identity "$COSIGN_IDENTITY"
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-github-workflow-name "octet binary release"
+            --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
+            --certificate-github-workflow-sha "$WORKFLOW_COMMIT"
+          )
+          # Sigstore bundles are freshly signed on every run, so a resumed run
+          # cannot require byte equality for them. Accept an existing bundle
+          # only when it verifies the identical candidate artifact under this
+          # workflow's exact identity; anything else stops publication.
+          verify_existing_bundle() {
+            name=$1
+            artifact=${name%.sigstore.json}
+            if [[ ! -f "release-assets/$artifact" ]]; then
+              echo "existing release signature has no candidate asset: $name" >&2
+              exit 1
+            fi
+            signature_directory="$RUNNER_TEMP/existing-signatures"
+            mkdir -p "$signature_directory"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$signature_directory" --clobber
+            if ! cosign verify-blob \
+              --bundle "$signature_directory/$name" \
+              "${verify[@]}" \
+              "release-assets/$artifact"; then
+              echo "existing release signature does not verify the immutable candidate: $name" >&2
+              exit 1
+            fi
+            echo "verified existing immutable release signature: $name"
+          }
           verify_release_refs() {
             phase=$1
             git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
@@ -706,25 +857,60 @@ jobs:
               echo "canonical tag moved while release artifacts were $phase" >&2
               exit 1
             fi
-            git fetch --force origin "refs/tags/$WORKFLOW_TAG:refs/tags/$WORKFLOW_TAG"
-            if [[ "$(git rev-parse "$WORKFLOW_TAG^{commit}")" != "$WORKFLOW_COMMIT" ]]; then
-              echo "release workflow tag moved while release artifacts were $phase" >&2
+            if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+              git fetch --force origin "refs/tags/$WORKFLOW_TAG:refs/tags/$WORKFLOW_TAG"
+              if [[ "$(git rev-parse "$WORKFLOW_TAG^{commit}")" != "$WORKFLOW_COMMIT" ]]; then
+                echo "release workflow tag moved while release artifacts were $phase" >&2
+                exit 1
+              fi
+            elif [[ "$WORKFLOW_COMMIT" != "$SOURCE_COMMIT" ]]; then
+              # resolve only allows a non-canonical workflow commit on its exact
+              # tooling tag, so a branch dispatch must run the source itself.
+              echo "workflow commit $WORKFLOW_COMMIT is not the immutable source and this run is not on a tag" >&2
               exit 1
             fi
           }
           verify_release_refs building
+          marker="<!-- octet-binary-release-run:$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$SOURCE_COMMIT:$WORKFLOW_COMMIT -->"
           if ! release_state=$(gh release view "$RELEASE_TAG" \
             --json tagName,isDraft,isPrerelease \
             --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'); then
-            echo "canonical release $RELEASE_TAG no longer exists" >&2
-            exit 1
+            if [[ "$GITHUB_REF_TYPE" != tag \
+              || ( "$WORKFLOW_TAG" != "$RELEASE_TAG" && "$WORKFLOW_TAG" != "octet-binaries-$RELEASE_TAG" ) ]]; then
+              echo "canonical release $RELEASE_TAG no longer exists" >&2
+              exit 1
+            fi
+            { cat "docs/releases/$RELEASE_TAG.md"; printf '\n\n%s\n' "$marker"; } > "$RUNNER_TEMP/new-release-notes.md"
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" \
+              --notes-file "$RUNNER_TEMP/new-release-notes.md"
+            release_state=$(gh release view "$RELEASE_TAG" \
+              --json tagName,isDraft,isPrerelease \
+              --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
           fi
           IFS=$'\t' read -r release_tag draft prerelease <<< "$release_state"
-          if [[ "$release_tag" != "$RELEASE_TAG" || "$draft" != false || "$prerelease" != false ]]; then
-            echo "canonical release $RELEASE_TAG is no longer a published stable release" >&2
+          if [[ "$release_tag" != "$RELEASE_TAG" || "$prerelease" != false \
+            || ( "$draft" != true && "$draft" != false ) ]]; then
+            echo "canonical release $RELEASE_TAG is not a stable release" >&2
             exit 1
           fi
+          if [[ "$draft" == true ]]; then
+            if [[ "$GITHUB_REF_TYPE" != tag \
+              || ( "$WORKFLOW_TAG" != "$RELEASE_TAG" && "$WORKFLOW_TAG" != "octet-binaries-$RELEASE_TAG" ) ]] \
+              || ! gh release view "$RELEASE_TAG" --json body --jq '.body // ""' | grep -Fxq -- "$marker"; then
+              echo "canonical release $RELEASE_TAG is a draft owned by another run" >&2
+              exit 1
+            fi
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$INPUT_FORCE_RELEASE" == true ]]; then
+            waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
+            gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
+            if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
+              { printf '%s\n\n' "$waiver"; cat "$RUNNER_TEMP/release-notes.md"; } > "$RUNNER_TEMP/waived-release-notes.md"
+              gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/waived-release-notes.md"
+            fi
+          fi
           existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          declare -A accepted=()
           uploads=()
           for asset in release-assets/*; do
             name=${asset##*/}
@@ -734,21 +920,68 @@ jobs:
                 exit 1
               fi
               local_digest=$(sha256sum "$asset" | awk '{print $1}')
-              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+              if [[ "$existing_digest" == "sha256:$local_digest" ]]; then
+                echo "verified existing immutable release asset: $name"
+              elif [[ "$name" == *.sigstore.json ]]; then
+                verify_existing_bundle "$name"
+                accepted["$name"]=$existing_digest
+              else
                 echo "immutable release asset differs from the existing asset: $name" >&2
                 exit 1
               fi
-              echo "verified existing immutable release asset: $name"
             else
               uploads+=("$asset")
             fi
           done
+          if [[ "$draft" == true ]]; then
+            # A draft is owned by this run, so it may contain only candidates.
+            while IFS=$'\t' read -r name digest; do
+              [[ -n "$name" ]] || continue
+              if [[ ! "$name" =~ ^[A-Za-z0-9_.-]+$ || ! -f "release-assets/$name" ]]; then
+                echo "draft contains an unexpected asset: $name" >&2
+                exit 1
+              fi
+            done <<< "$existing_digests"
+          fi
           if ((${#uploads[@]})); then
             gh release upload "$RELEASE_TAG" "${uploads[@]}"
           else
             echo "all release assets already match the immutable candidate"
           fi
           verify_release_refs publishing
+          # Upload success is not evidence that every hosted asset has settled.
+          # Compare GitHub's immutable digest for every candidate before making a
+          # draft visible or changing the repository's Latest release.
+          published_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            local_digest=$(sha256sum "$asset" | awk '{print $1}')
+            if ! observed=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$published_digests"); then
+              echo "uploaded release asset is missing: $name" >&2
+              exit 1
+            fi
+            if [[ "$observed" == "sha256:$local_digest" ]]; then
+              continue
+            fi
+            if [[ -n "${accepted[$name]:-}" && "$observed" == "${accepted[$name]}" ]]; then
+              echo "verified existing immutable release signature: $name"
+              continue
+            fi
+            echo "uploaded release asset has a mismatched digest: $name" >&2
+            exit 1
+          done
+          if [[ "$draft" == true ]]; then
+            release_state=$(gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease \
+              --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
+            if [[ "$release_state" != "$RELEASE_TAG"$'\t'true$'\t'false ]] \
+              || ! gh release view "$RELEASE_TAG" --json body --jq '.body // ""' | grep -Fxq -- "$marker"; then
+              echo "draft release state or ownership changed before publication" >&2
+              exit 1
+            fi
+            # Publish without moving the repository's Latest pointer. The
+            # promote job sets it only after the published-install smoke passes.
+            gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          fi
 
   verify-published:
     name: Verify binary install on ${{ matrix.target }}
@@ -835,6 +1068,41 @@ jobs:
             | HOME="$test_home" "$host_binary" \
             | grep -F '"type":"hello"' >/dev/null
 
+  promote-latest:
+    name: Mark the verified release as Latest
+    needs: [resolve, publish, verify-published]
+    # Latest drives `octet update`, the startup notice and generic installers,
+    # so it moves only after every published-install smoke job has succeeded.
+    if: needs.resolve.result == 'success' && needs.publish.result == 'success' && needs['verify-published'].result == 'success' && needs.resolve.outputs.mode == 'binaries'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Promote the immutable release that passed public installation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          release_state=$(gh release view "$RELEASE_TAG" \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')
+          if [[ "$release_state" != "$RELEASE_TAG"$'\t'false$'\t'false ]]; then
+            echo "release $RELEASE_TAG is not a published stable release" >&2
+            exit 1
+          fi
+          tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+          if [[ "$tag_commit" != "$SOURCE_COMMIT" ]]; then
+            echo "tag $RELEASE_TAG no longer resolves to the immutable source $SOURCE_COMMIT" >&2
+            exit 1
+          fi
+          # Idempotent: re-running a resumed workflow only reasserts Latest.
+          gh release edit "$RELEASE_TAG" --latest
+          echo "release $RELEASE_TAG is Latest after the published-install smoke passed"
+
   package-npm:
     name: Package verified npm artifacts
     needs: [resolve, verify-published]
@@ -865,7 +1133,7 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
-          CORE_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-${{ needs.resolve.outputs.tag }}
+          CORE_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/release-octet.yml@refs/tags/${{ needs.resolve.outputs.core_workflow_tag }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -1161,10 +1429,11 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
+          COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
           set -euo pipefail
           verify=(
-            --certificate-identity "https://github.com/${{ github.workflow_ref }}"
+            --certificate-identity "$COSIGN_IDENTITY"
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
             --certificate-github-workflow-name "octet binary release"
             --certificate-github-workflow-repository "$WORKFLOW_REPOSITORY"
@@ -1177,7 +1446,29 @@ jobs:
           cosign sign-blob --yes --bundle npm-assets/OCTET_NPM_MANIFEST.json.sigstore.json npm-assets/OCTET_NPM_MANIFEST.json
           cosign verify-blob --bundle npm-assets/OCTET_NPM_SHA256SUMS.sigstore.json "${verify[@]}" npm-assets/OCTET_NPM_SHA256SUMS
           cosign verify-blob --bundle npm-assets/OCTET_NPM_MANIFEST.json.sigstore.json "${verify[@]}" npm-assets/OCTET_NPM_MANIFEST.json
+          # A resumed run produces fresh signature bundles. Accept an existing
+          # bundle only when it verifies the identical candidate artifact.
+          verify_existing_bundle() {
+            name=$1
+            artifact=${name%.sigstore.json}
+            if [[ ! -f "npm-assets/$artifact" ]]; then
+              echo "existing npm evidence signature has no candidate asset: $name" >&2
+              exit 1
+            fi
+            signature_directory="$RUNNER_TEMP/existing-npm-signatures"
+            mkdir -p "$signature_directory"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$signature_directory" --clobber
+            if ! cosign verify-blob \
+              --bundle "$signature_directory/$name" \
+              "${verify[@]}" \
+              "npm-assets/$artifact"; then
+              echo "existing npm evidence signature does not verify the immutable candidate: $name" >&2
+              exit 1
+            fi
+            echo "verified existing immutable npm evidence signature: $name"
+          }
           existing_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          declare -A accepted=()
           uploads=()
           for asset in npm-assets/*.tgz npm-assets/*.sigstore.json npm-assets/OCTET_NPM_SHA256SUMS npm-assets/OCTET_NPM_MANIFEST.json; do
             name=${asset##*/}
@@ -1187,11 +1478,15 @@ jobs:
                 exit 1
               fi
               local_digest=$(sha256sum "$asset" | awk '{print $1}')
-              if [[ "$existing_digest" != "sha256:$local_digest" ]]; then
+              if [[ "$existing_digest" == "sha256:$local_digest" ]]; then
+                echo "verified existing immutable release asset: $name"
+              elif [[ "$name" == *.sigstore.json ]]; then
+                verify_existing_bundle "$name"
+                accepted["$name"]=$existing_digest
+              else
                 echo "immutable release asset differs from the existing asset: $name" >&2
                 exit 1
               fi
-              echo "verified existing immutable release asset: $name"
             else
               uploads+=("$asset")
             fi
@@ -1201,6 +1496,23 @@ jobs:
           else
             echo "all npm evidence assets already match the immutable candidate"
           fi
+          published_digests=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, (.digest // "")] | @tsv')
+          for asset in npm-assets/*.tgz npm-assets/*.sigstore.json npm-assets/OCTET_NPM_SHA256SUMS npm-assets/OCTET_NPM_MANIFEST.json; do
+            name=${asset##*/}
+            local_digest=$(sha256sum "$asset" | awk '{print $1}')
+            if ! observed=$(awk -F '\t' -v wanted="$name" '$1 == wanted { print $2; found=1 } END { exit found ? 0 : 1 }' <<< "$published_digests"); then
+              echo "uploaded npm evidence asset is missing: $name" >&2
+              exit 1
+            fi
+            if [[ "$observed" == "sha256:$local_digest" ]]; then
+              continue
+            fi
+            if [[ -n "${accepted[$name]:-}" && "$observed" == "${accepted[$name]}" ]]; then
+              continue
+            fi
+            echo "uploaded npm evidence asset has a mismatched digest: $name" >&2
+            exit 1
+          done
 
   verify-npm-published:
     name: Verify published npm provenance
@@ -1342,6 +1654,21 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
+      - name: Record a source CI waiver in the release notes
+        if: github.event_name == 'workflow_dispatch' && inputs.force_release == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          INPUT_FORCE_REASON: ${{ inputs.force_reason }}
+        run: |
+          set -euo pipefail
+          waiver="**Source CI qualification WAIVED: $INPUT_FORCE_REASON by $GITHUB_ACTOR**"
+          gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$RUNNER_TEMP/release-notes.md"
+          if ! grep -Fxq -- "$waiver" "$RUNNER_TEMP/release-notes.md"; then
+            { printf '%s\n\n' "$waiver"; cat "$RUNNER_TEMP/release-notes.md"; } > "$RUNNER_TEMP/waived-release-notes.md"
+            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/waived-release-notes.md"
+          fi
       - name: Generate version-pinned portable installer
         shell: bash
         env:
@@ -1420,6 +1747,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
+          CORE_WORKFLOW_TAG: ${{ needs.resolve.outputs.core_workflow_tag }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -1428,7 +1756,7 @@ jobs:
             --dir upstream-assets \
             --pattern OCTET_SHA256SUMS \
             --pattern OCTET_SHA256SUMS.sigstore.json
-          core_identity="https://github.com/$WORKFLOW_REPOSITORY/.github/workflows/release-octet.yml@refs/tags/octet-binaries-$RELEASE_TAG"
+          core_identity="https://github.com/$WORKFLOW_REPOSITORY/.github/workflows/release-octet.yml@refs/tags/$CORE_WORKFLOW_TAG"
           cosign verify-blob \
             --bundle upstream-assets/OCTET_SHA256SUMS.sigstore.json \
             --certificate-identity "$core_identity" \
@@ -1505,7 +1833,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
-          CORE_WORKFLOW_TAG: octet-binaries-${{ needs.resolve.outputs.tag }}
+          CORE_WORKFLOW_TAG: ${{ needs.resolve.outputs.core_workflow_tag }}
           CORE_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.core_workflow_commit }}
           INSTALLER_WORKFLOW_TAG: ${{ github.ref_name }}
           INSTALLER_WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}

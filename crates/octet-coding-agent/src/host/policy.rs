@@ -159,6 +159,9 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         skill_paths: request.skill_paths.clone(),
         extension_paths: request.extension_paths.clone(),
         enabled_extensions: request.enabled_extensions.clone(),
+        // A host request states activation directly; there is no user config
+        // off list to subtract at this boundary.
+        disabled_extensions: Vec::new(),
         extension_activation_overridden: true,
         trusted_extensions: request.trusted_extensions.clone(),
         invocation_trusted_extensions: Vec::new(),

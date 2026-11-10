@@ -49,6 +49,8 @@ mod resource_resolver;
 mod resources;
 mod session_catalog;
 mod session_commands;
+#[cfg(test)]
+mod session_parity;
 mod session_store;
 mod session_tree;
 mod tui;
@@ -101,7 +103,18 @@ fn forward_startup_trace(line: &str) {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let args = std::env::args_os().collect::<Vec<OsString>>();
+    // Pi spells "no extensions" as the multi-character short flag `-ne`, which
+    // clap cannot express directly. Accept it as `--no-extensions` before any
+    // parsing so both spellings behave identically.
+    let args = std::env::args_os()
+        .map(|arg| {
+            if arg == "-ne" {
+                OsString::from("--no-extensions")
+            } else {
+                arg
+            }
+        })
+        .collect::<Vec<OsString>>();
     // The internal re-exec probe is answered before clap, provider setup,
     // extension activation, workspace access, networking, or the agent loop.
     // This early return is the whole guarantee: no `App` can be constructed,
@@ -192,10 +205,35 @@ async fn run() -> anyhow::Result<()> {
     } else {
         Default::default()
     };
+    // Pi's surface-reducing flags are accepted so an ACP bridge can spawn octet
+    // with the same argv it passes Pi. Say so once instead of failing silently
+    // or pretending the flag changed something.
+    for (flag, set, why) in [
+        (
+            "--no-themes",
+            cli.no_themes,
+            "octet loads no theme unless --theme names one",
+        ),
+        (
+            "--no-skills",
+            cli.no_skills,
+            "skills come only from --skill-dir and trusted workspace resources",
+        ),
+    ] {
+        if set {
+            crate::output::stderr_line(format!(
+                "note: {flag} is accepted for Pi CLI compatibility and has no effect here: {why}"
+            ));
+        }
+    }
+    let no_extensions = cli.no_extensions;
     let mut config = cli::build_config(cli, &cwd)?;
     app::bootstrap::startup_phase("cli.configured");
     config.extension_flag_values = extension_flag_values;
     cli::apply_pi_codemode_settings(&mut config, &explicit_extension_flags);
+    // Native activation is last so `-ne` also covers the mirrored Pi codemode
+    // preference, and a `/extensions` Disable outranks it on the next launch.
+    cli::apply_native_extension_activation(&mut config, no_extensions);
     if let Some(search) = parity.list_models.as_deref() {
         return cli::parity::list_models(&config, search);
     }

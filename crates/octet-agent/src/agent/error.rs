@@ -61,7 +61,7 @@ pub enum AgentError {
     InputLimitUnavailable,
     /// Effective provider context could not be prepared safely before dispatch.
     #[error("provider context preparation refused: {0}")]
-    ProviderContextPreparation(&'static str),
+    ProviderContextPreparation(String),
     /// A host-owned maximum outage duration expired during recovery.
     #[error("network recovery exceeded the host outage limit of {limit:?} (failed-attempt usage unknown: {usage_unknown})")]
     NetworkWaitLimit {

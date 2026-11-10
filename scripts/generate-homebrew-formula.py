@@ -112,17 +112,24 @@ def require_digest(value: Any, label: str) -> str:
 
 
 def expected_asset_names(version: str) -> dict[str, tuple[str, str | None]]:
-    return {
+    assets = {
         "install-octet.sh": ("installer", None),
         **{
             f"octet-{version}-{target}.tar.gz": ("binary", target)
-            for target, _ in (
-                ("aarch64-apple-darwin", "arm64"),
-                ("x86_64-apple-darwin", "x86_64"),
-                ("x86_64-unknown-linux-gnu", "linux-x86_64"),
+            for target in (
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+                "x86_64-unknown-linux-gnu",
             )
         },
     }
+    # Published releases from 0.9.0 also bind the Windows installer and ZIP.
+    if tuple(int(part) for part in version.split(".")) >= (0, 9, 0):
+        assets["install-octet.ps1"] = ("installer", None)
+        assets[f"octet-{version}-x86_64-pc-windows-msvc.zip"] = (
+            "binary", "x86_64-pc-windows-msvc"
+        )
+    return assets
 
 
 def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], str]:
@@ -154,10 +161,11 @@ def parse_metadata(value: Mapping[str, Any]) -> tuple[str, str, dict[str, str], 
         if COMMIT_PATTERN.fullmatch(commit) is None:
             fail(f"release metadata {label} is malformed")
     workflow_ref = require_string(value, "workflow_ref", "workflow ref")
-    expected_workflow_ref = (
-        f"{identity_repository}/.github/workflows/release-octet.yml@refs/tags/octet-binaries-v{version}"
-    )
-    if workflow_ref != expected_workflow_ref:
+    prefix = f"{identity_repository}/.github/workflows/release-octet.yml@refs/tags/"
+    if workflow_ref == prefix + tag:
+        if value["workflow_commit"] != value["source_commit"]:
+            fail("canonical release workflow commit must equal the source commit")
+    elif workflow_ref != prefix + "octet-binaries-" + tag:
         fail("release metadata workflow ref is not the immutable binary release tag")
 
     checksum_manifest = value["checksum_manifest"]

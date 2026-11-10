@@ -11,6 +11,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { root, inspect, host } from './helper.mjs';
 import { PI_SUPPORTED_RANGE, piReleaseSupported } from '../lib/pi-modules.mjs';
+import { PI_MANIFEST_VERSIONS } from '../lib/pi-manifests.mjs';
 
 const fixture = name => join(root, 'test/fixtures/installed-pi', name);
 const runner = join(root, 'runner.mjs');
@@ -18,7 +19,9 @@ const piVersion = readFileSync(join(root, 'lib/public-helpers.mjs'), 'utf8').mat
 
 function run(extensions, { mode, env = {} } = {}) {
   const result = spawnSync(process.execPath, [runner, ...(mode ? ['--pi-runtime', mode] : []), '--inspect', ...extensions],
-    { encoding: 'utf8', timeout: 20000, maxBuffer: 1048576, env: { ...process.env, ...env } });
+    // Real Pi 1.5.0 loads a much larger native ESM graph than 1.0.2; the fake
+    // installs are fast, the managed-release cases are not.
+    { encoding: 'utf8', timeout: 60000, maxBuffer: 1048576, env: { ...process.env, ...env } });
   const fallback = result.stderr.split('\n').find(line => line.startsWith('[pi-compat fallback] '));
   return { ...result, metadata: result.status === 0 ? JSON.parse(result.stdout).result : undefined,
     fallback: fallback && JSON.parse(fallback.slice('[pi-compat fallback] '.length)) };
@@ -177,7 +180,6 @@ test('installed mode fails loudly for a missing, unsupported, or inconsistent Pi
   const entry = [fixture('missing-export.ts')];
   const cases = [
     [{ OCTET_PI_AGENT_DIR: join(tmpdir(), 'octet-no-such-pi-agent') }, /could not read managed Pi version from .*current-version \(ENOENT\)/],
-    [fakeInstall(t, { version: '1.5.0' }), /installed Pi 1\.5\.0 is outside the supported range >=1\.0\.2 <1\.5\.0/],
     [fakeInstall(t, { version: '1.0.1' }), /installed Pi 1\.0\.1 is outside the supported range/],
     [fakeInstall(t, { version: '1.4.0-beta.1' }), /installed Pi 1\.4\.0-beta\.1 is outside the supported range/],
     [fakeInstall(t, { version: '2.0.0' }), /installed Pi 2\.0\.0 is outside the supported range/],
@@ -199,15 +201,22 @@ test('installed mode fails loudly for a missing, unsupported, or inconsistent Pi
   assert.match(invalid.stderr, /pi_runtime must be "shims" or "installed"/);
 });
 
-test('installed mode accepts every supported Pi release, 1.0.2 through 1.4.x', t => {
-  for (const version of ['1.0.2', '1.1.0', '1.4.0', '1.4.9']) {
+test('installed mode accepts every release a manifest governs, and diagnoses a substituted one', t => {
+  for (const version of ['1.0.2', '1.1.0', '1.4.0', '1.4.9', '1.5.0']) {
     const result = run([fixture('denied.ts')], { mode: 'installed', env: fakeInstall(t, { version }) });
     assert.equal(result.status, 0, `${version}: ${result.stderr}`);
     assert.match(describe(result.metadata, 'trust'), /^unsupported_feature pi-coding-agent\.ProjectTrustStore/);
   }
   assert.equal(piReleaseSupported('1.4.0'), true);
   assert.equal(piReleaseSupported('1.0.2'), true);
-  for (const version of ['1.0.1', '1.5.0', '1.4.0-rc.1', '01.4.0', '1.4', '']) assert.equal(piReleaseSupported(version), false, version);
+  assert.equal(piReleaseSupported('1.5.0'), true);
+  // A release newer than the highest manifest reuses it, and says so on stderr.
+  const untested = run([fixture('denied.ts')], { mode: 'installed', env: fakeInstall(t, { version: '1.6.0' }) });
+  assert.equal(untested.status, 0, untested.stderr);
+  assert.match(untested.stderr, /\[pi-compat manifest\] installed Pi 1\.6\.0 has no manifest; using 1\.5\.0 routes and classifications unverified/);
+  for (const version of ['1.0.1', '1.4.0-rc.1', '01.4.0', '1.4', '', '2.0.0']) assert.equal(piReleaseSupported(version), false, version);
+  assert.deepEqual(PI_MANIFEST_VERSIONS, ['1.0.2', '1.5.0']);
+  assert.equal(PI_SUPPORTED_RANGE, '>=1.0.2 <2.0.0');
 });
 
 test('host initialize receives the fallback data on the JSON-RPC error', async t => {

@@ -16,9 +16,9 @@ use crate::tui::theme::ModelLab;
 /// Maximum owned image bytes accepted from one tool-result image. This sits
 /// below the terminal foundation's hard cap so the product projection remains
 /// bounded even when a session contains larger provider payloads.
-pub(crate) const MAX_TOOL_RESULT_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_TOOL_RESULT_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum inline image payload bytes retained for one tool result.
-pub(crate) const MAX_TOOL_RESULT_IMAGE_BYTES_PER_ITEM: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_TOOL_RESULT_IMAGE_BYTES_PER_ITEM: usize = 8 * 1024 * 1024;
 /// Maximum validated images retained for one tool result.
 pub(crate) const MAX_TOOL_RESULT_IMAGES_PER_ITEM: usize = 4;
 /// Maximum validated tool-result images retained at once in one interactive
@@ -27,7 +27,7 @@ pub(crate) const MAX_TOOL_RESULT_IMAGES_PER_ITEM: usize = 4;
 pub(crate) const MAX_SESSION_TOOL_RESULT_IMAGES: usize = 32;
 /// Maximum inline image payload bytes retained at once in one interactive
 /// session; the oldest retained images are released first.
-pub(crate) const MAX_SESSION_TOOL_RESULT_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_SESSION_TOOL_RESULT_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
 /// A bounded, opaque image projection for one tool result.
 ///
@@ -1294,6 +1294,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("ok".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1338,6 +1339,7 @@ mod tests {
                 content: vec![ToolResultPart::Text("read=image".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             };
             let content = if protocol == Protocol::OpenAiChat {
                 vec![
@@ -1374,6 +1376,7 @@ mod tests {
             content: vec![ToolResultPart::Text("done".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         };
         for content in [
             vec![
@@ -1613,6 +1616,7 @@ mod tests {
                             content: vec![ToolResultPart::Text("ok".into())],
                             is_error: false,
                             added_tool_names: None,
+                            tool_name: None,
                         }),
                         UserPart::Text("after".into()),
                     ],
@@ -1844,6 +1848,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("contents".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1911,6 +1916,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("contents".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1996,6 +2002,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("durable".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -2045,6 +2052,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("one durable result".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();

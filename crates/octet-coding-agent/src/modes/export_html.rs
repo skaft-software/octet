@@ -413,6 +413,7 @@ mod tests {
                         )],
                         is_error: true,
                         added_tool_names: None,
+                        tool_name: None,
                     })],
                 },
             )))
@@ -572,6 +573,7 @@ mod tests {
                 content: vec![ToolResultPart::Media(image)],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })] })
         )});
         let package = json!({"metadata": {}, "records": [user, assistant, tool]});

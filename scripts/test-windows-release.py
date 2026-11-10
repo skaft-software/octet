@@ -213,6 +213,19 @@ class WindowsReleaseFixtureTests(unittest.TestCase):
             self.tracked.remove("OCTET.EXE")
             (self.source / "OCTET.EXE").unlink()
 
+    def test_probe_accepts_canonical_signer_only_at_the_source_commit(self) -> None:
+        value = json.loads(self.probe.read_text(encoding="utf-8"))
+        value["workflow_ref"] = f"{REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/v{VERSION}"
+        with self.assertRaises(packager.ReleaseError):
+            packager.validate_probe(value, VERSION, WINDOWS_TARGET)
+        value["workflow_commit"] = SOURCE_COMMIT
+        packager.validate_probe(value, VERSION, WINDOWS_TARGET)
+        self.probe.write_text(json.dumps(value), encoding="utf-8")
+        self.package(self.root / "canonical-signer")
+        value["workflow_ref"] += "-rc.1"
+        with self.assertRaises(packager.ReleaseError):
+            packager.validate_probe(value, VERSION, WINDOWS_TARGET)
+
     def test_probe_and_resource_mismatches_fail_closed(self) -> None:
         value = json.loads(self.probe.read_text(encoding="utf-8"))
         value["binaries"]["octet-host.exe"]["hello_stdout"] = "{}\n{}\n"

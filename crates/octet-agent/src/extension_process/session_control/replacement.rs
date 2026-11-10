@@ -16,7 +16,7 @@ impl ReplacementReceiver {
             Self::Setup(receiver) => receiver
                 .await
                 .map_err(|_| ExtensionSessionLifecycleError::Unavailable)?
-                .map_err(|_| ExtensionSessionLifecycleError::Failed),
+                .map_err(ExtensionSessionLifecycleError::Refused),
         }
     }
 }
@@ -212,13 +212,13 @@ pub(super) fn dispatch_setup(
                         }
                     }
                     Ok(result) => Ok(serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})),
-                    Err(detail) => api_v03_session_lifecycle_error(&id, "internal_error", &detail),
+                    Err(detail) => session_lifecycle_error(&id, "internal_error", &detail),
                 }
             }
-            Err(error) => api_v03_session_lifecycle_submit_error(&id, error),
+            Err(error) => session_lifecycle_submit_error(&id, error),
         };
         if let Ok(response) = response {
-            deliver_api_v03_session_lifecycle_response(
+            deliver_session_lifecycle_response(
                 children,
                 id,
                 writer,
@@ -392,21 +392,23 @@ pub(super) fn queue_replacement(
                     Err(ExtensionSessionLifecycleError::Cancelled) => Ok(serde_json::json!({
                         "jsonrpc":"2.0", "id":id, "result":{"cancelled":true}
                     })),
-                    Err(ExtensionSessionLifecycleError::Unavailable) => {
-                        api_v03_session_lifecycle_error(
-                            &id,
-                            "internal_error",
-                            "active-session lifecycle service is unavailable",
-                        )
-                    }
-                    Err(ExtensionSessionLifecycleError::Failed) => api_v03_session_lifecycle_error(
+                    Err(ExtensionSessionLifecycleError::Unavailable) => session_lifecycle_error(
+                        &id,
+                        "internal_error",
+                        "active-session lifecycle service is unavailable",
+                    ),
+                    Err(ExtensionSessionLifecycleError::Refused(reason)) => Ok(serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32000, "message": reason},
+                    })),
+                    Err(ExtensionSessionLifecycleError::Failed) => session_lifecycle_error(
                         &id,
                         "internal_error",
                         "active-session lifecycle operation failed",
                     ),
                 }
             }
-            Err(error) => api_v03_session_lifecycle_submit_error(&id, error),
+            Err(error) => session_lifecycle_submit_error(&id, error),
         };
         // API 0.4 typed errors must not pass through the canonical API 0.3
         // error table. Its ordinary bounded writer still atomically claims the

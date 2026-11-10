@@ -95,6 +95,81 @@ fn responses_steering_metadata_is_not_a_catalog_prompt() {
 }
 
 #[test]
+fn catalog_model_comes_from_the_nearest_model_change_or_assistant_message() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("assistant-model.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let assistant = |model: &str| {
+        EntryValue::Message(Message::Assistant(octet_ai::AssistantMessage {
+            model: ModelId(model.into()),
+            protocol: Protocol::OpenAiChat,
+            content: vec![octet_ai::AssistantPart::Text("hi".into())],
+        }))
+    };
+    session
+        .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+            content: vec![UserPart::Text("hello".into())],
+        })))
+        .unwrap();
+    // A legacy import's bare model name is not a route id and never wins.
+    session.append(assistant("legacy-bare-model")).unwrap();
+    assert_eq!(active_branch_catalog_config(&session).0, None);
+    assert_eq!(summarize_session(&path).unwrap().configured_model, None);
+    session.append(assistant("openai/first")).unwrap();
+    // No model_change: the assistant message names the model.
+    assert_eq!(
+        active_branch_catalog_config(&session).0.as_deref(),
+        Some("openai/first")
+    );
+    assert_eq!(
+        summarize_session(&path)
+            .unwrap()
+            .configured_model
+            .as_deref(),
+        Some("openai/first")
+    );
+    // A later assistant message wins over an earlier model_change.
+    session
+        .append(EntryValue::Config {
+            model: Some("openai/changed".into()),
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
+    session.append(assistant("openai/second")).unwrap();
+    assert_eq!(
+        active_branch_catalog_config(&session).0.as_deref(),
+        Some("openai/second")
+    );
+    assert_eq!(
+        summarize_session(&path)
+            .unwrap()
+            .configured_model
+            .as_deref(),
+        Some("openai/second")
+    );
+    // A model_change after the last assistant message wins.
+    session
+        .append(EntryValue::Config {
+            model: Some("openai/latest".into()),
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
+    assert_eq!(
+        active_branch_catalog_config(&session).0.as_deref(),
+        Some("openai/latest")
+    );
+    assert_eq!(
+        summarize_session(&path)
+            .unwrap()
+            .configured_model
+            .as_deref(),
+        Some("openai/latest")
+    );
+}
+
+#[test]
 fn responses_reasoning_catalog_uses_durable_effective_choice() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("reasoning.jsonl");

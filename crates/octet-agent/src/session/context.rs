@@ -522,9 +522,7 @@ impl Session {
                         .as_ref()
                         .map_or(summary.as_str(), |image| image.source_text.as_str());
                     messages.push(Message::User(UserMessage {
-                        content: vec![UserPart::Text(format!(
-                            "[summary of earlier conversation]\n{text}"
-                        ))],
+                        content: vec![UserPart::Text(compaction_summary_text(text))],
                     }));
                 }
                 EntryValue::ResponsesReasoning { .. }
@@ -837,13 +835,21 @@ pub(super) fn compaction_parts(
     summary: &str,
     checkpoint: Option<&SnapcompactCheckpoint>,
 ) -> Vec<UserPart> {
-    let mut parts = vec![UserPart::Text(format!(
-        "[summary of earlier conversation]\n{summary}"
-    ))];
+    let mut parts = vec![UserPart::Text(compaction_summary_text(summary))];
     if let Some(checkpoint) = checkpoint {
         parts.extend(checkpoint.frames.iter().cloned().map(UserPart::Media));
     }
     parts
+}
+
+/// Model-visible wrapper around a compaction summary.
+///
+/// Matches Pi's `COMPACTION_SUMMARY_PREFIX` / `COMPACTION_SUMMARY_SUFFIX`
+/// (`pi-session-1-5-0/dist/core/messages.js:7-12`, used at `messages.js:107`).
+pub fn compaction_summary_text(summary: &str) -> String {
+    format!(
+        "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{summary}\n</summary>"
+    )
 }
 
 pub(crate) fn branch_summary_message(summary: &str) -> Message {
