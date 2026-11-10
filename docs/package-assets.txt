@@ -49,7 +49,9 @@
 # private docs/maintainers/pi-usability-wip/S-commits/0002-fix-pi-compat-a-quit-stops-waiting-for-a-slow-sessio.patch
 # private docs/maintainers/pi-usability-wip/S-uncommitted.patch
 # private docs/maintainers/pi-v0.10-perf-handoff.md
+text AGENTS.md
 text CHANGELOG.md
+text CLAUDE.md
 text CONTRIBUTING.md
 text LICENSE
 text README.md
