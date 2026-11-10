@@ -308,6 +308,23 @@ pub(super) async fn project_provider_context(
     session: &mut Session,
     notices: &mut Vec<String>,
 ) -> Result<Request, AgentError> {
+    if hooks.is_empty() {
+        // No hook can project this request, so keep the caller's owned
+        // request instead of deep-copying the entire history into a clone
+        // that would be handed back unchanged. This mirrors the no-hook path
+        // of project_context_hooks exactly: validate the canonical size,
+        // prune stale failure-notice IDs, then honour cancellation.
+        validate_size(&request)?;
+        session.context_failure_notices.retain(|id| {
+            hooks
+                .iter()
+                .any(|hook| hook.failure_notice_id() == Some(id.as_str()))
+        });
+        if abort.is_set() {
+            return Err(AgentError::Cancelled);
+        }
+        return Ok(request);
+    }
     // Keep the original for validation and, only on refusal, diagnostics. In
     // the successful case avoid serializing the entire history just to describe
     // an error that did not occur.

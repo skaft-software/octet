@@ -896,9 +896,16 @@ impl Agent {
                 }
                 let input_tokens = capacity.input_tokens;
                 let request_max_output_tokens = capacity.max_output_tokens;
-                let messages = match session.context() {
-                    Ok(m) => m,
-                    Err(e) => break 'run FinishReason::Failed(e.into()),
+                // A hook-prepared request already carries its projected
+                // context; cloning the session context again for it would
+                // deep-copy the whole history for nothing.
+                let prepared_messages = if capacity.effective_request.is_some() {
+                    None
+                } else {
+                    match session.context() {
+                        Ok(m) => Some(m),
+                        Err(e) => break 'run FinishReason::Failed(e.into()),
+                    }
                 };
                 let active_system = capacity.active_system;
                 let responses =
@@ -928,7 +935,8 @@ impl Agent {
                     Some(request) => request,
                     None => Request {
                     system: if active_system.is_empty() { None } else { Some(active_system.clone()) },
-                    messages,
+                    messages: prepared_messages
+                        .expect("prepared messages exist without hook preparation"),
                     tools: request_tool_defs.clone(),
                     tool_choice: if answer_only {
                         ToolChoice::None
