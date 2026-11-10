@@ -37,6 +37,20 @@
   ("The conversation history before this point was compacted into the following
   summary: ..."), so a session compacted in either tool reads the same.
 
+- An extension CLI flag may reuse the name of a subcommand option (Pi's
+  `preset.ts` registers `--preset`, which `octet setup` also has), instead of
+  failing startup with a conflict. Only top-level options reserve a name; a real
+  conflict now tells the user to rename the flag or disable the named extension.
+
+- `octet-pi-compat` configure writes a valid manifest default for a Pi flag
+  registered without one (such as `preset.ts`'s `--preset`) instead of
+  `default = undefined`.
+
+- Pi extension commands that await `ctx.ui.select(...)` and then `ctx.ui.confirm(...)`
+  or `ctx.ui.input(...)` (Pi's `commands.ts` example) no longer fail with
+  `not_foreground_owner ... requires a live request`; the later dialog opens on a
+  remote selector or input surface like Pi's.
+
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 

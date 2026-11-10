@@ -836,6 +836,36 @@ fn extension_flags_parse_types_defaults_inverses_and_help() {
     assert!(help.contains("--fixture-count <INTEGER>"));
 }
 
+// Pi's `examples/extensions/preset.ts` registers `--preset`. `octet setup` has an
+// option of that name, but subcommand options are parsed only after the subcommand
+// token, so they must not occupy the top-level extension flag namespace.
+#[test]
+fn extension_flag_may_reuse_a_subcommand_option_name() {
+    let declaration = || {
+        vec![(
+            "preset".to_owned(),
+            extension_flag("preset", ExtensionFlagType::String, serde_json::json!("")),
+        )]
+    };
+    let registered = register_extension_flags(declaration()).expect("--preset registers");
+    let matches = extension_flag_command(&registered)
+        .try_get_matches_from(["octet", "--preset", "fast"])
+        .expect("parse extension --preset");
+    assert_eq!(
+        resolve_extension_flag_values(&matches, &registered).expect("resolve")["preset"]["preset"],
+        serde_json::json!("fast")
+    );
+    let (cli, values, explicit) = extension_flags::parse_declared_extension_flags(
+        ["octet", "setup", "--preset", "lm-studio"]
+            .map(OsString::from)
+            .to_vec(),
+        declaration(),
+    )
+    .expect("setup keeps its own --preset");
+    assert!(matches!(cli.command, Some(TopLevelCommand::Setup { .. })));
+    assert!(values.is_empty() && explicit.is_empty());
+}
+
 #[test]
 fn extension_flags_reject_static_and_cross_extension_collisions() {
     for reserved in [

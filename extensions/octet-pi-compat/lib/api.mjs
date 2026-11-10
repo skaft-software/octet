@@ -387,6 +387,11 @@ export function createContext(runtime, store, replaced = false) {
       return runtime.track(runtime.transport.notify('notification', { level: type, message: bounded(message, 'notification', 16384), ...(source ? { source } : {}) }), store);
     },
     ...dialogAPI(custom, {
+      // The host's confirmation/input brokers answer only while the command's own
+      // request is live. Once a first dialog surface has detached the command from
+      // that request (store.detach, runtime.mjs command/execute), later dialogs in
+      // the same handler stay on remote surfaces like Pi's selector-based dialogs.
+      brokered: () => !store.detached,
       async confirm(title, message) {
         const state = foreground();
         if (!uiAvailable()) return false;
