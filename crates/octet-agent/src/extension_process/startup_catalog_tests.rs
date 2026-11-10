@@ -126,10 +126,12 @@ hooks = ["session_start", "session_end"]
         .contains("inactive extension generation"));
     assert_eq!(current.catalog_revision.load(Ordering::Acquire), 1);
     assert_eq!(host.tool_definitions()[0].description, "Generation 2");
-    process
-        .settle_session_hook_binding("session-owner", ExtensionLifecycleOutcome::Completed)
-        .await
-        .unwrap();
+    crate::extension_process::tests::settle_session_hook_after_delivery(
+        &process,
+        "session-owner",
+        ExtensionLifecycleOutcome::Completed,
+    )
+    .await;
     // Publication without deliverable ACK must still withdraw and terminate,
     // never leave the extension and host with divergent accepted catalogs.
     process
