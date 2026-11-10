@@ -443,6 +443,8 @@ impl Session {
     /// The boundary's root-side entry is detached from its omitted source
     /// ancestry (or linked to those retained private markers).
     ///
+    /// Labels on retained entries are copied; labels on omitted entries are not.
+    ///
     /// A `None` checkpoint copies no entries at all: the destination is an
     /// empty session (for forking "before" a root message).
     ///
@@ -523,6 +525,17 @@ impl Session {
                 retained_parent = Some(retained.id.clone());
                 write_json_line(&mut bytes, &SessionRecordRef::Entry(&retained))?;
             }
+            // Labels are sidecar records keyed by entry id. Carry the ones whose
+            // entry the fork retains, as Pi re-creates label entries for the
+            // retained path (pi-session-1-5-0/dist/core/session-manager.js:1265-1290).
+            let retained_labels: Vec<(&EntryId, &str)> = newest_first
+                .iter()
+                .filter_map(|entry| {
+                    self.entry_labels
+                        .get(&entry.id)
+                        .map(|label| (&entry.id, label.as_str()))
+                })
+                .collect();
             let mut remaining = newest_first.into_iter();
             if let Some(first) = remaining.next() {
                 if first.parent.is_some() {
@@ -538,6 +551,12 @@ impl Session {
                 for entry in remaining {
                     write_json_line(&mut bytes, &SessionRecordRef::Entry(entry))?;
                 }
+            }
+            for (entry_id, label) in retained_labels {
+                write_json_line(
+                    &mut bytes,
+                    &SessionRecordRef::EntryLabel { entry_id, label },
+                )?;
             }
             if let Some(id) = checkpoint {
                 write_json_line(

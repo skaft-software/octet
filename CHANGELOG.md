@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Forking a session now keeps the entry labels (bookmarks) of the entries the
+  fork retains.
+
 - Resuming a session with no model change on its branch now selects the model
   of the last assistant message, as Pi does, instead of the configured default.
   Pi-imported assistant messages now record the `provider/model` route id.

@@ -105,6 +105,34 @@ fn fork_to_copies_only_the_selected_committed_ancestor_chain() {
 }
 
 #[test]
+fn fork_to_copies_labels_of_retained_entries_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.jsonl");
+    let fork_path = dir.path().join("fork.jsonl");
+    let mut source = Session::create(&source_path).unwrap();
+
+    let root = source.append(user("root")).unwrap();
+    let selected = source.append(assistant("selected answer")).unwrap();
+    let later = source.append(user("later work")).unwrap();
+    source.set_entry_label(&root, "bookmark").unwrap();
+    source.set_entry_label(&later, "not retained").unwrap();
+
+    let fork = source.fork_to(&fork_path, Some(&selected)).unwrap();
+    assert_eq!(fork.entry_labels().len(), 1);
+    assert_eq!(
+        fork.entry_labels().get(&root).map(String::as_str),
+        Some("bookmark")
+    );
+    drop(fork);
+    let reopened = Session::open(fork_path).unwrap();
+    assert_eq!(reopened.entry_labels().len(), 1);
+    assert_eq!(
+        reopened.entry_labels().get(&root).map(String::as_str),
+        Some("bookmark")
+    );
+}
+
+#[test]
 fn fork_to_stops_at_the_compaction_boundary_and_reroots_the_span() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.jsonl");

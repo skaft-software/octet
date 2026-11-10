@@ -538,20 +538,6 @@
       "check": "settings",
       "fingerprint": "settings.model",
       "reason": "Pi's createBranchedSession keeps the full root-to-leaf path while octet's fork_to omits pre-firstKept history, so the branch's last assistant message can differ."
-    },
-    {
-      "scenario": "fork-labels",
-      "step": "*",
-      "check": "labels",
-      "fingerprint": "labels.0",
-      "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
-    },
-    {
-      "scenario": "fork-labels",
-      "step": "*",
-      "check": "reopen-labels",
-      "fingerprint": "labels.0",
-      "reason": "Pi's createBranchedSession re-creates label entries in the fork; octet's fork_to copies entries only, so sidecar labels are not carried."
     }
   ]
 }
