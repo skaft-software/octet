@@ -713,6 +713,12 @@ jobs:
           grep -F "release_workflow_commit=\"$WORKFLOW_COMMIT\"" release-assets/install-octet.sh
           release-assets/install-octet.sh --help | grep -F "Install octet ${{ needs.resolve.outputs.version }}."
           cp scripts/install-octet.ps1 release-assets/install-octet.ps1
+          # The PowerShell installer embeds its target version. Publishing a
+          # stale copy would install a different release than the tag.
+          if ! grep -Fq "[string] \$Version = '${{ needs.resolve.outputs.version }}'" release-assets/install-octet.ps1; then
+            echo "PowerShell installer version does not match the release version" >&2
+            exit 1
+          fi
           ls -la release-assets/
           test "$(find release-assets -maxdepth 1 -name 'octet-*.tar.gz' | wc -l | tr -d ' ')" = 3
           test "$(find release-assets -maxdepth 1 -name 'octet-*.zip' | wc -l | tr -d ' ')" = 1

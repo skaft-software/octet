@@ -204,6 +204,10 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
                          self.version)
         self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
+        # The release workflow republishes this installer verbatim, so its
+        # embedded pin is what a Windows install actually fetches.
+        self.assertIn(f"[string] $Version = '{self.version}'",
+                      (SCRIPTS / "install-octet.ps1").read_text())
         for package in ("octet-codemode", "octet-computer-use", "octet-mcp", "octet-pi-compat", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):
