@@ -111,6 +111,10 @@ fn catalog_model_comes_from_the_nearest_model_change_or_assistant_message() {
             content: vec![UserPart::Text("hello".into())],
         })))
         .unwrap();
+    // A legacy import's bare model name is not a route id and never wins.
+    session.append(assistant("legacy-bare-model")).unwrap();
+    assert_eq!(active_branch_catalog_config(&session).0, None);
+    assert_eq!(summarize_session(&path).unwrap().configured_model, None);
     session.append(assistant("openai/first")).unwrap();
     // No model_change: the assistant message names the model.
     assert_eq!(
