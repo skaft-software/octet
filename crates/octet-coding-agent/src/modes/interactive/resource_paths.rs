@@ -170,7 +170,12 @@ where
         Err(error) => {
             let baseline = app.prepare_resource_withdrawal(shell.theme().background(), error)?;
             let (baseline, lease) = pump(shell, input, app, baseline).await?;
-            app.apply_extension_resource_paths(baseline, lease)?
+            match app.publish_withdrawal(baseline, lease)? {
+                Some(published) => published,
+                // The binding moved under the withdrawal (extension session replacement):
+                // the next idle pass publishes for the settled binding.
+                None => return Ok(Vec::new()),
+            }
         }
     };
     // Publish once, then repaint once. A round that resolves the same theme an

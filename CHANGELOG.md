@@ -8,6 +8,14 @@
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.
 
+- A Pi extension that starts a new session from its own command (`ctx.newSession`,
+  and likewise fork or switch) no longer ends octet with "Error: stale resource
+  candidate". Retiring the old session's resource binding left extension resource
+  discovery permanently disabled for the replacement session, and the withdrawal
+  fallback then treated the stale binding as fatal. The replacement owner now gets a
+  live binding, and a withdrawal baseline for a binding that has since moved is
+  dropped instead of ending the application.
+
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 
