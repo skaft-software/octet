@@ -32,9 +32,38 @@ function projectBuiltinResult(name, result, output) {
   return result;
 }
 
+const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+
+// Pi 1.5.0 coding-agent dist/core/tools/bash.js:135-157 (resolveSpawnContext) and :160-175 (execute): the command is
+// `commandPrefix\ncommand`, then `spawnHook({command, cwd, env})` returns the command, cwd and env to spawn with.
+// Octet's host runs the shell, so command and cwd are applied directly; an env the hook changed is applied as
+// shell exports/unsets in front of the command, which a bash child sees the same way as a spawn env.
+function shellSpawn(name, options, input, cwd) {
+  let command = typeof input?.command === 'string' ? input.command : '';
+  if (options.commandPrefix !== undefined) command = `${options.commandPrefix}\n${command}`;
+  if (options.spawnHook === undefined) return { input: { ...input, command }, cwd };
+  const base = { ...process.env };
+  const resolved = options.spawnHook({ command, cwd, env: { ...base } });
+  if (!resolved || typeof resolved !== 'object' || typeof resolved.command !== 'string' || typeof resolved.cwd !== 'string'
+      || !resolved.env || typeof resolved.env !== 'object') invalid('spawnHook result');
+  const lines = [];
+  for (const [key, value] of Object.entries(resolved.env)) {
+    if (value === base[key] || value === undefined) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) invalid('spawnHook env name');
+    lines.push(`export ${key}=${shellQuote(value)}`);
+  }
+  for (const key of Object.keys(base)) if (!Object.hasOwn(resolved.env, key) || resolved.env[key] === undefined) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) lines.push(`unset ${key}`);
+  }
+  if (lines.length && name !== 'bash') unsupported('powershell spawnHook env', 'environment changes are applied to bash only');
+  return { input: { ...input, command: lines.length ? `${lines.join('\n')}\n${resolved.command}` : resolved.command }, cwd: resolved.cwd };
+}
+
 export function createBuiltinDefinition(name, cwd, options = {}) {
   if (!Object.hasOwn(definitions, name)) invalid('builtin tool name');
-  fields(options, name === 'read' ? ['autoResizeImages', 'resizeOptions'] : [], `${name} tool options`);
+  fields(options, name === 'read' ? ['autoResizeImages', 'resizeOptions'] : shells.has(name) ? ['commandPrefix', 'spawnHook'] : [], `${name} tool options`);
+  if (options.commandPrefix !== undefined && typeof options.commandPrefix !== 'string') invalid(`${name} commandPrefix`);
+  if (options.spawnHook !== undefined && typeof options.spawnHook !== 'function') invalid(`${name} spawnHook`);
   if (options.autoResizeImages !== undefined && options.autoResizeImages !== true) unsupported('read.autoResizeImages', 'image processing remains native-owned');
   if (options.resizeOptions !== undefined) unsupported('read.resizeOptions', 'image processing remains native-owned');
   if (cwd !== undefined && typeof cwd !== 'string') invalid('tool cwd');
@@ -54,7 +83,10 @@ export function createBuiltinDefinition(name, cwd, options = {}) {
     if (shells.has(name) && args?.timeout !== undefined && (!Number.isFinite(args.timeout) || args.timeout <= 0 || args.timeout * 1000 > 2147483647)) invalid('tool timeout');
     if (!fileTools.has(name) && !shells.has(name)) unsupported(`native ${name} tool`, 'no corresponding native builtin implementation');
     const result = await executeHostTool(name, args, { builtin: true, toolCallId, signal, onUpdate,
-      translate: (input, workspace) => builtinArguments(name, input, context?.cwd ?? cwd, workspace),
+      translate: (input, workspace) => {
+        const spawn = shells.has(name) ? shellSpawn(name, options, input, context?.cwd ?? cwd) : { input, cwd: context?.cwd ?? cwd };
+        return builtinArguments(name, spawn.input, spawn.cwd, workspace);
+      },
       project: (value, output) => projectBuiltinResult(name, value, output),
     });
     if (result.isError && !shells.has(name)) throw new Error(result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));

@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Pi extensions that build the bash tool with `commandPrefix` or `spawnHook` (for example Pi's
+  `bash-spawn-hook.ts`) are no longer refused at configure time with "option would not be
+  honored". The prefixed command, and the command, cwd and environment changes the hook returns,
+  are what the native shell runs (environment changes as exports in front of the command).
+
 - Pi extensions that import `renderFakeCursor` from `@earendil-works/pi-tui` (for example
   Pi's `overlay-test.ts`) no longer fail with "renderFakeCursor is not a function".
   The helper is provided and a frame carries the fake cursor as reverse video, as Pi draws it.
