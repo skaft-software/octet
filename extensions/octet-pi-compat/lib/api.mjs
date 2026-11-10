@@ -6,6 +6,7 @@ import { contextTheme } from './theme.mjs';
 import { exec } from './exec.mjs';
 import { mcpAPI } from './mcp.mjs';
 import { chromeAPI, dialogAPI, editorAPI } from './ui-api.mjs';
+import { joinPresentation } from './ui-delivery.mjs';
 import { currentModel, thinkingLevel, scopedModels, modelRegistry, registerProvider, unregisterProvider } from './providers.mjs';
 import { setModel, setThinkingLevel } from './model-control.mjs';
 import { registerTool, toolSnapshot, getAllTools, setActiveTools } from './tools.mjs';
@@ -275,15 +276,10 @@ export function textOnly(content) {
   });
 }
 
-// Pi presents a footer, header, widget or status line by mutating local state and
-// calling `requestRender()`; the slot is presentation, never hook output
-// (modes/interactive/interactive-mode.ts:2401-2404, 2749-2752). Mounting or
-// refreshing one therefore must not be joined to the hook flush (`store.pending`
-// holds a promise the hook awaits) nor turn a refused or timed-out UI round trip
-// into a hook failure (`store.errors` is thrown by `flush`). Before this, a host
-// that did not answer `ui/open`/`ui/chrome` held `session_start` for the 30 s
-// transport timeout and then failed it, so resource discovery admitted no paths
-// and every later extension burned its own startup budget.
+// Pi's presentation setters are local and cannot fail a hook. The native host
+// nevertheless requires the originating request to remain live while it admits a
+// surface. Join that admission only for a bounded interval, reporting failures
+// separately instead of turning them into hook failures.
 function detachedUi(runtime, store, promise, slot) {
   const observed = Promise.resolve(promise);
   const state = store.state;
@@ -293,6 +289,7 @@ function detachedUi(runtime, store, promise, slot) {
     state.uiFailures.add(slot);
     runtime.backgroundError(error);
   });
+  joinPresentation(runtime, store, observed);
   return observed;
 }
 

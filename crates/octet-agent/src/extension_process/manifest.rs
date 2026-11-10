@@ -187,7 +187,7 @@ impl ExtensionManifest {
                 self.version
             ))
         })?;
-        if !api_v03::runtime_supports_api_version(&self.api_version) {
+        if !crate::extension_api_policy::runtime_supports_api_version(&self.api_version) {
             return Err(ExtensionRuntimeError::UnsupportedApiVersion {
                 extension: self.api_version.clone(),
                 host: "0.1, 0.2, 0.3, or 0.4".into(),

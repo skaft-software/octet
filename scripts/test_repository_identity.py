@@ -217,10 +217,10 @@ class ReleaseToolchainTests(unittest.TestCase):
         self.assertIn(install, quality)
         self.assertIn(package, quality)
         self.assertLess(quality.index(install), quality.index(package))
-        # This immutable action is generated for 1.88, not the configurable action.
+        # This immutable action is generated for 1.89, not the configurable action.
         self.assertNotRegex(
             ci,
-            r"uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884"
+            r"uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66"
             r"\n\s+with:\n\s+toolchain:",
         )
 

@@ -8,6 +8,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { Box } from '../node_modules/@earendil-works/pi-tui/dist/components/box.js';
 import { Text } from '../node_modules/@earendil-works/pi-tui/dist/components/text.js';
 import { truncateToWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
+import { inRender } from './ui-delivery.mjs';
 
 const MAX_COMPONENTS = 128;
 // Generic per-slot fallbacks follow Pi's tool-execution/render-utils contract.
@@ -177,11 +178,11 @@ export class TranscriptRenderers {
     this.remember(cache, key, cached);
     const renderSlot = (slot, makeFallback, event) => {
       if (!cached[slot]) return [];
-      try { return this.call(store, factory, () => safeLines(cached[slot].render(params.width))); }
+      try { return this.call(store, factory, () => inRender(() => safeLines(cached[slot].render(params.width)))); }
       catch (error) {
         this.live(store); this.runtime.reportCallbackError?.(event, factory, error);
         cached[slot]?.dispose?.(); cached[slot] = makeFallback();
-        return cached[slot] ? this.call(store, factory, () => safeLines(cached[slot].render(params.width))) : [];
+        return cached[slot] ? this.call(store, factory, () => inRender(() => safeLines(cached[slot].render(params.width)))) : [];
       }
     };
     const lines = [

@@ -66,7 +66,7 @@ jobs:
           fi
           test "$(git rev-parse 'HEAD^{commit}')" = "$SOURCE_SHA"
           git diff-index --quiet HEAD --
-      - uses: dtolnay/rust-toolchain@688313b0823df1393bcebb1b4add0438a6d36884
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       - name: Build the candidate native host
         run: cargo build --locked --release -p octet-coding-agent --bin octet-host
       - name: Exercise credentialed routes without retaining provider traffic

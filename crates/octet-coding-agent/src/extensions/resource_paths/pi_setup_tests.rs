@@ -281,6 +281,8 @@ export default function (pi) {{
     );
     install_automatic_mirror(&root, &pi);
     let mut app = app_with_timing(&root, &workspace, true, true);
+    assert!(app.executable_extensions.pending_agent_session_service());
+    assert!(!app.executable_extensions.pending_subagents_service());
     assert!(
         app.executable_extensions.processes.is_empty(),
         "the mirror attaches after the first frame"

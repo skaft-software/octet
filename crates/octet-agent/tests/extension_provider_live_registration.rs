@@ -393,14 +393,14 @@ fn foreign_and_duplicate_owners_cannot_replace_a_late_registration() {
             },
         }],
     });
-    let register = octet_agent::extension_api_v03::parse_provider_register_params(params)
+    let register = octet_agent::extension_api_v04::parse_provider_register_params(params)
         .expect("valid declaration");
     registry
         .register(owner.clone(), register)
         .expect("initial registration");
     registry.complete_initial_catalog(&owner);
 
-    let duplicate = octet_agent::extension_api_v03::parse_provider_register_params(json!({
+    let duplicate = octet_agent::extension_api_v04::parse_provider_register_params(json!({
         "provider": {"id": "fixture", "label": "Fixture", "auth": {"kind": "none"}},
         "models": [],
     }))
@@ -413,7 +413,7 @@ fn foreign_and_duplicate_owners_cannot_replace_a_late_registration() {
         extension_instance_id: "extension-2".into(),
         generation: 2,
     };
-    let foreign_params = octet_agent::extension_api_v03::parse_provider_register_params(json!({
+    let foreign_params = octet_agent::extension_api_v04::parse_provider_register_params(json!({
         "provider": {"id": "fixture", "label": "Fixture", "auth": {"kind": "none"}},
         "models": [],
     }))

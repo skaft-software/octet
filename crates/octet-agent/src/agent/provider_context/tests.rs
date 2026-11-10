@@ -121,14 +121,14 @@ impl ProviderContextHook for InvalidProjection {
     }
 }
 
-
 /// A projection that produces an unrepresentable request must not kill the run
 /// (the 116-tool Pi-fleet failure), and the notice must name the validator
 /// reason once. Authority/identity refusals stay fatal and have their own tests.
 #[tokio::test]
 async fn invalid_projection_is_skipped_with_the_validator_reason() {
-    let hooks: Vec<Arc<dyn ProviderContextHook>> =
-        vec![Arc::new(InvalidProjection { failure_notice_id: "pi-bridge" })];
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![Arc::new(InvalidProjection {
+        failure_notice_id: "pi-bridge",
+    })];
     let mut notices = Vec::new();
     let workspace = tempfile::tempdir().unwrap();
     let mut session = Session::create(workspace.path().join("invalid-projection.jsonl")).unwrap();
@@ -170,7 +170,10 @@ async fn invalid_projection_is_skipped_with_the_validator_reason() {
     )
     .await
     .expect("second preparation also survives");
-    assert!(more.is_empty(), "notice reported once per session: {more:?}");
+    assert!(
+        more.is_empty(),
+        "notice reported once per session: {more:?}"
+    );
 }
 
 struct Capture(Arc<Mutex<Vec<Request>>>);

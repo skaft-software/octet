@@ -192,8 +192,10 @@ pub(crate) fn enable_root_delegation(
     config: DelegationConfig,
     template: DelegationTemplate,
     root_tools: bool,
+    root_session: &Path,
 ) -> Result<DelegationBinding, DelegationError> {
-    if root_tools {
+    let rebinding = agent.delegation_team_directory().is_some();
+    if root_tools && !rebinding {
         for name in &COLLABORATION_TOOL_NAMES {
             if agent
                 .registered_tool_names()
@@ -204,14 +206,21 @@ pub(crate) fn enable_root_delegation(
             }
         }
     }
-    let manager = DelegationManager::create(config, template, agent.session().path(), root_tools)?;
+    let manager = DelegationManager::create(config, template, root_session, root_tools)?;
     // Row 3.5: delegated child runs are observed with the owner's explicit
     // context. The observer is inert unless the host installed one.
     manager.set_span_context(agent.telemetry_context().clone());
     let binding = manager.root_binding();
     if manager.root_tools {
-        agent.append_system_instructions(binding.system_instructions().to_owned());
-        agent.install_delegation_tools(manager.tools(&binding.identity));
+        if rebinding {
+            // The configuration and instructions are unchanged. Replace only
+            // the executable bindings; appending/registering again duplicates
+            // the root's delegation surface on every session change.
+            agent.replace_delegation_tools(manager.tools(&binding.identity));
+        } else {
+            agent.append_system_instructions(binding.system_instructions().to_owned());
+            agent.install_delegation_tools(manager.tools(&binding.identity));
+        }
     }
     Ok(binding)
 }

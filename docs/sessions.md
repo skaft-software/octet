@@ -38,6 +38,16 @@ session shows in the terminal window title as `octet · <name>`, and unnamed
 sessions use `octet`. Renaming, resuming or starting a session updates the
 title. Plain, print and RPC modes don't set a window title.
 
+Pi extension `newSession`, `switchSession` and `fork` requests also work with
+V2 delegation enabled. Before replacing the active session, the host parks its
+workers, waiting up to 10 seconds. If any worker is still running, replacement
+is refused: wait for it to finish or stop it, then retry. The outgoing session
+stays active. Successful replacement rebinds delegation and extension child
+services without restarting the extension process. Outgoing child transcripts
+and settled outcomes remain durable; returning to that session restores its
+fleet, and an explicit follow-up continues a settled child without replaying
+its completed task.
+
 In the resume picker, type to filter by fuzzy match, `"quoted phrase"` or `re:`
 regex. Tab switches between this workspace and all workspaces. Ctrl+S cycles the
 sort (recent, title, message count), Ctrl+N shows named sessions only, Ctrl+P
