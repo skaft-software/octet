@@ -327,7 +327,9 @@ provider acknowledgement. Other routes still change at an idle boundary. See the
 [control
 qualification](provider-thinking.md#mid-conversation-changes-unreleased).
 
-Reasoning is collapsed by default. Ctrl+O expands what octet kept.
+Reasoning is collapsed by default. Ctrl+T shows or hides what octet kept,
+for every trace in the transcript and for new ones. It is separate from
+Ctrl+O, which owns tool and shell output.
 
 Each run shows a shimmering `Working` row, and a trailing
 `Working (<elapsed> • esc to interrupt)` stays until the run settles. Retry
@@ -341,7 +343,7 @@ shows.
 
 ```text
 • Thinking
-  └ Verifying the implementation (ctrl+o to expand)
+  └ Verifying the implementation (ctrl+t to expand)
 ```
 
 Reasoning and activity dots keep a solid, fixed-size glyph. The `Working` dot
@@ -384,8 +386,11 @@ above the viewport. Only the visible image rows are placed, leaving the composer
 and footer outside the placement. Terminal-specific pixels still require separate
 qualification; protocol and retained-row tests are not Rex or Ghostty verification.
 
-Ctrl+O and `/verbose [on|off]` reveal reasoning, compaction, subagent activity,
-bounded search and shell output, and edit and write diffs. They can't recover
+Ctrl+O reveals compaction, subagent activity, bounded search, tool and shell
+output, and edit and write diffs; Ctrl+T reveals the reasoning traces.
+`/verbose [on|off]` steers both. Reasoning display is a per-session choice
+that survives new traces, and a theme's `thinking_expanded` decides the
+starting state. They can't recover
 output that was discarded when it was captured. Raw arguments, unsanitized
 failures and extension-rendered payloads stay out of the transcript and out of
 copy. A failed run keeps `failed · <duration>` and a short reason with

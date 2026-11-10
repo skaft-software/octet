@@ -322,19 +322,19 @@ pub(super) fn render_assistant_update_planned(
     rich_renderer: &RichRenderer,
     reasoning_renderer: &RichRenderer,
     outer_width: u16,
-    show_reasoning: bool,
+    verbose_tools: bool,
 ) -> Option<RenderedTranscriptBlockUpdate> {
     let (assistant, renderer) = match block {
         TranscriptBlock::Assistant(assistant) => (assistant, rich_renderer),
         TranscriptBlock::Reasoning(reasoning)
-            if (reasoning.reasoning_expanded || show_reasoning)
+            if reasoning.reasoning_expanded
                 && (!reasoning.text.is_empty() || reasoning.show_reasoning_hint) =>
         {
             (reasoning, reasoning_renderer)
         }
         _ => return None,
     };
-    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, show_reasoning);
+    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, verbose_tools);
     let update = assistant.render_update(renderer, theme, plan.geometry.content_width)?;
     if update.stable_prefix == 0 {
         return None;
@@ -428,8 +428,7 @@ pub(super) fn render_block_planned_with_rainbow(
     .filter(|background| *background != Color::Default);
     let collapsed_reasoning = matches!(
         block,
-        TranscriptBlock::Reasoning(reasoning)
-            if !reasoning.reasoning_expanded && !verbose_tools
+        TranscriptBlock::Reasoning(reasoning) if !reasoning.reasoning_expanded
     );
     let mut geometry = plan.geometry;
     let mut lines = match block {
@@ -524,7 +523,6 @@ pub(super) fn render_block_planned_with_rainbow(
             reasoning_renderer,
             theme,
             width,
-            verbose_tools,
             content_background,
             status_shimmer_frame,
             rainbow_strength,

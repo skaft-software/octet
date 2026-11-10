@@ -185,9 +185,10 @@ Both settings are boolean tokens in the theme's `[colors]` table:
 | `quiet_tool_summaries` | `false` | Groups consecutive read-only tool calls into one summary row such as `Explored 3 files · 1 command`, with edits, web, MCP and other activity summarized the same way. `Still` sets it. Press Ctrl+O to open the individual calls. |
 | `thinking_expanded` | `false` | Shows the model's thinking trace as it streams, and when you resume a session, instead of a collapsed `Thinking` line. Pi profiles default to it, as Pi does; explicit overrides win. |
 
-The compiled default theme collapses thinking to a single `Thinking` line; Ctrl+O
-expands it. A theme that sets `thinking_expanded = true` starts every thinking
-trace open, and `[layout] show_reasoning = false` still hides thinking entirely.
+The compiled default theme collapses thinking to a single `Thinking` line; Ctrl+T
+shows it. A theme that sets `thinking_expanded = true` starts every thinking
+trace open, an explicit Ctrl+T choice wins over the theme for the rest of the
+session, and `[layout] show_reasoning = false` still hides thinking entirely.
 
 Expanded reasoning prose uses a balanced neutral gray on known light/dark
 profiles. When the background is unknown, it keeps the terminal's default

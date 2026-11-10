@@ -41,7 +41,7 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/theme [auto\|light\|dark\|name]` | Pick a built-in appearance or a discovered TOML theme. With no argument, it opens a filterable picker. |
 | `/answer [instruction]` | Stop using tools at the next safe point and answer from what's gathered. |
 | `/compact [instructions]` | Compact at the next safe point. Custom instructions apply to local summaries, not native Responses compaction. |
-| `/verbose [on\|off]` | Expand or collapse reasoning, compaction and tool output. |
+| `/verbose [on\|off]` | Expand or collapse reasoning, compaction and tool output. Ctrl+O and Ctrl+T steer the same two modes separately. |
 | `/reload` | Reload your keybindings, instructions, prompts, skills and enabled extensions at a safe point. On Unix, `/reload --force` restarts the app into the executable currently on disk and resumes the same session, even if that executable is unchanged. It is also explicit consent to enter a moved or replaced binary; compatibility and durable-session checks still apply. Plain `/reload` is resources-only. Automatic host re-exec requires an executable change and `reload_host = true`. Refused while a model turn, tool call, shell child, effect approval or in-flight session write is active. Finished subagents (done, limit reached, failed, timed out) never block a reload: they are parked with their result and session kept, and `subagent_continue` resumes them afterwards. A subagent that is still running or has queued work blocks plain `/reload`; `/reload --force` detaches it instead, keeping its session and queued work. |
 | `/login [provider]` | Sign in to a subscription provider. |
 | `/setup` | Open the provider setup wizard at any time, to add or replace a built-in API key, sign in with a supported subscription, or set up a local endpoint, or to remove a saved key, sign-in or custom provider. During a run it waits for the idle point, and your current model and session aren't switched. |
@@ -246,7 +246,8 @@ See [Discovery and trust](resources.md).
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the resolved `--models` scope (or the available catalog with no scope). Backward is Alt+P on Windows and WSL. Drafts are kept. |
 | Ctrl+L | Open the model selector. |
 | Ctrl+Up / Ctrl+Down | Jump between prompt boundaries. |
-| Ctrl+O | Show kept reasoning, compaction, subagent activity, tool commands, tool evidence and shell output. It can't recover discarded output. |
+| Ctrl+O | Show compaction, subagent activity, tool commands, tool evidence and shell output. It can't recover discarded output. |
+| Ctrl+T | Show or hide the retained thinking traces, independently of Ctrl+O. New traces follow the current choice. |
 | PageUp / PageDown | Scroll the transcript. PageUp pins the view, PageDown returns toward live output. |
 | Up / Down | Pick a visible suggestion first, otherwise move through multiline input. At the first/last editor row, recall sent prompts and return to the exact draft, caret and paste/attachment chips—even during active work. History never submits. |
 | Tab | Complete the selected slash command without running it, or insert the selected path or `@` file suggestion. Directories stay open, and spaces are backslash-escaped. |

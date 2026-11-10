@@ -35,9 +35,11 @@ pub enum InputAction {
     SlashMenu(SlashMenuAction),
     CompletePath,
     ShowCompactionSummary,
-    /// Toggle the global transcript disclosure mode (ctrl+o) for reasoning,
-    /// summaries, retained tool output, and delegated-worker activity.
+    /// Toggle the global transcript disclosure mode (ctrl+o) for summaries,
+    /// retained tool output, and delegated-worker activity.
     ToggleDisclosure,
+    /// Toggle the thinking traces alone (ctrl+t), independently of tool output.
+    ToggleThinking,
     /// Cycle to the next thinking level supported by the active model.
     CycleThinking,
     Edit(EditAction),
@@ -500,8 +502,11 @@ pub fn translate_with_bindings(
             if matches("app.thinking.cycle") && press {
                 return InputAction::CycleThinking;
             }
-            if (matches("app.tools.expand") || matches("app.thinking.toggle")) && press {
+            if matches("app.tools.expand") && press {
                 return InputAction::ToggleDisclosure;
+            }
+            if matches("app.thinking.toggle") && press {
+                return InputAction::ToggleThinking;
             }
             for (id, command) in [
                 ("app.model.select", "/model"),
@@ -1396,6 +1401,19 @@ mod tests {
                 "draft",
             ),
             InputAction::Ignore
+        );
+    }
+
+    #[test]
+    fn ctrl_t_toggles_thinking_without_touching_tool_output() {
+        let ctrl_t = Some(key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(
+            translate(ctrl_t.clone(), false, "draft prompt"),
+            InputAction::ToggleThinking
+        );
+        assert_eq!(
+            translate(ctrl_t, true, "queued steering"),
+            InputAction::ToggleThinking
         );
     }
 

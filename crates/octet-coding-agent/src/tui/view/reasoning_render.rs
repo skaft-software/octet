@@ -1119,7 +1119,7 @@ pub(super) fn activity_shimmer_marker(
 
 fn reasoning_detail_line(theme: &OctetTheme, reasoning: &AssistantBlock) -> String {
     let elbow = activity_elbow(theme);
-    let hint = "(ctrl+o to expand)";
+    let hint = "(ctrl+t to expand)";
     let detail = reasoning.reasoning_heading.as_deref().map_or_else(
         || format!("{elbow} {hint}"),
         |heading| format!("{elbow} {heading} {hint}"),
@@ -1172,9 +1172,9 @@ fn collapsed_reasoning_lines_at(
 
 fn reasoning_inline_hint(theme: &OctetTheme) -> &'static str {
     if theme.unicode() {
-        " · Ctrl+O expand"
+        " · Ctrl+T expand"
     } else {
-        " - Ctrl+O expand"
+        " - Ctrl+T expand"
     }
 }
 
@@ -1317,7 +1317,6 @@ pub(super) fn render_reasoning_on_surface(
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
-    show_reasoning: bool,
     background: Option<Color>,
     shimmer_frame: usize,
 ) -> Vec<String> {
@@ -1326,7 +1325,6 @@ pub(super) fn render_reasoning_on_surface(
         renderer,
         theme,
         width,
-        show_reasoning,
         background,
         shimmer_frame,
         0,
@@ -1339,13 +1337,12 @@ pub(super) fn render_reasoning_on_surface_with_rainbow(
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
-    show_reasoning: bool,
     background: Option<Color>,
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> Vec<String> {
     let non_expandable_activity = reasoning.text.is_empty() && !reasoning.show_reasoning_hint;
-    if non_expandable_activity || (!reasoning.reasoning_expanded && !show_reasoning) {
+    if non_expandable_activity || !reasoning.reasoning_expanded {
         // The transcript now holds status rows, not this Markdown prefix.
         // Re-expansion must establish a full body before applying tail updates.
         reasoning.invalidate_layout();

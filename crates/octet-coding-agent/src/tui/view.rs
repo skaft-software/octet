@@ -1996,6 +1996,10 @@ pub(crate) struct ShellState {
     pub(crate) run_label: String,
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
+    /// Thinking disclosure chosen with Ctrl+T or `/verbose`. `None` follows the
+    /// theme's `thinking_expanded`, so a theme keeps deciding until the user
+    /// says otherwise, and the choice survives new reasoning blocks.
+    pub(crate) thinking_disclosure: Option<bool>,
     pub(crate) size: (u16, u16),
     /// A resize away and back still invalidates the physical grid, even when
     /// coalescing observes the same final dimensions as the previous frame.
@@ -2342,6 +2346,7 @@ impl ShellState {
             session_name: Default::default(),
             run_label: Default::default(),
             verbose_tools: Default::default(),
+            thinking_disclosure: Default::default(),
             size: Default::default(),
             resize_epoch: Default::default(),
             startup_pending: Default::default(),
@@ -3090,13 +3095,33 @@ impl ShellState {
             .unwrap_or(false)
     }
 
-    /// Whether a new thinking trace starts expanded. Themes choose their own
-    /// verbosity: the compiled default collapses to a `Thinking` line, Pi
-    /// themes show the trace as it streams. Ctrl+O still expands a collapsed one.
-    fn thinking_expanded_by_default(&self) -> bool {
-        self.theme
-            .resolve::<bool>("thinking_expanded")
-            .unwrap_or(false)
+    /// Whether thinking renders expanded. An explicit Ctrl+T or `/verbose`
+    /// choice wins; otherwise themes choose their own verbosity: the compiled
+    /// default collapses to a `Thinking` line, Pi themes show the trace as it
+    /// streams.
+    fn thinking_expanded(&self) -> bool {
+        self.thinking_disclosure.unwrap_or_else(|| {
+            self.theme
+                .resolve::<bool>("thinking_expanded")
+                .unwrap_or(false)
+        })
+    }
+
+    /// Ctrl+T: show or hide every thinking trace, including the live one, and
+    /// keep that choice for blocks created later. Tool output keeps its own
+    /// Ctrl+O; neither toggle changes the other.
+    fn set_thinking_expanded(&mut self, expanded: bool) {
+        self.thinking_disclosure = Some(expanded);
+        let mut changed = false;
+        for block in &mut self.transcript {
+            if let TranscriptBlock::Reasoning(reasoning) = block {
+                changed |= reasoning.reasoning_expanded != expanded;
+                reasoning.reasoning_expanded = expanded;
+            }
+        }
+        if changed {
+            self.invalidate_disclosure();
+        }
     }
 
     fn seal_activity_group(&mut self) {
@@ -3309,7 +3334,7 @@ impl ShellState {
             OutputChannel::Reasoning => self.active_reasoning,
         };
         if let Some(index) = active_index {
-            let expand_thinking = self.thinking_expanded_by_default();
+            let expand_thinking = self.thinking_expanded();
             let updated = match self.transcript.get_mut(index) {
                 Some(TranscriptBlock::Assistant(existing)) if channel == OutputChannel::Text => {
                     existing.append(text);
@@ -3385,7 +3410,7 @@ impl ShellState {
             )),
             OutputChannel::Reasoning => TranscriptBlock::Reasoning(Box::new(
                 AssistantBlock::streaming_reasoning(text)
-                    .with_reasoning_expanded(self.thinking_expanded_by_default())
+                    .with_reasoning_expanded(self.thinking_expanded())
                     .with_model_lab(model_lab)
                     .with_activity_started_at(activity_started_at),
             )),
@@ -3507,10 +3532,7 @@ impl ShellState {
     fn animation_block_is_addressable(&self, index: usize) -> bool {
         let spaced_activity = matches!(self.transcript.get(index),
             Some(TranscriptBlock::Reasoning(reasoning))
-                if !reasoning.finished
-                    && !reasoning.reasoning_expanded
-                    && (!self.verbose_tools
-                        || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
+                if !reasoning.finished && !reasoning.reasoning_expanded
         );
         if self.render_threaded && !self.application_viewport_requested {
             if spaced_activity {
@@ -3688,7 +3710,6 @@ impl ShellState {
             .resolve::<bool>("thinking_spinner")
             .unwrap_or(false);
         thinking_spinner
-            && !self.verbose_tools
             && self
                 .active_event_blocks
                 .iter()
@@ -6496,6 +6517,21 @@ impl InteractiveShell {
         if welcome_changed {
             welcome_card::restart_welcome_animation(&mut state);
         }
+    }
+
+    pub fn set_thinking_expanded(&mut self, expanded: bool) {
+        self.state.borrow_mut().set_thinking_expanded(expanded);
+    }
+
+    pub fn thinking_expanded(&self) -> bool {
+        self.state.borrow().thinking_expanded()
+    }
+
+    /// Show or hide the thinking traces. Returns the new shape of the transcript.
+    pub fn toggle_thinking(&mut self) -> bool {
+        let next = !self.thinking_expanded();
+        self.set_thinking_expanded(next);
+        next
     }
 
     pub fn set_verbose_tools(&mut self, verbose: bool) {

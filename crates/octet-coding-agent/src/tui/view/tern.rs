@@ -145,6 +145,9 @@ pub(super) struct TernSurface {
     theme_key: Option<(u64, Option<ModelLab>)>,
     collapsed: HashMap<String, bool>,
     verbose: bool,
+    /// Last observed thinking disclosure. A change drops per-node click state so
+    /// Ctrl+T stays authoritative over a section the reader clicked in Tern.
+    thinking: bool,
     last_resync: u64,
     last_editor_revision: u64,
     /// Last OS-focus return consumed from the native mailbox. A change forces
@@ -190,6 +193,7 @@ impl TernSurface {
             theme_key: None,
             collapsed: HashMap::new(),
             verbose: false,
+            thinking: false,
             last_resync: 0,
             last_editor_revision: 0,
             last_focus_resync: 0,
@@ -573,6 +577,11 @@ impl TernSurface {
         if self.verbose != shell.verbose_tools {
             self.collapsed.clear();
             self.verbose = shell.verbose_tools;
+        }
+        let thinking = shell.thinking_expanded();
+        if self.thinking != thinking {
+            self.collapsed.clear();
+            self.thinking = thinking;
         }
         let theme_key = (shell.theme_epoch, shell.model_lab);
         if self.theme_key != Some(theme_key) {
@@ -1120,7 +1129,7 @@ fn block_node(
                                 .extension_ui
                                 .hidden_thinking_label
                                 .as_ref()
-                                .filter(|_| !shell.verbose_tools)
+                                .filter(|_| !block.reasoning_expanded)
                             {
                                 label.clone()
                             } else if block.finished {
@@ -1140,10 +1149,7 @@ fn block_node(
                         )],
                     )
                     .set("collapsible", true)
-                    .set(
-                        "collapsed",
-                        !shell.verbose_tools && !block.reasoning_expanded,
-                    ),
+                    .set("collapsed", !block.reasoning_expanded),
                 vec![Node::new(
                     id(identity, "reasoning.md"),
                     Kind::Md,

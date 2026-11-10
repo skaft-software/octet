@@ -123,7 +123,7 @@ pub(super) fn append_hydrated_items(
                 )));
             }
             TranscriptItem::Reasoning(text) => {
-                let expanded = state.thinking_expanded_by_default();
+                let expanded = state.thinking_expanded();
                 state.push_block(TranscriptBlock::Reasoning(Box::new(
                     AssistantBlock::finalized_reasoning(text).with_reasoning_expanded(expanded),
                 )));

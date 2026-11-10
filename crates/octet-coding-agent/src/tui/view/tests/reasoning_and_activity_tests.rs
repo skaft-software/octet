@@ -27,7 +27,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         vec![
             "",
             "• Thinking (0s • esc to interrupt)",
-            "  └ Verifying reproducibility of evidence package (ctrl+o to expand)",
+            "  └ Verifying reproducibility of evidence package (ctrl+t to expand)",
         ]
     );
 }
@@ -76,7 +76,7 @@ fn still_working_to_thinking_keeps_the_transcript_height_stable() {
     assert!(
         thinking
             .last()
-            .is_some_and(|row| row.contains("ctrl+o to expand")),
+            .is_some_and(|row| row.contains("ctrl+t to expand")),
         "{thinking:?}"
     );
 
@@ -304,7 +304,7 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
     );
     assert!(promoted[0].is_empty(), "{promoted:?}");
     assert!(promoted[1].contains("Thinking"), "{promoted:?}");
-    assert!(promoted[1].contains("Ctrl+O expand"), "{promoted:?}");
+    assert!(promoted[1].contains("Ctrl+T expand"), "{promoted:?}");
     assert!(promoted[2].is_empty(), "{promoted:?}");
     assert!(!promoted.join("\n").contains("provider-private detail"));
 }
@@ -611,7 +611,7 @@ fn reasoning_status_reopens_after_tools_for_the_next_model_turn() {
 }
 
 #[test]
-fn streamed_reasoning_shows_one_live_indicator_until_ctrl_o() {
+fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
     shell.on_run_event(
@@ -634,7 +634,7 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_o() {
     assert_eq!(initial.len(), 3, "{initial:?}");
     assert!(initial[0].is_empty(), "{initial:?}");
     assert!(initial[1].contains("Thinking"), "{initial:?}");
-    assert!(initial[1].contains("Ctrl+O expand"), "{initial:?}");
+    assert!(initial[1].contains("Ctrl+T expand"), "{initial:?}");
     assert!(initial[2].is_empty(), "{initial:?}");
     assert!(!initial.join("\n").contains("first private sentinel"));
 
@@ -664,18 +664,18 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_o() {
         );
     }
 
-    shell.toggle_disclosure();
+    shell.toggle_thinking();
     let expanded = transcript(&shell).join("\n");
     assert!(expanded.contains("first private sentinel"), "{expanded}");
     assert!(expanded.contains("private reasoning row 127"), "{expanded}");
-    assert!(!expanded.contains("Ctrl+O expand"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T expand"), "{expanded}");
 
-    shell.toggle_disclosure();
+    shell.toggle_thinking();
     assert_eq!(transcript(&shell), initial);
 }
 
 #[test]
-fn a_new_reasoning_event_retires_the_previous_ctrl_o_hint() {
+fn a_new_reasoning_event_retires_the_previous_ctrl_t_hint() {
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
     shell.on_run_event(
@@ -707,8 +707,8 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_o_hint() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(rendered.matches("Ctrl+O expand").count(), 1, "{rendered}");
-    shell.toggle_disclosure();
+    assert_eq!(rendered.matches("Ctrl+T expand").count(), 1, "{rendered}");
+    shell.toggle_thinking();
     let expanded = shell
         .state
         .borrow()
@@ -719,7 +719,69 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_o_hint() {
         .join("\n");
     assert!(expanded.contains("first thought"), "{expanded}");
     assert!(expanded.contains("second thought"), "{expanded}");
-    assert!(!expanded.contains("Ctrl+O expand"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T expand"), "{expanded}");
+}
+
+#[test]
+fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
+    let mut shell = InteractiveShell::test_shell();
+    let run_id = shell.begin_run("openai");
+    let rendered = |shell: &InteractiveShell| {
+        shell
+            .state
+            .borrow()
+            .rendered_transcript(80)
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "first private thought".into(),
+        },
+    );
+    let collapsed = rendered(&shell);
+    assert!(!collapsed.contains("first private thought"), "{collapsed}");
+    assert!(collapsed.contains("Ctrl+T expand"), "{collapsed}");
+
+    // Ctrl+O owns tool output and chrome; it never reveals private reasoning.
+    shell.toggle_disclosure();
+    assert!(
+        !rendered(&shell).contains("first private thought"),
+        "Ctrl+O revealed reasoning"
+    );
+    shell.toggle_disclosure();
+
+    assert!(shell.toggle_thinking());
+    let expanded = rendered(&shell);
+    assert!(expanded.contains("first private thought"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T expand"), "{expanded}");
+
+    // A trace that starts after the choice follows it instead of the theme.
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "answer".into(),
+        },
+    );
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "second private thought".into(),
+        },
+    );
+    let later = rendered(&shell);
+    assert!(later.contains("second private thought"), "{later}");
+
+    assert!(!shell.toggle_thinking());
+    let hidden = rendered(&shell);
+    assert!(!hidden.contains("first private thought"), "{hidden}");
+    assert!(!hidden.contains("second private thought"), "{hidden}");
 }
 
 #[test]
@@ -776,7 +838,7 @@ fn reasoning_heading_is_terminal_sanitized() {
 }
 
 #[test]
-fn hydrated_reasoning_is_retained_but_collapsed_until_ctrl_o() {
+fn hydrated_reasoning_is_retained_but_collapsed_until_ctrl_t() {
     use octet_ai::{AssistantMessage, AssistantPart, Message, ModelId, Protocol, ReasoningPart};
 
     let directory = tempfile::tempdir().unwrap();
@@ -815,12 +877,12 @@ fn hydrated_reasoning_is_retained_but_collapsed_until_ctrl_o() {
     assert!(reasoning.finished);
     drop(state);
 
-    shell.toggle_disclosure();
+    shell.toggle_thinking();
     let expanded = render(&shell).join("\n");
     assert!(expanded.contains("durable private thought"), "{expanded}");
     assert!(expanded.contains("with a second line"), "{expanded}");
 
-    shell.toggle_disclosure();
+    shell.toggle_thinking();
     assert_eq!(render(&shell), collapsed);
 }
 
@@ -860,7 +922,7 @@ fn completed_reasoning_uses_rich_markdown_without_raw_delimiters() {
         assert!(reasoning.text.contains("****"));
         assert!(!reasoning.markdown.raw_text().contains("****"));
     }
-    shell.toggle_disclosure();
+    shell.toggle_thinking();
     let live = render_shell(&shell.state.borrow(), 80).join("\n");
     assert!(live.contains("Planning validation"), "{live}");
     assert!(live.contains("Inspecting"), "{live}");
@@ -919,6 +981,7 @@ fn reasoning_is_subdued_without_losing_inline_code_colour() {
         None,
         &TranscriptBlock::Reasoning(Box::new(
             AssistantBlock::streaming_reasoning("Thinking about `Session`")
+                .with_reasoning_expanded(true)
                 .with_model_lab(Some(ModelLab::Unknown)),
         )),
         &theme,
@@ -1093,12 +1156,12 @@ fn an_expanding_theme_paints_the_trace_while_the_default_paints_a_collapsed_line
     };
 
     let collapsed = rendered("[colors]\n");
-    assert!(collapsed.contains("ctrl+o to expand"), "{collapsed}");
+    assert!(collapsed.contains("ctrl+t to expand"), "{collapsed}");
 
     let expanded = rendered("[colors]\nthinking_expanded = true");
     assert!(
         expanded.contains("Weighing the two migration paths."),
         "{expanded}"
     );
-    assert!(!expanded.contains("ctrl+o to expand"), "{expanded}");
+    assert!(!expanded.contains("ctrl+t to expand"), "{expanded}");
 }
