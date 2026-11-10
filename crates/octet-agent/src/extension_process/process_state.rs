@@ -34,10 +34,10 @@ pub struct InitializeRequest {
     pub host: ExtensionHostState,
     /// Declared CLI flag values projected into API `0.2` initialize so that
     /// `pi.getFlag` observes host-resolved values rather than local defaults.
-    /// Reuses the API `0.3` [`api_v03::InitializeFlagValue`] shape. Omitted
+    /// Uses the API `0.4`-owned [`api_v04::InitializeFlagValue`] shape. Omitted
     /// byte-for-byte for API `0.1` and for a host that has no flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flag_values: Option<Vec<api_v03::InitializeFlagValue>>,
+    pub flag_values: Option<Vec<api_v04::InitializeFlagValue>>,
     /// Additive API `0.2` feature and limit negotiation. Frozen API `0.1`
     /// initialization omits this field byte-for-byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]

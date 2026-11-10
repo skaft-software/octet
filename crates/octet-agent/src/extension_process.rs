@@ -66,6 +66,7 @@ use crate::extension::{
     ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
+use crate::extension_api_v04 as api_v04;
 use crate::extension_policy::{
     ExtensionActionIntent, ExtensionApprovalStore, ExtensionApprovalToken, ExtensionPolicyDecision,
 };

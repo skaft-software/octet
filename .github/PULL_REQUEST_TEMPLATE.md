@@ -1,3 +1,8 @@
+## Linked issue
+
+<!-- Link the issue scoped before this change; fill in its number after Refs #. -->
+Refs #
+
 ## Summary
 
 <!-- What changed? Keep this factual and bounded. -->
@@ -8,7 +13,6 @@
 
 ## Design and ownership
 
-- Issue / Discussion / roadmap item:
 - Owning boundary (core, extension, provider data/runtime, TUI, Serve, release/docs):
 - Why the change does not belong in a smaller or external boundary:
 - Compatibility or migration effect:

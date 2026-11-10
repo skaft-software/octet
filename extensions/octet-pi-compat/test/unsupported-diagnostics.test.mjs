@@ -82,7 +82,7 @@ test('a package names the skipped hook, the member it needed, and the one action
   assert.equal(notices[0].params.message,
     'Pi Web Access: session_start hook needs ctx.abort, which octet does not provide, so the hook was skipped. Update octet or the extension, or disable.');
   assert.ok(!notices[0].params.message.includes(directory), 'a notice names no path');
-  assert.match(peer.stderr(), /session_start hook needs ctx\.abort/);
+  await peer.waitStderr(/session_start hook needs ctx\.abort/);
   await peer.close();
 });
 

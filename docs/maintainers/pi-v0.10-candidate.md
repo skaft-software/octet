@@ -38,7 +38,7 @@ for Pi and Octet. A Python venv alone does not isolate Node extensions, HOME,
 OS processes, credentials or executable effects. Use the Space's OS/VM isolation;
 venvs may isolate test-driver Python dependencies within it.
 
-Install Rust 1.88+, Node 22.19+, and Python 3.11+ with `venv` and `ensurepip`
+Install Rust 1.89+, Node 22.19+, and Python 3.11+ with `venv` and `ensurepip`
 in the VM. Verify Python before running executable-extension tests; a bare
 interpreter without `ensurepip` is insufficient. Build without replacing an
 installed Octet binary:
