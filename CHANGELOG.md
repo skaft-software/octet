@@ -7,6 +7,10 @@
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 
+- Shift+Enter inserts a newline in fullscreen mode on terminals that report the
+  kitty keyboard protocol or `modifyOtherKeys`, including right after octet
+  enters fullscreen. Ctrl+J remains the portable newline.
+
 - The extension API 0.4 reference now documents its actual feature-negotiated
   wire, provider/session data and service-specific errors instead of presenting
   canonical API 0.3 models as the current contract. Public provider-registry Rust
