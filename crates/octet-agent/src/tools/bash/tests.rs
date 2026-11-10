@@ -930,6 +930,7 @@ async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
     // returned before the holder started there was nothing to drain and
     // nothing to measure.
     let pid_file = f.workspace.join("escaped.pid");
+    let called = std::time::Instant::now();
     let execute = BashTool.execute(
         json!({"command": "python3 -c 'import os,time; os.setsid(); open(\"escaped.pid\", \"w\").write(str(os.getpid())); time.sleep(30)' & sleep 30"}),
         &ctx,
@@ -969,6 +970,12 @@ async fn timeout_drain_is_bounded_when_escaped_descendant_holds_pipes() {
             "escaped pipe holder defeated the deadline"
         );
     }
+    // Whether or not the holder started before the deadline, the call must
+    // never wait for its 30 s sleep.
+    assert!(
+        finished.duration_since(called) < Duration::from_secs(20),
+        "the call waited for the escaped pipe holder"
+    );
 }
 
 #[tokio::test]
