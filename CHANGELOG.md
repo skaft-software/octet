@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Pi extension commands that await `ctx.ui.select(...)` and then `ctx.ui.confirm(...)`
+  or `ctx.ui.input(...)` (Pi's `commands.ts` example) no longer fail with
+  `not_foreground_owner ... requires a live request`; the later dialog opens on a
+  remote selector or input surface like Pi's.
+
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 

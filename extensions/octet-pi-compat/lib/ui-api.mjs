@@ -305,15 +305,16 @@ export function dialogAPI(custom, native = {}) {
   return {
     select,
     async confirm(title, message, options) {
-      if (native.confirm && simple(options)) return native.confirm(title, message);
+      if (native.confirm && simple(options) && native.brokered?.() !== false) return native.confirm(title, message);
       bounded(message, 'confirmation message', 16384, { controls: true });
+      // Pi's confirm is a Yes/No selector (pi-session-1-5-0/dist/modes/interactive/interactive-mode.js:2244-2250).
       return await select(`${title}\n${message}`, ['Yes', 'No'], options) === 'Yes';
     },
     input(title, placeholder, options) {
       // Pi 1.0.2 accepts this argument, but ExtensionInputComponent does not
       // render it or use it as the initial value.
       if (placeholder !== undefined) bounded(placeholder, 'input placeholder', 16384);
-      if (native.input && simple(options)) return native.input(title);
+      if (native.input && simple(options) && native.brokered?.() !== false) return native.input(title);
       return dialog(custom, title, options, (_tui, _theme, done) => {
         const input = new Input();
         const handle = input.handleInput.bind(input);
