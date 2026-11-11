@@ -653,17 +653,9 @@ pub(super) fn try_queue_child_response_line(
     }
 }
 
-pub(super) fn cancel_children_from_reader(
-    state: &ProtocolReadState,
-    parent_request_id: u64,
-    reason: &str,
-) {
-    cancel_children_from_reader_keeping(state, parent_request_id, reason, false);
-}
-
 /// `keep_surface_opens`: the parent replied successfully, so its unanswered
 /// `ui/open` children stay admitted (see `RemoteUiChildRequest::is_surface_open`).
-pub(super) fn cancel_children_from_reader_keeping(
+pub(super) fn cancel_children_from_reader(
     state: &ProtocolReadState,
     parent_request_id: u64,
     reason: &str,

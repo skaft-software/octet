@@ -2312,7 +2312,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
     };
     if let Some(request) = request {
         state.pending_changed.notify_waiters();
-        cancel_children_from_reader_keeping(state, id, "parent settled", reply.is_ok());
+        cancel_children_from_reader(state, id, "parent settled", reply.is_ok());
         let _ = request.sender.send(reply);
     } else if lock_std_mutex(&state.tombstones).remove(id) {
         let _ = state.events.send(ExtensionEvent::Diagnostic {
