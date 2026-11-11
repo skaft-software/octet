@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Ctrl+C at an idle, empty prompt now closes octet, as the welcome hint says.
+  During a running response Ctrl+C still only stops the run; press it again
+  once the run has stopped to exit. Ctrl+D exits at any time (#673).
+
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
 - The `/resume` empty states are now derived from the picker when it is drawn,
