@@ -107,7 +107,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_session_replacement_tests` | 10 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch and before-hook cancellation |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
 | `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
-| `pi_ui_contract_tests` | 14 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
+| `pi_ui_contract_tests` | 15 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane (including a slow listener) and editor calls during prompt hooks |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
 | `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
 | `resource_paths::pi_app_tests` | 8 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
