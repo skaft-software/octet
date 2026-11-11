@@ -127,6 +127,26 @@ their five-second budgets and use fresh completed-frame observations.
 The existing 1.3-second initial observation remains a time-based baseline wait,
 not a protocol receipt proving the first watcher scan completed.
 
+## Explicit forced reload
+
+```sh
+python3 scripts/test-reload-pty.py --binary /absolute/path/to/octet
+```
+
+This separate Unix harness does not build or install anything. With disposable
+HOME, workspace and session storage, it checks `/reload --force` against an
+unchanged executable, an atomic replacement, a retargeted launch symlink, and a
+retry after candidate-probe refusal. Each successful force must bootstrap a fresh
+app in the same PID, resume exactly the original session, accept editor input,
+and restore terminal modes on exit. The watcher is disabled so no automatic pass
+can substitute for the explicit command. Reports include the tested binary hash;
+no live provider is called. Running-worker detachment is covered independently by
+`running_host_worker_refuses_plain_reload_and_force_detaches_it` in the interactive
+resource-reload tests. To test an upgrade from an older binary into a new build,
+pass `--binary /path/to/old/octet --replacement-binary /path/to/new/octet --cases atomic symlink retry`;
+the report identifies both images by hash. This does not qualify Windows or an
+attended desktop.
+
 ## Isolation and safety
 
 Each real-binary run creates a disposable HOME, workspace, and session store,

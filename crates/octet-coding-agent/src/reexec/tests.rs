@@ -556,6 +556,89 @@ async fn unchanged_binary_is_resources_only() {
     assert_eq!(hooks.counters.shutdown.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn forced_unchanged_binary_restarts_and_retains_validation_and_durability() {
+    let directory = tempfile::tempdir().unwrap();
+    let exe = directory.path().join("octet");
+    write_binary(&exe, b"unchanged binary");
+    let (probe, seen) = recording_probe(valid_output());
+    let controller = ReexecController {
+        startup_exe: exe.clone(),
+        original_argv: vec![OsString::from("octet"), OsString::from("--offline")],
+        startup_generation: BinaryGeneration::capture(&exe).unwrap(),
+        session_id: Some(SESSION.to_owned()),
+        probe,
+        probe_timeout: Duration::from_millis(50),
+        resolver: resolving(&exe),
+    };
+    let observed = controller.observe_generation();
+    let options = ReexecOptions::default().forcing_restart();
+    let mut hooks = TestHooks::default();
+    for safety in [
+        LiveSafetyInputs {
+            model_turn_active: true,
+            ..Default::default()
+        },
+        LiveSafetyInputs {
+            tool_call_active: true,
+            ..Default::default()
+        },
+        LiveSafetyInputs {
+            session_persistence_in_flight: true,
+            ..Default::default()
+        },
+    ] {
+        let decision = controller
+            .reexec_if_changed(&observed, &safety, options, &mut hooks)
+            .await;
+        assert!(
+            matches!(decision, ReexecDecision::Refused { .. }),
+            "{decision:?}"
+        );
+    }
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(hook_order(&hooks).is_empty());
+
+    hooks.durable_failure = Some("fixture persistence failure".into());
+    let decision = controller
+        .reexec_if_changed(&observed, &LiveSafetyInputs::default(), options, &mut hooks)
+        .await;
+    assert!(matches!(
+        decision,
+        ReexecDecision::Blocked {
+            reason: BlockedReason::DurableHeadFailed(_),
+            ..
+        }
+    ));
+    assert_eq!(hooks.counters.shutdown.load(Ordering::SeqCst), 0);
+
+    // A previous refusal or failure must not suppress an explicit retry.
+    hooks.durable_failure = None;
+    let decision = controller
+        .reexec_if_changed(&observed, &LiveSafetyInputs::default(), options, &mut hooks)
+        .await;
+    let ReexecDecision::Ready(plan) = decision else {
+        panic!("forced unchanged image must restart: {decision:?}");
+    };
+    assert_eq!(plan.executable(), exe);
+    assert_eq!(plan.session_id(), SESSION);
+    assert_eq!(
+        plan.argv(),
+        [
+            OsString::from("octet"),
+            OsString::from("--offline"),
+            OsString::from("--resume"),
+            OsString::from(SESSION)
+        ]
+    );
+    assert_eq!(seen.lock().unwrap().as_slice(), [exe.clone(), exe]);
+    assert_eq!(
+        hook_order(&hooks),
+        ["durable-head", "durable-head", "extension-shutdown"]
+    );
+}
+
 #[tokio::test]
 async fn changed_binary_reaches_ready_and_names_the_candidate_build_and_path() {
     let directory = tempfile::tempdir().unwrap();

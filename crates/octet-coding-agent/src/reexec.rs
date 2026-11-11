@@ -1,8 +1,8 @@
 //! Safe hot re-exec for `/reload`.
 //!
-//! `/reload` keeps its existing transactional resource reload. Only when the
-//! executable on disk is no longer the image this process started from does the
-//! interactive caller consult this module. The decision core is deliberately
+//! `/reload` keeps its existing transactional resource reload. Explicit force
+//! and the opt-in `reload_host` watcher consult this module for a host restart.
+//! The decision core is deliberately
 //! self-contained: it never reaches into `App`, the TUI shell, the extension
 //! manager, or the session store. Live facts arrive as [`LiveSafetyInputs`], and
 //! the two operations this module must not own (a durable session head and a
@@ -14,8 +14,9 @@
 //!    [`ReexecController::observe_generation`] and hands the observed generation
 //!    to [`ReexecController::reexec_if_changed`].
 //! 2. An unchanged generation returns [`ReexecDecision::ResourcesOnly`] with the
-//!    notice `resources reloaded · binary unchanged`.
-//! 3. A changed generation is validated before anything is torn down. A
+//!    notice `resources reloaded · binary unchanged`, unless the caller explicitly
+//!    requested `/reload --force` on Unix, which restarts even the unchanged image.
+//! 3. A changed or explicitly forced image is validated before any teardown. A
 //!    **retargeted** image — one that no longer shares the startup image's file
 //!    identity (a moved path or a replaced inode) — first returns
 //!    [`ReexecDecision::ConfirmationRequired`] without spawning anything; only
@@ -861,6 +862,9 @@ pub(crate) struct ReexecOptions {
     /// the confirmation; an explicit `/reload --force` is that user decision,
     /// while the automatic `reload_host = true` path asks first.
     pub(crate) redirect_confirmed: bool,
+    /// Explicit `/reload --force` restarts even an unchanged image, instead of
+    /// retaining process-local extension state and reload budgets.
+    pub(crate) force_restart: bool,
 }
 
 impl ReexecOptions {
@@ -876,6 +880,18 @@ impl ReexecOptions {
         Self {
             detach_background_workers: true,
             ..Self::default()
+        }
+    }
+
+    /// An explicit force reload both confirms the installed image and requests
+    /// a fresh process. Validation, persistence and live-work checks still apply.
+    pub(crate) fn forcing_restart(self) -> Self {
+        Self {
+            // Other hosts retain their existing in-process reload until
+            // platform_exec supports replacing their process image.
+            force_restart: cfg!(unix),
+            redirect_confirmed: true,
+            ..self
         }
     }
 
@@ -1332,7 +1348,8 @@ impl ReexecController {
     ///
     /// `observed` is what the caller resolved after its resource reload. An
     /// unchanged image at the startup path returns
-    /// [`ReexecDecision::ResourcesOnly`]. Anything else re-pins the observed
+    /// [`ReexecDecision::ResourcesOnly`] unless `options.force_restart` was
+    /// explicitly selected. A forced or changed image re-pins the observed
     /// candidate, runs candidate validation, live-state refusal under
     /// `options`, the redirect confirmation gate, the durable-head hook, the
     /// bounded extension-shutdown hook, and the canonical argv build, in that
@@ -1349,11 +1366,15 @@ impl ReexecController {
         hooks: &mut dyn ReexecHooks,
     ) -> ReexecDecision {
         // The caller's observation is the trigger: the startup path with the
-        // startup identity needs no re-exec. A path that differs is already a
+        // startup identity needs no automatic re-exec. Explicit force must not
+        // retain the runtime state that an in-process reload could not replace.
+        // A path that differs is already a
         // change (the same file reached through a new path is a new image to
         // enter), and the partial observations are the update-in-progress cases
         // below.
-        if observed.is_startup_image(&self.startup_exe, &self.startup_generation) {
+        if !options.force_restart
+            && observed.is_startup_image(&self.startup_exe, &self.startup_generation)
+        {
             return ReexecDecision::ResourcesOnly;
         }
         let candidate = match observed.candidate() {
@@ -1362,12 +1383,16 @@ impl ReexecController {
         };
         // The caller's read is only a trigger. Re-pin the generation that is
         // about to be probed, so the probe is validated against the state at
-        // spawn time; a disk that reverted to the running image is unchanged.
+        // spawn time; a disk that reverted to the running image is unchanged
+        // only for a non-forced pass.
         let probed = match capture_executable_image(&candidate) {
             Ok(generation) => generation,
             Err(defect) => return ReexecDecision::blocked(defect.into_blocked(&candidate)),
         };
-        if candidate == self.startup_exe && probed == self.startup_generation {
+        if !options.force_restart
+            && candidate == self.startup_exe
+            && probed == self.startup_generation
+        {
             return ReexecDecision::ResourcesOnly;
         }
         // Refuse before spawning anything: the cheapest actionable notice wins

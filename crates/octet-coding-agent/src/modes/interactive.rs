@@ -5961,9 +5961,9 @@ where
     // own blocked notice instead of an opaque error.
     let observed = reexec.observe_generation();
     let safety = live_reexec_inputs(busy_subagent_workers(&app));
-    // A typed `/reload --force` already carries the retarget consent;
-    // every other host pass must ask before a
-    // retargeted image is probed.
+    // A typed `/reload --force` confirms the installed image and requests an
+    // actual restart, including when its generation has not changed. Automatic
+    // passes still require a changed image and consent before a retarget probe.
     let mut options = crate::reexec::ReexecOptions::refusing_workers();
     if matches!(
         host,
@@ -5971,7 +5971,7 @@ where
             redirect_confirmed: true
         }
     ) {
-        options = options.confirming_redirect();
+        options = options.forcing_restart();
     }
     // Running execution cannot move into a replacement image. Busy workers
     // were refused here or detached by `/reload --force` before this point;

@@ -1054,12 +1054,6 @@ impl ReloadReport {
 
     fn collect_notices(&self, detailed: bool) -> Vec<String> {
         let mut notices = Vec::new();
-        if self.forced {
-            notices.push(
-                "reload (forced): applying an explicit pass; interruption risks are previewed from current state"
-                    .to_owned(),
-            );
-        }
         // Detailed output distinguishes the watcher noticing a save from an
         // owner or extension asking for a pass.
         if let Some(reason) = self

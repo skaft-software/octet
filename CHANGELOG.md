@@ -18,6 +18,12 @@
 
 ### Fixed
 
+- On Unix, `/reload --force` restarts into the installed executable and resumes
+  the same session even when the binary is unchanged, instead of retaining stale
+  extension runtime state and in-process reload limits. Updated binaries still
+  pass compatibility checks; running workers are detached with their sessions kept.
+  Forced reload no longer prints a generic interruption-risk status line.
+
 - Pi compaction callbacks can observe opaque reasoning and split-turn tool results
   without failing history conversion. A throwing compaction or tree callback is
   warned and skipped; explicit vetoes, cancellation and failed native writes still stop.
