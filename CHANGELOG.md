@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `octet migrate pi --dry-run` no longer reports "0 skills" for a Pi setup whose skills live
+  in `~/.agents/skills` (or a project `.agents/skills`, up to its git root). The report now
+  counts the skills Pi's loader finds there, with the same rules the adapter mirror uses: a
+  directory with `SKILL.md` is one skill, and loose Markdown files directly in the root are not.
+
 - A first run with no provider configured now says when it finds a Pi setup (`~/.pi/agent`
   or `PI_CODING_AGENT_DIR`) and names the two commands that act on it,
   `octet --enable-extension octet-pi-compat` and `octet migrate pi --dry-run`, instead of
