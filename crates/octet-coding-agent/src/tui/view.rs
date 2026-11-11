@@ -6121,33 +6121,46 @@ impl InteractiveShell {
     }
 
     /// Complete the highlighted slash suggestion without submitting it. When
-    /// the popup is dismissed, only a unique prefix can complete. A mounted slot
-    /// editor receives the completed draft instead of the hidden mirror, so its
-    /// own pastes and undo stay consistent with what it shows.
+    /// the popup is dismissed, only a unique prefix can complete. Tab never
+    /// inserts a suggestion the user cannot see: a popup that is not drawn, or
+    /// that an extension's autocomplete overlay replaced, completes nothing.
+    /// A mounted slot editor receives the completed draft instead of the hidden
+    /// mirror, so its own pastes and undo stay consistent with what it shows.
     pub fn complete_slash_command(&mut self) {
+        let native_input = self
+            .state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .accepting_input;
         let mut state = self.state.borrow_mut();
-        if state.editor.cursor() != state.editor.text().len() {
+        let (popup_visible, overlay_shown) = if native_input {
+            let source =
+                tern_completion::Completion::capture(&state).map(|completion| completion.source);
+            (
+                source == Some(tern_completion::Source::Slash),
+                source == Some(tern_completion::Source::Extension),
+            )
+        } else {
+            let width = state.size.0;
+            let overlay = input_overlays::extension_autocomplete_shown(&state);
+            let drawn = !shell_chrome(&state, width, Instant::now())
+                .suggestions
+                .is_empty();
+            (drawn && !overlay, overlay)
+        };
+        let Some(completed) =
+            input_overlays::slash_completion(&state, popup_visible, overlay_shown)
+        else {
             return;
-        }
-        let suggestions = input_slash_suggestions(&state);
-        if state.slash_popup_dismissed && suggestions.len() != 1 {
-            return;
-        }
-        let selected = state
-            .slash_selection
-            .min(suggestions.len().saturating_sub(1));
-        if let Some(suggestion) = suggestions.get(selected) {
-            let completed = format!(
-                "/{}{}",
-                suggestion.name,
-                if suggestion.accepts_argument { " " } else { "" }
-            );
-            state.editor.set_text(completed.clone());
-            state.slash_popup_dismissed = true;
-            invalidate_editor_autocomplete(&mut state);
-            drop(state);
-            self.set_composer_slot_text(completed);
-        }
+        };
+        state.editor.set_text(completed.clone());
+        state.slash_popup_dismissed = true;
+        state.slash_selection = 0;
+        state.slash_scroll = 0;
+        invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.set_composer_slot_text(completed);
     }
 
     pub fn slash_popup_open(&self) -> bool {

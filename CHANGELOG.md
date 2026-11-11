@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Tab completion of a `/command` keeps a name you typed in full (`/skill:review`
+  no longer becomes `/skill:review-pr`) until you move the highlight, completes
+  only a suggestion that is on screen (not when the popup is hidden on a short
+  terminal or an extension's autocomplete replaced it), and resets the popup
+  selection afterwards. Follow-up to #675.
+
 - A partially typed `/command` completion menu now includes commands that an
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.
