@@ -1,36 +1,27 @@
-// Soak fixture: a minimal Pi extension exercising the bridge's provider
-// pipeline, tool calls, and durable UI mounts.
-//
-// The bridge process environment is sanitized by the native host, so the
-// provider URL travels through a file inside the Pi agent directory (which
-// the host passes explicitly as OCTET_PI_AGENT_DIR).
-//
-// The provider registers the extension model for selection and reload checks;
-// inference runs on the native custom route to the deterministic loopback
-// fake provider (see README). The footer mount is intentionally opened from `session_start` without awaiting
-// it, exactly like real Pi extensions do; on main the native reader cancels
-// that mount when the hook replies (the known mount-cancellation race the
-// reference-model fuzzer records). The soak harness reports mount liveness
-// without failing on it until the fix lands.
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+// The provider URL travels through a file the driver writes next to this
+// fixture (<workspace>/.pi/soak-port). It is NOT read from the environment:
+// the host sandboxes the bridge's environment, and the factory runs in more
+// than one bridge process (the activation-time mirror capture and the runtime
+// bridge), so an environment lookup would silently fall back to a dummy URL in
+// one of them and the provider would be registered with a dead endpoint.
+// The fixture only reads, and only inside a directory the soak driver marked
+// with a `.soak-harness` sentinel; it never writes.
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { streamSimpleOpenAIResponses } from '@earendil-works/pi-ai';
+
+function harnessDir() {
+  const here = dirname(fileURLToPath(import.meta.url)); // <workspace>/.pi/extensions
+  const dir = join(here, '..');
+  if (!existsSync(join(dir, '.soak-harness'))) throw new Error('not a soak harness directory');
+  return dir;
+}
 
 function providerUrl() {
-  try {
-    const agentDir = process.env.OCTET_PI_AGENT_DIR;
-    if (!agentDir) throw new Error('no OCTET_PI_AGENT_DIR');
-    // Read-only, and only inside the agent directory the soak driver created
-    // (it leaves this sentinel). The fixture never writes anywhere.
-    if (!existsSync(join(agentDir, '.soak-harness'))) throw new Error('not a soak harness agent dir');
-    const port = readFileSync(join(agentDir, 'soak-port'), 'utf8').trim();
-    if (!/^\d+$/.test(port)) throw new Error('bad soak port');
-    return `http://127.0.0.1:${port}/v1/`;
-  } catch (error) {
-    // The mirror capture imports this factory before the driver writes the
-    // port file; a dummy loopback URL keeps the capture deterministic.
-    return 'http://127.0.0.1:0/v1/';
-  }
+  const port = readFileSync(join(harnessDir(), 'soak-port'), 'utf8').trim();
+  if (!/^\d+$/.test(port)) throw new Error('bad soak port');
+  return `http://127.0.0.1:${port}/v1/`;
 }
 
 export default pi => {
@@ -54,6 +45,8 @@ export default pi => {
   });
   pi.registerProvider('soak', {
     baseUrl,
+    // Pi requires an apiKey (or oauth) whenever models are defined.
+    apiKey: 'soak-key',
     api: 'openai-responses',
     models: [{
       id: 'soak-model',
@@ -66,12 +59,10 @@ export default pi => {
       contextWindow: 32768,
       maxTokens: 1024,
     }],
-    // Required for explicit models. As in Pi the extension's own stream runs
-    // for this route, and this one cannot reach the loopback fake, so the
-    // driver pins the native custom route for every inference turn.
-    streamSimple: async function* (_input, _update, _signal) {
-      throw new Error('soak provider delegates HTTP to the host');
-    },
+    // Pi runs the extension's own stream for its provider. Delegating to the
+    // installed pi-ai's OpenAI Responses stream sends the request to baseUrl
+    // (the loopback fake) exactly as a real Pi custom provider would.
+    streamSimple: (model, context, options) => streamSimpleOpenAIResponses(model, context, options),
   });
   pi.registerTool({
     name: 'soak_probe',

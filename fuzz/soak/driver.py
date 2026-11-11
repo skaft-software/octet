@@ -227,16 +227,20 @@ def main() -> int:
                         help="fail when the post-warmup RSS slope exceeds this MiB/turn")
     parser.add_argument("--warmup-fraction", type=float, default=0.25,
                         help="leading fraction of samples excluded from the slope check")
+    parser.add_argument("--route", choices=("native", "extension"), default="native",
+                        help="route every inference turn takes: the native custom route (default) "
+                             "or the Pi extension provider registered by the fixture")
     parser.add_argument("--keep", action="store_true", help="keep the run directory on failure")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
+    route_model = SOAK_MODEL_ID if args.route == "extension" else "custom/soak/soak-bootstrap"
     try:
         guard.preflight(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp")
     except guard.IsolationError as error:
         print(error, file=sys.stderr)
         return 2
-    run_dir = Path(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp") / "octet-soak" / f"soak-{args.seed}"
+    run_dir = Path(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp") / "octet-soak" / f"soak-{args.seed}" if args.route == "native" else f"soak-ext-{args.seed}"
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
@@ -268,6 +272,7 @@ def main() -> int:
         print(error, file=sys.stderr)
         return 2
     (pi_agent / guard.SENTINEL).write_text(str(run_dir))
+    (workspace / ".pi" / guard.SENTINEL).write_text(str(run_dir))
 
     provider = subprocess.Popen(
         [sys.executable, str(HERE / "fake_provider.py"), "--port-file", str(run_dir / "port")],
@@ -278,7 +283,7 @@ def main() -> int:
             time.sleep(0.1)
         port = (run_dir / "port").read_text().strip()
         provider_url = f"http://127.0.0.1:{port}/v1/"
-        (pi_agent / "soak-port").write_text(port)
+        (workspace / ".pi" / "soak-port").write_text(port)
     except Exception as error:
         provider.kill()
         raise SoakFailure(f"fake provider failed to start: {error}") from error
@@ -340,7 +345,7 @@ def main() -> int:
         # custom route for every inference turn (the bridge-delegated
         # extension route's baseUrl is not reproducible in this shared
         # environment; see fuzz/soak/README.md "unverified").
-        select_model(rpc, "custom/soak/soak-bootstrap", timeout=300)
+        select_model(rpc, route_model, timeout=300)
 
         for turn in range(args.turns):
             print(f"[driver] turn {turn} (choice {choice:.3f})", flush=True) if False else None
@@ -384,7 +389,7 @@ def main() -> int:
                 # remain selected; re-pin the model before the next prompt.
                 try:
                     select_model(rpc, SOAK_MODEL_ID, timeout=300)
-                    select_model(rpc, "custom/soak/soak-bootstrap", timeout=300)
+                    select_model(rpc, route_model, timeout=300)
                 except SoakFailure as error:
                     raise SoakFailure(f"reload at turn {turn} lost the soak model: {error}") from error
             elif choice < 0.88 and turn >= 3:
@@ -396,14 +401,14 @@ def main() -> int:
                 # extension model (verifying the route stays registered) and
                 # pin the native route back before any inference turn.
                 select_model(rpc, SOAK_MODEL_ID, timeout=300)
-                select_model(rpc, "custom/soak/soak-bootstrap", timeout=300)
+                select_model(rpc, route_model, timeout=300)
             else:
                 command_response(rpc, "new_session", {}, timeout=300)
                 # Same sequencing as after reload: the extension route is
                 # re-selected (registration check) and the native route is
                 # pinned again before any inference turn.
                 select_model(rpc, SOAK_MODEL_ID, timeout=300)
-                select_model(rpc, "custom/soak/soak-bootstrap", timeout=300)
+                select_model(rpc, route_model, timeout=300)
             # Mount-cancellation signature detection (known main bug): report,
             # do not fail until the fix lands.
             mount_cancel_hits = rpc.mount_cancel_hits
@@ -428,6 +433,7 @@ def main() -> int:
     slope = linear_slope(rss_samples[warmup:])
     summary.update({
         "seed": args.seed,
+        "route": args.route,
         "turns": args.turns,
         "rss_samples": len(rss_samples),
         "rss_slope_mib_per_turn": round(slope, 4),

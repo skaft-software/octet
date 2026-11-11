@@ -80,21 +80,25 @@ Known on main / unverified here:
   itself, and the reader thread blocked before logging, so `octet.log` looked
   like a stall after `agent_start`. A wire tap showed octet and the bridge
   completing the whole turn. The lock is now an `RLock`.
-- **Resolved, not a product bug: `SOAK_TOOL` after `new_session`.** The
-  driver re-selected the extension model after `new_session` without pinning
-  the native route again, so the next prompt ran on the extension route. That
-  route cannot reach the loopback fake: a `registerProvider` explicit-model
-  provider runs the extension's own `streamSimple` (as in Pi), and the
-  host-delegated HTTP exists only for native Pi registry providers, so the
-  stream raises `unsupported_feature` and the host reports "extension
-  provider reported an error" with no request reaching the fake. Reproduced
-  with `new_session` absent (extension model, first prompt) as well. The
-  driver now re-pins the native route after `new_session`, as after reload.
-- **Bridge-delegated extension-model inference** (`soak/m-…`) resolves and
-  registers, but its delegated `baseUrl` is not reproducible in this shared
-  environment (a stale value was observed coming from shared mirror-cache
-  state). The driver verifies registration/reselection and pins the native
-  custom route for inference; extension-route inference stays unverified.
+- **Resolved: `SOAK_TOOL` after `new_session`.** The driver re-selected the
+  extension model after `new_session` and left it selected, so the next prompt
+  ran on the extension route. That failed ("extension provider reported an
+  error", no request reaching the fake) for two independent reasons, both now
+  fixed: (1) adapter bug: the bridge handed the extension's `streamSimple` a
+  strict options object that threw `unsupported_feature` for any option Pi does
+  not set (`headers`, `env`, `fetch`, `samplingParams`, ...), which the
+  installed Pi's own stream helpers read; unset options now read as
+  `undefined` (regression test in `provider-registration.test.mjs`). (2)
+  fixture bugs: it read the provider URL from `process.env`, which the
+  sandboxed runtime bridge does not have (the factory runs in the mirror
+  capture and in the runtime bridge, and the runtime one registered the dummy
+  `127.0.0.1:0` URL), it lacked the `apiKey` Pi requires with explicit models,
+  and its `streamSimple` threw instead of streaming. The URL now comes from
+  `<workspace>/.pi/soak-port`, and the stream delegates to pi-ai's OpenAI
+  Responses stream.
+- Both routes are covered: the default `--route native` pins the native
+  custom route for inference, `--route extension` runs every inference turn on
+  the extension provider (`soak/m-...`).
 - Provider *streaming quality*, prompt latency, and terminal rendering are
   deliberately out of scope — this harness checks stability and invariant
   hygiene, not performance or visual output.
