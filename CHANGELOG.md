@@ -23,6 +23,9 @@
   sessions keep their published view; any new record, label, usage, host change,
   reopened session or failed publication still republishes in full.
 
+- A slash command entered once during startup runs when the session is ready,
+  instead of reporting `busy · draft kept` and requiring Enter again.
+
 - On Unix, `/reload --force` restarts into the installed executable and resumes
   the same session even when the binary is unchanged, instead of retaining stale
   extension runtime state and in-process reload limits. Updated binaries still

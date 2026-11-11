@@ -1362,7 +1362,7 @@ where
 
 fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> bool {
     if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
-        shell.cancel_thinking_submission("interrupted");
+        shell.cancel_wait_submissions("interrupted");
         shell.request_close();
         return true;
     }
@@ -1386,11 +1386,11 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     }
     match shell.translate_input(Some(event), true) {
         InputAction::Abort | InputAction::DispatchQueued => {
-            shell.cancel_thinking_submission("interrupted");
+            shell.cancel_wait_submissions("interrupted");
             return true;
         }
         InputAction::Closed => {
-            shell.cancel_thinking_submission("interrupted");
+            shell.cancel_wait_submissions("interrupted");
             shell.request_close();
             return true;
         }
@@ -1409,13 +1409,19 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::CycleThinking => shell.cycle_thinking_during_wait(),
         InputAction::Queue(_) | InputAction::Steer(_) | InputAction::Submit(_) => {
             // An ordinary prompt is latched once and sent when the wait ends,
-            // so Enter never has to be repeated. Commands and shell escapes are
-            // never admitted as delayed model input; a repeat Enter stays silent.
+            // so Enter never has to be repeated. Shell escapes are never
+            // admitted as delayed model input; a repeat Enter stays silent.
             if !shell.queue_thinking_submission() && !shell.thinking_submission_pending() {
                 shell.notice("busy · draft kept");
             }
         }
-        InputAction::Command(_) => shell.notice("busy · draft kept"),
+        // A typed command is latched once and run by the idle command path
+        // when the wait ends (same session/route), never as model input.
+        InputAction::Command(text) => {
+            if !shell.queue_wait_command(text) && !shell.thinking_submission_pending() {
+                shell.notice("busy · draft kept");
+            }
+        }
         InputAction::Close => shell.clear_error(),
         _ => return false,
     }
@@ -13336,17 +13342,29 @@ async fn run_interactive_once(
         let thinking_fence = thinking_input
             .as_ref()
             .map(|_| (thinking_selection_owner(&app), app.reasoning.clone()));
-        let queued_input = if startup_input.is_none() && thinking_input.is_none() {
-            shell.take_ready_follow_up(
-                crate::cli::queue_mode(crate::cli::QueueKind::FollowUp)
-                    == octet_agent::QueueDeliveryMode::All,
-            )
+        // A command typed once while a wait owned the session runs here, at the
+        // same idle boundary and through the same path as a freshly typed one.
+        let wait_command = if startup_input.is_none() && thinking_input.is_none() {
+            shell.take_wait_command(&thinking_selection_owner(&app))
         } else {
             None
         };
+        let queued_input =
+            if startup_input.is_none() && thinking_input.is_none() && wait_command.is_none() {
+                shell.take_ready_follow_up(
+                    crate::cli::queue_mode(crate::cli::QueueKind::FollowUp)
+                        == octet_agent::QueueDeliveryMode::All,
+                )
+            } else {
+                None
+            };
         let queued_submission = queued_input.is_some();
-        let idle = match startup_input.take().or(thinking_input).or(queued_input) {
-            Some(input) if !input.is_empty() => Idle::Submit(input),
+        let idle = match (
+            startup_input.take().or(thinking_input).or(queued_input),
+            wait_command,
+        ) {
+            (Some(input), _) if !input.is_empty() => Idle::Submit(input),
+            (_, Some(command)) => Idle::Command(command),
             _ => {
                 wait_for_prompt(
                     &mut shell,

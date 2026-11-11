@@ -73,7 +73,11 @@ history, so it stays fast on long resumed sessions.
 
 Startup keeps routine session lookup, replay and extension-loading progress off
 screen. You can type while startup work finishes, and the welcome card and saved
-conversation appear when octet is ready. Setup prompts, errors, and cancel or
+conversation appear when octet is ready. Pressing Enter once on a prompt or a
+slash command while startup (or an extension hook) still owns the session queues
+it; it runs once when the session is ready, never as model input. A second Enter
+keeps the draft, Esc or Ctrl+C restores it, and it is restored instead of run if
+the session or model changed meanwhile. Setup prompts, errors, and cancel or
 shutdown diagnostics stay visible. Fresh sessions skip the replay worker
 entirely, and resumed sessions still restore their history. `--models` inventory
 discovery also runs after the shell owns input, not before the first paint.
