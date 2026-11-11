@@ -741,7 +741,6 @@ pub(super) fn render_loop_with_terminal(
         // Clear and replay once rather than append a duplicate transcript.
         tui.request_render_force(true);
     }
-    let trace_frames = std::env::var("OCTET_PERF_TRACE").is_ok_and(|value| value == "1");
     let mut painted_resize_epoch = state.borrow().resize_epoch;
     tui.start();
     state.frame_written_at(tui.rendered_viewport_top());
@@ -892,16 +891,10 @@ pub(super) fn render_loop_with_terminal(
         // unchanged. Capture before writing so a newer resize during the paint
         // remains pending instead of being mistaken for the rendered geometry.
         let resize_epoch = state.borrow().resize_epoch;
-        let frame_start = trace_frames.then(Instant::now);
-        tui.request_render_force(resize_epoch != painted_resize_epoch);
-        state.frame_written_at(tui.rendered_viewport_top());
-        if let Some(start) = frame_start {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "octet-perf: render.frame elapsed={}us bytes=0",
-                start.elapsed().as_micros()
-            );
+        {
+            let _span = octet_agent::performance_trace::Span::start("render.frame", 0);
+            tui.request_render_force(resize_epoch != painted_resize_epoch);
+            state.frame_written_at(tui.rendered_viewport_top());
         }
         painted_resize_epoch = resize_epoch;
         resize_schedule.painted();

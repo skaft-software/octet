@@ -95,7 +95,7 @@ pub mod extension_secret;
 pub mod goal_driver;
 pub mod goal_store;
 pub mod input;
-mod performance_trace;
+pub mod performance_trace;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod session;
