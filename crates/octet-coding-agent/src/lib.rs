@@ -91,7 +91,7 @@ pub async fn run_cli() -> std::process::ExitCode {
             // `Result`'s default `Termination` implementation writes errors
             // directly to stderr. Keep even early startup failures behind the
             // same control-safe presentation boundary as command output.
-            crate::output::stderr_line(format!("Error: {error:#}"));
+            crate::output::stderr_multiline(format!("Error: {error:#}"));
             std::process::ExitCode::FAILURE
         }
     }
