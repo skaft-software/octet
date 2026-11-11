@@ -9261,7 +9261,9 @@ fn build_app_with_consumer(
     config.model = Some(model.spec.id.clone());
     crate::output::checked_diagnostics(
         crate::output::DiagnosticComponent::Bootstrap("pi-model".into()),
-        crate::cli::pi_model_notice(&config)
+        crate::output::tui_diagnostics_active()
+            .then(|| crate::cli::pi_model_notice(&config))
+            .flatten()
             .into_iter()
             .map(|notice| format!("note: {notice}"))
             .collect(),

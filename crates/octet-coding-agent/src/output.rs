@@ -149,6 +149,16 @@ impl Drop for DiagnosticCheck {
     }
 }
 
+/// Whether startup diagnostics are being routed into the interactive
+/// interface (as opposed to plain, print or headless stderr).
+pub(crate) fn tui_diagnostics_active() -> bool {
+    io::stderr().is_terminal()
+        && TUI_DIAGNOSTICS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+}
+
 pub(crate) fn checked_diagnostics(
     component: DiagnosticComponent,
     messages: Vec<String>,
