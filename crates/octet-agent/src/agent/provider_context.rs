@@ -502,7 +502,7 @@ async fn project_context_hooks(
                     )
                 })
                 .collect::<Vec<_>>();
-            tools.sort_by(|a, b| b.1.cmp(&a.1));
+            tools.sort_by_key(|tool| std::cmp::Reverse(tool.1));
             let record = serde_json::json!({
                 "messages": request.messages.len(),
                 "tools": request.tools.len(),
