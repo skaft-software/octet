@@ -156,6 +156,9 @@ pub(in crate::extension_process) fn publish(
     session: &crate::Session,
     owner: ExtensionResourceOwner,
 ) -> Result<(), ExtensionRuntimeError> {
+    if publication_is_current(process, &connection, &state, session, &owner) {
+        return Ok(());
+    }
     let publication_id = connection
         .session_leaf
         .begin_snapshot_publication(owner.clone());
@@ -286,6 +289,47 @@ pub(in crate::extension_process) fn publish(
             .fail_snapshot_publication(&owner, publication_id);
     }
     result
+}
+
+/// An idle refresh must not re-encode, invalidate and re-prepare the whole
+/// history: frontends refresh host state on every UI wake, and doing O(history)
+/// work there starved large sessions. A refresh is a no-op only when every fact
+/// the newest publication carried is unchanged: the same opened session handle
+/// with no durable record written since (`SessionViewIdentity`), the same owner
+/// (session, instance and process generation key the view), identical host
+/// facts, the mirror still announcing that revision, and that publication
+/// acknowledged or still in flight. Head or entry count alone is never used: a
+/// label or usage record changes the view without changing either. A failed
+/// publication, a replacement copy or a retired mirror always republishes.
+fn publication_is_current(
+    process: &ExtensionProcess,
+    connection: &ProcessConnection,
+    state: &ExtensionHostState,
+    session: &crate::Session,
+    owner: &ExtensionResourceOwner,
+) -> bool {
+    if connection.closed.load(Ordering::Acquire) || connection.draining.load(Ordering::Acquire) {
+        return false;
+    }
+    let identity = session.view_identity();
+    let revision = match lock_std_mutex(&connection.session_leaf.transport)
+        .current
+        .get(owner)
+    {
+        Some(Some(view)) if view.source == Some(identity) => view.descriptor.view_revision,
+        _ => return false,
+    };
+    let mirrored = lock_std_mutex(&connection.session_leaf.mirror)
+        .as_ref()
+        .filter(|mirror| &mirror.owner == owner)
+        .and_then(|mirror| mirror.value.as_ref())
+        .and_then(|value| value.get("session_view_revision"))
+        .and_then(Value::as_u64);
+    mirrored == Some(revision)
+        && connection
+            .session_leaf
+            .snapshot_publication_is_live(owner, revision)
+        && *read_std_lock(&process.inner.host_state) == *state
 }
 
 /// Bounded host-state publication: a publication burst spends at most two

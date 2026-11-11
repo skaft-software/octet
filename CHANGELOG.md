@@ -18,6 +18,11 @@
 
 ### Fixed
 
+- Resuming a session with thousands of entries no longer re-encodes and
+  re-sends its whole history to every extension on each UI refresh. Unchanged
+  sessions keep their published view; any new record, label, usage, host change,
+  reopened session or failed publication still republishes in full.
+
 - On Unix, `/reload --force` restarts into the installed executable and resumes
   the same session even when the binary is unchanged, instead of retaining stale
   extension runtime state and in-process reload limits. Updated binaries still

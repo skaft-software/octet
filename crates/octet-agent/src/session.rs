@@ -1514,6 +1514,33 @@ pub struct Session {
     // Ephemeral notices belong to this live Session, not to the process or
     // its durable transcript. Pruned against active hooks before preparation.
     pub(crate) context_failure_notices: BTreeSet<String>,
+    /// Content identity of this live handle; see [`SessionViewIdentity`].
+    view_identity: SessionViewIdentity,
+}
+
+/// Identity of the extension-visible content of one live [`Session`] handle.
+///
+/// `instance` is unique per opened or created handle in this process, so a
+/// resumed, reopened or replacement session never matches an earlier one even
+/// at the same path, head and entry count. `mutation` advances before every
+/// durable record this handle writes. Every change to entries, head, header,
+/// labels or usage is persisted first, so equal identities imply identical
+/// history views. Advancing for records that do not change the view only costs
+/// a republication; it can never reuse a stale view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SessionViewIdentity {
+    instance: u64,
+    mutation: u64,
+}
+
+impl SessionViewIdentity {
+    fn fresh() -> Self {
+        static NEXT_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            instance: NEXT_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            mutation: 0,
+        }
+    }
 }
 
 impl Drop for Session {

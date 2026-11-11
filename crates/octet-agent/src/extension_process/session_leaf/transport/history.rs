@@ -132,6 +132,7 @@ pub(super) fn encode(
     Ok(Arc::new(View {
         bytes: encoded,
         descriptor,
+        source: Some(session.view_identity()),
         _reservation: reservation,
     }))
 }

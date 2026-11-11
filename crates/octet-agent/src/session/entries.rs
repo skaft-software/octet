@@ -242,6 +242,8 @@ impl Session {
             .iter()
             .map(|(scope, _)| scope.clone())
             .collect::<Vec<_>>();
+        // This append writes through the shared line directly, not persist().
+        self.note_view_mutation();
         self.invocations
             .commit_results(&scopes, || self.writer.persist(&buf))?;
         self.invocation_entries

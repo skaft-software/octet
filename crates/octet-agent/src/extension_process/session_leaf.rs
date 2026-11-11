@@ -297,6 +297,30 @@ impl SessionLeafMailbox {
         publication_id
     }
 
+    /// Whether `revision` is the newest publication for `owner` and has been
+    /// acknowledged or is still in flight. A failed, superseded or foreign
+    /// publication never qualifies.
+    pub(super) fn snapshot_publication_is_live(
+        &self,
+        owner: &ExtensionResourceOwner,
+        revision: u64,
+    ) -> bool {
+        let publication = lock_std_mutex(&self.snapshot_publication);
+        let Some((current_owner, sender)) = publication.as_ref() else {
+            return false;
+        };
+        if current_owner != owner {
+            return false;
+        }
+        let state = sender.borrow().clone();
+        matches!(
+            state,
+            SnapshotPublicationState::Prepared { revision: current }
+                | SnapshotPublicationState::Pending { revision: Some(current), .. }
+                if current == revision
+        )
+    }
+
     pub(super) fn set_snapshot_publication_revision(
         &self,
         owner: &ExtensionResourceOwner,

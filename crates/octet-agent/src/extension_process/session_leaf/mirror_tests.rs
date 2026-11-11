@@ -674,3 +674,143 @@ async fn unnegotiated_session_entries_does_not_disclose_history() {
         .is_none());
     assert!(process.shutdown().await);
 }
+
+fn prepares(temp: &TempDir) -> usize {
+    observations(temp)
+        .iter()
+        .filter(|message| message["method"] == "session/snapshot/prepare")
+        .count()
+}
+
+fn published_revision(process: &ExtensionProcess, owner: &ExtensionResourceOwner) -> Option<u64> {
+    let connection = Arc::clone(&read_std_lock(&process.inner.connection));
+    let store = lock_std_mutex(&connection.session_leaf.transport);
+    store
+        .current
+        .get(owner)
+        .and_then(Option::as_ref)
+        .map(|view| view.descriptor.view_revision)
+}
+
+/// Frontends refresh host state on every UI wake. An unchanged refresh must not
+/// re-encode, invalidate or re-prepare the history, while every native change
+/// (append, same-head label, host facts, a reopened handle) still republishes.
+#[tokio::test]
+async fn unchanged_refresh_keeps_the_published_history_and_any_change_republishes() {
+    let (temp, process, _events) = process_with_snapshot_transport(false, true, false).await;
+    let path = temp.path().join("session.jsonl");
+    let mut session = crate::Session::create(&path).unwrap();
+    let head = append(&mut session);
+    let owner = ExtensionResourceOwner {
+        session_id: session.resource_owner_key(),
+        extension_instance_id: process.extension_instance_id().to_owned(),
+        process_generation: process.health_snapshot().generation,
+    };
+    let cancellation = CancellationToken::default();
+    let settle = |process: &ExtensionProcess| {
+        let process = process.clone();
+        let owner = owner.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            process
+                .wait_for_session_snapshot_prepared(&owner, Duration::from_secs(5), &cancellation)
+                .await
+                .unwrap();
+        }
+    };
+    let host = state(&session);
+    process
+        .set_host_state_with_session(host.clone(), &session)
+        .unwrap();
+    settle(&process).await;
+    let first = published_revision(&process, &owner).unwrap();
+    assert_eq!(prepares(&temp), 1);
+
+    for _ in 0..20 {
+        process
+            .set_host_state_with_session(host.clone(), &session)
+            .unwrap();
+    }
+    settle(&process).await;
+    assert_eq!(published_revision(&process, &owner), Some(first));
+    assert_eq!(
+        prepares(&temp),
+        1,
+        "unchanged refreshes must not re-prepare"
+    );
+
+    // Same head and entry count, different view: a label must republish.
+    session.set_entry_label(&head, "checkpoint").unwrap();
+    process
+        .set_host_state_with_session(host.clone(), &session)
+        .unwrap();
+    settle(&process).await;
+    let labelled = published_revision(&process, &owner).unwrap();
+    assert!(labelled > first);
+    assert_eq!(prepares(&temp), 2);
+
+    // Host facts alone also republish; the prepare carries them.
+    let mut other = host.clone();
+    other.model = Some("other-model".into());
+    process
+        .set_host_state_with_session(other.clone(), &session)
+        .unwrap();
+    settle(&process).await;
+    let rehosted = published_revision(&process, &owner).unwrap();
+    assert!(rehosted > labelled);
+    assert_eq!(prepares(&temp), 3);
+
+    // A reopened handle never matches, even at the same path, head and count.
+    let reopened = crate::Session::open_read_only(&path).unwrap();
+    assert_eq!(reopened.head(), session.head());
+    assert_eq!(reopened.entries().len(), session.entries().len());
+    process
+        .set_host_state_with_session(other.clone(), &reopened)
+        .unwrap();
+    settle(&process).await;
+    let reopened_revision = published_revision(&process, &owner).unwrap();
+    assert!(reopened_revision > rehosted);
+    assert_eq!(prepares(&temp), 4);
+    process
+        .set_host_state_with_session(other.clone(), &reopened)
+        .unwrap();
+    settle(&process).await;
+    assert_eq!(prepares(&temp), 4);
+
+    // An append on the original handle republishes.
+    append(&mut session);
+    process
+        .set_host_state_with_session(other, &session)
+        .unwrap();
+    settle(&process).await;
+    assert!(published_revision(&process, &owner).unwrap() > reopened_revision);
+    assert_eq!(prepares(&temp), 5);
+    assert!(process.shutdown().await);
+}
+
+/// A failed publication is never reused: the identical refresh retries it.
+#[tokio::test]
+async fn unchanged_refresh_after_failed_publication_republishes() {
+    let (temp, process, _events) = process_with_snapshot_transport(false, true, true).await;
+    let path = temp.path().join("session.jsonl");
+    let mut session = crate::Session::create(&path).unwrap();
+    append(&mut session);
+    let owner = ExtensionResourceOwner {
+        session_id: session.resource_owner_key(),
+        extension_instance_id: process.extension_instance_id().to_owned(),
+        process_generation: process.health_snapshot().generation,
+    };
+    let cancellation = CancellationToken::default();
+    let host = state(&session);
+    for attempt in 1..=2 {
+        process
+            .set_host_state_with_session(host.clone(), &session)
+            .unwrap();
+        let result = process
+            .wait_for_session_snapshot_prepared(&owner, Duration::from_secs(5), &cancellation)
+            .await;
+        assert!(result.is_err(), "a mismatched acknowledgement fails");
+        assert_eq!(prepares(&temp), attempt);
+    }
+    assert!(process.shutdown().await);
+}
