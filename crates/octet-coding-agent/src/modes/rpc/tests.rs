@@ -2754,3 +2754,54 @@ async fn rpc_provider_reload_withdrawn_or_changed_route_refuses_before_prompt_mu
         app.executable_extensions.shutdown().await;
     }
 }
+
+/// A manual `compact` that the compaction policy refuses (an empty session has
+/// no safe history) must answer with a typed error response and keep serving.
+/// It used to propagate out of the command loop: the RPC process exited after
+/// `compaction_start` without a response or a `compaction_end`.
+#[tokio::test]
+async fn rpc_compact_refusal_is_a_typed_error_response_and_the_server_keeps_serving() {
+    let (_workspace, app) = crate::compaction::tests::app_for_estimate();
+    let capture = RpcCapture::default();
+    let mut output = capture.output(false);
+    let mut settings = RpcSettings::default();
+    let command = serde_json::json!({"type": "compact", "id": "c1"});
+    let app = super::handle_idle_command(app, command, &mut output, &mut settings, 0)
+        .await
+        .expect("a compaction refusal must not end the RPC server");
+    let frames = capture.frames();
+    let response = frames
+        .iter()
+        .find(|frame| frame["type"] == "response")
+        .expect("the compact command must get a response");
+    assert_eq!(response["id"], "c1");
+    assert_eq!(response["success"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("no safe history to compact"),
+        "{response}"
+    );
+    let end = frames
+        .iter()
+        .find(|frame| frame["type"] == "compaction_end")
+        .expect("compaction_start must be closed by compaction_end");
+    assert_eq!(end["aborted"], false);
+    assert!(end["errorMessage"].is_string(), "{end}");
+    // Still serving: the next command on the same app is answered.
+    let mut output = capture.output(false);
+    super::handle_idle_command(
+        app,
+        serde_json::json!({"type": "get_state", "id": "s1"}),
+        &mut output,
+        &mut settings,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(capture
+        .frames()
+        .iter()
+        .any(|frame| frame["id"] == "s1" && frame["success"] == true));
+}

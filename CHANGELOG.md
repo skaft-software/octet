@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- A manual `compact` over RPC that the compaction policy refuses (for example on a new, empty session: "no safe history to compact") now answers with an error response and a closing `compaction_end` event. It used to end the RPC server after `compaction_start` without any response.
+
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
 - Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or
