@@ -496,7 +496,11 @@ export function startProviderStream(runtime, id) {
       job.options = { ...options, headers };
     }
     const callback = job.entry.inherited && !job.entry.native && job.entry.config.api !== job.model.pi.api ? nativeProviderDelegate : job.entry.stream;
-    const stream = callback(model, job.context, strict(job.options, 'provider stream options'));
+    // Pi hands a provider stream only the options it sets, and the installed
+    // Pi's own stream helpers read optional ones (headers, env, fetch,
+    // samplingParams, ...) expecting undefined. Unset options therefore read
+    // as undefined; the delegates still refuse unsupported options that are set.
+    const stream = callback(model, job.context, job.options);
     if (!stream?.[Symbol.asyncIterator]) invalid('streamSimple must return an async iterable');
     const iterator = stream[Symbol.asyncIterator]();
     const abort = new Promise((_, reject) => job.controller.signal.addEventListener('abort', () => reject(rpcError(-32800, 'provider stream cancelled')), { once: true }));

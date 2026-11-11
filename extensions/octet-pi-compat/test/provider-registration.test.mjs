@@ -201,6 +201,24 @@ test('native cancellation aborts the callback signal without waiting for an unco
   assert.equal(signal.aborted, false); cancelProviderStream(value.runtime, 'stream-1'); assert.equal(signal.aborted, true);
 });
 
+// Pi passes a registered provider's stream only the options it sets; the
+// installed Pi's own stream helpers read optional ones (headers, env, fetch,
+// samplingParams, ...) and expect undefined. Reading an unset option must not
+// fail the stream with unsupported_feature.
+test('a custom stream reading an option Pi does not set gets undefined instead of failing', async () => {
+  let observed;
+  const value = await registered((_, __, options) => {
+    observed = ['headers', 'env', 'fetch', 'samplingParams', 'metadata', 'transport'].map(key => options[key]);
+    return { [Symbol.asyncIterator]() { return this; }, next: () => new Promise(() => {}) };
+  });
+  await prepareProviderStream(value.runtime, params(value), value.store);
+  startProviderStream(value.runtime, 'stream-1');
+  await until(() => observed !== undefined);
+  assert.deepEqual(observed, [undefined, undefined, undefined, undefined, undefined, undefined]);
+  assert.equal(value.frames.some(frame => frame.params?.kind === 'error'), false);
+  cancelProviderStream(value.runtime, 'stream-1');
+});
+
 for (const operation of ['replace', 'remove']) test(`acknowledged native ${operation} aborts an already accepted custom callback`, async () => {
   let signal;
   const value = await registered((_, __, options) => { signal = options.signal; return { [Symbol.asyncIterator]() { return this; }, next: () => new Promise(() => {}) }; });
