@@ -20,7 +20,9 @@ if [[ ! -x "$octet_bin" ]]; then
   exit 2
 fi
 
-export CARGO_TARGET_DIR="$target_dir" TMPDIR="$root/.tmp-fuzz"
+# Run directories live outside the repository (a temp dir inside a git
+# worktree causes false failures); override with TMPDIR or SOAK_RUN_ROOT.
+export CARGO_TARGET_DIR="$target_dir" TMPDIR="${TMPDIR:-/tmp}"
 mkdir -p "$TMPDIR"
 exec python3 "$here/driver.py" \
   --octet "$octet_bin" \

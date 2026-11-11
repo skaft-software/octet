@@ -88,6 +88,7 @@ class OctetRpc:
         self.stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self.lines = []
         self.stderr_text = ""
+        self.mount_cancel_hits = 0
         self.lock = threading.RLock()  # wait_turn_end holds the condition and calls events_since()
         self.condition = threading.Condition(self.lock)
         self.next_id = 0
@@ -102,8 +103,10 @@ class OctetRpc:
 
     def _read_stderr(self):
         for raw in self.process.stderr:
+            hits = sum(len(pattern.findall(raw)) for pattern in MOUNT_CANCEL_SIGNATURES)
             with self.lock:
                 self.stderr_text = (self.stderr_text + raw)[-262144:]
+                self.mount_cancel_hits += hits
             self.log.write(f"[stderr] {raw}")
             self.log.flush()
 
@@ -221,10 +224,11 @@ def main() -> int:
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
-    run_dir = WORKTREE / ".tmp-fuzz" / f"soak-{args.seed}"
+    run_dir = Path(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp") / "octet-soak" / f"soak-{args.seed}"
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
+    run_dir = run_dir.resolve()
     home = run_dir / "home"
     workspace = run_dir / "workspace"
     pi_agent = home / ".pi" / "agent"
@@ -364,12 +368,14 @@ def main() -> int:
                 select_model(rpc, "custom/soak/soak-bootstrap", timeout=300)
             else:
                 command_response(rpc, "new_session", {}, timeout=300)
+                # Same sequencing as after reload: the extension route is
+                # re-selected (registration check) and the native route is
+                # pinned again before any inference turn.
                 select_model(rpc, SOAK_MODEL_ID, timeout=300)
+                select_model(rpc, "custom/soak/soak-bootstrap", timeout=300)
             # Mount-cancellation signature detection (known main bug): report,
             # do not fail until the fix lands.
-            stderr = rpc.stderr()
-            for pattern in MOUNT_CANCEL_SIGNATURES:
-                mount_cancel_hits += len(pattern.findall(stderr))
+            mount_cancel_hits = rpc.mount_cancel_hits
             sample_rss(turn + 1)
 
         command_response(rpc, "get_state", {})
@@ -386,6 +392,7 @@ def main() -> int:
         provider_log.close()
 
     sample_rss(args.turns)
+    mount_cancel_hits = rpc.mount_cancel_hits
     warmup = max(1, int(len(rss_samples) * args.warmup_fraction))
     slope = linear_slope(rss_samples[warmup:])
     summary.update({

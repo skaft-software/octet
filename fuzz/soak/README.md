@@ -31,7 +31,7 @@ SOAK_TURNS=60 fuzz/soak/soak.sh --seed 7
 Deterministic: the seed drives every randomized decision and the fake
 provider derives each reply from the request body, so a failing run
 reproduces with the same seed. Failure details live in
-`.tmp-fuzz/soak-<seed>/` (`octet.log`, `provider.log`, `summary.json`);
+`$TMPDIR/octet-soak/soak-<seed>/` (`SOAK_RUN_ROOT` overrides the root) (`octet.log`, `provider.log`, `summary.json`);
 `--keep` preserves the directory (otherwise it is removed on failure).
 
 ## Invariants
@@ -69,10 +69,17 @@ Known on main / unverified here:
   called `events_since()`, which took the same lock: the driver deadlocked
   itself, and the reader thread blocked before logging, so `octet.log` looked
   like a stall after `agent_start`. A wire tap showed octet and the bridge
-  completing the whole turn. The lock is now an `RLock`. After that fix, a
-  `SOAK_TOOL` turn after `new_session` fails with "extension provider
-  reported an error" because the driver re-selects the extension model
-  without re-pinning the native route: a driver sequencing issue, open.
+  completing the whole turn. The lock is now an `RLock`.
+- **Resolved, not a product bug: `SOAK_TOOL` after `new_session`.** The
+  driver re-selected the extension model after `new_session` without pinning
+  the native route again, so the next prompt ran on the extension route. That
+  route cannot reach the loopback fake: a `registerProvider` explicit-model
+  provider runs the extension's own `streamSimple` (as in Pi), and the
+  host-delegated HTTP exists only for native Pi registry providers, so the
+  stream raises `unsupported_feature` and the host reports "extension
+  provider reported an error" with no request reaching the fake. Reproduced
+  with `new_session` absent (extension model, first prompt) as well. The
+  driver now re-pins the native route after `new_session`, as after reload.
 - **Bridge-delegated extension-model inference** (`soak/m-…`) resolves and
   registers, but its delegated `baseUrl` is not reproducible in this shared
   environment (a stale value was observed coming from shared mirror-cache

@@ -5,9 +5,9 @@
 // provider URL travels through a file inside the Pi agent directory (which
 // the host passes explicitly as OCTET_PI_AGENT_DIR).
 //
-// The provider delegates HTTP to the host (non-empty baseUrl), so every
-// inference request reaches the deterministic loopback fake provider. The
-// footer mount is intentionally opened from `session_start` without awaiting
+// The provider registers the extension model for selection and reload checks;
+// inference runs on the native custom route to the deterministic loopback
+// fake provider (see README). The footer mount is intentionally opened from `session_start` without awaiting
 // it, exactly like real Pi extensions do; on main the native reader cancels
 // that mount when the hook replies (the known mount-cancellation race the
 // reference-model fuzzer records). The soak harness reports mount liveness
@@ -62,8 +62,9 @@ export default pi => {
       contextWindow: 32768,
       maxTokens: 1024,
     }],
-    // Required for explicit models; the delegated host route performs the
-    // HTTP, so this generator must never be invoked.
+    // Required for explicit models. As in Pi the extension's own stream runs
+    // for this route, and this one cannot reach the loopback fake, so the
+    // driver pins the native custom route for every inference turn.
     streamSimple: async function* (_input, _update, _signal) {
       throw new Error('soak provider delegates HTTP to the host');
     },
