@@ -52,6 +52,11 @@
   every pipe read. Large fragmented session/provider frames now use bounded linear
   intake work, with the same frame limits, strict UTF-8 validation and refusals.
 
+- A first `/reload` submitted from the slash popup while Pi extensions are
+  starting now runs once when ready and shows its completion result, rather
+  than silently requiring a second Enter. Native and Pi custom editors retain
+  the same reload and forced-restart paths; automatic startup stays quiet.
+
 - Resuming a session with thousands of entries no longer re-encodes and
   re-sends its whole history to every extension on each UI refresh. Unchanged
   sessions keep their published view; any new record, label, usage, host change,

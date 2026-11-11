@@ -1402,7 +1402,17 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
         InputAction::ScrollLines(direction) => shell.scroll_lines(direction),
         InputAction::JumpToTail => shell.jump_to_tail(),
         InputAction::SlashMenu(action) => {
-            shell.slash_menu(action);
+            if shell.slash_menu(action) {
+                // The native popup owns Enter before a Pi editor sees it. Its
+                // accepted command needs the same wait latch as Command below;
+                // otherwise the first /reload during session_start disappears.
+                // Pi 9c9ce854 packages/coding-agent/src/modes/interactive/
+                // interactive-mode.ts:3376-3379 routes /reload before model input.
+                let text = shell.pending().to_owned();
+                if !shell.queue_wait_command(text) && !shell.thinking_submission_pending() {
+                    shell.notice("busy · draft kept");
+                }
+            }
         }
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),

@@ -157,3 +157,11 @@ sees half a reload.
 - `/extensions reload` handshakes replacement processes when enablement and host
   authority allow startup. Safe mode starts granted sources, not ungranted ones.
 - `/reload` runs full discovery and rebuilds the active customization.
+
+Native and Pi custom editors use the same reload command path. A reload submitted
+from the slash popup while extensions are starting is queued once and runs when
+that same session is ready; it does not need a second Enter. An explicit reload
+shows one completion note after the rebuild, or a failure note instead of success.
+Automatic startup and watcher passes remain quiet on success. `/reload --force`
+keeps its separate [host-restart and consent policy](commands.md#slash-commands),
+including resuming the same session on Unix.

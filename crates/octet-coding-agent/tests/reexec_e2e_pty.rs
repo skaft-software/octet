@@ -187,6 +187,56 @@ impl Fixture {
         }
     }
 
+    /// A reviewed, offline Pi editor in this pane's disposable HOME only.
+    fn enable_pi_editor(&self) {
+        let adapter = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extensions/octet-pi-compat")
+            .canonicalize()
+            .unwrap();
+        let factory = self.root().join("reload-editor.ts");
+        fs::write(
+            &factory,
+            r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+class ReloadEditor extends CustomEditor {
+  renderTopBorder(width) { return 'PI-RELOAD-EDITOR'.padEnd(width, '-'); }
+}
+export default pi => pi.on('session_start', (_, ctx) =>
+  ctx.ui.setEditorComponent((t, theme, keys) => new ReloadEditor(t, theme, keys)));
+"#,
+        )
+        .unwrap();
+        let node = Command::new("node")
+            .args(["-p", "process.execPath"])
+            .output()
+            .expect("Node is required for Pi adapter PTY acceptance");
+        assert!(node.status.success());
+        let node = String::from_utf8(node.stdout).unwrap();
+        let configured = Command::new(node.trim())
+            .arg(adapter.join("configure.mjs"))
+            .args(["--reviewed", "--output"])
+            .arg(self.home.join(".octet/extensions/octet-pi-compat"))
+            .arg(factory)
+            .current_dir(&self.workspace)
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("PI_OFFLINE", "1")
+            .env("OCTET_PI_AGENT_DIR", self.root().join("pi-agent"))
+            .output()
+            .expect("configure reviewed Pi editor fixture");
+        assert!(
+            configured.status.success(),
+            "{}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        fs::write(
+            self.home.join(".octet/config.toml"),
+            "enabled_extensions = [\"octet-pi-compat\"]\n",
+        )
+        .unwrap();
+    }
+
     /// One executable scratch copy of the built binary.
     fn copy_binary(&self, name: &str) -> PathBuf {
         let destination = self.bin.join(name);
@@ -978,13 +1028,28 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
 /// exact session, so stale extension runtime state cannot survive a force.
 #[test]
 fn real_octet_forced_reload_restarts_an_unchanged_binary_and_resumes_the_same_session() {
+    forced_unchanged_binary_restart(false);
+}
+
+#[test]
+fn real_octet_pi_editor_forced_reload_restarts_and_resumes_the_same_session() {
+    forced_unchanged_binary_restart(true);
+}
+
+fn forced_unchanged_binary_restart(pi_editor: bool) {
     let _guard = pty_lock().lock().unwrap_or_else(PoisonError::into_inner);
     let fixture = Fixture::new(UNREACHABLE_PROVIDER);
+    if pi_editor {
+        fixture.enable_pi_editor();
+    }
     let launch = fixture.copy_binary("octet");
     let mut pane = Pane::spawn(fixture, &launch);
     let session = pane.await_ready(STARTUP_TIMEOUT);
     let session_id = session_id_of(&session);
     let pane_pid = pane.pid();
+    if pi_editor {
+        pane.wait_for(b"PI-RELOAD-EDITOR", STARTUP_TIMEOUT);
+    }
     let before_argv = pane.ps_argv();
     assert!(
         !before_argv.contains("--resume"),
@@ -1021,6 +1086,9 @@ fn real_octet_forced_reload_restarts_an_unchanged_binary_and_resumes_the_same_se
         .expect("observed above")
         + b"To resume this session".len();
     pane.wait_for_suffix(courtesy_at, b"custom/probe", STEP_TIMEOUT);
+    if pi_editor {
+        pane.wait_for_suffix(courtesy_at, b"PI-RELOAD-EDITOR", STEP_TIMEOUT);
+    }
     pane.pty.write_input(b"/verbose on\r");
     pane.wait_for(b"verbose transcript enabled", STEP_TIMEOUT);
 
