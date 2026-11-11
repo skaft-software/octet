@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Pi extensions that import `StreamingJsonParser` or `ToolCallArgumentsStream` from `@earendil-works/pi-ai`
+  (Pi 1.5.0 exports both; Pi's `custom-provider-anthropic` imports the second) no longer fail to load
+  with "octet shims lack or refuse ToolCallArgumentsStream". Both bind to the installed Pi release, as the
+  other inert pi-ai helpers do.
+
 - A Pi extension whose `project_trust` handler asks the user a question (Pi's `project-trust.ts`
   opens a select dialog) no longer holds `session_start` until the host gives up after 30 s, which
   cascaded into "reload failed" and bridge errors. A handler still waiting after a short grace

@@ -181,3 +181,11 @@ test('provider catalog subpath uses static inventory and guarded native delegate
     assert.equal(providers.getAllBuiltinModels('anthropic').length, ai.getModels('anthropic').length + ai.getImageModels('anthropic').length);
   }
 });
+
+// Pi 1.5.0 pi-ai/dist/index.js exports both; custom-provider-anthropic imports ToolCallArgumentsStream at load.
+test('the Pi 1.5.0 streaming JSON helpers are bound on the ai shim', () => {
+  for (const name of ['StreamingJsonParser', 'ToolCallArgumentsStream']) {
+    assert.ok(Object.hasOwn(ai, name), `ai.${name}`);
+    assert.equal(typeof ai[name], 'function', `${name} is a constructible binding`);
+  }
+});

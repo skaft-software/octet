@@ -552,6 +552,16 @@
       "withoutInitialSystemMessage": {
         "surface": "inert",
         "source": "shim"
+      },
+      "StreamingJsonParser": {
+        "surface": "inert",
+        "route": null,
+        "note": "not shipped by Pi 1.0.2; bound so extensions written against later releases load, and unusable here"
+      },
+      "ToolCallArgumentsStream": {
+        "surface": "inert",
+        "route": null,
+        "note": "not shipped by Pi 1.0.2; bound so extensions written against later releases load, and unusable here"
       }
     },
     "coding-agent": {
