@@ -586,26 +586,27 @@ pub(super) fn raw_input(shell: &InteractiveShell, bytes: &[u8]) -> EventStream {
         .with_interceptors(shell.terminal_input_interceptors())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_pi_terminal_input_hung_handler_fails_open_once_without_freezing_typing() {
-    let (_directory, mut app, mut shell) = live_ui_app(
-        r#"
-export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
-  ctx.ui.onTerminalInput(() => { while (true) {} });
-}});
-"#,
-    )
-    .await;
-    command(&mut app, &mut shell, "listen").await.unwrap();
-    let draft = "hanging handler must not slow subsequent typing";
-    let mut input = raw_input(&shell, format!("{draft}\x04").as_bytes());
+/// The documented hang limit: a listener may be slow, only one that has not
+/// answered for this long is latched off.
+const INPUT_HANG_LIMIT: Duration = Duration::from_secs(1);
+
+/// Run the idle prompt over raw bytes until Ctrl+D ends it, collecting every
+/// extension notice. Returns the notices and how long the keys took.
+async fn type_through_listener(
+    app: &mut App,
+    shell: &mut InteractiveShell,
+    bytes: &[u8],
+    deadline: Duration,
+) -> (Vec<String>, Duration) {
+    let mut input = raw_input(shell, bytes);
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
     let (watcher, mut reload, mut reload_tick) = test_reload();
+    let started = std::time::Instant::now();
     tokio::time::timeout(
-        Duration::from_millis(500),
+        deadline,
         wait_for_prompt(
-            &mut shell,
+            shell,
             &mut input,
             &mut scroll_tick,
             &mut extension_tick,
@@ -618,9 +619,80 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
         ),
     )
     .await
-    .expect("hung extension froze native input")
+    .expect("listener handling froze native input")
     .unwrap();
+    let elapsed = started.elapsed();
+    let mut notices = app.executable_extensions.drain_events_for_shell(shell);
+    notices.push(app.executable_extensions.inspect_text());
+    (notices, elapsed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_terminal_input_hung_handler_fails_open_once_without_freezing_typing() {
+    let (_directory, mut app, mut shell) = live_ui_app(
+        r#"
+export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
+  ctx.ui.onTerminalInput(() => { while (true) {} });
+}});
+"#,
+    )
+    .await;
+    command(&mut app, &mut shell, "listen").await.unwrap();
+    let draft = "hanging handler must not slow subsequent typing";
+    let (notices, elapsed) = type_through_listener(
+        &mut app,
+        &mut shell,
+        format!("{draft}\x04").as_bytes(),
+        INPUT_HANG_LIMIT * 4,
+    )
+    .await;
+    // The first key waited for the hang limit (it was held, not dropped early),
+    // was then delivered unchanged, and every later key bypassed the listener.
+    assert!(
+        elapsed >= INPUT_HANG_LIMIT,
+        "a listener was latched off after {elapsed:?}, before the hang limit"
+    );
     assert_eq!(shell.extension_editor_snapshot().text, draft);
+    let disabled = notices
+        .iter()
+        .map(|notice| {
+            notice
+                .matches("terminal input interception disabled")
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(disabled, 1, "one warning expected: {notices:?}");
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_terminal_input_slow_listener_keeps_order_and_stays_enabled() {
+    let (_directory, mut app, mut shell) = live_ui_app(
+        r#"
+export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
+  ctx.ui.onTerminalInput(data => {
+    if (data === 'a') { const t = Date.now(); while (Date.now() - t < 200) {} return {consume: true}; }
+    if (data === 'b') return {data: 'B'};
+    if (data === 'e') return {data: 'E'};
+    if (data === 'd') { const t = Date.now(); while (Date.now() - t < 200) {} }
+  });
+}});
+"#,
+    )
+    .await;
+    command(&mut app, &mut shell, "listen").await.unwrap();
+    // `a` is slow and consumed, `b` is replaced, `c` passes, `d` is slow and
+    // delivered, `e` is replaced: the listener is still enabled after two slow
+    // keys and nothing was reordered around them.
+    let (notices, _) =
+        type_through_listener(&mut app, &mut shell, b"abcde\x04", INPUT_HANG_LIMIT * 4).await;
+    assert_eq!(shell.extension_editor_snapshot().text, "BcdE");
+    assert!(
+        !notices
+            .iter()
+            .any(|notice| notice.contains("interception disabled")),
+        "a slow listener must not be latched off: {notices:?}"
+    );
     app.executable_extensions.shutdown().await;
 }
 

@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- A Pi input listener (`ctx.ui.onTerminalInput`) that is briefly slow, for example
+  during a garbage collection or on a loaded machine, is no longer disabled
+  until reload. Keys wait for it in order, as in Pi; only a listener that does
+  not answer for a full second is latched off, with one warning.
+
 - A partially typed `/command` completion menu now includes commands that an
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.

@@ -176,8 +176,8 @@ are the behavioral evidence.
   lane after native reserved actions, the open slash popup and native
   search-query ownership, but before the composer slot editor. The
   adapter keeps Pi's live `Set` ordering (consume, replace, deduplicate identity,
-  drop removed listeners, ignore promises) under a 50 ms whole-chain budget with
-  a latched-off circuit breaker and one bounded diagnostic per owner.
+  drop removed listeners, ignore promises) with a slow listener waited for in order and a 1 s
+  hang limit for the whole chain behind a latched-off circuit breaker and one bounded diagnostic per owner.
 - `artifact/publish` acknowledgement: the host returns `{artifact_id}` (protocol
   reference), the adapter read `id`. Every Pi image failed on the real host while
   synthetic-host tests passed because they replied `{id}`. Fixed both.
