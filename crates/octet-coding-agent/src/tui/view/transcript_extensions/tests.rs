@@ -81,6 +81,7 @@ fn resumed_sources_keep_identity_private_data_and_tool_details_without_writing_s
                         ],
                         is_error: false,
                         added_tool_names: None,
+                        tool_name: None,
                     })],
                 },
             )),

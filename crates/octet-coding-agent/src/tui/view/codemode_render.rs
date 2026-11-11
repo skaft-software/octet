@@ -78,12 +78,28 @@ pub(super) fn render_source(
     rows
 }
 
+/// The failure projection already shows the status line that the tool writes at
+/// the top of its captured output, so only the duplicate is dropped. The match
+/// is exact and leading: output that merely mentions a status stays intact.
+fn without_repeated_failure_status<'a>(panel: &ToolPanel, output: &'a str) -> &'a str {
+    let Some(reason) = panel.failure_reason.as_deref().map(str::trim) else {
+        return output;
+    };
+    match output.split_once('\n') {
+        Some((first, rest)) if first.trim() == reason => rest,
+        Some(_) => output,
+        None if output.trim() == reason => "",
+        None => output,
+    }
+}
+
 /// A bounded literal preview; long single-line JSON cannot flood the native
 /// surface. This is UI elision, not a claim that captured bytes were discarded.
 pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
-    let output = sanitize_for_terminal(&panel.output);
+    let sanitized = sanitize_for_terminal(&panel.output);
+    let output = without_repeated_failure_status(panel, &sanitized);
     if expanded {
-        return output;
+        return output.to_owned();
     }
     let mut end = 0;
     let mut lines = 1;
@@ -95,7 +111,7 @@ pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
         end = offset + ch.len_utf8();
     }
     if end == output.len() {
-        output
+        output.to_owned()
     } else {
         format!(
             "{}\n(output preview; Ctrl+O for full output)",
@@ -144,6 +160,21 @@ mod tests {
         )
     }
 
+    fn failed_panel(code: &str, output: &str, reason: &str) -> ToolPanel {
+        let args = serde_json::json!({"code":code});
+        ToolPanel::new(
+            ToolCallId("codemode-failure".into()),
+            "codemode".into(),
+            args.to_string(),
+            summarize_tool("codemode", &args),
+            output.into(),
+            true,
+            true,
+            Some(reason.into()),
+            None,
+        )
+    }
+
     #[test]
     fn codemode_source_is_explicit_sanitized_and_not_a_shell_summary() {
         let mut p = panel("const x = '雪';\n\nreturn x;\x1b[3J", "", false, false);
@@ -174,6 +205,71 @@ mod tests {
         assert!(render_output(&p, &test_theme(), 80, false)
             .iter()
             .any(|row| row.is_empty()));
+    }
+
+    #[test]
+    fn codemode_failed_output_does_not_repeat_the_failure_status() {
+        let output =
+            "Script failed\nWall time 0.0 seconds\nOutput:\n\nScript error:\nTypeError: boom";
+        for width in [46, 120] {
+            for expanded in [false, true] {
+                let block = TranscriptBlock::Tool(Box::new(failed_panel(
+                    "throw new TypeError('boom')",
+                    output,
+                    "Script failed",
+                )));
+                let theme = test_theme();
+                let renderer = theme.rich_renderer();
+                let rows =
+                    render_block(None, &block, &theme, &renderer, &renderer, width, expanded);
+                let text = strip_terminal_sequences(&rows.join("\n"));
+                assert_eq!(
+                    text.matches("Script failed").count(),
+                    1,
+                    "width {width}, expanded {expanded}: {text}"
+                );
+                assert!(text.contains("Wall time 0.0 seconds"));
+                assert!(text.contains("Script error:"));
+                assert!(text.contains("TypeError: boom"));
+            }
+        }
+    }
+
+    #[test]
+    fn codemode_output_that_only_resembles_the_failure_status_is_kept() {
+        let output = "Script failed\nWall time 0.0 seconds\nOutput:\nmanual note";
+        let p = failed_panel("return 1", output, "TypeError: boom");
+        assert_eq!(output_text(&p, false), output);
+        assert_eq!(output_text(&p, true), output);
+        let only_status = failed_panel("return 1", "Script failed", "Script failed");
+        assert_eq!(output_text(&only_status, false), "");
+        assert_eq!(output_text(&only_status, true), "");
+    }
+
+    #[test]
+    fn codemode_failed_preview_stays_bounded_after_dropping_the_duplicate() {
+        let output = format!(
+            "Script failed\nWall time 0.0 seconds\nOutput:\n{}",
+            "雪".repeat(2000)
+        );
+        let p = failed_panel("return 1", &output, "Script failed");
+        let preview = output_text(&p, false);
+        assert!(!preview.starts_with("Script failed"));
+        assert!(preview.contains("Wall time 0.0 seconds"));
+        assert!(preview.contains("Ctrl+O for full output"));
+        assert!(preview.chars().count() < 700);
+        assert_eq!(
+            output_text(&p, true),
+            output.replacen("Script failed\n", "", 1)
+        );
+    }
+
+    #[test]
+    fn codemode_success_output_keeps_its_status_header() {
+        let output = "Script completed\nWall time 0.1 seconds\nOutput:\n42";
+        let p = panel("return 42", output, true, false);
+        assert_eq!(output_text(&p, false), output);
+        assert_eq!(output_text(&p, true), output);
     }
 
     #[test]

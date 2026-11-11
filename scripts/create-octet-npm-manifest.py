@@ -114,10 +114,12 @@ def read_release_metadata(
         if value.get(key) != expected_value:
             fail(f"release metadata field {key} does not match the candidate")
     workflow_ref = value.get("workflow_ref")
-    if not isinstance(workflow_ref, str) or not workflow_ref.startswith(
-        f"{identity_repository}/.github/workflows/release-octet.yml@"
-    ):
-        fail("release metadata workflow ref is not canonical")
+    prefix = f"{identity_repository}/.github/workflows/release-octet.yml@refs/tags/"
+    if workflow_ref == prefix + tag:
+        if workflow_commit != source_commit:
+            fail("canonical release workflow commit must equal the source commit")
+    elif workflow_ref != prefix + "octet-binaries-" + tag:
+        fail("release metadata workflow ref is not an immutable binary release tag")
     checksum_manifest = value.get("checksum_manifest")
     if not isinstance(checksum_manifest, dict) or set(checksum_manifest) != {"name", "sha256"}:
         fail("release metadata checksum manifest is malformed")

@@ -177,11 +177,12 @@ def validate_probe(value: Mapping[str, Any], version: str, target: str) -> None:
     repository = string_field(value, "repository")
     if repository != release_repository(version, source_commit, workflow_commit):
         fail(f"Windows probe repository is not the canonical release identity: {repository}")
-    expected_workflow_ref = (
-        f"{repository}/.github/workflows/release-octet.yml@refs/tags/"
-        f"octet-binaries-v{version}"
-    )
-    if value.get("workflow_ref") != expected_workflow_ref:
+    prefix = f"{repository}/.github/workflows/release-octet.yml@refs/tags/"
+    workflow_ref = value.get("workflow_ref")
+    if workflow_ref == f"{prefix}v{version}":
+        if workflow_commit != source_commit:
+            fail("canonical Windows probe workflow commit must equal the source commit")
+    elif workflow_ref != f"{prefix}octet-binaries-v{version}":
         fail("Windows probe workflow ref is not the immutable binary release workflow tag")
 
     binaries = value.get("binaries")

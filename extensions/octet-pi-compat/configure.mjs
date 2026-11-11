@@ -121,7 +121,10 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   const quoted = value => JSON.stringify(value);
   const list = values => `[${values.map(quoted).join(', ')}]`;
   const shortcuts = registrations.shortcuts.map(shortcut => `{ name = ${quoted(shortcut.name)}, key = ${quoted(shortcut.key)}, description = ${quoted(shortcut.description)} }`);
-  const flags = registrations.flags.map(flag => `{ name = ${quoted(flag.name)}, type = ${quoted(flag.type)}, default = ${quoted(flag.default)}${flag.description ? `, description = ${quoted(flag.description)}` : ''} }`);
+  // The manifest requires a typed default and TOML has no null. A flag registered
+  // without one reads as the type's zero value, as in lib/api.mjs registerFlag.
+  const flagDefault = flag => flag.default === undefined ? ({ boolean: false, string: '', integer: 0 }[flag.type]) : flag.default;
+  const flags = registrations.flags.map(flag => `{ name = ${quoted(flag.name)}, type = ${quoted(flag.type)}, default = ${quoted(flagDefault(flag))}${flag.description ? `, description = ${quoted(flag.description)}` : ''} }`);
   const manifest = [
     'name = "octet-pi-compat"', 'version = "0.1.0"', 'api_version = "0.4"',
     'description = "Optional reviewed Pi factories; Rust owns the agent and terminal"', '',

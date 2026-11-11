@@ -2717,6 +2717,7 @@ fn canonical_capacity_overbounds_coalesced_tool_results_without_a_full_scan() {
                 content: vec![ToolResultPart::Text(text.into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }))
     }
@@ -3949,6 +3950,7 @@ fn provider_usage_suffix_matches_reference_across_branches_and_boundaries() {
                 content: vec![ToolResultPart::Text("tool result λ".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .unwrap();
@@ -4338,6 +4340,7 @@ fn compaction_boundaries_include_each_completed_tool_episode() {
                     content: vec![ToolResultPart::Text(text.into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();

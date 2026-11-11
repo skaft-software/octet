@@ -337,7 +337,12 @@ verified_archive_sha256() {
             signing_repository="skaft-software/ygg" ;;
     esac
     identity_version=$(printf '%s' "$version" | sed 's/\./\\./g')
-    identity="^https://github\\.com/${signing_repository}/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
+    if [ "${release_workflow_commit:-$release_source_commit}" = "$release_source_commit" ]; then
+        identity_tag="(v${identity_version}|octet-binaries-v${identity_version})"
+    else
+        identity_tag="octet-binaries-v${identity_version}"
+    fi
+    identity="^https://github\\.com/${signing_repository}/\\.github/workflows/release-octet\\.yml@refs/tags/${identity_tag}$"
     python3 - \
         "$checksums" \
         "$bundle" \

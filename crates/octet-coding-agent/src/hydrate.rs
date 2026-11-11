@@ -1294,6 +1294,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("ok".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1338,6 +1339,7 @@ mod tests {
                 content: vec![ToolResultPart::Text("read=image".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             };
             let content = if protocol == Protocol::OpenAiChat {
                 vec![
@@ -1374,6 +1376,7 @@ mod tests {
             content: vec![ToolResultPart::Text("done".into())],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         };
         for content in [
             vec![
@@ -1613,6 +1616,7 @@ mod tests {
                             content: vec![ToolResultPart::Text("ok".into())],
                             is_error: false,
                             added_tool_names: None,
+                            tool_name: None,
                         }),
                         UserPart::Text("after".into()),
                     ],
@@ -1844,6 +1848,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("contents".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1911,6 +1916,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("contents".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -1996,6 +2002,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("durable".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();
@@ -2045,6 +2052,7 @@ mod tests {
                     content: vec![ToolResultPart::Text("one durable result".into())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();

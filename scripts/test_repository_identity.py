@@ -86,6 +86,19 @@ class RepositoryIdentityTests(unittest.TestCase):
                 with self.assertRaises(metadata.MetadataError):
                     metadata.validate_identity(version, f"v{version}", source, commit, workflow(other, version), repository)
 
+    def test_metadata_accepts_canonical_tag_only_for_exact_source(self):
+        version = "0.10.3"
+        source = "a" * 40
+        ref = f"{CANONICAL_REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/v{version}"
+        metadata.validate_identity(version, f"v{version}", source, source, ref, CANONICAL_REPOSITORY)
+        with self.assertRaises(metadata.MetadataError):
+            metadata.validate_identity(version, f"v{version}", source, "b" * 40, ref, CANONICAL_REPOSITORY)
+        for wrong_ref in (ref + "-rc.1", ref.replace(version, "0.10.2"),
+                          ref.replace("refs/tags/", "refs/heads/")):
+            with self.subTest(ref=wrong_ref), self.assertRaises(metadata.MetadataError):
+                metadata.validate_identity(version, f"v{version}", source, source,
+                                           wrong_ref, CANONICAL_REPOSITORY)
+
     def test_formula_accepts_current_fixture_and_historical_metadata(self):
         for value in [self.fixture, self.legacy_metadata()]:
             with self.subTest(repository=value["repository"]):
@@ -93,6 +106,36 @@ class RepositoryIdentityTests(unittest.TestCase):
                 rendered = formula.render_formula(tag, version, value["source_commit"], value["workflow_commit"], value["workflow_ref"], checksum, assets)
                 self.assertIn(f'https://github.com/{CANONICAL_REPOSITORY}/releases/download/v0.7.0/', rendered)
                 self.assertIn(value["workflow_ref"], rendered)
+
+    def test_formula_and_npm_require_exact_canonical_or_legacy_signer(self):
+        value = copy.deepcopy(self.fixture)
+        value["workflow_commit"] = value["source_commit"]
+        prefix = f"{CANONICAL_REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metadata.json"
+            def validate():
+                path.write_text(json.dumps(value))
+                formula.parse_metadata(value)
+                npm.read_release_metadata(path, "0.7.0", "v0.7.0", value["source_commit"], value["workflow_commit"])
+            for ref in (prefix + "v0.7.0", prefix + "octet-binaries-v0.7.0"):
+                value["workflow_ref"] = ref
+                validate()
+            for ref in (prefix + "v0.7.1", prefix + "v0.7.0-rc.1", prefix.replace("tags", "heads") + "v0.7.0",
+                        prefix + "octet-binaries-v0.7.1"):
+                value["workflow_ref"] = ref
+                with self.subTest(ref=ref):
+                    with self.assertRaises(formula.FormulaError):
+                        formula.parse_metadata(value)
+                    path.write_text(json.dumps(value))
+                    with self.assertRaises(npm.ManifestError):
+                        npm.read_release_metadata(path, "0.7.0", "v0.7.0", value["source_commit"], value["workflow_commit"])
+            value["workflow_ref"] = prefix + "v0.7.0"
+            value["workflow_commit"] = "b" * 40
+            with self.assertRaises(formula.FormulaError):
+                formula.parse_metadata(value)
+            path.write_text(json.dumps(value))
+            with self.assertRaises(npm.ManifestError):
+                npm.read_release_metadata(path, "0.7.0", "v0.7.0", value["source_commit"], value["workflow_commit"])
 
     def test_formula_rejects_mixed_or_unbound_historical_identity(self):
         for field, value in [("source_commit", "a" * 40), ("workflow_commit", "b" * 40),
@@ -135,6 +178,19 @@ class RepositoryIdentityTests(unittest.TestCase):
                 escaped_version = version.replace(".", r"\.")
                 self.assertEqual(lines[1], rf"^https://github\.com/{expected}/\.github/workflows/release-octet\.yml@refs/tags/(v{escaped_version}|octet-binaries-v{escaped_version})$")
 
+    def test_repair_installer_does_not_trust_canonical_ref_for_a_different_signer_commit(self):
+        text = (SCRIPTS / "install.sh").read_text()
+        block = 'signing_repository="$repository"' + text.split('    signing_repository="$repository"', 1)[1].split('    python3 - \\\n', 1)[0]
+        for workflow_commit, canonical_allowed in (("a" * 40, True), ("b" * 40, False)):
+            script = (f'repository="{CANONICAL_REPOSITORY}"\nversion="0.10.3"\n'
+                      f'release_source_commit="{"a" * 40}"\nrelease_workflow_commit="{workflow_commit}"\n'
+                      + block + '\nprintf "%s\\n" "$identity"\n')
+            identity = subprocess.check_output(["sh", "-eu", "-c", script], text=True, env={"PATH": os.defpath}).strip()
+            prefix = f"https://github.com/{CANONICAL_REPOSITORY}/.github/workflows/release-octet.yml@refs/tags/"
+            self.assertEqual(bool(re.fullmatch(identity, prefix + "v0.10.3")), canonical_allowed)
+            self.assertIsNotNone(re.fullmatch(identity, prefix + "octet-binaries-v0.10.3"))
+            self.assertIsNone(re.fullmatch(identity, prefix + "v0.10.4"))
+
 
 class SourceDistributionVersionTests(unittest.TestCase):
     """Release distribution identities stay aligned; API versions are independent."""
@@ -164,6 +220,10 @@ class SourceDistributionVersionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "sdk/typescript/package.json").read_text())["version"],
                          self.version)
         self.assertIn(f'\nversion="{self.version}"\n', (SCRIPTS / "install.sh").read_text())
+        # The release workflow republishes this installer verbatim, so its
+        # embedded pin is what a Windows install actually fetches.
+        self.assertIn(f"[string] $Version = '{self.version}'",
+                      (SCRIPTS / "install-octet.ps1").read_text())
         for package in ("octet-codemode", "octet-computer-use", "octet-mcp", "octet-pi-compat", "octet-subagents", "octet-web-search"):
             manifest = (self.root / "extensions" / package / "extension.toml").read_text()
             with self.subTest(package=package):

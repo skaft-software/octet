@@ -1543,6 +1543,7 @@ mod tests {
                     ))],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             })))
             .unwrap();

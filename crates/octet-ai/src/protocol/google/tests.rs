@@ -156,6 +156,7 @@ fn tool_result_media_follows_the_function_responses_as_inline_data() {
             ],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })
     };
     let request = Request {
@@ -323,6 +324,7 @@ fn uses_model_specific_google_tool_call_id_shape() {
                     content: vec![ToolResultPart::Text("Paris is sunny".to_owned())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 })],
             }),
         ],

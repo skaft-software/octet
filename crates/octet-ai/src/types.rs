@@ -1293,6 +1293,13 @@ pub struct ToolResult {
     /// codecs still send every tool schema and do not claim native load points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_tool_names: Option<Vec<String>>,
+    /// Name of the tool that produced this result, when known.
+    ///
+    /// Durable session metadata only (Pi persists `toolName` on every tool
+    /// result message: `pi-session-1-5-0/dist/core/messages.js` and the
+    /// `toolResult` message type). Protocol codecs never send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 /// Part of a tool result.

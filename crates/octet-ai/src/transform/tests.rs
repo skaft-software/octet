@@ -161,6 +161,7 @@ fn unsupported_user_and_tool_images_become_visible_placeholders() {
                 content: vec![ToolResultPart::Media(image)],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             }),
         ],
     })];
@@ -208,6 +209,7 @@ fn audio_transcripts_replace_unreplayable_user_tool_and_assistant_media() {
                     content: vec![ToolResultPart::Media(tool_audio)],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 }),
             ],
         }),
@@ -336,6 +338,7 @@ fn owned_request_transform_matches_borrowed_and_moves_pending_text() {
                     content: vec![ToolResultPart::Text("done".to_string())],
                     is_error: false,
                     added_tool_names: None,
+                    tool_name: None,
                 }),
             ],
         }),
@@ -416,6 +419,7 @@ fn existing_tool_result_prevents_synthetic_result() {
                 content: vec![ToolResultPart::Text("ok".to_string())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         }),
     ];

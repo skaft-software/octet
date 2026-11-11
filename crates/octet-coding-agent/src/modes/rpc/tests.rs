@@ -125,6 +125,7 @@ fn rpc_message_count_matches_the_projected_history_for_every_shape() {
             content: vec![octet_ai::ToolResultPart::Text(format!("{id} done"))],
             is_error: false,
             added_tool_names: None,
+            tool_name: None,
         })
     };
     let user_turns = vec![
@@ -225,6 +226,7 @@ fn rpc_messages_keep_durable_identity_across_turns_reopen_and_branching() {
                 content: vec![octet_ai::ToolResultPart::Text("effect retained".into())],
                 is_error: false,
                 added_tool_names: None,
+                tool_name: None,
             })],
         })))
         .unwrap();

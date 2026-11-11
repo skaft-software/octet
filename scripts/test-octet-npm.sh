@@ -184,6 +184,48 @@ python3 "$script_directory/create-octet-npm-manifest.py" \
     "$output_directory" \
     "$output_directory/OCTET_NPM_MANIFEST.json" \
     "$output_directory/OCTET_NPM_SHA256SUMS" >/dev/null
+# Exercise the legacy signer and current Windows asset shape with offline fixtures.
+python3 "$script_directory/generate-homebrew-formula.py" \
+    "$native_directory/OCTET_RELEASE_METADATA.json" --assets-dir "$native_directory" \
+    --output "$work_directory/legacy-octet.rb"
+# A canonical native signer is bound to the source, independently of the later
+# npm publication workflow commit. Exercise the same full Windows asset set.
+python3 "$script_directory/generate-octet-release-metadata.py" \
+    "$version" "v$version" \
+    "0123456789abcdef0123456789abcdef01234567" \
+    "0123456789abcdef0123456789abcdef01234567" \
+    "skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/v$version" \
+    "skaft-software/octet" "$native_directory/OCTET_SHA256SUMS" \
+    "$work_directory/canonical-metadata.json" --include-windows-msvc >/dev/null
+python3 "$script_directory/generate-homebrew-formula.py" \
+    "$work_directory/canonical-metadata.json" --assets-dir "$native_directory" \
+    --output "$work_directory/canonical-octet.rb"
+python3 "$script_directory/create-octet-npm-manifest.py" \
+    "$version" "v$version" "0123456789abcdef0123456789abcdef01234567" \
+    "fedcba9876543210fedcba9876543210fedcba98" \
+    "$work_directory/canonical-metadata.json" "$output_directory" \
+    "$work_directory/canonical-manifest.json" "$work_directory/canonical-checksums" \
+    --core-workflow-commit "0123456789abcdef0123456789abcdef01234567" >/dev/null
+python3 - "$work_directory/canonical-metadata.json" "$work_directory/bad-canonical.json" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+value['workflow_commit'] = 'abcdef0123456789abcdef0123456789abcdef01'
+pathlib.Path(sys.argv[2]).write_text(json.dumps(value))
+PY
+if python3 "$script_directory/create-octet-npm-manifest.py" \
+    "$version" "v$version" "0123456789abcdef0123456789abcdef01234567" \
+    "fedcba9876543210fedcba9876543210fedcba98" \
+    "$work_directory/bad-canonical.json" "$output_directory" \
+    "$work_directory/bad-canonical-manifest.json" "$work_directory/bad-canonical-checksums" \
+    --core-workflow-commit "abcdef0123456789abcdef0123456789abcdef01" >/dev/null 2>&1; then
+    echo "canonical native signer with a different workflow commit was accepted" >&2
+    exit 1
+fi
+if python3 "$script_directory/generate-homebrew-formula.py" \
+    "$work_directory/bad-canonical.json" --assets-dir "$native_directory" >/dev/null 2>&1; then
+    echo "Homebrew accepted a canonical signer with a different workflow commit" >&2
+    exit 1
+fi
 # A later npm publication workflow must retain the original native signer identity.
 python3 "$script_directory/create-octet-npm-manifest.py" \
     "$version" "v$version" \
@@ -463,8 +505,10 @@ doc_root = stage / "share/octet"
 ignore = doc_root / benchmark / ".gitignore"
 installed_ignore = ignore.with_name(".npmignore")
 ignore_bytes = ignore.read_bytes()
-assert not installed_ignore.exists()
-ignore.rename(installed_ignore)
+ignores = [doc_root / name for name in sorted(files) if pathlib.PurePosixPath(name).name == ".gitignore"]
+for path in ignores:
+    assert not path.with_name(".npmignore").exists()
+    path.rename(path.with_name(".npmignore"))
 verification["check_documentation_bytes"](inspection, doc_root, npm_install=True)
 for data in (None, ignore_bytes + b"changed"):
     installed_ignore.unlink()
@@ -479,7 +523,8 @@ for data in (None, ignore_bytes + b"changed"):
     if installed_ignore.exists():
         installed_ignore.unlink()
     installed_ignore.write_bytes(ignore_bytes)
-installed_ignore.rename(ignore)
+for path in ignores:
+    path.with_name(".npmignore").rename(path)
 
 # Exercise the exact private-stage restoration helper: it may add only missing
 # inventoried docs, never overwrite changed bytes or launder unsafe npm entries.

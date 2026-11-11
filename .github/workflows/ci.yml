@@ -74,6 +74,7 @@ jobs:
           python3 scripts/test_provider_acceptance.py
           python3 scripts/test_release_serve_trust.py
           python3 scripts/test_release_source_qualification.py
+          python3 scripts/test_release_handoffs.py
           python3 scripts/test_windows_release_surface.py
           python3 scripts/test_repository_identity.py
           python3 scripts/test-packaged-docs.py

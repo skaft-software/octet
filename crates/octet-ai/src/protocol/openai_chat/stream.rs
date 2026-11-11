@@ -407,6 +407,11 @@ pub(crate) fn decode_stream_event(
         if builder.stop_reason.is_none() {
             builder.add_diagnostic(defaulted_stop_reason_diagnostic());
         }
+        // Emit the authoritative (latest) usage report exactly once, before
+        // `Finished`.
+        if let Some(usage) = builder.chat_pending_usage.take() {
+            emit_event(&mut events, builder, StreamEvent::Usage(usage))?;
+        }
         if builder.usage.is_none() {
             builder.add_diagnostic(crate::Diagnostic {
                 code: "chat_usage_missing".to_owned(),
@@ -660,8 +665,8 @@ pub(crate) fn decode_stream_event(
     }
 
     if let Some(ref usage) = chunk.usage {
-        let u = map_usage(usage)?;
-        emit_event(&mut events, builder, StreamEvent::Usage(u))?;
+        // Keep only the latest report; it is emitted once at `[DONE]`.
+        builder.chat_pending_usage = Some(map_usage(usage)?);
     }
 
     Ok(events)
