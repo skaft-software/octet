@@ -84,6 +84,10 @@ export class SessionManager {
   static inMemory(cwd) { return new SessionManager(SECRET, cwd); }
   static create() { unsupported('SessionManager.create', 'Pi session-file projection is not implemented; use the host-backed inMemory view'); }
   static open() { unsupported('SessionManager.open', 'Pi JSONL is not the native session format; implicit import/resume is forbidden'); }
+  // Pi's session browsers (/sessions) list Pi JSONL files. octet keeps its own
+  // sessions, so say where they are instead of failing as 'not a function'.
+  static async list() { unsupported('SessionManager.list', 'octet keeps its own sessions; use /resume to open one'); }
+  static async listAll() { unsupported('SessionManager.listAll', 'octet keeps its own sessions; use /resume to open one'); }
   getSessionFile() { return undefined; }
   getSessionId() { if (!this.session?._sessionId) unsupported('SessionManager.getSessionId', 'native session identity has not been supplied yet'); return this.session._sessionId; }
   getCwd() { return this.cwd ?? this.session?._binding.cwd; }

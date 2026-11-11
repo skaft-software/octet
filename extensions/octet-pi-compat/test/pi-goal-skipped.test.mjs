@@ -1,7 +1,7 @@
 // @narumitw/pi-goal is not loaded: octet keeps its own built-in /goal, and a Pi
 // package registering `goal` would shadow it. Discovery must skip the package
 // (by npm name or resolved package.json name), say so once, and keep every other
-// extension loading, together with pi-subagents when both are listed.
+// extension loading. pi-subagents is no longer skipped: it loads alongside.
 // Synthetic filesystem only; no installed Pi, no network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,7 +13,6 @@ import { discoverPiSetup, UNSUPPORTED_PACKAGES } from '../lib/pi-setup.mjs';
 import { host, launch } from './helper.mjs';
 
 const GOAL_LINE = 'pi-goal: octet uses its built-in /goal';
-const SUBAGENTS_LINE = 'pi-subagents: replaced by octet-subagents';
 // What the real package does that matters here: it owns the `goal` command.
 const goalFactory = 'export default pi => { pi.registerCommand("goal", { description: "Pi goal", handler() {} }); };';
 // Executing this factory is the failure the user used to see.
@@ -39,9 +38,8 @@ function installNpm(agent, name, source = explode, version = '1.2.3') {
   return put(join(root, 'extensions/index.ts'), source);
 }
 
-test('the table holds exactly the two unsupported packages, each with one short line', () => {
+test('the table holds exactly the one unsupported package, with one short line', () => {
   assert.deepEqual(UNSUPPORTED_PACKAGES.map(({ match, line }) => [match, line]), [
-    ['pi-subagents', SUBAGENTS_LINE],
     ['@narumitw/pi-goal', GOAL_LINE],
   ]);
   assert.ok(UNSUPPORTED_PACKAGES.every(item => !item.line.includes('\n') && item.line.length < 80));
@@ -108,15 +106,15 @@ test('names that merely resemble an unsupported package are not skipped', t => {
   assert.deepEqual(setup.extensions, [join(f.agent, 'extensions/kept.js'), ...roots, join(lookalike, 'extensions/index.ts')]);
 });
 
-test('both unsupported packages in one setup print one line each, in settings order', t => {
+test('pi-goal is skipped while pi-subagents in the same setup loads', t => {
   const f = fixture(t);
-  installNpm(f.agent, 'pi-subagents');
+  const subagents = installNpm(f.agent, 'pi-subagents', kept);
   installNpm(f.agent, '@narumitw/pi-goal', goalFactory);
   const other = installNpm(f.agent, 'pi-other', kept);
-  put(join(f.agent, 'settings.json'), { packages: ['npm:@narumitw/pi-goal', 'npm:pi-other', 'npm:pi-subagents', 'npm:pi-subagents@1.2.3'] });
+  put(join(f.agent, 'settings.json'), { packages: ['npm:@narumitw/pi-goal', 'npm:pi-other', 'npm:pi-subagents@1.2.3'] });
   const setup = f.discover();
-  assert.deepEqual(setup.unsupportedPackages.map(item => item.line), [GOAL_LINE, SUBAGENTS_LINE]);
-  assert.deepEqual(setup.extensions, [join(f.agent, 'extensions/kept.js'), other]);
+  assert.deepEqual(setup.unsupportedPackages.map(item => item.line), [GOAL_LINE]);
+  assert.deepEqual(setup.extensions, [join(f.agent, 'extensions/kept.js'), other, subagents]);
   assert.deepEqual(packageNotes(setup), []);
 });
 
