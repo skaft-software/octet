@@ -253,6 +253,15 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
         }
     }
     let (state, message) = surface.lifecycle.native_state(std::time::Instant::now());
+    // The /resume empty state is derived from the picker, like the ANSI
+    // renderer, so the two cannot disagree or go stale.
+    let derived = match panel {
+        Panel::SessionPicker { picker } if order.is_empty() && !surface.lifecycle.is_loading() => {
+            Some(super::panel_render::session_empty_message(picker, shell.theme.unicode()).message)
+        }
+        _ => None,
+    };
+    let message = derived.as_deref().or(message);
     let props = Props::new()
         .role("octet.picker")
         .set("state", state)

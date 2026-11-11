@@ -841,21 +841,6 @@ pub fn slash_suggestions(input: &str) -> Vec<&'static SlashCommandSuggestion> {
     direct.chain(related).collect()
 }
 
-/// Complete a unique command-name prefix. Argument-taking commands receive a
-/// trailing space so the next keystroke naturally begins their argument.
-#[cfg(test)]
-pub fn complete_slash_command(input: &str) -> Option<String> {
-    let suggestions = slash_suggestions(input);
-    let [command] = suggestions.as_slice() else {
-        return None;
-    };
-    Some(format!(
-        "/{}{}",
-        command.name,
-        if command.accepts_argument { " " } else { "" }
-    ))
-}
-
 fn parse_on_off(value: &str) -> Option<bool> {
     match value {
         "on" | "true" | "yes" => Some(true),

@@ -879,3 +879,108 @@ fn unsupported_media_mention_falls_back_to_a_path_and_notice() {
         .debug_snapshot()
         .contains("does not accept image input"));
 }
+
+fn review_skills_shell() -> InteractiveShell {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_skill_commands(Arc::from(vec![
+        ("skill:review-pr".into(), "Review a pull request".into()),
+        ("skill:review".into(), "Review changes".into()),
+    ]));
+    shell
+}
+
+#[test]
+fn slash_tab_keeps_an_exact_typed_match_over_a_longer_name() {
+    // Pi's editor ranks the exact name first, so Tab applies it
+    // (pi-tui dist/autocomplete.js fuzzyFilter, dist/components/editor.js:540).
+    let mut shell = review_skills_shell();
+    shell.apply_edit(EditAction::Paste("/skill:review".into()));
+    shell.complete_slash_command();
+    assert_eq!(shell.pending(), "/skill:review ");
+
+    // An explicit arrow selection still wins over the exact match.
+    let mut shell = review_skills_shell();
+    shell.apply_edit(EditAction::Paste("/skill:review".into()));
+    assert!(!shell.slash_menu(SlashMenuAction::Next));
+    assert!(!shell.slash_menu(SlashMenuAction::Previous));
+    assert!(!shell.slash_menu(SlashMenuAction::Next));
+    shell.complete_slash_command();
+    assert_eq!(shell.pending(), "/skill:review ");
+}
+
+#[test]
+fn slash_tab_only_completes_a_suggestion_that_is_on_screen() {
+    // Tab completes exactly when the popup is drawn; short terminals draw none.
+    let mut hidden = 0;
+    for rows in 0..=12 {
+        let mut shell = review_skills_shell();
+        shell.set_size(100, 5);
+        // Error rows crowd the popup out of the five-row minimum terminal.
+        shell.state.borrow_mut().error = Some("failed\n".repeat(rows));
+        shell.apply_edit(EditAction::Paste("/skill:re".into()));
+        let drawn = !crate::tui::view::shell_chrome::shell_chrome(
+            &shell.state.borrow(),
+            100,
+            std::time::Instant::now(),
+        )
+        .suggestions
+        .is_empty();
+        shell.complete_slash_command();
+        assert_eq!(
+            shell.pending() != "/skill:re",
+            drawn,
+            "{rows} rows: popup drawn={drawn}"
+        );
+        hidden += usize::from(!drawn);
+    }
+    assert!(hidden > 0, "some small terminal must hide the popup");
+}
+
+#[test]
+fn slash_tab_ignores_the_slash_list_when_an_extension_overlay_replaces_it() {
+    let mut shell = review_skills_shell();
+    shell.apply_edit(EditAction::Paste("/skill:re".into()));
+    let snapshot = shell.extension_editor_snapshot();
+    let items = vec![ShellAutocompleteItem {
+        value: "/ext-choice".into(),
+        label: "/ext-choice".into(),
+        description: None,
+        replace_after_bytes: None,
+        cursor_offset_bytes: None,
+    }];
+    assert!(shell.set_extension_autocomplete(&snapshot, "/skill:re".into(), items));
+    shell.complete_slash_command();
+    assert_eq!(shell.pending(), "/skill:re");
+}
+
+#[test]
+fn slash_tab_resets_the_selection_and_scroll() {
+    let mut shell = review_skills_shell();
+    shell.apply_edit(EditAction::Paste("/skill:re".into()));
+    assert!(!shell.slash_menu(SlashMenuAction::Next));
+    shell.state.borrow_mut().slash_scroll = 1;
+    shell.complete_slash_command();
+    assert_eq!(shell.pending(), "/skill:review ");
+    let state = shell.state.borrow();
+    assert_eq!((state.slash_selection, state.slash_scroll), (0, 0));
+}
+
+#[test]
+fn slash_tab_completes_built_in_commands_with_their_argument_space() {
+    // Ported from the retired commands::complete_slash_command helper so the
+    // product path is the only completion selector.
+    for (typed, expected) in [
+        ("/chang", "/changelog"),
+        ("/mod", "/model "),
+        ("/thi", "/thinking "),
+        ("/status", "/status"),
+        // The reference hides this command from discovery; Tab must not
+        // advertise it either.
+        ("/deb", "/deb"),
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.apply_edit(EditAction::Paste(typed.into()));
+        shell.complete_slash_command();
+        assert_eq!(shell.pending(), expected, "{typed}");
+    }
+}

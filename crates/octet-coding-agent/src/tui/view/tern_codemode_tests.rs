@@ -253,3 +253,37 @@ fn safe_boundary_controls_share_native_queue_chrome_without_input_authority() {
     surface.flush(&shell.state).unwrap();
     assert!(find_node(&surface.sent.dock, "pending").is_none());
 }
+
+#[test]
+fn codemode_failure_with_only_the_status_mounts_no_empty_output_block() {
+    // The failure reason is already the card's status; an output that is just
+    // that line (or blank) must not mount an empty code block.
+    for output in ["Script failed", "\n\nScript failed\n", "  \n"] {
+        let (shell, mut surface, _) = setup(10);
+        let args = json!({"code": "throw new Error('boom')"});
+        let index = shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                ToolCallId("codemode-empty".into()),
+                "codemode".into(),
+                args.to_string(),
+                summarize_tool("codemode", &args),
+                output.into(),
+                true,
+                true,
+                Some("Script failed".into()),
+                None,
+            ))));
+        let identity = shell.state.borrow().transcript_commit_ids[index];
+        surface.flush(&shell.state).unwrap();
+        for verbose in [false, true] {
+            shell.state.borrow_mut().verbose_tools = verbose;
+            surface.flush(&shell.state).unwrap();
+            assert!(
+                find_node(&surface.sent.main, &id(identity, "out")).is_none(),
+                "{output:?} verbose={verbose}: no empty output block"
+            );
+        }
+    }
+}

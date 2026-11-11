@@ -4,7 +4,9 @@
 
 Type `/` in the input to see every command. Up and Down highlight a suggestion;
 Tab inserts it without running it, even when multiple names match. This includes
-`/skill:NAME` suggestions. Enter sends the selection through its normal handler.
+`/skill:NAME` suggestions. A name typed in full stays itself (`/skill:review`
+is not completed to `/skill:review-pr`) until you move the highlight. Tab only
+completes a suggestion that is on screen. Enter sends the selection through its normal handler.
 
 ```text
 /status
