@@ -70,7 +70,7 @@ diagnosed loudly rather than silently changing a Pi result.
 | `isProjectTrusted` | Conservative; can tighten, cannot silently re-promote | Kept — never weakens native trust admission |
 | Resource path admission | Requires explicit workspace trust and grants | Kept — native trust is authoritative |
 | Unsafe host effects | Effect policy still applies to Pi tools | Kept — Octet owns host authority |
-| `onTerminalInput` 50 ms latch | Pi blocks typing indefinitely | **open — to free** (compatibility, not security) |
+| `onTerminalInput` 1 s hang limit | Pi blocks typing indefinitely | Slow listeners are waited for in order; only a listener silent for 1 s is latched off (compatibility, not security) |
 | Editor draft/history/paste/menu bounds | Bounded | **open — to free** where Pi is unbounded |
 
 ## Using this register

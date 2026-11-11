@@ -1867,15 +1867,20 @@ fn tool_node(
         // paints one expanded frame before the terminal hides it. Bash failures
         // retain their reason in metadata; full output requires disclosure.
         if script_output {
-            body.push(Node::new(
-                id(index, "out"),
-                Kind::Code,
-                Props::new()
-                    .set("text", super::codemode_render::output_text(panel, verbose))
-                    .set("lang", "text")
-                    .set("wrap", true)
-                    .set("numbers", false),
-            ));
+            // The failure status is the card's own line; an output that is only
+            // that status leaves nothing to mount.
+            let text = super::codemode_render::output_text(panel, verbose);
+            if !text.trim().is_empty() {
+                body.push(Node::new(
+                    id(index, "out"),
+                    Kind::Code,
+                    Props::new()
+                        .set("text", text)
+                        .set("lang", "text")
+                        .set("wrap", true)
+                        .set("numbers", false),
+                ));
+            }
         } else {
             let shown = sanitize_for_terminal(&panel.output);
             body.push(Node::new(
