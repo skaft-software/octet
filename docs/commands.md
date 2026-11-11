@@ -2,8 +2,9 @@
 
 [Documentation](README.md) · [CLI flags](cli.md) · [Terminal](terminal.md)
 
-Type `/` in the input to see every command. Tab completes a command name without
-running it, and Enter runs the highlighted command through its normal handler.
+Type `/` in the input to see every command. Up and Down highlight a suggestion;
+Tab inserts it without running it, even when multiple names match. This includes
+`/skill:NAME` suggestions. Enter sends the selection through its normal handler.
 
 ```text
 /status
@@ -68,10 +69,11 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/exit` | Exit octet. |
 
 Type `/log…` or `/setu…` to see both `/login` and `/setup` in the suggestions,
-then pick one with Up and Down and Enter. An ambiguous partial match doesn't
-Tab-complete on its own, and exact `/login` and `/setup` keep their separate
-actions. `/theme` previews and selects the built-in Auto, Light and Dark
-appearances, or valid TOML files in the trusted theme discovery roots.
+then pick one with Up and Down. Tab inserts the highlighted name without running
+it; Enter runs it. With the popup dismissed, Tab still requires a unique match.
+Exact `/login` and `/setup` keep their separate actions. `/theme` previews and
+selects the built-in Auto, Light and Dark appearances, or valid TOML files in the
+trusted theme discovery roots.
 Cancelling leaves the theme and session unchanged ([Theme discovery and
 format](themes.md)). Extensions can add commands, and each package's README
 lists its arguments.
