@@ -1523,7 +1523,7 @@ mod tests {
                 reader_binding(&binding, producer, consumer.revoker(), &grant);
             handle_protocol_line(&wire_request(&grant, 100), &state).unwrap();
             if parent {
-                cancel_children_from_reader(&state, 1, "parent cancelled");
+                cancel_children_from_reader(&state, 1, "parent cancelled", false);
             } else {
                 handle_protocol_line(
                     br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":100}}"#,
@@ -1562,7 +1562,7 @@ mod tests {
                             &state,
                         )
                         .unwrap(),
-                        1 => cancel_children_from_reader(&state, 1, "parent cancelled"),
+                        1 => cancel_children_from_reader(&state, 1, "parent cancelled", false),
                         _ => state.session_leaf.clear(),
                     }
                     assert!(frames.try_recv().is_err());

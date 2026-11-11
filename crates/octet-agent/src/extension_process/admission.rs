@@ -653,12 +653,20 @@ pub(super) fn try_queue_child_response_line(
     }
 }
 
+/// `keep_surface_opens`: the parent replied successfully, so its unanswered
+/// `ui/open` children stay admitted (see `RemoteUiChildRequest::is_surface_open`).
 pub(super) fn cancel_children_from_reader(
     state: &ProtocolReadState,
     parent_request_id: u64,
     reason: &str,
+    keep_surface_opens: bool,
 ) {
-    let child_ids = cancel_active_children(&state.child_requests, parent_request_id, reason);
+    let child_ids = cancel_active_children_keeping(
+        &state.child_requests,
+        parent_request_id,
+        reason,
+        keep_surface_opens,
+    );
     for id in child_ids {
         let _ = queue_writer_value(
             &state.writer,
@@ -677,12 +685,26 @@ pub(super) fn cancel_active_children(
     parent_request_id: u64,
     reason: &str,
 ) -> Vec<ExtensionRequestId> {
+    cancel_active_children_keeping(child_requests, parent_request_id, reason, false)
+}
+
+fn cancel_active_children_keeping(
+    child_requests: &ChildRequests,
+    parent_request_id: u64,
+    reason: &str,
+    keep_surface_opens: bool,
+) -> Vec<ExtensionRequestId> {
     let mut children = lock_std_mutex(child_requests);
     let matching = children
         .iter()
         .filter_map(|(id, child)| {
-            (child.parent_request_id == parent_request_id)
-                .then_some((id.clone(), Arc::clone(&child.response_state)))
+            (child.parent_request_id == parent_request_id
+                && !(keep_surface_opens
+                    && child
+                        .remote_ui
+                        .as_ref()
+                        .is_some_and(|ui| ui.is_surface_open())))
+            .then_some((id.clone(), Arc::clone(&child.response_state)))
         })
         .collect::<Vec<_>>();
     let mut settled = Vec::new();

@@ -278,6 +278,12 @@ impl Pane {
         process_argv_line(self.pid())
     }
 
+    /// The pane's current argv, or `None` while the kernel reports none (an
+    /// `execve` is replacing the image). Safe to poll.
+    fn try_ps_argv(&self) -> Option<String> {
+        try_process_argv_line(self.pid())
+    }
+
     /// Poll the pane's PTY and liveness until `ready` holds.
     fn wait_until(&mut self, timeout: Duration, what: &str, mut ready: impl FnMut(&Pane) -> bool) {
         let deadline = Instant::now() + timeout;
@@ -654,31 +660,30 @@ fn shell_quote(path: &Path) -> String {
 }
 
 fn process_argv_line(pid: i32) -> String {
+    try_process_argv_line(pid).unwrap_or_else(|| panic!("no argv reported for pid {pid}"))
+}
+
+/// The process's argv, or `None` when it cannot be read or is momentarily
+/// empty (the kernel reports no argv while an `execve` replaces the image).
+fn try_process_argv_line(pid: i32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let bytes = fs::read(format!("/proc/{pid}/cmdline"))
-            .unwrap_or_else(|error| panic!("cannot read /proc/{pid}/cmdline: {error}"));
+        let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         let args = bytes
             .split(|byte| *byte == 0)
             .filter(|part| !part.is_empty())
             .map(|part| String::from_utf8_lossy(part).into_owned())
             .collect::<Vec<_>>();
-        assert!(
-            !args.is_empty(),
-            "the kernel reported no argv for pid {pid}"
-        );
-        args.join(" ")
+        (!args.is_empty()).then(|| args.join(" "))
     }
     #[cfg(not(target_os = "linux"))]
     {
         let output = Command::new("/bin/ps")
             .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
             .output()
-            .unwrap_or_else(|error| panic!("cannot run ps for pid {pid}: {error}"));
-        assert!(output.status.success(), "ps failed for pid {pid}");
+            .ok()?;
         let line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        assert!(!line.is_empty(), "ps reported no argv for pid {pid}");
-        line
+        (output.status.success() && !line.is_empty()).then_some(line)
     }
 }
 
@@ -939,8 +944,13 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
 
     // (b)/(d) same pid, new image, responsive pane.
     assert_eq!(pane.pid(), pane_pid, "exec preserves the pane pid");
+    let image_path = image.to_str().expect("image path");
     pane.wait_until(STEP_TIMEOUT, "the replacement image argv", |pane| {
-        pane.ps_argv().contains("--resume")
+        // `--resume` alone also matches the marker wrapper's own shell stage
+        // (`/bin/sh <launch> --resume ...`), which `exec`s the image a moment
+        // later; only the replacement image's argv carries its path.
+        pane.try_ps_argv()
+            .is_some_and(|argv| argv.contains("--resume") && argv.contains(image_path))
     });
     let argv = pane.ps_argv();
     assert!(

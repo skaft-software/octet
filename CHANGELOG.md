@@ -34,6 +34,14 @@
   During a running response Ctrl+C still only stops the run; press it again
   once the run has stopped to exit. Ctrl+D exits at any time (#673).
 
+- A Pi extension that mounts its footer or a widget from `session_start` without awaiting it (as Pi's own examples do) no longer has the mount cancelled when the hook replies: a still-unanswered `ui/open` now survives a successful parent reply (a failed or cancelled parent still retires it).
+
+- A Pi extension provider whose stream reports an OpenAI Responses tool call (Pi's id form is `call_id|item_id`) no longer fails the turn with "tool call id is not a native provider identifier"; the id is forwarded unchanged.
+
+- A Pi extension's provider stream (`pi.registerProvider` with `streamSimple`) no longer fails with "unsupported_feature provider stream options.<name>" when the stream, or the Pi stream helper it calls, reads an option Pi does not set (`headers`, `env`, `fetch`, `samplingParams`, ...). Unset options read as `undefined`, as in Pi.
+
+- A manual `compact` over RPC that the compaction policy refuses (for example on a new, empty session: "no safe history to compact") now answers with an error response and a closing `compaction_end` event. It used to end the RPC server after `compaction_start` without any response.
+
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
 - Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or

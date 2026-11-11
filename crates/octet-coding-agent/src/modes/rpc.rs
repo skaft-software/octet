@@ -1481,7 +1481,21 @@ async fn handle_idle_command(
         }
         "compact" => {
             output.send(json!({"type": "compaction_start", "reason": "manual"}))?;
-            let outcome = attempt_compaction(&mut app).await?;
+            // A policy or hook refusal answers this command; it never ends the
+            // server (Pi's RPC reports a failed manual compaction the same way).
+            let outcome = match attempt_compaction(&mut app).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    output.send(json!({
+                        "type": "compaction_end",
+                        "reason": "manual",
+                        "aborted": false,
+                        "willRetry": false,
+                        "errorMessage": error.to_string()
+                    }))?;
+                    respond_error!(error)
+                }
+            };
             let data = match outcome {
                 CompactionOutcome::Compacted { elided } => json!({"elided": elided}),
                 CompactionOutcome::NativeCompacted => json!({"native": true}),
