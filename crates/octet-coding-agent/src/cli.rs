@@ -819,7 +819,7 @@ impl ConfigLayer {
 const PI_SETTINGS_BYTES: usize = 64 * 1024;
 pub(crate) const CODEMODE_EXTENSION: &str = "octet-codemode";
 
-fn pi_agent_dir() -> Option<PathBuf> {
+pub(crate) fn pi_agent_dir() -> Option<PathBuf> {
     for name in ["OCTET_PI_AGENT_DIR", "PI_CODING_AGENT_DIR"] {
         if let Some(value) = std::env::var_os(name) {
             if value.is_empty() {

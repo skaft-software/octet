@@ -40,6 +40,10 @@ octet extension install octet-pi-compat
 octet --enable-extension octet-pi-compat
 ```
 
+A first run with no provider configured notes a Pi agent directory it finds
+(`~/.pi/agent` or `PI_CODING_AGENT_DIR`) and names this command and
+`octet migrate pi --dry-run`. The check only tests that the directory exists.
+
 For source development, install locked adapter dependencies as described below,
 then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
 To install a downloaded bundle explicitly, use

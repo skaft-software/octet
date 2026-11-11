@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- A first run with no provider configured now says when it finds a Pi setup (`~/.pi/agent`
+  or `PI_CODING_AGENT_DIR`) and names the two commands that act on it,
+  `octet --enable-extension octet-pi-compat` and `octet migrate pi --dry-run`, instead of
+  showing only the provider wizard. Detection is a directory-existence check.
+
 - An oversized paste no longer leaves a session unrecoverable. A message larger than the
   model's input budget is refused before it is saved (the draft stays in the editor, and the
   error names its size against the budget and the context window), and `/compact` and
