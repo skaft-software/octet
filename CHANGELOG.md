@@ -30,6 +30,11 @@
   Pi's `overlay-test.ts`) no longer fail with "renderFakeCursor is not a function".
   The helper is provided and a frame carries the fake cursor as reverse video, as Pi draws it.
 
+- A Pi input listener (`ctx.ui.onTerminalInput`) that is briefly slow, for example
+  during a garbage collection or on a loaded machine, is no longer disabled
+  until reload. Keys wait for it in order, as in Pi; only a listener that does
+  not answer for a full second is latched off, with one warning.
+
 - The `/resume` empty states are now derived from the picker when it is drawn,
   so they cannot go stale (transcript-search hits no longer stay hidden behind an
   old message). Named-only (`^n`) hiding every row says to press `^n`, an
