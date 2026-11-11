@@ -13,6 +13,7 @@ pub struct Span {
 }
 
 impl Span {
+    /// Starts a span, or returns `None` when tracing is off.
     pub fn start(phase: &'static str, bytes: usize) -> Option<Self> {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         ENABLED

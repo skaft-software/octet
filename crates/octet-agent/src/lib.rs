@@ -95,6 +95,7 @@ pub mod extension_secret;
 pub mod goal_driver;
 pub mod goal_store;
 pub mod input;
+#[doc(hidden)]
 pub mod performance_trace;
 pub mod sandbox;
 pub mod secure_fs;
