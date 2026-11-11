@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, utimesSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync, utimesSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,14 @@ function tree() {
   for (const f of ['a.ts', 'b.ts']) utimesSync(join(dir, f), past, past);
   return dir;
 }
+// `racyNs: 0n` removes the extra window, not the guard: a file whose ctime is
+// later than the millisecond-truncated clock is still refused. Wait (at most a
+// millisecond) until the clock has passed every fixture ctime.
+function clockPast(dir) {
+  const newest = ['a.ts', 'b.ts'].map(f => statSync(join(dir, f), { bigint: true }).ctimeNs)
+    .reduce((a, b) => (a > b ? a : b));
+  while (BigInt(Date.now()) * 1_000_000n <= newest) { /* sub-millisecond spin */ }
+}
 
 test('fingerprint cache reuses unchanged digests and re-hashes a same-size rewrite with restored mtime', t => {
   const cache = mkdtempSync(join(tmpdir(), 'octet-fp-'));
@@ -24,6 +32,7 @@ test('fingerprint cache reuses unchanged digests and re-hashes a same-size rewri
   process.env.OCTET_PI_COMPAT_CACHE = cache;
   t.after(() => { previous === undefined ? delete process.env.OCTET_PI_COMPAT_CACHE : process.env.OCTET_PI_COMPAT_CACHE = previous; });
   const dir = tree();
+  clockPast(dir);
   const first = new SourceFingerprints({ racyNs: 0n });
   const plain = reviewedSourceHashes(join(dir, 'a.ts'));
   assert.deepEqual(reviewedSourceHashes(join(dir, 'a.ts'), { fingerprints: first }), plain);
@@ -34,6 +43,7 @@ test('fingerprint cache reuses unchanged digests and re-hashes a same-size rewri
   // Same size, mtime restored: ctime still moves, so the file is re-hashed.
   writeFileSync(join(dir, 'b.ts'), 'export const b = 2;\n');
   utimesSync(join(dir, 'b.ts'), past, past);
+  clockPast(dir);
   const third = new SourceFingerprints({ racyNs: 0n });
   const changed = reviewedSourceHashes(join(dir, 'a.ts'), { fingerprints: third });
   assert.notDeepEqual(changed, plain);
