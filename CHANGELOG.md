@@ -53,6 +53,23 @@
   `not_foreground_owner ... requires a live request`; the later dialog opens on a
   remote selector or input surface like Pi's.
 
+- GitHub Copilot startup registers the account's chat models again. The
+  authenticated inventory also lists legacy, embedding and partial records that
+  omit `supported_endpoints`, `capabilities` or a chat token limit; one such
+  sibling used to reject the whole inventory, so no `github-copilot/<id>` model
+  was advertised even though sign-in and token exchange succeeded. Each
+  unsupported entry is now skipped on its own, and the models the integration
+  supports are registered. A record is no longer rejected for publishing no
+  `policy`: only a `policy` naming another state withdraws a model, and the live
+  inventory omits the field on enabled picker models.
+
+- OpenCode Go startup registers its models again. Its inventory publishes a
+  model's exact effort levels as `effort` next to a structured default
+  (`{"type": "effort", "value": …}`); discovery accepted only `values` and
+  failed the whole provider, so no `opencode-go/<id>` model was advertised.
+  Both spellings now decode to the same exact contract, and a default that names
+  no published level remains malformed.
+
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
 

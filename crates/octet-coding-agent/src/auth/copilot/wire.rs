@@ -384,17 +384,39 @@ fn parse_models(
     let mut models = Vec::new();
     let mut individual_fallback = Vec::new();
     for value in inventory.data {
-        // Validate each record before filtering, so a malformed sibling cannot
-        // turn a failed inventory into a partially advertised one.
-        let model: WireModel =
-            serde_json::from_value(value).map_err(|_| Error::InvalidModelMetadata)?;
+        // The authenticated inventory also lists legacy, embedding and partial
+        // records, some of which omit fields this integration needs
+        // (`supported_endpoints`, `capabilities` or its limits). Skip an entry
+        // that is not a complete chat model instead of failing the inventory:
+        // the models this integration can use must survive a sibling it cannot.
+        let Ok(model) = serde_json::from_value::<WireModel>(value) else {
+            continue;
+        };
         if [model.id.as_str(), model.name.as_deref().unwrap_or("")]
             .iter()
             .any(|text| secrets.iter().any(|secret| text.contains(*secret)))
         {
             return Err(Error::InvalidModelMetadata);
         }
-        if model.policy.state != "enabled" || model.capabilities.kind != "chat" {
+        // A policy that names any other state is the endpoint withdrawing the
+        // model. An entry that publishes no policy states no restriction, and
+        // skipping it would drop real models: a live Business inventory
+        // publishes no `policy` at all on 6 of its 24 usable chat models, 5 of
+        // them picker-enabled. Absence is not a withdrawal statement.
+        if model
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.state != "enabled")
+        {
+            continue;
+        }
+        let Some(capabilities) = model.capabilities else {
+            continue;
+        };
+        let Some(limits) = capabilities.limits else {
+            continue;
+        };
+        if capabilities.kind != "chat" {
             continue;
         }
         let protocol = if model
@@ -413,7 +435,7 @@ fn parse_models(
             // In particular, do not relabel Anthropic-only models as OpenAI.
             continue;
         };
-        let supports = model.capabilities.supports;
+        let supports = capabilities.supports;
         // A bare reasoning flag is not an effort/control contract. Leave these
         // models out rather than fabricate controls or strip reasoning semantics.
         if supports.reasoning || !supports.tool_calls {
@@ -435,8 +457,8 @@ fn parse_models(
                 deferred_tool_loading: false,
             },
             ModelLimits {
-                context_window: model.capabilities.limits.max_context_window_tokens,
-                max_output_tokens: model.capabilities.limits.max_output_tokens,
+                context_window: limits.max_context_window_tokens,
+                max_output_tokens: limits.max_output_tokens,
             },
         );
         // Vision and structured-output controls require separate wire evidence;
@@ -466,10 +488,14 @@ fn parse_models(
 struct WireModel {
     id: String,
     name: Option<String>,
+    #[serde(default)]
     model_picker_enabled: bool,
-    policy: Policy,
+    /// Absent on records whose availability the endpoint does not scope.
+    policy: Option<Policy>,
+    #[serde(default)]
     supported_endpoints: Vec<String>,
-    capabilities: WireCapabilities,
+    /// Absent on embedding and legacy records the picker never offers.
+    capabilities: Option<WireCapabilities>,
 }
 
 #[derive(Deserialize)]
@@ -481,11 +507,12 @@ struct Policy {
 struct WireCapabilities {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
     supports: Supports,
-    limits: Limits,
+    limits: Option<Limits>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct Supports {
     #[serde(default)]
     tool_calls: bool,
@@ -547,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn individual_fallback_requires_empty_picker_and_enabled_policy() {
+    fn individual_fallback_requires_an_empty_picker_and_a_non_withdrawn_policy() {
         let mut disabled = model("disabled", false);
         disabled["policy"]["state"] = json!("disabled");
         let mut reasoning = model("reasoning", false);
@@ -581,13 +608,59 @@ mod tests {
     }
 
     #[test]
-    fn malformed_sibling_invalidates_individual_fallback_inventory() {
+    fn unusable_records_are_skipped_and_unpoliced_models_stay_advertised() {
+        // The inventory mixes supported chat models with legacy, embedding and
+        // partial records. A record this integration cannot use must not remove
+        // the models it can use, and publishing no `policy` is not a defect: the
+        // live inventory omits it on usable, picker-enabled models.
+        let mut unpoliced = model("unpoliced", true);
+        unpoliced.as_object_mut().unwrap().remove("policy");
+        let mut disabled = model("disabled", true);
+        disabled["policy"]["state"] = json!("disabled");
+        let mut no_output_limit = model("no-output-limit", true);
+        no_output_limit["capabilities"]["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_output_tokens");
+        let embedding = json!({
+            "id": "text-embedding-3-small", "object": "model",
+            "model_picker_enabled": false,
+            "capabilities": {"type": "embeddings", "supports": {}}
+        });
+        let legacy = json!({"id": "gpt-4o", "object": "model", "model_picker_enabled": false});
+        let selected = parse(
+            vec![
+                unpoliced,
+                disabled,
+                no_output_limit,
+                embedding,
+                legacy,
+                json!({"id": "broken"}),
+                model("supported", true),
+            ],
+            false,
+        )
+        .unwrap();
+        let ids = selected.iter().map(CopilotModel::id).collect::<Vec<_>>();
+        assert_eq!(ids, ["unpoliced", "supported"]);
+
+        // An Individual inventory still falls back to non-picker entries, and
+        // the same partial sibling stays inert there too.
+        let selected = parse(
+            vec![model("policy-only", false), json!({"id": "broken"})],
+            true,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id(), "policy-only");
+    }
+
+    #[test]
+    fn secret_echo_in_an_advertised_model_still_invalidates_the_inventory() {
+        let mut echo = model("echo", true);
+        echo["name"] = json!("uses oauth-secret");
         assert_eq!(
-            parse(
-                vec![model("policy-only", false), json!({"id": "broken"})],
-                true
-            )
-            .unwrap_err(),
+            parse(vec![echo], false).unwrap_err(),
             Error::InvalidModelMetadata
         );
     }

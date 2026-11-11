@@ -402,6 +402,13 @@ editor, Codex or environment credentials are imported.
 Online startup registers authenticated, eligible models as `github-copilot/<id>`
 in the ordinary picker and the shared native-host catalog. Missing credentials,
 failed discovery and unsupported models contribute no Copilot entries.
+The inventory may also list legacy, embedding and partial records (an entry can
+omit `supported_endpoints`, `capabilities` or a chat token limit); each such
+entry is skipped on its own and never removes the chat models this integration
+can use. A record that publishes no `policy` is not skipped on that basis: a
+`policy` naming a state other than `enabled` withdraws a model, and a missing
+`policy` states no restriction, which the live inventory does on enabled
+picker models.
 `--offline` skips even Copilot-store access and advertises no cached inventory.
 Only explicit Chat and Responses routes are supported. Reasoning-flagged models,
 Anthropic-only routes, vision and structured output aren't advertised. Custom
