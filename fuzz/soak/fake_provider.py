@@ -58,10 +58,16 @@ def tool_stream(body: dict) -> bytes:
     events = [
         sse("response.created", {"type": "response.created", "response": {"id": "resp_soak_tool"}}),
         sse("response.output_item.added", {"type": "response.output_item.added", "output_index": 0,
-            "item": {"id": "fc_soak", "type": "function_call", "call_id": "call_soak", "name": name}}),
+            "item": {"id": "fc_soak", "type": "function_call", "call_id": "call_soak", "name": name, "arguments": ""}}),
         sse("response.function_call_arguments.delta", {"type": "response.function_call_arguments.delta",
             "output_index": 0, "delta": arguments}),
-        sse("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "output_index": 0}),
+        sse("response.function_call_arguments.done", {"type": "response.function_call_arguments.done", "output_index": 0,
+            "arguments": arguments}),
+        # Real Responses streams close every item; clients that track content
+        # blocks (the installed Pi's stream) leave the block open without it.
+        sse("response.output_item.done", {"type": "response.output_item.done", "output_index": 0,
+            "item": {"id": "fc_soak", "type": "function_call", "call_id": "call_soak", "name": name,
+                     "arguments": arguments, "status": "completed"}}),
         sse("response.completed", {"type": "response.completed", "response": {
             "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}}),
     ]
