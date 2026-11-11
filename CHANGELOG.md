@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- A failed Codemode card no longer mounts an empty output block when its output
+  is only the failure status, and the repeated status is dropped by comparing it
+  with the status actually shown, skipping leading blank lines, so sanitized or
+  over-long statuses dedupe too, with one fewer copy of the output per render.
+  Follow-up to #678.
+
 - Tab completion of a `/command` keeps a name you typed in full (`/skill:review`
   no longer becomes `/skill:review-pr`) until you move the highlight, completes
   only a suggestion that is on screen (not when the popup is hidden on a short
