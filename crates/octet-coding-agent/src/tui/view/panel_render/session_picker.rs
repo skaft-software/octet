@@ -699,22 +699,69 @@ fn render_message_item(
     ]
 }
 
-fn session_empty_message(picker: &PickerState) -> String {
+/// Why `/resume` shows no session row, derived from the picker's own state at
+/// render time so it can never go stale.
+pub(in crate::tui::view) struct SessionEmpty {
+    pub(in crate::tui::view) message: String,
+    /// Nothing exists to match at all, as opposed to a filter, the named-only
+    /// toggle or the scope hiding every row. Rendered without the "no matches"
+    /// state word.
+    pub(in crate::tui::view) no_sessions: bool,
+}
+
+/// The recovery guidance leads and the filter echo trails, truncated, so a
+/// narrow terminal clips the echo and never the action.
+pub(in crate::tui::view) fn session_empty_message(
+    picker: &PickerState,
+    unicode: bool,
+) -> SessionEmpty {
+    let current = picker.scope == PickerScope::Current;
+    let filter = picker.filter.trim();
+    if picker.active_rows().is_empty() {
+        return SessionEmpty {
+            message: if current {
+                "No sessions in this workspace yet. Start one and it will appear here."
+            } else {
+                "No sessions in any workspace yet."
+            }
+            .to_owned(),
+            no_sessions: true,
+        };
+    }
+    let mut actions = Vec::new();
+    if !filter.is_empty() {
+        actions.push("Backspace clears the search");
+    }
     if picker.named_only {
-        match picker.scope {
-            PickerScope::Current => {
-                "named sessions in the current workspace. Press ^n to show all, or tab to view all."
-                    .to_owned()
-            }
-            PickerScope::All => "named sessions. Press ^n to show all.".to_owned(),
-        }
+        actions.push(if filter.is_empty() {
+            "^n shows all sessions"
+        } else {
+            "^n shows unnamed sessions too"
+        });
+    }
+    if current {
+        actions.push(if filter.is_empty() {
+            "Tab shows all workspaces"
+        } else {
+            "Tab searches all workspaces"
+        });
+    }
+    let guidance = actions.join("; ");
+    let message = if !filter.is_empty() {
+        let ellipsis = if unicode { "…" } else { "..." };
+        let echo = sexy_tui_rs::truncate_to_width(&panel_cell(filter, unicode), 24, Some(ellipsis));
+        format!("{guidance}. No sessions match '{echo}'.")
+    } else if picker.named_only {
+        let place = if current { " in this workspace" } else { "" };
+        format!("No named sessions{place}. {guidance}.")
+    } else if guidance.is_empty() {
+        "No sessions to show.".to_owned()
     } else {
-        match picker.scope {
-            PickerScope::Current => {
-                "sessions in the current workspace. Press tab to view all.".to_owned()
-            }
-            PickerScope::All => "sessions".to_owned(),
-        }
+        format!("No sessions to show. {guidance}.")
+    };
+    SessionEmpty {
+        message,
+        no_sessions: false,
     }
 }
 
@@ -764,20 +811,25 @@ pub(super) fn render_session_picker(
     let body_rows = max_rows.saturating_sub(lines.len() + remaining_border_rows);
     if body_rows > 0 {
         let ordering = session_picker_ordering(picker);
-        if matches!(
-            &picker.surface.lifecycle,
-            OrdinarySurfaceLifecycle::Loading(_) | OrdinarySurfaceLifecycle::Empty(_)
-        ) {
+        if picker.surface.lifecycle.is_loading() {
             if let Some(status) =
                 render_ordinary_status(&state.theme, &picker.surface.lifecycle, Instant::now())
             {
                 lines.push(fit_line(&format!("{inset}{status}"), width));
             }
         } else if ordering.is_empty() {
-            let lifecycle = OrdinarySurfaceLifecycle::empty(session_empty_message(picker));
-            if let Some(status) = render_ordinary_status(&state.theme, &lifecycle, Instant::now()) {
-                lines.push(fit_line(&format!("{inset}{status}"), width));
-            }
+            let empty = session_empty_message(picker, state.theme.unicode());
+            let status = if empty.no_sessions {
+                render_ordinary_note(&state.theme, &empty.message)
+            } else {
+                render_ordinary_status(
+                    &state.theme,
+                    &OrdinarySurfaceLifecycle::empty(empty.message),
+                    Instant::now(),
+                )
+                .unwrap_or_default()
+            };
+            lines.push(fit_line(&format!("{inset}{status}"), width));
         } else {
             // Wide pickers use a title line plus a dim metadata line. This
             // keeps timestamps/counts from competing with a long prompt and

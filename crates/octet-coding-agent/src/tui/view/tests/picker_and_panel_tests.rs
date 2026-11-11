@@ -1158,3 +1158,109 @@ fn secret_tool_prompt_temporarily_owns_composer_without_touching_the_editor() {
     .join("\n");
     assert!(restored.contains("ordinary draft"), "{restored}");
 }
+
+fn resume_empty_shell(rows: Vec<SessionMeta>, width: u16) -> InteractiveShell {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(width, 30);
+    shell.open_panel(Panel::SessionPicker {
+        picker: Box::new(PickerState::new(rows, None)),
+    });
+    shell
+}
+
+fn resume_empty_text(shell: &InteractiveShell, width: u16) -> String {
+    strip_terminal_sequences(&render_shell(&shell.state.borrow(), width).join("\n"))
+}
+
+fn type_into_picker(shell: &mut InteractiveShell, text: &str) {
+    for c in text.chars() {
+        shell.panel_input(&panel_key(crossterm::event::KeyCode::Char(c)));
+    }
+}
+
+fn ctrl_n(shell: &mut InteractiveShell) {
+    shell.panel_input(&panel_key_with_modifiers(
+        crossterm::event::KeyCode::Char('n'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+}
+
+#[test]
+fn resume_empty_state_is_derived_from_the_current_picker_state() {
+    // Transcript-search hits can make rows appear after the metadata filter
+    // matched nothing; a stored Empty lifecycle would keep hiding them.
+    let mut shell = resume_empty_shell(vec![picker_session("one", "alpha", 1, 1)], 100);
+    type_into_picker(&mut shell, "zzz");
+    let text = resume_empty_text(&shell, 100);
+    assert!(text.contains("No sessions match 'zzz'"), "{text}");
+    shell.set_picker_entry_search(
+        "zzz".into(),
+        HashMap::from([(PathBuf::from("/tmp/one.jsonl"), "zzz inside".into())]),
+    );
+    let text = resume_empty_text(&shell, 100);
+    assert!(!text.contains("No sessions match"), "{text}");
+    assert!(text.contains("alpha"), "{text}");
+}
+
+#[test]
+fn resume_named_only_empty_state_says_how_to_show_all() {
+    let mut shell = resume_empty_shell(vec![picker_session("one", "alpha", 1, 1)], 120);
+    ctrl_n(&mut shell);
+    let text = resume_empty_text(&shell, 120);
+    assert!(text.contains("No named sessions"), "{text}");
+    assert!(text.contains("^n"), "{text}");
+    assert!(
+        !text.contains("Tab to switch"),
+        "named-only hiding is undone with ^n, not Tab: {text}"
+    );
+    ctrl_n(&mut shell);
+    let text = resume_empty_text(&shell, 120);
+    assert!(!text.contains("No named sessions"), "{text}");
+    assert!(text.contains("alpha"), "{text}");
+}
+
+#[test]
+fn resume_all_scope_no_match_does_not_offer_a_scope_switch_or_claim_empty_workspace() {
+    let mut shell = resume_empty_shell(vec![picker_session("one", "alpha", 1, 1)], 120);
+    shell.refresh_panel_sessions(
+        vec![picker_session("one", "alpha", 1, 1)],
+        Some(vec![picker_session("one", "alpha", 1, 1)]),
+    );
+    shell.panel_input(&panel_key(crossterm::event::KeyCode::Tab));
+    type_into_picker(&mut shell, "zzz");
+    let text = resume_empty_text(&shell, 120);
+    assert!(text.contains("No sessions match 'zzz'"), "{text}");
+    assert!(
+        !text.contains("Tab"),
+        "already showing every workspace: {text}"
+    );
+    assert!(!text.contains("this workspace"), "{text}");
+
+    // In the current workspace, Tab is real guidance.
+    let mut shell = resume_empty_shell(vec![picker_session("one", "alpha", 1, 1)], 120);
+    type_into_picker(&mut shell, "zzz");
+    let text = resume_empty_text(&shell, 120);
+    assert!(text.contains("Tab"), "{text}");
+    assert!(text.contains("Backspace"), "{text}");
+}
+
+#[test]
+fn resume_with_no_sessions_at_all_is_not_labelled_no_matches() {
+    let shell = resume_empty_shell(Vec::new(), 120);
+    let text = resume_empty_text(&shell, 120);
+    assert!(text.contains("No sessions in this workspace yet"), "{text}");
+    assert!(!text.contains("no matches"), "{text}");
+}
+
+#[test]
+fn resume_empty_guidance_survives_a_long_filter_on_a_narrow_terminal() {
+    for width in [40u16, 60] {
+        let mut shell = resume_empty_shell(vec![picker_session("one", "alpha", 1, 1)], width);
+        type_into_picker(&mut shell, &"q".repeat(80));
+        let text = resume_empty_text(&shell, width);
+        assert!(text.contains("Backspace"), "{width}: {text}");
+        for line in text.lines() {
+            assert!(visible_width(line) <= usize::from(width), "{width}: {line}");
+        }
+    }
+}

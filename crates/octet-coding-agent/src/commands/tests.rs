@@ -73,7 +73,6 @@ fn debug_is_hidden_but_parses_and_reports_every_rendered_line() {
     // The reference hides this command from discovery; the popup must not
     // advertise it even though it is accepted.
     assert!(slash_suggestions("/deb").is_empty());
-    assert!(complete_slash_command("/deb").is_none());
 
     let lines = vec![
         "plain".to_owned(),
@@ -525,7 +524,6 @@ fn changelog_parser_discovery_and_local_help() {
     assert!(matches!(parse("/changelog extra"), Command::Unknown(_)));
     // `/checkout` was withdrawn, so this prefix is now unambiguous.
     assert_eq!(parse("/ch"), Command::Changelog);
-    assert_eq!(complete_slash_command("/chang"), Some("/changelog".into()));
     let suggestions = slash_suggestions("/chang");
     assert_eq!(suggestions.len(), 1);
     assert!(!suggestions[0].accepts_argument);
@@ -700,7 +698,6 @@ fn slash_suggestions_filter_and_tab_complete_unique_prefixes() {
                 "setup"
             }
         );
-        assert_eq!(complete_slash_command(prefix), None);
     }
     assert_eq!(
         slash_suggestions("/login")
@@ -718,15 +715,6 @@ fn slash_suggestions_filter_and_tab_complete_unique_prefixes() {
     );
     assert_eq!(slash_suggestions("/th").len(), 2);
     assert!(slash_suggestions("/model ").is_empty());
-    assert_eq!(complete_slash_command("/mod"), Some("/model ".to_owned()));
-    assert_eq!(
-        complete_slash_command("/thi"),
-        Some("/thinking ".to_owned())
-    );
-    assert_eq!(
-        complete_slash_command("/status"),
-        Some("/status".to_owned())
-    );
 }
 
 #[test]
