@@ -49,7 +49,7 @@ pub enum InputAction {
     /// Explicit return to the newest transcript output (Ctrl+End).
     JumpToTail,
     /// Application-owned transcript selection actions. Ctrl+C remains
-    /// draft-clear/interruption and is never repurposed as copy.
+    /// draft-clear/interrupt/exit and is never repurposed as copy.
     SelectAllTranscript,
     CopyTranscriptSelection,
     /// A pointer gesture that began in the transcript. Coordinates remain
@@ -384,9 +384,11 @@ pub fn translate_with_bindings(
                 return if !editor_text.is_empty() {
                     InputAction::ClearEditor
                 } else if active {
+                    // A running response is only stopped; the next press,
+                    // once it has settled, closes the idle prompt.
                     InputAction::Abort
                 } else {
-                    InputAction::Ignore
+                    InputAction::Closed
                 };
             }
 
@@ -787,16 +789,38 @@ mod tests {
     }
 
     #[test]
-    fn control_c_clears_text_then_aborts_only_an_active_empty_prompt() {
+    fn control_c_clears_text_then_aborts_an_active_run_or_closes_when_idle() {
         let event = Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         for active in [false, true] {
             assert_eq!(
                 translate(event.clone(), active, "draft"),
                 InputAction::ClearEditor
             );
+            assert_eq!(
+                translate(event.clone(), active, ""),
+                if active {
+                    InputAction::Abort
+                } else {
+                    InputAction::Closed
+                }
+            );
+            for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                for editor in ["", "draft"] {
+                    assert_eq!(
+                        translate(
+                            Some(Event::Key(KeyEvent::new_with_kind(
+                                KeyCode::Char('c'),
+                                KeyModifiers::CONTROL,
+                                kind,
+                            ))),
+                            active,
+                            editor,
+                        ),
+                        InputAction::Ignore
+                    );
+                }
+            }
         }
-        assert_eq!(translate(event.clone(), true, ""), InputAction::Abort);
-        assert_eq!(translate(event, false, ""), InputAction::Ignore);
     }
 
     #[test]

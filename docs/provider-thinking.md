@@ -9,6 +9,10 @@ live-provider availability or acceptance.
 - Discovered exact values and defaults survive caches and model selection.
   Missing metadata, unknown metadata and explicit false are distinct. Explicit
   false disables inference from a known route; malformed assertions fail closed.
+  An inventory may publish its exact levels as `values`, or as an `effort` array
+  next to a structured default (`{"type": "effort", "value": …}`); both spell the
+  same exact contract, and a default that names no published level stays
+  malformed.
   Built-in discovery can supplement an absent contract from the pinned,
   exact provider/model models.dev record; this does not advertise availability
   or enrich custom/Codex inventories. Existing declaration-owned wire profiles,

@@ -1413,8 +1413,15 @@ fn decode_reasoning_metadata(entry: &serde_json::Value) -> anyhow::Result<Discov
         }
         if let Some(values) = field.get("values") {
             result.options = Some(decode_reasoning_options(values, field.get("default"))?);
-        } else if field.get("default").is_some() {
-            anyhow::bail!("reasoning default requires exact values");
+        } else if let Some(default) = field.get("default") {
+            // Some inventories publish the accepted levels as `effort` alongside
+            // a structured default ({"type": "effort", "value": ...}). Without a
+            // declared level list there is nothing exact to select, so keep
+            // failing closed instead of inventing a range.
+            let values = field
+                .get("effort")
+                .ok_or_else(|| anyhow::anyhow!("reasoning default requires exact values"))?;
+            result.options = Some(decode_reasoning_options(values, Some(default))?);
         }
         if let Some(profile) = field.get("profile") {
             result.profile =
@@ -1563,7 +1570,10 @@ fn decode_reasoning_options(
     let default = default
         .filter(|d| !d.is_null())
         .map(|d| {
+            // A structured default names its effort in `value`; a plain string
+            // default is the same claim in the shorter form.
             d.as_str()
+                .or_else(|| d.get("value").and_then(serde_json::Value::as_str))
                 .map(str::to_owned)
                 .ok_or_else(|| anyhow::anyhow!("invalid reasoning default"))
         })

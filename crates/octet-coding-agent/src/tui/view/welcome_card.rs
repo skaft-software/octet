@@ -267,7 +267,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             detail,
             format!(
                 "{} {}",
-                state.theme.bold("Ctrl+D"),
+                state.theme.bold("Ctrl+C / Ctrl+D"),
                 state.theme.dim("to exit")
             ),
         ]
@@ -393,7 +393,11 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             ));
         }
         compact.push(fit_line(
-            &format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
+            &format!(
+                "{} {}",
+                splash_bold("Ctrl+C / Ctrl+D"),
+                splash_text("to exit")
+            ),
             width,
         ));
         // The update action and setup/permission state outrank the changelog
@@ -429,7 +433,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             ),
             format!(
                 "{} {}",
-                state.theme.bold("Ctrl+D"),
+                state.theme.bold("Ctrl+C / Ctrl+D"),
                 state.theme.dim("to exit")
             ),
         ];
@@ -461,7 +465,11 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
                     splash_bold("full access")
                 )
             },
-            format!("{} {}", splash_bold("Ctrl+D"), splash_text("to exit")),
+            format!(
+                "{} {}",
+                splash_bold("Ctrl+C / Ctrl+D"),
+                splash_text("to exit")
+            ),
         ];
         Vec::from(text)
     } else {
@@ -489,7 +497,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             },
             format!(
                 "{} {}",
-                state.theme.bold("Ctrl+D"),
+                state.theme.bold("Ctrl+C / Ctrl+D"),
                 state.theme.dim("to exit")
             ),
         ];
@@ -789,6 +797,30 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn welcome_exit_hint_includes_ctrl_c_across_layouts() {
+        for theme in [
+            crate::tui::theme::test_theme(),
+            crate::tui::theme::test_theme_from_source("[metadata]\nname = 'Plain'\n"),
+            crate::tui::theme::test_theme_from_source(
+                "[colors]\nsplash = '#d97757'\nsplash_box = '#d97757'\n",
+            ),
+        ] {
+            let shell = InteractiveShell::test_shell_with_theme(theme);
+            for (width, budget) in [(24, 3), (24, 7), (80, 10), (160, 10)] {
+                let rows = render_welcome_content(&shell.state.borrow(), width, budget);
+                let plain = strip_terminal_sequences(&rows.join("\n"));
+                assert!(
+                    plain.contains("Ctrl+C / Ctrl+D to exit"),
+                    "{width}/{budget}: {plain}"
+                );
+                assert!(rows
+                    .iter()
+                    .all(|row| sexy_tui_rs::visible_width(row) <= usize::from(width)));
             }
         }
     }
