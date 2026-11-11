@@ -240,7 +240,8 @@ def main() -> int:
     except guard.IsolationError as error:
         print(error, file=sys.stderr)
         return 2
-    run_dir = Path(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp") / "octet-soak" / f"soak-{args.seed}" if args.route == "native" else f"soak-ext-{args.seed}"
+    run_name = f"soak-{args.seed}" if args.route == "native" else f"soak-ext-{args.seed}"
+    run_dir = Path(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp") / "octet-soak" / run_name
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
@@ -393,7 +394,12 @@ def main() -> int:
                 except SoakFailure as error:
                     raise SoakFailure(f"reload at turn {turn} lost the soak model: {error}") from error
             elif choice < 0.88 and turn >= 3:
-                command_response(rpc, "compact", {}, timeout=300)
+                # A session with no safe history to compact (for example right
+                # after new_session) refuses with a typed error response, which
+                # is a valid terminal outcome; any other failure is not.
+                compact = rpc.call("compact", {}, timeout=300)
+                if not compact.get("success") and "no safe history to compact" not in str(compact.get("error")):
+                    raise SoakFailure(f"compact reported failure: {compact}")
             elif choice < 0.90:
                 command_response(rpc, "cycle_thinking_level", {})
             elif choice < 0.96:
