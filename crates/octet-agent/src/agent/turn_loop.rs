@@ -663,13 +663,19 @@ impl Agent {
                 }
 
                 if background_tools.is_empty() && !native.has_pending() {
+                    // Only an actual append can change what the estimate covers;
+                    // invalidating on every turn forced a full re-estimate of the
+                    // whole history per request, so turn cost grew with the session.
+                    let appended_context = !pending_context.is_empty();
                     if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
                         break 'run FinishReason::Failed(error);
                     }
                     for event in committed_custom_message_events(session, &mut custom_message_cursor) {
                         notify_observers(&observers, &event); yield event;
                     }
-                    context_capacity.invalidate();
+                    if appended_context {
+                        context_capacity.invalidate();
+                    }
                 }
 
                 if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {

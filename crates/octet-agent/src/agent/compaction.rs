@@ -199,6 +199,13 @@ pub(super) struct CapacityEstimate {
 /// falls back to the exact estimator. Responses appends estimate only the new
 /// route-affine opaque replay items, not the complete unchanged prefix. The detailed category breakdown remains
 /// the on-demand telemetry path in [`context_breakdown`].
+#[cfg(test)]
+thread_local! {
+    /// Full capacity rebuilds on this thread, so a run-level test can prove an
+    /// ordinary turn reuses the seeded estimate.
+    pub(super) static CAPACITY_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) struct ContextCapacityCache {
     pub(super) head: Option<EntryId>,
     pub(super) tool_generation: u64,
@@ -346,6 +353,7 @@ impl ContextCapacityCache {
         tools: &[ToolDef],
         tool_generation: u64,
     ) -> RequestContextEstimate {
+        let _span = crate::performance_trace::Span::start("capacity.rebuild", messages.len());
         let estimate = reconcile_context_estimate(session, model, system, messages, tools);
         self.head = session.head();
         self.tool_generation = tool_generation;
@@ -364,6 +372,7 @@ impl ContextCapacityCache {
         #[cfg(test)]
         {
             self.full_rebuilds = self.full_rebuilds.saturating_add(1);
+            CAPACITY_REBUILDS.with(|count| count.set(count.get() + 1));
         }
         estimate
     }
@@ -376,7 +385,10 @@ impl ContextCapacityCache {
         tools: &[ToolDef],
         tool_generation: u64,
     ) -> Result<RequestContextEstimate, SessionError> {
-        let messages = session.context_ref()?;
+        let messages = {
+            let _span = crate::performance_trace::Span::start("capacity.context_ref", 0);
+            session.context_ref()?
+        };
         let can_advance = self.valid
             && self.tool_generation == tool_generation
             && self.advance_for_model(session, model);

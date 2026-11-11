@@ -1,4 +1,5 @@
 use super::*;
+use super::compaction::CAPACITY_REBUILDS;
 use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
 use base64::Engine as _;
 
@@ -1020,6 +1021,76 @@ fn terminal_gate_capsule_stays_bounded_across_repeated_requests_and_decisions() 
             assert_eq!(terminal_gate_capsule(&evidence, &candidate), capsule);
         }
     }
+}
+
+/// An ordinary prompt must reuse the capacity estimate seeded at run start. The
+/// turn boundary used to invalidate it unconditionally, which forced a full
+/// re-estimate of the entire history on every request (per-turn cost grew with
+/// the session; found by the long-session benchmark).
+#[tokio::test]
+async fn ordinary_turns_reuse_the_seeded_capacity_estimate() {
+    struct Script(Mutex<VecDeque<Vec<AssistantPart>>>);
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for Script {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            _: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            let content = self.0.lock().unwrap().pop_front().expect("scripted turn");
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content,
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    inference: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = active_tool_test_agent(
+        directory.path(),
+        Session::create(directory.path().join("capacity-reuse.jsonl")).unwrap(),
+        ExtensionHost::new(),
+    );
+    let script = Arc::new(Script(Mutex::new(VecDeque::from(
+        (0..3)
+            .map(|turn| vec![AssistantPart::Text(format!("answer {turn}"))])
+            .collect::<Vec<_>>(),
+    ))));
+    agent
+        .client
+        .register_host_stream_transport(agent.model.endpoint.id.clone(), script.clone());
+    CAPACITY_REBUILDS.with(|count| count.set(0));
+    for turn in 0..3 {
+        let mut run = agent
+            .prompt(UserInput::from(format!("question {turn}")))
+            .await
+            .unwrap();
+        while let Some(event) = run.next().await {
+            if let AgentEvent::RunFinished { reason, .. } = event {
+                assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+            }
+        }
+    }
+    assert!(script.0.lock().unwrap().is_empty());
+    assert_eq!(
+        CAPACITY_REBUILDS.with(|count| count.get()),
+        0,
+        "appending turns must advance the estimate, not rebuild it"
+    );
 }
 
 #[tokio::test]
