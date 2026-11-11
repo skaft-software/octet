@@ -16,16 +16,16 @@
 ### Changed
 
 - Per-request preparation work no longer grows with the whole session
-  unnecessarily: a hook-free context projection keeps the caller's owned
-  request instead of deep-copying the entire history into an unchanged clone;
-  a hook-prepared request no longer triggers a second full context copy that
-  the turn loop then discards; and the bitmap-compaction verdict is resolved
+  unnecessarily: a hook-prepared request no longer triggers a second full
+  context copy that the turn loop then discards, and its refusal diagnostic is
+  built only on refusal; the bitmap-compaction verdict is resolved
   incrementally, walking the branch once between compaction, checkout or
   branch changes instead of materializing every active entry on every
   provider request. The context-capacity estimate seeded at run start is now
   reused across turns instead of being invalidated and fully recomputed for
   every provider request, which removes a per-request cost that grew linearly
-  with the session.
+  with the session; the cached estimate is keyed on the model route, system
+  prompt and tool surface it was computed for.
 
 ### Fixed
 
