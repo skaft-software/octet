@@ -588,6 +588,7 @@ export class RemoteUI {
     this.surfaces.delete(surface.id);
     if (surface.slotKey && this.slots.get(surface.slotKey) === surface) this.slots.delete(surface.slotKey);
     this.runtime.timers.surface(surface);
+    surface.footerData?.dispose();
     const disposed = new Set();
     for (const c of [surface.component, ...surface.tui.children, ...surface.tui.overlays.map(e => e.component)]) if (c && !disposed.has(c)) {
       disposed.add(c);

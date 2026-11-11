@@ -43,6 +43,11 @@
   acknowledged now paints. The mount was cancelled with its hook while the host still
   mounted it, so on large sessions the footer stayed blank until the next keystroke.
 
+- Pi footers show branches from ancestor repositories and worktrees, including
+  `detached` HEADs, and refresh after branch changes without filesystem reads
+  during painting. Native branch snapshots stay authoritative; failing footer
+  branch listeners are isolated and named without exposing exception text.
+
 - The Pi adapter no longer copies and rescans an unfinished protocol frame on
   every pipe read. Large fragmented session/provider frames now use bounded linear
   intake work, with the same frame limits, strict UTF-8 validation and refusals.

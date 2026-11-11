@@ -1,5 +1,5 @@
 import { withContextLimits } from './context-limits.mjs';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { basename, dirname, join, parse, resolve } from 'node:path';
 import { bounded, facade, fields, invalid, plainJSON, rpcError, unsupported, unsupportedAPI } from './errors.mjs';
 import { contextTheme } from './theme.mjs';
@@ -17,6 +17,7 @@ import { matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js'
 import { truncateToWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 import { safeLines } from './remote-ui.mjs';
 import { contextFacts, getSettings } from './context-api.mjs';
+import { createFooterData } from './footer-data.mjs';
 import { sessionMethods, sessionHeader } from './session-methods.mjs';
 import { customMessageParams, userMessageParams } from './custom-messages.mjs';
 import { buildContextEntries, buildSessionContext, buildSessionProjection } from './context.mjs';
@@ -64,18 +65,6 @@ function register(runtime, map, key, definition, factory) {
   }
   if (!runtime.loaded && map.has(key)) invalid(`duplicate registration ${key}`);
   map.set(key, { ...map.get(key), definition, factory });
-}
-function gitBranch(cwd) {
-  try {
-    let git = join(cwd, '.git');
-    if (!statSync(git).isDirectory()) {
-      const value = readFileSync(git, 'utf8').trim();
-      if (!value.startsWith('gitdir: ')) return undefined;
-      git = resolve(cwd, value.slice(8));
-    }
-    const head = readFileSync(join(git, 'HEAD'), 'utf8').trim();
-    return head.startsWith('ref: refs/heads/') ? head.slice(16) : undefined;
-  } catch { return undefined; }
 }
 function snapshot(host, key, api) {
   if (!(key in host)) unsupportedAPI(api, `${key} snapshot not supplied by the host`);
@@ -298,14 +287,6 @@ export function createContext(runtime, store, replaced = false) {
   const foreground = () => { runtime.assertOwner(store); return store.state; };
   const operation = (method, params, feature) => { runtime.require(feature); return runtime.track(runtime.hostCall(method, params, store), store); };
 
-  const footerData = facade({
-    getGitBranch: () => foreground().host.git_branch ?? gitBranch(foreground().workspace),
-    getExtensionStatuses: () => new Map(foreground().statuses),
-    onBranchChange(handler) {
-      if (typeof handler !== 'function') invalid('branch change listener');
-      const s = foreground(), bound = () => runtime.scope.run(store, handler); s.branchListeners.add(bound); return () => s.branchListeners.delete(bound);
-    },
-  }, 'footerData');
   const setSlot = (slot, placement, factory, options) => {    // Headless Pi has no chrome: a requested slot is simply not shown there.
     if (!runtime.features.has('remote_ui')) { foreground(); return Promise.resolve(); }
     runtime.require('remote_ui'); foreground();
@@ -315,7 +296,12 @@ export function createContext(runtime, store, replaced = false) {
       if (factory === undefined) result = await runtime.ui.clearSlot(store, slot);
       else {
         const make = Array.isArray(factory) ? () => ({ render: () => factory, invalidate() {} }) : factory;
-        result = await runtime.ui.mount(store, placement, slot, slot === 'footer' ? (tui, t) => make(tui, t, footerData) : make, { slot, ...options });
+        result = await runtime.ui.mount(store, placement, slot, slot === 'footer' ? async (tui, t) => {
+          const mounted = runtime.scope.getStore();
+          const footer = mounted.surface.footerData = createFooterData(runtime, mounted, tui);
+          await footer.ready;
+          return make(tui, t, footer.data);
+        } : make, { slot, ...options });
       }
       if (slot === 'footer') await syncStatuses();
       return result;

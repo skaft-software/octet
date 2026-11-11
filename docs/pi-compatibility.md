@@ -361,7 +361,11 @@ usage or OAuth data. The host publishes secret-free OAuth provenance from its
 actual authentication resolver (including Codex and subscription resolvers),
 without reading or refreshing credentials. Unclassified dynamic resolvers still
 refuse that query; endpoint names never establish authentication kind.
-Unavailable capabilities fail explicitly. Custom editor
+Unavailable capabilities fail explicitly. Footer git data finds ancestor repositories
+and worktrees, reports `detached` for a detached HEAD, and refreshes its local
+cache off the paint path. An explicit native branch snapshot (including `null`)
+remains authoritative. A failing branch listener is named and skipped without
+stopping other listeners or frames. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
 Every custom editor occupies the composer slot, leaving native transcript,
 chrome and the single slash popup visible. `Ctrl+G` rescues only explicit fullscreen
