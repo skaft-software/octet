@@ -1027,7 +1027,16 @@ export class Runtime {
         // resources load; this is the matching point, and the earliest one where
         // a real foreground owner and UI exist. The event notifies only: native
         // trust is already decided and no handler result can change admission.
-        await projectTrustEvent(this, store);
+        // Pi awaits project_trust handlers before the UI starts, so a handler may ask the user (examples/extensions/
+        // project-trust.ts opens a select dialog; pi dist/core/project-trust.js emitProjectTrustEvent). Octet's
+        // startup holds session_start behind a 30 s deadline, so a handler still waiting (for the user) after a short
+        // grace stops holding it: its dialog is a detached surface request (no settlement parent, as a detached
+        // command's) and the handler finishes in the background.
+        const trust = projectTrustEvent(this, { ...store, detached: true });
+        let released = false;
+        trust.catch(error => { if (released && !this.stopping) this.backgroundError(error); });
+        await Promise.race([trust, new Promise(resolve => setTimeout(resolve, 250).unref())]);
+        released = true;
       }
       if (p.hook === 'after_tool_call') {
         const toolResult = await this.runToolResult(payload, store);

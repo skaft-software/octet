@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- A Pi extension whose `project_trust` handler asks the user a question (Pi's `project-trust.ts`
+  opens a select dialog) no longer holds `session_start` until the host gives up after 30 s, which
+  cascaded into "reload failed" and bridge errors. A handler still waiting after a short grace
+  stops holding the hook and its dialog opens on the live UI, as Pi's does.
+
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
 - Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or
