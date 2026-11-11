@@ -6120,16 +6120,23 @@ impl InteractiveShell {
         invalidate_editor_autocomplete(&mut state);
     }
 
-    /// Complete a unique slash-command prefix at the end of the prompt. A
-    /// mounted slot editor receives the completed draft instead of the hidden
-    /// mirror, so its own pastes and undo stay consistent with what it shows.
+    /// Complete the highlighted slash suggestion without submitting it. When
+    /// the popup is dismissed, only a unique prefix can complete. A mounted slot
+    /// editor receives the completed draft instead of the hidden mirror, so its
+    /// own pastes and undo stay consistent with what it shows.
     pub fn complete_slash_command(&mut self) {
         let mut state = self.state.borrow_mut();
         if state.editor.cursor() != state.editor.text().len() {
             return;
         }
         let suggestions = input_slash_suggestions(&state);
-        if let [suggestion] = suggestions.as_slice() {
+        if state.slash_popup_dismissed && suggestions.len() != 1 {
+            return;
+        }
+        let selected = state
+            .slash_selection
+            .min(suggestions.len().saturating_sub(1));
+        if let Some(suggestion) = suggestions.get(selected) {
             let completed = format!(
                 "/{}{}",
                 suggestion.name,
