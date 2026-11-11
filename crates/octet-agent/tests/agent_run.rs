@@ -1645,7 +1645,12 @@ async fn retryable_initial_stream_open_is_retried_by_the_agent() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+// The client's header timeout covers connect + send + the wait for headers, so a
+// wall-clock 10 ms timeout can expire before the request reaches the server on a
+// loaded machine (the POST is then never sent and the test proves nothing). The
+// client clock is paused and advanced only once the server has received the
+// POST; the busy gate task keeps the runtime from auto-advancing it earlier.
+#[tokio::test(start_paused = true)]
 async fn response_header_timeout_is_terminal_without_replaying_post() {
     for protocol in [
         Protocol::OpenAiResponses,
@@ -1676,7 +1681,14 @@ async fn response_header_timeout_is_terminal_without_replaying_post() {
         );
 
         let mut run = agent.prompt("do not replay a slow POST").await.unwrap();
-        let events = collect(&mut run).await;
+        let request_received = async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(Duration::from_millis(50)).await;
+        };
+        let (events, ()) = tokio::join!(collect(&mut run), request_received);
         assert!(
             matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
             "{protocol:?}"
