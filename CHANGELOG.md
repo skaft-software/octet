@@ -15,6 +15,9 @@
 
 ### Changed
 
+- Subagents admit up to 16 active workers per parent (32 retained, depth one).
+  The host permit pool and checked-in extension enforce the same active cap.
+
 - `octet migrate pi` is now one guided command: a short overview a newcomer can read, a note
   on what turning the setup on does, and one question. Yes installs the Pi adapter, backs up
   octet's config to `~/.octet/backups/` and enables the adapter; Pi's settings are never

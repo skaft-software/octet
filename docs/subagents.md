@@ -13,7 +13,7 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
 
 - **Depth one.** A worker cannot spawn another worker; a descendant observed at
   depth two is interrupted immediately.
-- **Bounded.** At most eight active children and thirty-two retained workers per
+- **Bounded.** At most sixteen active children and thirty-two retained workers per
   parent owner. Wall-time, turn, cost, and output ceilings are optional per spawn
   and default to the parent session's settings (an unlimited parent stays
   unlimited).
@@ -113,7 +113,7 @@ independently of the parent.
   in the report** with the approve/reattach step: a detached worker is alive and
   reattachable, so dropping its row silently would be wrong, and opening a stale
   pane for it would target the wrong session.
-- **Bounded.** At most nine panes (the eight-worker fleet cap plus the parent);
+- **Bounded.** At most seventeen panes (the sixteen-worker fleet cap plus the parent);
   above that the whole request is refused before anything is created.
 - **Shell-safe.** Every session id, path, and flag is a separate `argv` element,
   the multiplexer is always invoked with an argv list and never through a shell,

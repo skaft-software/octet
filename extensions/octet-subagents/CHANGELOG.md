@@ -50,6 +50,9 @@
 
 ### Changed
 
+- Raise the host-matched active-worker cap to 16, retaining 32 records per owner
+  and the depth-one, tool-policy, budget and cancellation boundaries.
+
 - Workers now inherit the parent's full standard tool scope (`read`, `search`,
   `edit`, `write`, `bash`) by default; pass `tools: [read, search]` for a hard
   read-only guarantee. The child prompt states the granted scope instead of a

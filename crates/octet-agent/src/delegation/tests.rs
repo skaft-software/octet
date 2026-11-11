@@ -3431,6 +3431,41 @@ fn config_requires_real_bounded_child_capacity() {
 }
 
 #[test]
+fn extension_child_capacity_admits_sixteen_and_rejects_seventeen() {
+    let mut policy = test_extension_policy();
+    for count in [1, 8, 9, 16] {
+        policy.max_concurrent_children = count;
+        assert!(
+            policy.validate().is_ok(),
+            "{count} active children must be valid"
+        );
+    }
+    for count in [0, 17] {
+        policy.max_concurrent_children = count;
+        assert!(policy.validate().is_err(), "invalid active cap {count}");
+    }
+    assert_eq!(MAX_EXTENSION_OWNED_CHILDREN, 32);
+    policy.max_concurrent_children = 16;
+    policy.max_depth = 2;
+    assert!(policy.validate().is_err(), "depth one remains mandatory");
+
+    // Exercise the real default permit capacity without starting worker/model
+    // tasks. A valid extension policy must not be rejected by a smaller host pool.
+    let permits = Arc::new(Semaphore::new(
+        DelegationLimits::default().max_concurrent_agents - 1,
+    ));
+    let held: Vec<_> = (0..16)
+        .map(|_| {
+            permits
+                .clone()
+                .try_acquire_owned()
+                .expect("sixteenth child slot")
+        })
+        .collect();
+    assert_eq!(held.len(), 16);
+}
+
+#[test]
 fn extension_child_policy_installs_only_detached_read_only_tools_and_lowers_parent_limits() {
     let directory = tempfile::tempdir().unwrap();
     let mut manager = writable_manager_with_core_tools(directory.path());

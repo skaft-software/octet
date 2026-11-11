@@ -83,7 +83,7 @@ generation and negotiated features. The packaged skill is opt-in too:
 
 ## Bound the work
 
-- At most **8 active children and 32 retained workers per parent owner**, one
+- At most **16 active children and 32 retained workers per parent owner**, one
   level deep.
 - Profiles are `explore`, `review`, `test-analysis` and `research`. The
   provider, model and reasoning selection defaults to inherited. There's no
@@ -155,7 +155,7 @@ stays blocked with an explicit reason, and otherwise-ready workers report
 blocked because its calling process still owns it. Execution can't be enabled
 until the host supplies atomic writer claim and settlement, and operator
 coordination is no substitute. The command never installs a multiplexer and
-keeps the eight-worker plan cap. The low-level tmux and herdr adapters keep
+keeps the sixteen-worker plan cap. The low-level tmux and herdr adapters keep
 preflight, partial-failure reporting and direct stub tests, and those tests
 aren't product ownership or live-handover qualification.
 

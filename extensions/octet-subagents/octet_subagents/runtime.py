@@ -586,7 +586,7 @@ def create_runtime() -> tuple[Extension, Orchestrator, PresentationPublisher]:
             "Launch one named, depth-one octet worker with a bounded profile and an optional (host-enforced) tool whitelist, wall deadline, turn ceiling, output size, and cost ceiling. "
             "Optionally select the worker's provider, model, and reasoning effort per spawn (`inherit` is the default and copies the parent session); an unknown selection is rejected rather than coerced. "
             "Ceilings default to inherited/unlimited, so a minimal spawn is just name and task. Defaults to background and is retry-safe through an idempotency key. "
-            "At most 8 active children per parent (32 total); no writers beyond the granted tools, no graph, swarm, team chat, or recursive spawn."
+            "At most 16 active children per parent (32 total); no writers beyond the granted tools, no graph, swarm, team chat, or recursive spawn."
         ),
         parameters=SPAWN_SCHEMA,
     )

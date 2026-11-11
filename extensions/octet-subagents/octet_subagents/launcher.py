@@ -14,7 +14,7 @@ House rules implemented here, in order of severity:
    element and `subprocess` is always called with an argv list (never
    `shell=True`). Identifiers are validated against a strict allowlist *before*
    they can reach an argv, so a metacharacter can never be smuggled in.
-3. **Bounded.** At most `MAX_OPEN_ALL_PANES` (the 8-worker fleet cap plus the
+3. **Bounded.** At most `MAX_OPEN_ALL_PANES` (the 16-worker fleet cap plus the
    parent) panes are ever planned; beyond that the whole request is refused.
 4. **No secret ever leaves this module.** Only opaque, path-free session
    references (`agent-session:<sha256>`, the contract asserted by

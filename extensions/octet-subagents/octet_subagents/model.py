@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 VERSION = "0.8.0"
-MAX_ACTIVE_CHILDREN = 8
+MAX_ACTIVE_CHILDREN = 16
 MAX_DEPTH = 1
 MAX_WORKERS_PER_OWNER = 32
 MAX_OWNER_CACHES = 32

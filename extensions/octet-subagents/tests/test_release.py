@@ -177,7 +177,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn("  - %s" % tool, skill)
         self.assertIn("read-only", skill)
         self.assertNotIn("V1 has no writer profile", skill)
-        self.assertIn("8 concurrent", skill)
+        self.assertIn("16 concurrent", skill)
         self.assertIn("32 total per owner", skill)
         self.assertIn("shared filesystem is not isolation", skill)
         self.assertIn("exclusive path ownership until settlement", skill)

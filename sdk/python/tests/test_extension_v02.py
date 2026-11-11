@@ -988,6 +988,27 @@ class AgentSessionTests(unittest.TestCase):
         extension.request.assert_not_called()
         host.shutdown()
 
+    def test_agent_session_active_cap_accepts_sixteen_but_not_seventeen(self):
+        from unittest.mock import Mock
+
+        extension = Extension(api_version="0.2", stderr=io.StringIO())
+        host = RunningExtension(extension)
+        host.start(initialize_v02(optional=["agent_sessions"]))
+        extension.request = Mock(return_value={"agent_id": "worker"})
+        arguments = dict(task_name="reader", message="x", idempotency_key="key",
+                         tools=["read"], max_depth=1, max_output_bytes=512,
+                         parent_request_id=42)
+        for cap in (1, 8, 9, 16):
+            with self.subTest(cap=cap):
+                extension.spawn_agent(**arguments, max_concurrent_children=cap)
+                self.assertEqual(extension.request.call_args.args[1]["policy"]["max_concurrent_children"], cap)
+        extension.request.reset_mock()
+        for cap in (0, 17, True):
+            with self.subTest(cap=cap), self.assertRaises(ValueError):
+                extension.spawn_agent(**arguments, max_concurrent_children=cap)
+        extension.request.assert_not_called()
+        host.shutdown()
+
     def test_agent_session_helpers_require_negotiation(self):
         extension = Extension(api_version="0.2", stderr=io.StringIO())
         host = RunningExtension(extension)

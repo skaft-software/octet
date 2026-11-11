@@ -101,9 +101,9 @@ const MAX_QUEUED_FOLLOW_UP_BYTES: usize =
 /// persistence remains the authority for whether an input was accepted.
 const MAX_UNDELIVERED_TASK_ATTEMPTS: u8 = 3;
 const MAX_TOOL_TIMEOUT_MS: u64 = 3_600_000;
-/// Extension children share one host permit pool; eight active workers leave
+/// Extension children share one host permit pool; sixteen active workers leave
 /// headroom for root-side native children as well.
-const MAX_EXTENSION_ACTIVE_CHILDREN: usize = 8;
+const MAX_EXTENSION_ACTIVE_CHILDREN: usize = 16;
 /// Bounded history retained per extension resource owner.
 const MAX_EXTENSION_OWNED_CHILDREN: usize = 32;
 /// Per-run turn budgets may be set up to 256 turns; `None` inherits the
@@ -244,7 +244,7 @@ pub struct DelegationLimits {
 impl Default for DelegationLimits {
     fn default() -> Self {
         Self {
-            max_concurrent_agents: 10,
+            max_concurrent_agents: MAX_EXTENSION_ACTIVE_CHILDREN + 2,
             max_depth: 2,
             max_total_agents: 32,
         }

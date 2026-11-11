@@ -15,7 +15,7 @@ pub(crate) struct ExtensionAgentSessionPolicy {
     pub(crate) tools: Vec<String>,
     /// Child depth relative to the root; extension children are exactly one.
     pub(crate) max_depth: usize,
-    /// Maximum active children this owner may hold; host cap is eight.
+    /// Maximum active children this owner may hold; host cap is sixteen.
     pub(crate) max_concurrent_children: usize,
     /// Child turn budget. `None` inherits the parent session limit exactly
     /// (unlimited parents stay unlimited).

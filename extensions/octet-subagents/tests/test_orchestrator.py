@@ -436,12 +436,16 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(self.host.agents[agent_id].status["state"], "running")
 
     def test_concurrency_is_enforced_and_children_inherit_no_token_ceiling(self):
-        for number in range(1, 9):
-            self.spawn("worker-%02d" % number)
+        for number in range(1, 17):
+            result = self.spawn("worker-%02d" % number)
+            self.assertEqual(result["worker"]["state"], "queued")
         with self.assertRaises(SubagentError) as raised:
-            self.spawn("worker-09")
+            self.spawn("worker-17")
         self.assertEqual(raised.exception.code, "concurrency_limit")
-        self.assertEqual(len(self.host.agents), 8)
+        self.assertEqual(len(self.host.agents), 16)
+        self.assertTrue(all(agent.depth == 1 for agent in self.host.agents.values()))
+        self.assertTrue(all(agent.policy["max_concurrent_children"] == 16
+                            for agent in self.host.agents.values()))
 
         host = FakeHostState(self.clock)
         client = host.client()
