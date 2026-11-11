@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
+
 - A partially typed `/command` completion menu now includes commands that an
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.
