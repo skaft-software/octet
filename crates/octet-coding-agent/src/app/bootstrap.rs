@@ -9259,6 +9259,14 @@ fn build_app_with_consumer(
         true,
     );
     config.model = Some(model.spec.id.clone());
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("pi-model".into()),
+        crate::cli::pi_model_notice(&config)
+            .into_iter()
+            .map(|notice| format!("note: {notice}"))
+            .collect(),
+        true,
+    );
     config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
     let cached_config = prepared_config

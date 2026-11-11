@@ -3440,3 +3440,24 @@ fn saved_defaults_are_distinguished_from_cli_and_absent_ones() {
     assert!(!config.model_saved && !config.reasoning_saved);
     assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
 }
+
+#[test]
+fn pi_model_notice_names_both_models_only_when_they_differ() {
+    use super::pi_model_notice_for;
+    let pi = serde_json::json!({"defaultProvider": "openai-codex", "defaultModel": "gpt-6-luna"});
+    assert_eq!(
+        pi_model_notice_for(Some("custom/custom-openai/qwen38"), Some(&pi)).as_deref(),
+        Some("using octet's model custom/custom-openai/qwen38 (your Pi default is openai-codex/gpt-6-luna); switch with /model")
+    );
+    assert_eq!(
+        pi_model_notice_for(Some("openai-codex/gpt-6-luna"), Some(&pi)),
+        None
+    );
+    assert_eq!(pi_model_notice_for(Some("gpt-6-luna"), Some(&pi)), None);
+    assert_eq!(pi_model_notice_for(None, Some(&pi)), None);
+    assert_eq!(pi_model_notice_for(Some("x/y"), None), None);
+    assert_eq!(
+        pi_model_notice_for(Some("x/y"), Some(&serde_json::json!({}))),
+        None
+    );
+}
