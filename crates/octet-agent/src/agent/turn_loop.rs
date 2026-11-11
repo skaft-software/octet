@@ -255,8 +255,12 @@ impl Agent {
         let extension_host = self.extensions.clone();
         let initial_context =
             observe_context_tracker(&context, &self.session, &model, &system, &initial_tool_defs)?;
-        let initial_capacity =
-            ContextCapacityCache::seeded(&self.session, initial_tool_revision, &initial_context);
+        let initial_capacity = ContextCapacityCache::seeded_for(
+            &self.session,
+            initial_tool_revision,
+            &initial_context,
+            capacity_inputs_key(&model, &system, &initial_tool_defs),
+        );
         if let Some(delegation) = &self.delegation {
             delegation.prepare_owning_run()?;
         }
