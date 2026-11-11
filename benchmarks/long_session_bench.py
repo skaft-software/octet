@@ -43,6 +43,12 @@ def answer(index, streaming=False):
     return body + f"LONG_REPLY_{index:05}"
 
 
+def octet_attributed_ms(wall_ms, fixture_ms):
+    """Latency attributable to octet: the fake provider's decode/validation time
+    grows with the history it checks and must not be charged to the binary."""
+    return wall_ms - fixture_ms
+
+
 def percentile(values, fraction):
     ordered = sorted(values)
     position = (len(ordered) - 1) * fraction
@@ -501,9 +507,13 @@ def run(binary, scales, work, timeout, strace=False):
                     validation_ms = sum((row["validated_ns"] - row["received_ns"]) / 1e6 for row in requests)
                     row = {"turn": index, "kind": "stream" if index in scales else
                            ("large_tool" if index % LARGE_EVERY == 0 else "small"),
-                           "wall_ms": (finished - started) / 1e6,
-                           "reply_frame_ms": (replied - started) / 1e6,
-                           "settled_ms": (finished - started) / 1e6 - DRAIN_MS,
+                           # The fake provider's JSON decode and history check grow with the
+                           # history it verifies; that is the fixture's cost, not octet's, so
+                           # it is subtracted from every gated latency and kept visible raw.
+                           "wall_ms": octet_attributed_ms((finished - started) / 1e6, validation_ms),
+                           "reply_frame_ms": octet_attributed_ms((replied - started) / 1e6, validation_ms),
+                           "settled_ms": octet_attributed_ms((finished - started) / 1e6 - DRAIN_MS, validation_ms),
+                           "wall_ms_raw": (finished - started) / 1e6,
                            "provider_validation_ms": validation_ms,
                            "cpu_ms": after["cpu_ms"] - before["cpu_ms"],
                            "rss_bytes": after["rss_bytes"], "private_bytes": after["private_bytes"],
@@ -569,7 +579,7 @@ def main():
                           "large_sha256": hashlib.sha256(LARGE_DATA.encode()).hexdigest(),
                           "compaction": "disabled", "extensions": [], "stream_chunk_bytes": 512,
                           "stream_chunk_interval_ms": 8},
-              "scope": {"latency": "submit to answer PTY frame plus fixed 40ms completion drain; includes fake-provider Python validation and scheduled stream delay",
+              "scope": {"latency": "submit to answer PTY frame plus fixed 40ms completion drain, minus the fake provider's own decode/validation time (raw value kept as wall_ms_raw); includes the scheduled stream delay",
                         "reply_frame": "submit to the first answer PTY frame, excluding the fixed completion drain",
                         "settled": "submit to the durable checkpoint record that ends the run, excluding the fixed drain",
                         "resume": "spawn to history/model-ready synchronized fullscreen PTY frame, not first provisional composer or emulator paint",

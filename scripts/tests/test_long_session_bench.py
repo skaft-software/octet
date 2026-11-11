@@ -331,5 +331,12 @@ class CommandLineTests(unittest.TestCase):
                 self.assertEqual(code, 2)
 
 
+class AttributionTests(unittest.TestCase):
+    def test_fixture_validation_time_is_not_charged_to_the_binary(self):
+        self.assertEqual(BENCH.octet_attributed_ms(165.0, 67.0), 98.0)
+        # A larger history makes the fixture slower, not octet.
+        self.assertEqual(BENCH.octet_attributed_ms(100.0 + 50.0, 50.0), BENCH.octet_attributed_ms(100.0, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()

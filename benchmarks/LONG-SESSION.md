@@ -25,7 +25,10 @@ Scales (`--scales`) are run continuously in one session: 100, 1,000 and 5,000
 turns. At every scale the run records:
 
 - **turn_latency_ms** (p50/p95/max) from input submission until the durable
-  checkpoint, minus a fixed 40 ms completion drain; early vs late small-turn
+  checkpoint, minus a fixed 40 ms completion drain and minus the fake
+  provider's own JSON decode and history validation (`provider_validation_ms`,
+  which grows with the history it checks; the unsubtracted value is kept as
+  `wall_ms_raw`); early vs late small-turn
   p50 medians expose linear growth.
 - **reply_frame_ms**: submission until the answer's first PTY frame.
 - **settled_ms**: submission until the durable checkpoint excludes the drain.
