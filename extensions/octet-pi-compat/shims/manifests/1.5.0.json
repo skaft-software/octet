@@ -1255,6 +1255,10 @@
         "surface": "inert",
         "source": "shim"
       },
+      "renderFakeCursor": {
+        "surface": "inert",
+        "source": "shim"
+      },
       "CancellableLoader": {
         "surface": "inert",
         "source": "shim"

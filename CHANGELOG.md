@@ -6,6 +6,26 @@
 
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
+- Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or
+  `setHiddenThinkingLabel` (Pi's `working-message-test.ts`) no longer fail their
+  `session_start` hook with "contains terminal controls". Pi renders those labels through its
+  themed loader; the host label is printable text, so the styling is dropped and the text kept.
+
+- Pi extensions that call `ctx.ui.setWorkingIndicator` (or another chrome setter) from
+  `session_start`, such as Pi's `working-indicator.ts`, no longer report "Pi compatibility
+  error: request cancelled". The host cancels a chrome request still pending when its parent
+  hook settles; the update is now sent once the hook has replied, as Pi's void setters outlive
+  their handler.
+
+- Pi extensions that build the bash tool with `commandPrefix` or `spawnHook` (for example Pi's
+  `bash-spawn-hook.ts`) are no longer refused at configure time with "option would not be
+  honored". The prefixed command, and the command, cwd and environment changes the hook returns,
+  are what the native shell runs (environment changes as exports in front of the command).
+
+- Pi extensions that import `renderFakeCursor` from `@earendil-works/pi-tui` (for example
+  Pi's `overlay-test.ts`) no longer fail with "renderFakeCursor is not a function".
+  The helper is provided and a frame carries the fake cursor as reverse video, as Pi draws it.
+
 - A partially typed `/command` completion menu now includes commands that an
   extension registers after the keystroke as soon as the extension finishes
   starting, instead of waiting for the next key press.
