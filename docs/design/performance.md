@@ -376,6 +376,29 @@ HTTP-client construction; it does not show a first-frame speedup or characterize
 an extension-enabled/credentialed launch. The script prints the per-trial
 samples and uses an intentionally credential-free environment.
 
+## Pi adapter frame intake
+
+The Pi adapter's physical stdio reader scans only newly received bytes for LF.
+Complete frames borrow their input chunk; fragmented frames use one geometrically
+expanded accumulator, capped at the negotiated frame limit (at most 1 MiB), then
+release it. Across one frame, delimiter scanning visits each input byte once and
+accumulation copies at most three times the frame bytes, rather than repeatedly
+copying and scanning the entire unfinished prefix on each read. The cap bounds
+retained accumulator capacity, not peak process memory during growth or decoding.
+
+Fatal UTF-8 decoding, JSON/envelope validation, exact frame limits, ordered delivery,
+reverse-request cancellation/receipts and queue budgets are unchanged. This removes
+fragmentation-dependent quadratic work, not JSON parsing, history projection or
+canonical session serialization. It does not establish startup, input-to-paint,
+provider or native-runtime latency improvements.
+
+The deterministic guard covers 64 KiB, 256 KiB and 1 MiB frames, coalesced frames,
+byte-split Unicode/CRLF, malformed input and refusal before oversized allocation:
+
+```sh
+node --test --test-concurrency=2 extensions/octet-pi-compat/test/transport-input.test.mjs
+```
+
 ## Complete startup and resume work
 
 Many-model custom override merging indexes the first exact `api_name` and
