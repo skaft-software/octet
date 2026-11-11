@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Running from a source checkout with `--extension-dir <checkout>/extensions` no longer prints
+  `warning: ...: cannot inspect resource entrypoint: No such file or directory` on every start
+  and `/reload` for `octet-browse` and `octet-serve`. Those directories hold no `extension.toml`
+  (the extensions moved to their own repositories), and a directory without a manifest is not an
+  extension, so it is skipped silently; a manifest that exists but cannot be read is still reported.
+
 - `octet migrate pi --dry-run` no longer reports "0 skills" for a Pi setup whose skills live
   in `~/.agents/skills` (or a project `.agents/skills`, up to its git root). The report now
   counts the skills Pi's loader finds there, with the same rules the adapter mirror uses: a
