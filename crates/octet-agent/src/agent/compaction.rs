@@ -190,6 +190,13 @@ pub(super) struct CapacityEstimate {
     pub(super) effective_request: Option<Request>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Full capacity rebuilds on this thread, so a run-level test can prove an
+    /// ordinary turn reuses the seeded estimate.
+    pub(super) static CAPACITY_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Total-only context accounting used by the pre-request capacity gate.
 ///
 /// The first value is seeded from the exact context observation. For ordinary
@@ -199,13 +206,6 @@ pub(super) struct CapacityEstimate {
 /// falls back to the exact estimator. Responses appends estimate only the new
 /// route-affine opaque replay items, not the complete unchanged prefix. The detailed category breakdown remains
 /// the on-demand telemetry path in [`context_breakdown`].
-#[cfg(test)]
-thread_local! {
-    /// Full capacity rebuilds on this thread, so a run-level test can prove an
-    /// ordinary turn reuses the seeded estimate.
-    pub(super) static CAPACITY_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 pub(super) struct ContextCapacityCache {
     pub(super) head: Option<EntryId>,
     pub(super) tool_generation: u64,

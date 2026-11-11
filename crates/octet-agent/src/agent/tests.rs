@@ -1,5 +1,5 @@
-use super::*;
 use super::compaction::CAPACITY_REBUILDS;
+use super::*;
 use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
 use base64::Engine as _;
 
