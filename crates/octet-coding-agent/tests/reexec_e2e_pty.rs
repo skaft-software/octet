@@ -973,16 +973,18 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
     pane.shutdown();
 }
 
-/// (3) An unchanged executable stays in this process, says so, and never runs
-/// the candidate path that a re-exec would have used.
+/// (3) An explicit `/reload --force` restarts even an unchanged executable on
+/// Unix: the same on-disk image replaces this process in place and resumes the
+/// exact session, so stale extension runtime state cannot survive a force.
 #[test]
-fn real_octet_reload_with_an_unchanged_binary_stays_in_place_and_reports_it() {
+fn real_octet_forced_reload_restarts_an_unchanged_binary_and_resumes_the_same_session() {
     let _guard = pty_lock().lock().unwrap_or_else(PoisonError::into_inner);
     let fixture = Fixture::new(UNREACHABLE_PROVIDER);
     let launch = fixture.copy_binary("octet");
-    let marker = fixture.root().join("reexec-marker.log");
     let mut pane = Pane::spawn(fixture, &launch);
     let session = pane.await_ready(STARTUP_TIMEOUT);
+    let session_id = session_id_of(&session);
+    let pane_pid = pane.pid();
     let before_argv = pane.ps_argv();
     assert!(
         !before_argv.contains("--resume"),
@@ -990,45 +992,40 @@ fn real_octet_reload_with_an_unchanged_binary_stays_in_place_and_reports_it() {
     );
 
     pane.pty.write_input(b"/reload --force\r");
-    pane.wait_for(b"binary unchanged", STEP_TIMEOUT);
+    pane.wait_for(b"reloading into build", STEP_TIMEOUT);
+    pane.wait_for(b"To resume this session", STEP_TIMEOUT);
     assert!(
-        contains_bytes(&pane.pty.output, b"resources reloaded"),
-        "the unchanged notice must be the resources-only one: {}",
+        !contains_bytes(&pane.pty.output, b"binary unchanged"),
+        "a forced reload must not fall back to the resources-only notice: {}",
         visible(&pane.pty.output)
-    );
-    // Both of these are written only after the interactive loop decides to
-    // leave the TUI for a replacement image.
-    assert!(
-        !contains_bytes(&pane.pty.output, b"reloading into build"),
-        "an unchanged binary must not produce a ready plan: {}",
-        visible(&pane.pty.output)
-    );
-    assert!(
-        !contains_bytes(&pane.pty.output, b"To resume this session"),
-        "an unchanged binary must not leave the TUI: {}",
-        visible(&pane.pty.output)
-    );
-    assert!(
-        !marker.exists(),
-        "no candidate was ever installed, so no wrapper may have run"
-    );
-    // Any re-exec would have replaced the kernel-visible argv by now.
-    thread::sleep(Duration::from_millis(300));
-    pane.pty.read_available();
-    let after_argv = pane.ps_argv();
-    assert!(
-        !after_argv.contains("--resume"),
-        "the running image was replaced despite an unchanged binary: {after_argv}"
     );
     assert_eq!(
-        after_argv, before_argv,
-        "an unchanged binary must keep the exact image and argv it started with"
+        courtesy_resume_id(&pane.pty.output).as_deref(),
+        Some(session_id.as_str()),
+        "the courtesy line must name the resumed session"
     );
-    assert_eq!(pane.session_files(), vec![session.clone()]);
 
-    // Still fully responsive and able to exit cleanly.
+    // Same pid, same on-disk image, now resuming the pane's own session.
+    assert_eq!(pane.pid(), pane_pid, "exec preserves the pane pid");
+    let launch_path = launch.to_str().expect("launch path");
+    pane.wait_until(STEP_TIMEOUT, "the restarted image argv", |pane| {
+        pane.try_ps_argv()
+            .is_some_and(|argv| argv.contains("--resume") && argv.contains(launch_path))
+    });
+    let argv = pane.ps_argv();
+    assert!(
+        argv.contains(&session_id),
+        "the restarted process must resume the pane's session: {argv}"
+    );
+    let courtesy_at = find_bytes(&pane.pty.output, b"To resume this session")
+        .expect("observed above")
+        + b"To resume this session".len();
+    pane.wait_for_suffix(courtesy_at, b"custom/probe", STEP_TIMEOUT);
     pane.pty.write_input(b"/verbose on\r");
     pane.wait_for(b"verbose transcript enabled", STEP_TIMEOUT);
+
+    // The restart kept the same durable session and created no second one.
+    assert_eq!(pane.session_files(), vec![session.clone()]);
     pane.shutdown();
 }
 
