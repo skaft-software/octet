@@ -342,10 +342,8 @@ async fn threshold_veto_allows_in_budget_request_without_reentering_hook() {
 #[tokio::test]
 async fn overflow_veto_cannot_bypass_capacity_or_dispatch_provider() {
     let (mut agent, seen, calls, _dir) = agent(Action::Cancel);
-    let error = agent
-        .complete("oversized history ".repeat(6000))
-        .await
-        .unwrap_err();
+    append_completed_episode(&mut agent, &"oversized history ".repeat(6000));
+    let error = agent.complete("next prompt").await.unwrap_err();
     assert!(matches!(error, AgentError::ContextExceeded { .. }));
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert!(matches!(
@@ -370,6 +368,8 @@ async fn overflow_veto_cannot_bypass_capacity_or_dispatch_provider() {
 struct ExpandingSummaryProvider {
     summaries: Arc<AtomicUsize>,
     answers: Arc<AtomicUsize>,
+    /// Repetitions of the 17-byte phrase that makes up each summary.
+    expansion: usize,
 }
 #[async_trait::async_trait]
 impl octet_ai::HostStreamTransport for ExpandingSummaryProvider {
@@ -385,7 +385,9 @@ impl octet_ai::HostStreamTransport for ExpandingSummaryProvider {
             assert!(self.summaries.fetch_add(1, Ordering::Relaxed) < 2);
             let response = octet_ai::Response {
                 message: AssistantMessage {
-                    content: vec![AssistantPart::Text("expanded handoff ".repeat(100))],
+                    content: vec![AssistantPart::Text(
+                        "expanded handoff ".repeat(self.expansion),
+                    )],
                     model: model.id,
                     protocol: model.protocol,
                 },
@@ -442,6 +444,7 @@ async fn expanding_summary_stops_threshold_compaction_and_continues() {
         Arc::new(ExpandingSummaryProvider {
             summaries: summaries.clone(),
             answers: answers.clone(),
+            expansion: 100,
         }),
     );
     agent.complete("next prompt").await.unwrap();
@@ -466,7 +469,10 @@ async fn expanding_summary_stops_hard_overflow_without_dispatching_answer() {
     agent
         .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, u64::MAX)
         .unwrap();
-    for _ in 0..3 {
+    // The over-full history is already persisted; the new prompt is small.
+    // (An oversized new prompt is refused up front, before any compaction.)
+    append_completed_episode(&mut agent, &"oversized history ".repeat(3000));
+    for _ in 0..2 {
         append_completed_episode(&mut agent, "small episode");
     }
     let mut summary_model = agent.model.clone();
@@ -479,12 +485,10 @@ async fn expanding_summary_stops_hard_overflow_without_dispatching_answer() {
         Arc::new(ExpandingSummaryProvider {
             summaries: summaries.clone(),
             answers: answers.clone(),
+            expansion: 4000,
         }),
     );
-    let error = agent
-        .complete("oversized history ".repeat(6000))
-        .await
-        .unwrap_err();
+    let error = agent.complete("next prompt").await.unwrap_err();
     assert!(matches!(error, AgentError::ContextExceeded { estimate, budget } if estimate > budget));
     assert_eq!(summaries.load(Ordering::Relaxed), 2);
     assert_eq!(answers.load(Ordering::Relaxed), 0);
@@ -631,4 +635,145 @@ async fn tree_observation_follows_real_synced_checkout_and_survives_reopen() {
             .head(),
         Some(target)
     );
+}
+
+/// Answers every request and records the estimated size of each summarizer
+/// request, so a test can prove what compaction actually sent.
+struct SizeRecordingProvider {
+    summary_tokens: Arc<Mutex<Vec<u64>>>,
+    answers: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl octet_ai::HostStreamTransport for SizeRecordingProvider {
+    async fn stream(
+        &self,
+        model: octet_ai::HostStreamModel,
+        request: Request,
+        diagnostics: Vec<octet_ai::Diagnostic>,
+    ) -> Result<octet_ai::ResponseStream, AiError> {
+        if request.system.as_deref() == Some(SUMMARIZATION_SYSTEM_PROMPT) {
+            self.summary_tokens
+                .lock()
+                .unwrap()
+                .push(estimate_request_tokens(
+                    request.system.as_deref().unwrap_or_default(),
+                    &request.messages,
+                    &request.tools,
+                ));
+            let text = serialize_conversation(&request.messages);
+            assert!(
+                text.contains("</conversation>"),
+                "the transcript block must stay closed: {}",
+                &text[text.len().saturating_sub(300)..]
+            );
+        }
+        LocalProvider(self.answers.clone())
+            .stream(model, request, diagnostics)
+            .await
+    }
+}
+
+/// A 242,109-byte, 3,000-line paste: the size that made a 32K-window session
+/// unrecoverable.
+fn big_paste() -> String {
+    let line = "0123456789abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 {}\n";
+    let mut paste = line.repeat(3_000);
+    paste.truncate(242_109);
+    paste
+}
+
+fn size_recording_agent(agent: &mut Agent) -> (Arc<Mutex<Vec<u64>>>, Arc<AtomicUsize>) {
+    let summary_tokens = Arc::new(Mutex::new(Vec::new()));
+    let answers = Arc::new(AtomicUsize::new(0));
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(SizeRecordingProvider {
+            summary_tokens: summary_tokens.clone(),
+            answers: answers.clone(),
+        }),
+    );
+    (summary_tokens, answers)
+}
+
+#[tokio::test]
+async fn manual_compaction_bounds_an_oversized_message_instead_of_refusing() {
+    let (mut agent, _, _, _dir) = agent(Action::Observe);
+    append_completed_episode(&mut agent, &big_paste());
+    for _ in 0..2 {
+        append_completed_episode(&mut agent, "small episode");
+    }
+    let (summary_tokens, _) = size_recording_agent(&mut agent);
+    let info = agent
+        .compact_session_with_instructions(None, CancellationToken::default(), drop)
+        .await
+        .expect("compaction must succeed however large one message is");
+    assert!(info.summary.contains("local summary"), "{}", info.summary);
+    let budget = agent.model.spec.limits.context_window - SUMMARY_OUTPUT_TOKENS;
+    let sent = summary_tokens.lock().unwrap().clone();
+    assert!(!sent.is_empty());
+    assert!(
+        sent.iter().all(|tokens| *tokens <= budget),
+        "summarizer requests {sent:?} must fit {budget}"
+    );
+}
+
+#[tokio::test]
+async fn the_turn_after_an_oversized_message_compacts_it_and_answers() {
+    // The history already holds a message far larger than the window (a
+    // session saved under a larger model, or resumed after a window change).
+    let (mut agent, _, _, _dir) = agent(Action::Observe);
+    append_completed_episode(&mut agent, &big_paste());
+    append_completed_episode(&mut agent, "small episode");
+    let (summary_tokens, answers) = size_recording_agent(&mut agent);
+    let result = agent.complete("next prompt").await.unwrap();
+    assert!(matches!(result.reason, FinishReason::Completed));
+    assert_eq!(
+        answers.load(Ordering::Relaxed),
+        1 + summary_tokens.lock().unwrap().len()
+    );
+    let budget = agent.model.spec.limits.context_window - SUMMARY_OUTPUT_TOKENS;
+    assert!(summary_tokens
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|tokens| *tokens <= budget));
+    assert!(agent
+        .session
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.value, EntryValue::Compaction { .. })));
+}
+
+#[tokio::test]
+async fn an_oversized_prompt_is_refused_before_it_is_saved_and_the_session_stays_usable() {
+    let (mut agent, _, calls, _dir) = agent(Action::Observe);
+    let saved = agent.session.entries().len();
+    let error = match agent.prompt(big_paste()).await {
+        Ok(_) => panic!("an oversized prompt must be refused"),
+        Err(error) => error,
+    };
+    let AgentError::PromptTooLarge {
+        estimate,
+        budget,
+        context_window,
+    } = error
+    else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert!(estimate > budget && context_window == 20_000);
+    let text = error.to_string();
+    assert!(
+        text.contains(&estimate.to_string()) && text.contains("20000"),
+        "{text}"
+    );
+    assert!(text.contains("Nothing was sent or saved"), "{text}");
+    assert_eq!(
+        agent.session.entries().len(),
+        saved,
+        "the prompt must not be persisted"
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    // The refusal left no poison behind: a normal turn still works.
+    let result = agent.complete("hello again").await.unwrap();
+    assert!(matches!(result.reason, FinishReason::Completed));
 }

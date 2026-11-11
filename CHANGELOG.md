@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- An oversized paste no longer leaves a session unrecoverable. A message larger than the
+  model's input budget is refused before it is saved (the draft stays in the editor, and the
+  error names its size against the budget and the context window), and `/compact` and
+  automatic compaction no longer fail with "request context is too large" when the history
+  holds a very large message: the transcript sent to the summarizer is bounded to its input
+  budget, with the shortened parts marked. A context that still cannot fit now says to run
+  `/compact`, switch to a larger-window model or start over with `/new`.
+
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
 - Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or

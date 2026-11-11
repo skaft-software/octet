@@ -731,6 +731,122 @@ pub fn finish_handoff_bounded(
     Some(summary)
 }
 
+/// Smallest per-paragraph allowance before whole paragraphs are dropped.
+const BOUND_MIN_PARAGRAPH_BYTES: usize = 64;
+/// Upper bound on the marker inserted into one shortened paragraph.
+const BOUND_MARKER_BYTES: usize = 96;
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+/// Keep the head and tail of `text`, replacing the middle with a marker.
+fn shorten_middle(text: &str, keep: usize) -> String {
+    let head_end = floor_char_boundary(text, keep / 2);
+    let tail_start = ceil_char_boundary(text, text.len().saturating_sub(keep - keep / 2));
+    let omitted = text[head_end..tail_start].chars().count();
+    format!(
+        "{}\n[... {omitted} characters omitted to fit the summarizer's context window ...]\n{}",
+        &text[..head_end],
+        &text[tail_start..]
+    )
+}
+
+/// Shrink a summarization prompt to about `target_prompt_bytes`, cutting only
+/// the transcript inside it.
+///
+/// Compaction must always be able to run, so a transcript larger than the
+/// summarizer's input budget is bounded rather than refused: every paragraph
+/// keeps its beginning and end, the largest ones are shortened first (a huge
+/// paste cannot crowd out the rest of the conversation), and only when that is
+/// not enough are the oldest paragraphs replaced by a count. Nothing outside
+/// the `<conversation>` block (instructions, previous summary) is touched.
+/// Returns `None` when the prompt has no transcript block to shrink.
+pub(crate) fn bound_summary_prompt(prompt: &str, target_prompt_bytes: usize) -> Option<String> {
+    const OPEN: &str = "<conversation>\n";
+    const CLOSE: &str = "\n</conversation>";
+    let (prefix, body, suffix) = match (prompt.find(OPEN), prompt.rfind(CLOSE)) {
+        (Some(open), Some(close)) if open + OPEN.len() <= close => (
+            &prompt[..open + OPEN.len()],
+            &prompt[open + OPEN.len()..close],
+            &prompt[close..],
+        ),
+        _ => ("", prompt, ""),
+    };
+    let target_bytes = target_prompt_bytes.saturating_sub(prefix.len() + suffix.len());
+    if body.len() <= target_bytes {
+        return None;
+    }
+    let paragraphs: Vec<&str> = body.split("\n\n").collect();
+    let mut start = 0;
+    while start < paragraphs.len()
+        && cost_from(&paragraphs[start..], BOUND_MIN_PARAGRAPH_BYTES) > target_bytes
+    {
+        start += 1;
+    }
+    let kept = &paragraphs[start.min(paragraphs.len().saturating_sub(1))..];
+    let (mut low, mut high) = (
+        BOUND_MIN_PARAGRAPH_BYTES,
+        kept.iter().map(|p| p.len()).max().unwrap_or(0),
+    );
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if cost_from(kept, mid) <= target_bytes {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let mut out =
+        String::with_capacity(target_bytes.min(body.len()) + prefix.len() + suffix.len() + 128);
+    out.push_str(prefix);
+    if start > 0 {
+        let dropped = start.min(paragraphs.len().saturating_sub(1));
+        if dropped > 0 {
+            out.push_str(&format!(
+                "[... {dropped} earlier paragraphs omitted to fit the summarizer's context window ...]\n\n"
+            ));
+        }
+    }
+    for (index, paragraph) in kept.iter().enumerate() {
+        if index > 0 {
+            out.push_str("\n\n");
+        }
+        if paragraph.len() <= low {
+            out.push_str(paragraph);
+        } else {
+            out.push_str(&shorten_middle(paragraph, low));
+        }
+    }
+    out.push_str(suffix);
+    Some(out)
+}
+
+fn cost_from(paragraphs: &[&str], cap: usize) -> usize {
+    paragraphs
+        .iter()
+        .map(|p| {
+            if p.len() <= cap {
+                p.len() + 2
+            } else {
+                cap + BOUND_MARKER_BYTES + 2
+            }
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +854,44 @@ mod tests {
         AssistantMessage, AudioFormat, AudioMedia, AudioPayload, ModelId, Protocol, ToolCall,
         ToolCallArgumentError, ToolCallId, ToolResult, ToolResultPart,
     };
+
+    #[test]
+    fn bounding_shortens_the_largest_paragraph_and_keeps_the_instructions() {
+        let paste = "x".repeat(200_000);
+        let prompt = format!(
+            "<conversation>\n[User]: first\n\n[User]: {paste}\n\n[Assistant]: done\n</conversation>\n\nSUMMARIZE NOW"
+        );
+        let bounded = bound_summary_prompt(&prompt, 10_000).unwrap();
+        assert!(bounded.len() <= 10_000 + 512, "{}", bounded.len());
+        assert!(bounded.starts_with("<conversation>\n[User]: first"));
+        assert!(bounded.contains("[Assistant]: done"));
+        assert!(bounded.contains("characters omitted to fit the summarizer's context window"));
+        assert!(bounded.ends_with("</conversation>\n\nSUMMARIZE NOW"));
+    }
+
+    #[test]
+    fn bounding_drops_oldest_paragraphs_when_shortening_is_not_enough() {
+        let body = (0..500)
+            .map(|index| format!("[User]: message number {index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let prompt = format!("<conversation>\n{body}\n</conversation>\n\nGO");
+        let bounded = bound_summary_prompt(&prompt, 2_000).unwrap();
+        assert!(bounded.len() <= 2_000 + 512, "{}", bounded.len());
+        assert!(bounded.contains("earlier paragraphs omitted"));
+        assert!(bounded.contains("message number 499"));
+        assert!(!bounded.contains("message number 0\n"));
+        assert!(bounded.ends_with("\n\nGO"));
+    }
+
+    #[test]
+    fn bounding_is_char_boundary_safe_and_a_no_op_when_it_fits() {
+        let text = "é".repeat(50_000);
+        let prompt = format!("<conversation>\n{text}\n</conversation>");
+        let bounded = bound_summary_prompt(&prompt, 1_001).unwrap();
+        assert!(bounded.contains("omitted"));
+        assert!(bound_summary_prompt(&prompt, 1_000_000).is_none());
+    }
 
     #[test]
     fn bounded_handoff_refuses_oversize_without_truncating() {

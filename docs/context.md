@@ -34,6 +34,17 @@ bounded like other provider retries. Named policy, authorization, quota and
 rate-limit rejections still fail without compacting, and a session with no
 reducible history reports the limit instead of retrying.
 
+A single message larger than the input budget (the context window minus the
+reserve, after the instructions and tool schemas) can never be sent, and
+compaction cannot shrink the newest message. octet refuses it before saving
+anything: the prompt stays in the editor and the error names its estimated size
+against the budget and the window. Shorten it, or put the content in a file and
+refer to its path. A large message already in the history is not a trap:
+the transcript sent to the summarizer is bounded to the summarizer's input
+budget (every message keeps its beginning and end, the largest are shortened
+first, and the shortening is marked in the text it summarizes), so `/compact`
+and automatic compaction still succeed.
+
 <details>
 <summary>Why the headroom, and what counts as a size rejection</summary>
 
