@@ -120,6 +120,30 @@ class BundleTests(unittest.TestCase):
             self.assertNotIn("node", missing.stderr.lower())
             self.assertNotIn("python", missing.stderr.lower())
 
+    def test_stale_cached_build_from_other_source_is_never_executed(self):
+        # A source run builds once into a private cache. A build left there by
+        # an older checkout or release must not be reused for different source:
+        # an old protocol fails startup with only "extension runtime Launch".
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            staging = self.staged_bundle(directory)
+            (staging / "bin/codemode").chmod(0o755)
+            cache = directory / "cache"
+            stale = "#!/bin/sh\necho STALE-BUILD-RAN\n"
+            for location in (cache / "target/release", cache / "0.0.0-0/target/release"):
+                location.mkdir(parents=True)
+                binary = location / "octet-codemode"
+                binary.write_text(stale)
+                binary.chmod(0o755)
+            result = subprocess.run(
+                [str(staging / "bin/codemode"), "serve"],
+                capture_output=True, text=True, timeout=30,
+                env={"PATH": "/usr/bin:/bin", "OCTET_EXTENSION_DIR": str(staging),
+                     "OCTET_CODEMODE_CACHE": str(cache)})
+            self.assertNotIn("STALE-BUILD-RAN", result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("cargo is unavailable", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

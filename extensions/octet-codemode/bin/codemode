@@ -25,6 +25,25 @@ elif [ -n "${HOME:-}" ]; then
 else
     cache_root=${TMPDIR:-/tmp}/octet-codemode-cache
 fi
+# Key the private build cache by this bundle's version and source digest, so a
+# build left by an older checkout or release is never reused for new source.
+# Without the tools to compute the key, no cached build is trusted.
+cache_key() {
+    for tool in sed head find sort cksum cut; do
+        command -v "$tool" >/dev/null 2>&1 || return 1
+    done
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$extension_dir/extension.toml" | head -n 1)
+    sources=$(
+        for path in "$extension_dir/Cargo.toml" "$extension_dir/Cargo.lock"; do
+            if [ -f "$path" ]; then printf '%s\n' "$path"; fi
+        done
+        if [ -d "$extension_dir/src" ]; then find "$extension_dir/src" -type f; fi
+    )
+    digest=$(printf '%s\n' "$sources" | LC_ALL=C sort | while IFS= read -r path; do
+        if [ -n "$path" ]; then cksum < "$path"; fi
+    done | cksum | cut -d ' ' -f 1)
+    printf '%s-%s\n' "${version:-unknown}" "$digest"
+}
 binary=${OCTET_CODEMODE_BINARY:-}
 
 if [ -n "$binary" ] && [ ! -x "$binary" ]; then
@@ -51,8 +70,11 @@ fi
 
 # A previous run's build is already the resolved executable. Checking it before
 # building keeps every later launch off cargo entirely.
-if [ -z "$binary" ] && [ -x "$cache_root/target/release/octet-codemode" ]; then
-    binary=$cache_root/target/release/octet-codemode
+if [ -z "$binary" ] && key=$(cache_key); then
+    cache_root=$cache_root/$key
+    if [ -x "$cache_root/target/release/octet-codemode" ]; then
+        binary=$cache_root/target/release/octet-codemode
+    fi
 fi
 
 if [ -z "$binary" ]; then
