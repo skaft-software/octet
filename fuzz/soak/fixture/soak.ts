@@ -14,11 +14,15 @@
 // without failing on it until the fix lands.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 
 function providerUrl() {
   try {
     const agentDir = process.env.OCTET_PI_AGENT_DIR;
     if (!agentDir) throw new Error('no OCTET_PI_AGENT_DIR');
+    // Read-only, and only inside the agent directory the soak driver created
+    // (it leaves this sentinel). The fixture never writes anywhere.
+    if (!existsSync(join(agentDir, '.soak-harness'))) throw new Error('not a soak harness agent dir');
     const port = readFileSync(join(agentDir, 'soak-port'), 'utf8').trim();
     if (!/^\d+$/.test(port)) throw new Error('bad soak port');
     return `http://127.0.0.1:${port}/v1/`;

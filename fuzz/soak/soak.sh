@@ -23,6 +23,7 @@ fi
 # Run directories live outside the repository (a temp dir inside a git
 # worktree causes false failures); override with TMPDIR or SOAK_RUN_ROOT.
 export CARGO_TARGET_DIR="$target_dir" TMPDIR="${TMPDIR:-/tmp}"
+python3 "$here/guard.py" "${SOAK_RUN_ROOT:-$TMPDIR}" || exit 2
 mkdir -p "$TMPDIR"
 exec python3 "$here/driver.py" \
   --octet "$octet_bin" \

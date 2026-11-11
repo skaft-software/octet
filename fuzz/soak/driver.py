@@ -27,6 +27,8 @@ import threading
 import time
 from pathlib import Path
 
+import guard
+
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parents[1]
 SOAK_MODEL_ID = "soak/m-" + __import__("hashlib").sha256(b"soak-model").hexdigest()[:32]
@@ -158,17 +160,22 @@ class OctetRpc:
             return events
 
     def wait_turn_end(self, timeout=420.0):
-        """Waits until a turn completes (turn_end event), returning the events."""
+        """Waits until the agent settles (agent_settled), returning every event.
+
+        A tool-calling prompt runs two model turns, so the first turn_end is
+        not the end of the prompt; the next prompt would be refused as "Agent
+        is already streaming"."""
         deadline = time.monotonic() + timeout
+        collected = []
         with self.condition:
             while True:
                 if self.process.poll() is not None:
                     raise SoakFailure("octet exited while waiting for the turn to complete")
-                events = self.events_since()
-                if any(event.get("type") == "turn_end" for event in events):
-                    return events
+                collected.extend(self.events_since())
+                if any(event.get("type") == "agent_settled" for event in collected):
+                    return collected
                 if time.monotonic() > deadline:
-                    raise SoakFailure("timeout waiting for turn completion")
+                    raise SoakFailure("timeout waiting for the agent to settle")
                 self.condition.wait(timeout=0.5)
 
     def stderr(self):
@@ -224,6 +231,11 @@ def main() -> int:
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
+    try:
+        guard.preflight(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp")
+    except guard.IsolationError as error:
+        print(error, file=sys.stderr)
+        return 2
     run_dir = Path(os.environ.get("SOAK_RUN_ROOT") or os.environ.get("TMPDIR") or "/tmp") / "octet-soak" / f"soak-{args.seed}"
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -240,6 +252,22 @@ def main() -> int:
     (extension_dir / "octet-pi-compat").symlink_to(WORKTREE / "extensions" / "octet-pi-compat")
     log_path = run_dir / "octet.log"
     provider_log = open(run_dir / "provider.log", "w")
+
+    # Hard rule: never touch the real HOME, ~/.pi or ~/.octet. The sentinel
+    # tells the fixture it runs under this harness's own agent directory.
+    guard_env = {
+        "HOME": str(home),
+        "OCTET_PI_AGENT_DIR": str(pi_agent),
+        "PI_CODING_AGENT_DIR": str(pi_agent),
+        "OCTET_DATA_DIR": str(home / ".local" / "share" / "octet"),
+    }
+    try:
+        guard.check_isolated(guard_env, run_dir)
+    except guard.IsolationError as error:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        print(error, file=sys.stderr)
+        return 2
+    (pi_agent / guard.SENTINEL).write_text(str(run_dir))
 
     provider = subprocess.Popen(
         [sys.executable, str(HERE / "fake_provider.py"), "--port-file", str(run_dir / "port")],
@@ -262,11 +290,14 @@ def main() -> int:
         "XDG_CACHE_HOME": str(home / ".cache"),
         "XDG_DATA_HOME": str(home / ".local" / "share"),
         "OCTET_PI_AGENT_DIR": str(pi_agent),
+        "PI_CODING_AGENT_DIR": str(pi_agent),
+        "OCTET_DATA_DIR": str(home / ".local" / "share" / "octet"),
         "OCTET_TRUSTED_EXTENSIONS": "octet-pi-compat",
         "SOAK_PROVIDER_URL": provider_url,
         "OCTET_NO_UPDATE_CHECK": "1",
         "TMPDIR": str(run_dir / "tmp"),
     }
+    guard.check_isolated(env, run_dir)
     (run_dir / "tmp").mkdir()
     # Bootstrap a native route to the loopback fake so a fresh HOME has a
     # resolvable startup model: offline setup with an explicit inventory, no

@@ -102,7 +102,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def chat_tool_payload(self, body: dict):
+        """A streamed tool call for a SOAK_TOOL/SOAK_UI prompt, or None.
+
+        The call is made once: after the tool result is in the transcript the
+        reply is plain text, so the turn terminates."""
+        messages = [m for m in body.get("messages", []) if isinstance(m, dict)]
+        if not messages or messages[-1].get("role") == "tool":
+            return None
+        last_user = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                content = message.get("content")
+                last_user = content if isinstance(content, str) else "".join(
+                    part.get("text", "") for part in (content or []) if isinstance(part, dict))
+                break
+        if TOOL_MARKER not in last_user and UI_MARKER not in last_user:
+            return None
+        ui = UI_MARKER in last_user
+        name = UI_TOOL_NAME if ui else TOOL_NAME
+        if not any((tool.get("function") or {}).get("name") == name for tool in body.get("tools") or []):
+            return None
+        match = re.search(r"turn[:=](\d+)", last_user)
+        arguments = "{}" if ui else json.dumps({"turn": int(match.group(1)) if match else 0}, separators=(",", ":"))
+        chunk = lambda delta, finish: f'data: {json.dumps({"id": "chatcmpl-soak-tool", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}, separators=(",", ":"))}\n\n'
+        return "".join([
+            chunk({"role": "assistant"}, None),
+            chunk({"tool_calls": [{"index": 0, "id": "call_soak", "type": "function",
+                                   "function": {"name": name, "arguments": arguments}}]}, None),
+            chunk({}, "tool_calls"),
+            "data: [DONE]\n\n",
+        ]).encode()
+
     def chat_payload(self, body: dict) -> bytes:
+        if body.get("stream"):
+            tool = self.chat_tool_payload(body)
+            if tool is not None:
+                return tool
         text = "".join(
             message.get("content") or ""
             for message in body.get("messages", [])
@@ -143,7 +179,10 @@ class Handler(BaseHTTPRequestHandler):
         if chat:
             payload = self.chat_payload(body)
         else:
-            payload = tool_stream(body) if (TOOL_MARKER in last_user_text(body) or UI_MARKER in last_user_text(body)) else text_stream(body)
+            items = body.get("input") or []
+            tool_done = bool(items) and isinstance(items[-1], dict) and items[-1].get("type") == "function_call_output"
+            wants_tool = (TOOL_MARKER in last_user_text(body) or UI_MARKER in last_user_text(body)) and not tool_done
+            payload = tool_stream(body) if wants_tool else text_stream(body)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream" if not chat else ("text/event-stream" if body.get("stream") else "application/json"))
         self.send_header("Content-Length", str(len(payload)))

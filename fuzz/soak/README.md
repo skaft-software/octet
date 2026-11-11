@@ -34,6 +34,16 @@ reproduces with the same seed. Failure details live in
 `$TMPDIR/octet-soak/soak-<seed>/` (`SOAK_RUN_ROOT` overrides the root) (`octet.log`, `provider.log`, `summary.json`);
 `--keep` preserves the directory (otherwise it is removed on failure).
 
+## Isolation guard
+
+`guard.py` makes `soak.sh` and `driver.py` refuse to start (exit 2, with a
+message) unless HOME, the Pi agent dir (`OCTET_PI_AGENT_DIR`,
+`PI_CODING_AGENT_DIR`, `HOME/.pi/agent`) and the octet dirs (`OCTET_DATA_DIR`,
+`HOME/.octet`) all resolve inside the run's own temporary directory, and the
+run directory is outside the real home. The fixture only reads, and only from
+an agent dir carrying the driver's `.soak-harness` sentinel. Test:
+`python3 -m unittest test_guard` from `fuzz/soak/`.
+
 ## Invariants
 
 Hard failures (exit 1):
