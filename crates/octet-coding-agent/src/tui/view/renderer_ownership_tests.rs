@@ -87,7 +87,7 @@ fn exercise_control(shell: &mut InteractiveShell) {
     shell.clear_editor();
     assert_eq!(
         shell.translate_input(Some(key(KeyCode::Char('c'), KeyModifiers::CONTROL)), true),
-        InputAction::Closed
+        InputAction::Abort
     );
     shell.apply_edit(EditAction::Paste("/he".into()));
     assert_eq!(

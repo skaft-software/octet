@@ -210,7 +210,7 @@ async fn active_clipboard_slow_helper_cancels_on_ctrl_c_and_settlement() {
             }
         );
         assert!(shell.pending().is_empty());
-        assert_eq!(quit, cancel);
+        assert!(!quit);
         assert!(matches!(
             dropped_rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Closed)

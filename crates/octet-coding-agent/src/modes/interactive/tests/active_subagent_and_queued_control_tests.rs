@@ -103,7 +103,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
             remaining: opening.len()
                 + closing.len()
                 + usize::from(owner_mode == "cancel")
-                + usize::from(after_completion_abort),
+                + 2 * usize::from(after_completion_abort),
             handled: Some(handled_tx),
         };
         let mut shell = InteractiveShell::test_shell();
@@ -140,14 +140,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
             }
             if owned {
                 tokio::time::timeout(Duration::from_secs(2), async {
-                    // A roster status request can create the log first. Wait
-                    // for the actual stop before testing shutdown mid-response.
-                    while !std::fs::read_to_string(&log).is_ok_and(|wire| {
-                        wire.lines().any(|line| {
-                            serde_json::from_str::<serde_json::Value>(line)
-                                .is_ok_and(|request| request["params"]["arguments"][0] == "stop")
-                        })
-                    }) {
+                    while !log.exists() {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
                 })
@@ -176,19 +169,15 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
                 })
                 .await
                 .expect("root settled before stop response and Ctrl+C");
-            }
-            tokio::time::timeout(Duration::from_millis(500), handled)
-                .await
-                .expect("input/cancel stays responsive while stop response is pending")
-                .expect("input handler completed while waiting for the stop response");
-            if after_completion_abort {
-                // Close disables input polling, so acknowledge earlier input
-                // before sending Ctrl+C rather than waiting for another poll.
                 sender
                     .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
                     .await
                     .unwrap();
             }
+            tokio::time::timeout(Duration::from_millis(500), handled)
+                .await
+                .expect("input/cancel stays responsive while stop response is pending")
+                .expect("input handler completed while waiting for the stop response");
             if let Some(release) = release {
                 let _ = release.send(true);
             }
@@ -202,9 +191,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         let case = format!("{worker} {owner_mode} {command}");
         assert_eq!(
             ended.unwrap(),
-            if after_completion_abort {
-                HostRunOutcome::Shutdown
-            } else if owner_mode == "cancel" {
+            if owner_mode == "cancel" {
                 HostRunOutcome::Aborted
             } else {
                 HostRunOutcome::Completed
@@ -221,7 +208,7 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         } else {
             assert_eq!(shell.pending(), "x", "{case}");
         }
-        assert_eq!(quit, after_completion_abort);
+        assert!(!quit);
         assert_eq!(
             pending.len(),
             0,
@@ -259,22 +246,11 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
                 owner
             );
             let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
-            let expected = if after_completion_abort {
-                "subagent stop response interrupted by shutdown"
-            } else {
-                "not settled"
-            };
-            assert!(frame.contains(expected), "{case}: {frame}");
+            assert!(frame.contains("not settled"), "{case}: {frame}");
         } else {
             assert!(commands.is_empty(), "unexpected command for {case}: {wire}");
         }
-        let graceful = process.shutdown().await;
-        if !after_completion_abort {
-            assert!(graceful);
-        }
-        // Closing can leave the fixture asleep in a stop request. Bounded
-        // shutdown may kill it instead of receiving a graceful acknowledgement.
-        assert!(!process.is_running());
+        assert!(process.shutdown().await);
     }
 }
 

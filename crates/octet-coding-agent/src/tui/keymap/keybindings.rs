@@ -666,7 +666,7 @@ const BASE_DEFINITIONS: &[(&str, &[&str], &str)] = &[
     ("tui.altScreen.top", &["home"], "Scroll viewport to top"),
     ("tui.altScreen.bottom", &["end"], "Scroll viewport to bottom"),
     ("app.interrupt", &["escape"], "Cancel or abort"),
-    ("app.clear", &["ctrl+c"], "Clear editor or exit"),
+    ("app.clear", &["ctrl+c"], "Clear editor, interrupt, or exit"),
     ("app.exit", &["ctrl+d"], "Exit when editor is empty"),
     ("app.suspend", &["ctrl+z"], "Suspend to background"),
     ("app.thinking.cycle", &["shift+tab"], "Cycle thinking level"),

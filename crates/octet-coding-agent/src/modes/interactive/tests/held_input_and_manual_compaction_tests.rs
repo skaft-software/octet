@@ -295,8 +295,7 @@ async fn caller_driven_run_settles_and_cancels_while_real_renderer_is_gated() {
         drop(run);
         assert_eq!(agent.session().checkpoints().len(), 1);
         assert!(pending.is_empty());
-        assert_eq!(quit, cancel);
-        assert_eq!(shell.close_requested(), cancel);
+        assert!(!quit);
         settled_tx.send(()).ok();
         assert!(
             watchdog.join().unwrap(),
