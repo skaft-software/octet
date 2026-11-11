@@ -423,6 +423,37 @@ impl ContextCapacityCache {
     }
 }
 
+/// Attempts at shortening one summary request; each removes the measured
+/// excess plus slack for JSON escaping and the estimate's rounding.
+const BOUND_SUMMARY_ATTEMPTS: usize = 4;
+
+/// Shorten the largest text part of the last user message by about
+/// `excess_bytes`. Returns `false` when nothing could be shortened.
+fn bound_summary_request(request: &mut Request, excess_bytes: usize) -> bool {
+    let Some(Message::User(user)) = request.messages.last_mut() else {
+        return false;
+    };
+    let Some(text) = user
+        .content
+        .iter_mut()
+        .filter_map(|part| match part {
+            UserPart::Text(text) => Some(text),
+            _ => None,
+        })
+        .max_by_key(|text| text.len())
+    else {
+        return false;
+    };
+    let target = text.len().saturating_sub(excess_bytes).max(512);
+    match crate::compaction::bound_summary_prompt(text, target) {
+        Some(bounded) if bounded.len() < text.len() => {
+            *text = bounded;
+            true
+        }
+        _ => false,
+    }
+}
+
 impl CompactionContext<'_> {
     pub(super) async fn call(
         &mut self,
@@ -467,7 +498,8 @@ impl CompactionContext<'_> {
             cache_retention: self.cache_retention,
             session_id: Some(self.session_id.to_owned()),
         };
-        let input_tokens = estimate_request_tokens(
+        let mut request = request;
+        let mut input_tokens = estimate_request_tokens(
             request.system.as_deref().unwrap_or_default(),
             &request.messages,
             &request.tools,
@@ -478,6 +510,25 @@ impl CompactionContext<'_> {
             .limits
             .context_window
             .saturating_sub(request.max_output_tokens.unwrap_or(output_tokens));
+        // Compaction is the way out of an over-full context, so it must not be
+        // refused for being over-full itself: shorten the transcript it sends
+        // (each paragraph keeps its head and tail) until the request fits.
+        for _ in 0..BOUND_SUMMARY_ATTEMPTS {
+            if input_tokens <= input_budget {
+                break;
+            }
+            let excess_bytes = usize::try_from(input_tokens - input_budget)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(5);
+            if !bound_summary_request(&mut request, excess_bytes) {
+                break;
+            }
+            input_tokens = estimate_request_tokens(
+                request.system.as_deref().unwrap_or_default(),
+                &request.messages,
+                &request.tools,
+            );
+        }
         if input_tokens > input_budget {
             return Err(AgentError::ContextExceeded {
                 estimate: input_tokens,

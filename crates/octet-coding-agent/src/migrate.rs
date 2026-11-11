@@ -25,8 +25,8 @@ mod source_analysis;
 #[cfg(test)]
 use resource_collection::collect_resource_path;
 use resource_collection::{
-    collect_package_resources, collect_top_level_resources, is_package_source_file,
-    walk_regular_files,
+    collect_agents_skill_resources, collect_package_resources, collect_top_level_resources,
+    is_package_source_file, walk_regular_files,
 };
 #[cfg(test)]
 use source_analysis::analyze_extension;
@@ -126,6 +126,8 @@ pub(crate) enum MigrationAdapterCommand {
 #[derive(Clone, Debug)]
 struct ScanOptions {
     pi_home: PathBuf,
+    /// The user's home directory: Pi also loads skills from `<home>/.agents/skills`.
+    home: Option<PathBuf>,
     project: PathBuf,
     npm_roots: Vec<PathBuf>,
 }
@@ -520,6 +522,7 @@ pub fn run(command: MigrationCommand, invocation_cwd: &Path) -> anyhow::Result<(
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let report = scan_pi(&ScanOptions {
                 pi_home,
+                home: dirs::home_dir().filter(|home| home.is_absolute()),
                 project,
                 npm_roots,
             });
@@ -717,6 +720,15 @@ fn scan_pi(options: &ScanOptions) -> MigrationReport {
         &project_settings,
         &mut resources,
         &mut extensions,
+        &mut analysis_budget,
+        &mut diagnostics,
+    );
+    collect_agents_skill_resources(
+        options.home.as_deref(),
+        &options.project,
+        &global_settings,
+        &project_settings,
+        &mut resources,
         &mut analysis_budget,
         &mut diagnostics,
     );

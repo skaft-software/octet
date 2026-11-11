@@ -8,6 +8,36 @@
   During a running response Ctrl+C still only stops the run; press it again
   once the run has stopped to exit. Ctrl+D exits at any time (#673).
 
+- `/compact` no longer reports "Context compacted · 9 input tokens summarized" with the provider's
+  prompt size for the last summarizer call (a billing figure that counts the summarizer
+  instructions and covers only the last of the summarizer calls). It now says what was
+  summarized: "12 earlier messages (~34000 tokens) summarized into a ~900-token summary", with
+  the compaction cost after it. Sizes are estimates from the session's own messages.
+
+- Running from a source checkout with `--extension-dir <checkout>/extensions` no longer prints
+  `warning: ...: cannot inspect resource entrypoint: No such file or directory` on every start
+  and `/reload` for `octet-browse` and `octet-serve`. Those directories hold no `extension.toml`
+  (the extensions moved to their own repositories), and a directory without a manifest is not an
+  extension, so it is skipped silently; a manifest that exists but cannot be read is still reported.
+
+- `octet migrate pi --dry-run` no longer reports "0 skills" for a Pi setup whose skills live
+  in `~/.agents/skills` (or a project `.agents/skills`, up to its git root). The report now
+  counts the skills Pi's loader finds there, with the same rules the adapter mirror uses: a
+  directory with `SKILL.md` is one skill, and loose Markdown files directly in the root are not.
+
+- A first run with no provider configured now says when it finds a Pi setup (`~/.pi/agent`
+  or `PI_CODING_AGENT_DIR`) and names the two commands that act on it,
+  `octet --enable-extension octet-pi-compat` and `octet migrate pi --dry-run`, instead of
+  showing only the provider wizard. Detection is a directory-existence check.
+
+- An oversized paste no longer leaves a session unrecoverable. A message larger than the
+  model's input budget is refused before it is saved (the draft stays in the editor, and the
+  error names its size against the budget and the context window), and `/compact` and
+  automatic compaction no longer fail with "request context is too large" when the history
+  holds a very large message: the transcript sent to the summarizer is bounded to its input
+  budget, with the shortened parts marked. A context that still cannot fit now says to run
+  `/compact`, switch to a larger-window model or start over with `/new`.
+
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
 - Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or

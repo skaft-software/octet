@@ -561,8 +561,14 @@ fn resource_candidate(
         .ok_or_else(|| "resource directory name is not valid UTF-8".to_owned())?
         .to_owned();
     let entrypoint = path.join(entrypoint);
-    let entry_metadata = std::fs::symlink_metadata(&entrypoint)
-        .map_err(|error| format!("cannot inspect resource entrypoint: {error}"))?;
+    let entry_metadata = match std::fs::symlink_metadata(&entrypoint) {
+        Ok(metadata) => metadata,
+        // A directory without its manifest is not a resource of this kind (a
+        // source checkout's `extensions/` holds directories that ship none), so
+        // it is skipped rather than reported on every start and reload.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot inspect resource entrypoint: {error}")),
+    };
     if entry_metadata.file_type().is_symlink() {
         return Err("resource entrypoint must not be a symlink".into());
     }
@@ -714,6 +720,30 @@ mod tests {
                 .unwrap()
                 .path,
             extension.canonicalize().unwrap().join("extension.toml")
+        );
+    }
+
+    #[test]
+    fn extension_root_directories_without_a_manifest_are_not_extensions_and_are_not_warned_about() {
+        // A source checkout's `extensions/` can hold directories that ship no
+        // manifest (leftovers of a removed extension, docs, caches). They are
+        // not extensions: skipping them must be silent, while a real manifest
+        // in a sibling directory is still found.
+        let root = tempfile::tempdir().unwrap();
+        let (resolver, _, _) = resolver(&root, true);
+        let extensions = root.path().join("checkout/extensions");
+        std::fs::create_dir_all(extensions.join("leftover/tests")).unwrap();
+        std::fs::write(extensions.join("leftover/tests/test_x.py"), "").unwrap();
+        std::fs::create_dir_all(extensions.join("real")).unwrap();
+        std::fs::write(extensions.join("real/extension.toml"), "name='real'").unwrap();
+
+        let snapshot = resolver.discover(ResourceKind::Extension, &[extensions]);
+        assert!(snapshot.get("real").is_some());
+        assert!(snapshot.get("leftover").is_none());
+        assert!(
+            snapshot.diagnostics().is_empty(),
+            "{:?}",
+            snapshot.diagnostics()
         );
     }
 

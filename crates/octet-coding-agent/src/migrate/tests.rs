@@ -16,6 +16,7 @@ fn options(root: &Path) -> ScanOptions {
     let root = fs::canonicalize(root).unwrap();
     ScanOptions {
         pi_home: root.join("home/.pi/agent"),
+        home: Some(root.join("home")),
         project: root.join("workspace"),
         npm_roots: Vec::new(),
     }
@@ -661,4 +662,73 @@ fn refuses_symlinked_package_roots() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "package_unresolved"));
+}
+
+#[test]
+fn counts_the_skills_pi_loads_from_agents_skills_in_home_and_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let options = options(temp.path());
+    let home = options.home.clone().unwrap();
+    // Pi's own skills directory.
+    write(
+        &options.pi_home.join("skills/pi-one/SKILL.md"),
+        "---\nname: pi-one\n---\n",
+    );
+    // The standard user location Pi also loads (package-manager.js userAgentsSkillsDir).
+    write(
+        &home.join(".agents/skills/shared-a/SKILL.md"),
+        "---\nname: shared-a\n---\n",
+    );
+    write(
+        &home.join(".agents/skills/shared-b/SKILL.md"),
+        "---\nname: shared-b\n---\n",
+    );
+    // A nested SKILL.md below a skill directory is part of that skill, not another one.
+    write(
+        &home.join(".agents/skills/shared-b/examples/SKILL.md"),
+        "nested",
+    );
+    // The project's `.agents/skills`, found at the project directory.
+    write(
+        &options.project.join(".agents/skills/project-a/SKILL.md"),
+        "---\nname: project-a\n---\n",
+    );
+    // A loose markdown file directly in `.agents/skills` is not a skill (Pi's "agents" mode).
+    write(&home.join(".agents/skills/README.md"), "not a skill");
+
+    let report = scan_pi(&options);
+    assert_eq!(report.found.skills, 4, "{:#?}", report.resources);
+    let paths: Vec<_> = report
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == ResourceKind::Skill)
+        .map(|resource| {
+            resource
+                .path
+                .strip_prefix(temp.path().canonicalize().unwrap())
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert!(paths
+        .iter()
+        .any(|path| path.ends_with("home/.agents/skills/shared-a/SKILL.md")));
+    assert!(paths
+        .iter()
+        .any(|path| path.ends_with("workspace/.agents/skills/project-a/SKILL.md")));
+    assert!(!paths.iter().any(|path| path.ends_with("README.md")));
+    assert!(!paths.iter().any(|path| path.ends_with("examples/SKILL.md")));
+}
+
+#[test]
+fn agents_skills_are_not_counted_twice_when_the_project_is_the_home_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut options = options(temp.path());
+    let home = options.home.clone().unwrap();
+    write(
+        &home.join(".agents/skills/only/SKILL.md"),
+        "---\nname: only\n---\n",
+    );
+    options.project = home;
+    assert_eq!(scan_pi(&options).found.skills, 1);
 }

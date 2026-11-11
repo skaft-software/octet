@@ -138,13 +138,27 @@ pub enum AgentError {
     },
     /// The request would exceed the model's context budget after compaction.
     #[error(
-        "request context is too large: approximately {estimate} tokens exceeds the {budget}-token input budget"
+        "request context is too large: approximately {estimate} tokens exceeds the {budget}-token input budget; run /compact, switch to a model with a larger context window, or start over with /new"
     )]
     ContextExceeded {
         /// Estimated request size.
         estimate: u64,
         /// Maximum input size after reserving output capacity.
         budget: u64,
+    },
+    /// One submitted message cannot fit the model's input budget even in an
+    /// otherwise empty conversation. It is refused before anything is
+    /// persisted or sent, so the draft can be shortened and resubmitted.
+    #[error(
+        "this message is too large for the model: about {estimate} tokens of input against a budget of {budget} tokens (context window {context_window}). Nothing was sent or saved. Shorten it, or put the content in a file and refer to its path"
+    )]
+    PromptTooLarge {
+        /// Estimated request size including the system prompt and tools.
+        estimate: u64,
+        /// Maximum input size after reserving output capacity.
+        budget: u64,
+        /// The model's context window.
+        context_window: u64,
     },
     /// The configured autonomous compaction policy is invalid.
     #[error("invalid compaction policy: {0}")]
@@ -513,6 +527,7 @@ pub(super) fn provider_failure_phase(error: &AgentError) -> Option<&'static str>
         | AgentError::CostLimit { .. }
         | AgentError::CostUnavailable { .. }
         | AgentError::ContextExceeded { .. }
+        | AgentError::PromptTooLarge { .. }
         | AgentError::InvalidCompactionPolicy(_)
         | AgentError::Cancelled
         | AgentError::UsageUncertain

@@ -350,6 +350,113 @@ pub(super) fn collect_top_level_resources(
     }
 }
 
+/// The standard `.agents/skills` locations Pi loads besides its own `skills`
+/// directories: `<home>/.agents/skills`, and every ancestor `.agents/skills`
+/// from the project directory up to its git root, except the home one
+/// (`package-manager.js`: `userAgentsSkillsDir`, `collectAncestorAgentsSkillDirs`
+/// and the `projectAgentsSkillDirs` filter). The mirrored adapter runs Pi's
+/// loader, so these are the skills it exposes; the report counts the same set.
+pub(super) fn collect_agents_skill_resources(
+    home: Option<&Path>,
+    project: &Path,
+    global_settings: &PiSettings,
+    project_settings: &PiSettings,
+    reports: &mut Vec<ResourceReport>,
+    analysis_budget: &mut AnalysisBudget,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let user_dir = home.map(|home| home.join(".agents/skills"));
+    let mut roots = Vec::new();
+    if let Some(user_dir) = &user_dir {
+        roots.push((user_dir.clone(), Scope::User));
+    }
+    for dir in ancestor_agents_skill_dirs(project) {
+        if Some(&dir) != user_dir.as_ref() {
+            roots.push((dir, Scope::Project));
+        }
+    }
+    for (dir, scope) in roots {
+        let Some(base) = dir.parent() else { continue };
+        let settings = match scope {
+            Scope::User => global_settings,
+            Scope::Project => project_settings,
+        };
+        let mut traversal = ResourceTraversal::default();
+        let paths =
+            collect_resource_path(&dir, ResourceKind::Skill, base, &mut traversal, diagnostics);
+        let mut paths = pi_agents_skill_files(&dir, paths);
+        let remaining = MAX_SCAN_RESOURCES.saturating_sub(analysis_budget.resources);
+        if paths.len() > remaining {
+            diagnostics.push(Diagnostic::warning(
+                "scan_resource_limit",
+                format!("setup resource inventory stopped at {MAX_SCAN_RESOURCES} entries"),
+                Some(base.to_path_buf()),
+            ));
+            paths.truncate(remaining);
+        }
+        analysis_budget.resources = analysis_budget.resources.saturating_add(paths.len());
+        let overrides = settings
+            .overrides(ResourceKind::Skill)
+            .iter()
+            .take(MAX_PATTERNS)
+            .filter(|pattern| pattern.starts_with(['!', '+', '-']))
+            .cloned()
+            .collect::<Vec<_>>();
+        let enabled = apply_patterns(base, &paths, &overrides, true, diagnostics);
+        for path in paths {
+            reports.push(ResourceReport {
+                kind: ResourceKind::Skill,
+                scope,
+                enabled: enabled.contains(&path),
+                path,
+                migration: default_migration(ResourceKind::Skill),
+            });
+        }
+    }
+}
+
+/// `collectAncestorAgentsSkillDirs`: `.agents/skills` in `start` and each parent,
+/// stopping at the git repository root (or the filesystem root).
+fn ancestor_agents_skill_dirs(start: &Path) -> Vec<PathBuf> {
+    let git_root = start.ancestors().find(|dir| dir.join(".git").exists());
+    let mut dirs = Vec::new();
+    for dir in start.ancestors() {
+        dirs.push(dir.join(".agents/skills"));
+        if git_root == Some(dir) {
+            break;
+        }
+    }
+    dirs
+}
+
+/// Pi's `collectSkillEntries(dir, "agents")`: a directory holding `SKILL.md` is
+/// one skill and is not searched further; elsewhere a loose `.md` file counts
+/// only below the root, never directly in it.
+fn pi_agents_skill_files(root: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let skill_dirs = files
+        .iter()
+        .filter(|file| file.file_name() == Some(OsStr::new("SKILL.md")))
+        .filter_map(|file| file.parent().map(Path::to_path_buf))
+        .collect::<BTreeSet<_>>();
+    files
+        .into_iter()
+        .filter(|file| {
+            let Some(parent) = file.parent() else {
+                return false;
+            };
+            let topmost_skill_dir = parent
+                .ancestors()
+                .take_while(|ancestor| ancestor.starts_with(root))
+                .filter(|ancestor| skill_dirs.contains(*ancestor))
+                .last();
+            match topmost_skill_dir {
+                Some(dir) => *file == dir.join("SKILL.md"),
+                None => parent != root && file.extension() == Some(OsStr::new("md")),
+            }
+        })
+        .collect()
+}
+
 pub(super) fn collect_resource_path(
     path: &Path,
     kind: ResourceKind,

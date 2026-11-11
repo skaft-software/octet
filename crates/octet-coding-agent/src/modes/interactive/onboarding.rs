@@ -107,9 +107,25 @@ pub(super) async fn run(
     boot: &mut Bootstrap,
 ) -> anyhow::Result<()> {
     if should_offer(&boot.config, &boot.catalog) {
+        if let Some(hint) = pi_setup_hint(crate::cli::pi_agent_dir().as_deref()) {
+            shell.notice(hint);
+        }
         run_setup(shell, input, boot).await?;
     }
     Ok(())
+}
+
+/// One line for the first-run screen when a Pi agent directory exists, pointing
+/// at the two real ways to use it. The check is a single metadata call: nothing
+/// under the directory is read, listed or written.
+fn pi_setup_hint(pi_agent_dir: Option<&Path>) -> Option<String> {
+    let dir = pi_agent_dir?;
+    dir.is_dir().then(|| {
+        format!(
+            "Pi setup found at {}. To use it, run `octet extension install octet-pi-compat`, then start with `octet --enable-extension octet-pi-compat`. To preview importing it instead, run `octet migrate pi --dry-run`.",
+            dir.display()
+        )
+    })
 }
 
 pub(super) async fn run_setup(
@@ -797,5 +813,32 @@ mod tests {
         );
         assert_eq!(boot.config.model, Some(model));
         assert!(!boot.config.model_explicit);
+    }
+
+    #[test]
+    fn first_run_names_an_existing_pi_setup_and_both_real_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".pi/agent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hint = pi_setup_hint(Some(&dir)).expect("an existing Pi agent dir is announced");
+        assert!(
+            hint.contains("octet extension install octet-pi-compat")
+                && hint.contains("octet --enable-extension octet-pi-compat"),
+            "{hint}"
+        );
+        assert!(hint.contains("octet migrate pi --dry-run"), "{hint}");
+        assert!(hint.contains(&dir.display().to_string()), "{hint}");
+        assert!(!hint.contains('\n'), "one line: {hint}");
+    }
+
+    #[test]
+    fn first_run_is_silent_without_a_pi_setup() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(pi_setup_hint(Some(&home.path().join(".pi/agent"))).is_none());
+        assert!(pi_setup_hint(None).is_none());
+        // A file where the directory should be is not a Pi setup.
+        let file = home.path().join("agent");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(pi_setup_hint(Some(&file)).is_none());
     }
 }

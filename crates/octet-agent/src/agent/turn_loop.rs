@@ -127,6 +127,44 @@ impl Agent {
         Ok(())
     }
 
+    /// Refuses `input` when it alone exceeds the model's input budget.
+    ///
+    /// The comparison uses the same budget as the per-turn capacity gate
+    /// (`context window - compaction reserve`). A request whose system prompt
+    /// and tools already exceed it is left to that gate, which reports the
+    /// real cause.
+    fn require_prompt_fits(
+        &self,
+        input: &UserInput,
+        tools_enabled: bool,
+        tool_defs: &[ToolDef],
+    ) -> Result<(), AgentError> {
+        // A provider-context hook may rewrite the request (for example, trim
+        // history) before it is sent, so the raw prompt size proves nothing.
+        if !self.extensions.provider_context_hooks.is_empty() {
+            return Ok(());
+        }
+        let context_window = self.model.spec.limits.context_window;
+        let budget = context_window.saturating_sub(self.compaction_reserve_tokens());
+        let system = self.model_visible_system(tools_enabled);
+        let baseline = estimate_request_tokens(&system, &[], tool_defs);
+        if baseline >= budget {
+            return Ok(());
+        }
+        let message = Message::User(UserMessage {
+            content: input.clone().into_user_parts(),
+        });
+        let estimate = estimate_request_tokens(&system, std::slice::from_ref(&message), tool_defs);
+        if estimate > budget {
+            return Err(AgentError::PromptTooLarge {
+                estimate,
+                budget,
+                context_window,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) async fn prompt_with_tools(
         &mut self,
         input: UserInput,
@@ -182,6 +220,11 @@ impl Agent {
         let mut terminal_gate_evidence =
             TerminalGateEvidence::for_run(completion_policy, &self.session, &input)?;
         let input = prepare_user_images(input, &self.model, None).await?;
+        // A message that cannot fit the input budget even with nothing else in
+        // the conversation can never be sent, and compaction cannot shrink the
+        // newest message. Refuse it before it is persisted so it does not
+        // poison every later turn and the draft can be shortened and retried.
+        self.require_prompt_fits(&input, tools_enabled, &initial_tool_defs)?;
         let prompt_metadata = self.prompt_entry_metadata();
         // `display_text` belongs only to the draft that started this run.
         // Steering and follow-up inputs are independent user submissions and

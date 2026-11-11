@@ -25,6 +25,9 @@ octet migrate pi --dry-run --project /path/to/project
 octet migrate pi --dry-run --json > pi-migration.json
 ```
 
+The skill count is what Pi loads: `<pi-home>/skills`, `~/.agents/skills`, and
+the project's `.agents/skills` up to its git root, plus package skills.
+
 It exits before normal octet config, provider discovery, session or extension
 startup and model bootstrap, so it uses no model tokens. Read the [report
 classifications](#classification) before treating anything as compatible.
