@@ -247,7 +247,10 @@ fn unpriced_usage_marks_local_and_native_compaction_reports_after_reopen() {
     assert!(session.has_unpriced_usage());
     assert!(!session.has_uncertain_usage());
     for outcome in [
-        CompactionOutcome::Compacted { elided: 1 },
+        CompactionOutcome::Compacted {
+            elided: 1,
+            summarized_tokens: 100,
+        },
         CompactionOutcome::NativeCompacted,
     ] {
         let mut shell = InteractiveShell::test_shell();
@@ -285,7 +288,10 @@ fn compaction_report_follows_active_ancestry_past_metadata_leaves() {
     let mut shell = InteractiveShell::test_shell();
     report_compaction(
         &mut shell,
-        &CompactionOutcome::Compacted { elided: 1 },
+        &CompactionOutcome::Compacted {
+            elided: 1,
+            summarized_tokens: 100,
+        },
         &session,
     );
     assert_eq!(shell.debug_error(), None);
@@ -419,4 +425,49 @@ fn fast_rebuild_scope_and_queue_barriers_are_explicit() {
             PendingIdleAction::Fast(true)
         ]
     );
+}
+
+#[test]
+fn compaction_report_states_what_was_summarized_not_the_summarizer_prompt_size() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("report-tokens.jsonl")).unwrap();
+    let first_kept = session
+        .append(EntryValue::Message(octet_ai::Message::User(
+            octet_ai::UserMessage {
+                content: vec![octet_ai::UserPart::Text("retained".into())],
+            },
+        )))
+        .unwrap();
+    // The provider reported a tiny prompt for the summarizer call. That is a
+    // billing figure and must not be shown as the amount summarized.
+    session
+        .record_compaction_usage(
+            octet_ai::EndpointId("fixture".into()),
+            ModelId("fixture".into()),
+            octet_ai::Usage {
+                input_tokens: 9,
+                ..octet_ai::Usage::default()
+            },
+            Some(octet_ai::Cost::default()),
+        )
+        .unwrap();
+    session
+        .compact("a short summary of the earlier turns", first_kept)
+        .unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    report_compaction(
+        &mut shell,
+        &CompactionOutcome::Compacted {
+            elided: 12,
+            summarized_tokens: 12_345,
+        },
+        &session,
+    );
+    let snapshot = shell.debug_snapshot();
+    assert!(
+        snapshot.contains("12 earlier messages (~12345 tokens) summarized into a ~9-token summary"),
+        "{snapshot}"
+    );
+    assert!(snapshot.contains("compaction cost"), "{snapshot}");
+    assert!(!snapshot.contains("9 input tokens"), "{snapshot}");
 }

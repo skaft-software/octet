@@ -1483,7 +1483,7 @@ async fn handle_idle_command(
             output.send(json!({"type": "compaction_start", "reason": "manual"}))?;
             let outcome = attempt_compaction(&mut app).await?;
             let data = match outcome {
-                CompactionOutcome::Compacted { elided } => json!({"elided": elided}),
+                CompactionOutcome::Compacted { elided, .. } => json!({"elided": elided}),
                 CompactionOutcome::NativeCompacted => json!({"native": true}),
                 CompactionOutcome::Skipped { reason } => json!({"skipped": true, "reason": reason}),
             };

@@ -5473,40 +5473,51 @@ fn apply_extension_background(
 
 fn report_compaction(shell: &mut InteractiveShell, outcome: &CompactionOutcome, session: &Session) {
     match outcome {
-        CompactionOutcome::Compacted { elided } => {
-            let usage = session
-                .usage_records()
-                .iter()
-                .rev()
-                .find(|record| matches!(record.kind, octet_agent::UsageRecordKind::Compaction));
-            let detail = usage.map_or_else(
-                || format!("{elided} earlier messages summarized"),
-                |record| {
-                    let cost = record
-                        .cost_microdollars
-                        .map(commands::format_microdollars)
-                        .unwrap_or_else(|| "cost unavailable".to_owned());
-                    let prompt_tokens = record
-                        .usage
-                        .input_tokens
-                        .saturating_add(record.usage.cache_read_tokens)
-                        .saturating_add(record.usage.cache_write_tokens);
-                    format!(
-                        "{prompt_tokens} input tokens summarized · {cost} compaction cost{}",
-                        if session.has_uncertain_usage() || session.has_unpriced_usage() {
-                            " (session usage or pricing uncertain)"
-                        } else {
-                            ""
-                        }
-                    )
-                },
-            );
+        CompactionOutcome::Compacted {
+            elided,
+            summarized_tokens,
+        } => {
             let summary = crate::compaction::latest_compaction(session).and_then(|entry| {
                 match &entry.value {
                     octet_agent::EntryValue::Compaction { summary, .. } => Some(summary.clone()),
                     _ => None,
                 }
             });
+            // What was summarized, from the session's own messages: the
+            // estimated size of the messages that left the context, and of
+            // the summary that replaced them. The provider's reported prompt
+            // size is a billing figure (the summarizer instructions, the
+            // earlier summary and a split-turn call all change it), so it is
+            // not presented as the amount summarized.
+            let mut detail = format!(
+                "{elided} earlier {} (~{summarized_tokens} tokens) summarized",
+                if *elided == 1 { "message" } else { "messages" }
+            );
+            if let Some(summary) = &summary {
+                detail.push_str(&format!(
+                    " into a ~{}-token summary",
+                    crate::compaction::estimate_text_tokens(summary)
+                ));
+            }
+            let usage = session
+                .usage_records()
+                .iter()
+                .rev()
+                .find(|record| matches!(record.kind, octet_agent::UsageRecordKind::Compaction));
+            if let Some(record) = usage {
+                let cost = record
+                    .cost_microdollars
+                    .map(commands::format_microdollars)
+                    .unwrap_or_else(|| "cost unavailable".to_owned());
+                detail.push_str(&format!(
+                    " · {cost} compaction cost{}",
+                    if session.has_uncertain_usage() || session.has_unpriced_usage() {
+                        " (session usage or pricing uncertain)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
             if let Some(summary) = summary {
                 shell.compaction_marker(format!("Context compacted · {detail}"), summary);
             } else {

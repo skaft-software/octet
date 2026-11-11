@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `/compact` no longer reports "Context compacted · 9 input tokens summarized" with the provider's
+  prompt size for the last summarizer call (a billing figure that counts the summarizer
+  instructions and covers only the last of the summarizer calls). It now says what was
+  summarized: "12 earlier messages (~34000 tokens) summarized into a ~900-token summary", with
+  the compaction cost after it. Sizes are estimates from the session's own messages.
+
 - Running from a source checkout with `--extension-dir <checkout>/extensions` no longer prints
   `warning: ...: cannot inspect resource entrypoint: No such file or directory` on every start
   and `/reload` for `octet-browse` and `octet-serve`. Those directories hold no `extension.toml`

@@ -24,9 +24,15 @@ const DOCUMENT_PAGE_TOKENS: u64 = 3_000;
 /// Result of a best-effort compaction attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompactionOutcome {
-    Compacted { elided: usize },
+    /// `elided` messages, estimated at `summarized_tokens`, were replaced by a summary.
+    Compacted {
+        elided: usize,
+        summarized_tokens: u64,
+    },
     NativeCompacted,
-    Skipped { reason: String },
+    Skipped {
+        reason: String,
+    },
 }
 
 /// Conservative character-based estimate retained alongside App's precomputed
@@ -265,14 +271,22 @@ pub(crate) async fn attempt_compaction_for_agent(
                 .entry(&info.first_kept)
                 .and_then(|entry| entry.parent.as_ref());
             let mut elided = 0;
+            let mut summarized_tokens = 0u64;
             while let Some(entry) = cursor.and_then(|id| session.entry(id)) {
-                elided += usize::from(matches!(entry.value, EntryValue::Message(_)));
+                if let EntryValue::Message(message) = &entry.value {
+                    elided += 1;
+                    summarized_tokens = summarized_tokens
+                        .saturating_add(estimate_messages_tokens(std::slice::from_ref(message)));
+                }
                 if Some(&entry.id) == previous_boundary.as_ref() {
                     break;
                 }
                 cursor = entry.parent.as_ref();
             }
-            Ok(CompactionOutcome::Compacted { elided })
+            Ok(CompactionOutcome::Compacted {
+                elided,
+                summarized_tokens,
+            })
         }
         // A refused or committed-but-failed hook must reach the caller as a
         // failure, not become an optimistic successful command acknowledgement.
@@ -710,7 +724,10 @@ pub(crate) mod tests {
                 if fail_after {
                     assert!(result.unwrap_err().to_string().contains("do not retry"));
                 } else {
-                    assert_eq!(result.unwrap(), CompactionOutcome::Compacted { elided: 3 });
+                    assert!(matches!(
+                        result.unwrap(),
+                        CompactionOutcome::Compacted { elided: 3, summarized_tokens } if summarized_tokens > 0
+                    ));
                 }
                 assert_ne!(app.agent.session().head(), head);
                 assert!(
@@ -925,10 +942,10 @@ pub(crate) mod tests {
                 if matches!(user.content.as_slice(), [UserPart::Text(text)] if text == &retained_prompt)
         ));
 
-        assert_eq!(
+        assert!(matches!(
             attempt_compaction(&mut app).await.unwrap(),
-            CompactionOutcome::Compacted { elided: 2 }
-        );
+            CompactionOutcome::Compacted { elided: 2, summarized_tokens } if summarized_tokens > 0
+        ));
         let head = app.agent.session().head().unwrap();
         assert!(matches!(
             &app.agent.session().entry(&head).unwrap().value,
