@@ -66,8 +66,6 @@ struct Bindings {
     clients: Vec<Client>,
     diagnostics: Vec<String>,
     host_policy: Option<HostPolicy>,
-    /// Whole-chain budget per event. Always [`INPUT_BUDGET`] in the product.
-    budget: Option<Duration>,
 }
 
 /// Shared binding table. The frontend installs the live extension processes and
@@ -79,19 +77,6 @@ impl InputInterceptors {
     /// Native reserved actions and an open slash popup precede all consumers.
     pub(crate) fn set_host_policy(&self, policy: impl Fn(&Event) -> bool + Send + Sync + 'static) {
         self.0.lock().unwrap().host_policy = Some(Arc::new(policy));
-    }
-
-    /// Tests about key precedence, not listener latency, run the chain under a
-    /// budget that CPU starvation of the adapter process cannot exhaust: one
-    /// slow reply otherwise latches the listener off and delivers `x` to the
-    /// editor. The product budget keeps its own test (hung handler).
-    #[cfg(test)]
-    pub(crate) fn set_budget_for_test(&self, budget: Duration) {
-        self.0.lock().unwrap().budget = Some(budget);
-    }
-
-    fn budget(&self) -> Duration {
-        self.0.lock().unwrap().budget.unwrap_or(INPUT_BUDGET)
     }
 
     fn host_reserves(&self, event: &Event) -> bool {
@@ -191,7 +176,6 @@ pub(super) struct PendingInput {
 impl PendingInput {
     pub(super) fn start(&mut self, packet: Packet) {
         let (revision, clients) = self.handle.active();
-        let budget = self.handle.budget();
         self.ready_revision = revision;
         let raw = (!(is_host_reserved(&packet.event) || self.handle.host_reserves(&packet.event)))
             .then(|| InputInterceptors::intercepted(packet.raw.as_deref()))
@@ -205,7 +189,7 @@ impl PendingInput {
         self.pending = Some((
             revision,
             Box::pin(async move {
-                let deadline = tokio::time::Instant::now() + budget;
+                let deadline = tokio::time::Instant::now() + INPUT_BUDGET;
                 // `None` means no listener answered; the original event is then
                 // delivered unchanged instead of an invented one.
                 let mut admitted: Option<(String, Vec<Event>)> = None;
