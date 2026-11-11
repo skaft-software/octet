@@ -387,7 +387,7 @@ impl ContextCapacityCache {
         tools: &[ToolDef],
         tool_generation: u64,
     ) -> RequestContextEstimate {
-        let _span = crate::performance_trace::Span::start("capacity.rebuild", messages.len());
+        let _span = crate::performance_trace::Span::start("capacity.rebuild", 0);
         let estimate = reconcile_context_estimate(session, model, system, messages, tools);
         self.head = session.head();
         self.tool_generation = tool_generation;
