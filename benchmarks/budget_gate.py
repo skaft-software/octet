@@ -22,6 +22,7 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import tempfile
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -158,10 +159,11 @@ def main() -> int:
         if args.binary is None:
             parser.error("--binary is required without --result")
         binary = args.binary.resolve(strict=True)
+        scratch = None
         output = args.output
         if output is None:
-            output = Path("octet-budget-run.json")
-            output.unlink(missing_ok=True)
+            scratch = tempfile.TemporaryDirectory(prefix="octet-budget-")
+            output = Path(scratch.name) / "run.json"
         command = [sys.executable, str(BENCH_PATH), "--binary", str(binary),
                    "--output", str(output), "--scales", str(short_scale),
                    "--timeout", str(args.timeout)]
@@ -170,6 +172,8 @@ def main() -> int:
         print(" ".join(command), flush=True)
         subprocess.run(command, check=True)
         result = json.loads(output.read_text())
+        if scratch is not None:
+            scratch.cleanup()
 
     count, breaches = evaluate(budget, result)
     if count < 0:
