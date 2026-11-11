@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- The model picker filter now finds a model when the separators in its name are left out:
+  `gpt6.1` and `gpt61` list `gpt-6.1-Sol`, as `gpt-6.1` already did. This applies to model
+  names and provider names in the model pickers only; descriptions and every other picker
+  keep exact substring matching. A query that already matched can list a few more models
+  (`gpt-6.1` also lists a model named `gpt-61`) (#726).
+
 - Ctrl+C at an idle, empty prompt now closes octet, as the welcome hint says.
   During a running response Ctrl+C still only stops the run; press it again
   once the run has stopped to exit. Ctrl+D exits at any time (#673).

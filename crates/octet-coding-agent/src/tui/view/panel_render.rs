@@ -1353,6 +1353,197 @@ mod panel_search_cache_tests {
 }
 
 #[cfg(test)]
+mod model_picker_separator_tests {
+    use super::*;
+
+    fn reset() {
+        PANEL_SEARCH_CACHE.with(|cache| *cache.borrow_mut() = None);
+    }
+
+    fn grouped(providers: &[&str], scope: Option<&str>) -> PanelAction {
+        PanelAction::SelectGroupedModel {
+            models: (0..providers.len())
+                .map(|index| octet_ai::ModelId(index.to_string()))
+                .collect(),
+            providers: providers.iter().map(|name| (*name).to_owned()).collect(),
+            details: Vec::new(),
+            scope: scope.map(str::to_owned),
+        }
+    }
+
+    fn labels(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|label| (*label).to_owned()).collect()
+    }
+
+    #[test]
+    fn omitted_separators_match_model_labels_without_skipping_characters() {
+        reset();
+        let items = labels(&["gpt-6.1-Sol", "gpt-6.0.1-Sol", "gpt-6.2"]);
+        let action = grouped(&["OpenAI", "OpenAI", "OpenAI"], None);
+        for query in [
+            "gpt6.1",
+            "gpt61",
+            "gpt6.1sol",
+            "GPT61SOL",
+            "gpt-6.1",
+            "gpt 6.1",
+        ] {
+            assert_eq!(
+                searched_indices_for_action(&items, &[], &action, query),
+                vec![0],
+                "query {query:?}"
+            );
+        }
+        // A different digit is not an omitted separator, and `gpt61` must not
+        // skip the `0` in `gpt-6.0.1-Sol`.
+        assert_eq!(
+            searched_indices_for_action(&items, &[], &action, "gpt62"),
+            vec![2]
+        );
+        assert_eq!(
+            searched_indices_for_action(&items, &[], &action, "gpt601"),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn ungrouped_model_picker_and_provider_names_accept_omitted_separators() {
+        reset();
+        let items = labels(&["GPT 6.1 Sol", "other"]);
+        assert_eq!(
+            searched_indices_for_action(
+                &items,
+                &[],
+                &PanelAction::SelectModel(Vec::new()),
+                "gpt6.1"
+            ),
+            vec![0]
+        );
+        let action = grouped(&["Open-Router", "Local"], None);
+        assert_eq!(
+            searched_indices_for_action(&items, &[], &action, "openrouter"),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn separator_only_terms_stay_literal() {
+        reset();
+        let items = labels(&["alpha", "gpt-6.1"]);
+        let action = grouped(&["beta", "gamma"], None);
+        assert_eq!(
+            searched_indices_for_action(&items, &[], &action, "-"),
+            vec![1]
+        );
+        assert_eq!(
+            searched_indices_for_action(&items, &[], &action, "gpt -"),
+            vec![1]
+        );
+        assert!(searched_indices_for_action(&items, &[], &action, "./:_").is_empty());
+        assert!(searched_indices_for_action(&items, &[], &action, "alpha -").is_empty());
+    }
+
+    #[test]
+    fn a_term_never_matches_across_two_fields_and_descriptions_stay_literal() {
+        reset();
+        let items = labels(&["alpha", "plain"]);
+        let descriptions = vec![Some("beta".to_owned()), Some("low-latency tier".to_owned())];
+        let action = grouped(&["beta", "gamma"], None);
+        assert!(
+            searched_indices_for_action(&items, &descriptions, &action, "alphabeta").is_empty()
+        );
+        assert!(
+            searched_indices_for_action(&items, &descriptions, &action, "betaalpha").is_empty()
+        );
+        // Two terms may still match two different fields.
+        assert_eq!(
+            searched_indices_for_action(&items, &descriptions, &action, "alpha beta"),
+            vec![0]
+        );
+        assert!(
+            searched_indices_for_action(&items, &descriptions, &action, "lowlatency").is_empty()
+        );
+        assert_eq!(
+            searched_indices_for_action(&items, &descriptions, &action, "low-latency"),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn other_panels_keep_literal_matching() {
+        reset();
+        let items = labels(&["gpt-6.1-Sol", "solarized-dark"]);
+        let action = PanelAction::SelectExtension(vec!["a".into(), "b".into()]);
+        assert!(searched_indices_for_action(&items, &[], &action, "gpt61").is_empty());
+        assert!(searched_indices_for_action(&items, &[], &action, "solarizeddark").is_empty());
+        assert_eq!(
+            searched_indices_for_action(&items, &[], &action, "solarized"),
+            vec![1]
+        );
+        // The same rows under a model picker must not reuse the literal snapshot.
+        assert_eq!(
+            searched_indices_for_action(
+                &items,
+                &[],
+                &PanelAction::SelectModel(Vec::new()),
+                "gpt61"
+            ),
+            vec![0]
+        );
+        assert!(searched_indices_for_action(&items, &[], &action, "gpt61").is_empty());
+    }
+
+    #[test]
+    fn cached_and_uncached_paths_return_the_same_rows() {
+        reset();
+        let action = PanelAction::SelectModel(Vec::new());
+        let small = labels(&["other", "gpt-6.1-Sol", "gpt-6.0.1-Sol"]);
+        let mut large = vec!["other".to_owned(); PANEL_SEARCH_CACHE_MAX_ITEMS + 1];
+        large[1] = "gpt-6.1-Sol".into();
+        large[2] = "gpt-6.0.1-Sol".into();
+        for query in ["gpt6.1", "gpt61", "gpt-6.1", "gpt 6.1", "gpt62", "-", "sol"] {
+            let cached = searched_indices_for_action(&small, &[], &action, query);
+            PANEL_SEARCH_CACHE.with(|cache| assert!(cache.borrow().is_some()));
+            let uncached = searched_indices_for_action(&large, &[], &action, query);
+            PANEL_SEARCH_CACHE.with(|cache| assert!(cache.borrow().is_none()));
+            assert_eq!(cached, uncached, "query {query:?}");
+        }
+        PANEL_SEARCH_CACHE.with(|cache| {
+            searched_indices_for_action(&small, &[], &action, "gpt61");
+            assert!(
+                cache.borrow().as_ref().unwrap().retained_bytes() <= PANEL_SEARCH_CACHE_MAX_BYTES
+            );
+        });
+    }
+
+    #[test]
+    fn relaxed_matches_keep_row_order_and_provider_scope() {
+        reset();
+        let items = labels(&["GPT 6.1", "claude", "gpt-6.1-Sol", "gpt-61"]);
+        let providers = ["Other", "Anthropic", "OpenAI", "OpenAI"];
+        assert_eq!(
+            filtered_indices_for_action(&items, &[], &grouped(&providers, None), "gpt6.1"),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            filtered_indices_for_action(
+                &items,
+                &[],
+                &grouped(&providers, Some("OpenAI")),
+                "gpt6.1"
+            ),
+            vec![2, 3]
+        );
+        // Documented tradeoff: a literal query also admits rows that only match
+        // once separators are removed.
+        assert_eq!(
+            filtered_indices_for_action(&items, &[], &grouped(&providers, None), "gpt-6.1"),
+            vec![0, 2, 3]
+        );
+    }
+}
+
+#[cfg(test)]
 mod grouped_model_tests {
     use super::*;
 
