@@ -241,6 +241,10 @@ pub(crate) struct ResponseBuilder {
     pub(crate) chat_reasoning_details: Vec<serde_json::Value>,
     pub(crate) chat_reasoning_details_bytes: usize,
     pub(crate) chat_reasoning_details_index: Option<usize>,
+    /// Latest Chat Completions usage report, held until `[DONE]`. Some
+    /// gateways repeat `usage` on every chunk (zeros, then the real totals);
+    /// the last report is authoritative and is emitted once at finalization.
+    pub(crate) chat_pending_usage: Option<Usage>,
     /// Opaque provider metadata retained immediately before its target part.
     pub(crate) part_metadata: HashMap<usize, ProviderPartMetadata>,
     pub(crate) tool_call_builders: HashMap<usize, ToolCallBuilder>,
@@ -326,6 +330,7 @@ impl ResponseBuilder {
             chat_reasoning_details: Vec::new(),
             chat_reasoning_details_bytes: 0,
             chat_reasoning_details_index: None,
+            chat_pending_usage: None,
             part_metadata: HashMap::with_capacity(2),
             tool_call_builders: HashMap::with_capacity(4),
             media_parts: HashMap::with_capacity(2),

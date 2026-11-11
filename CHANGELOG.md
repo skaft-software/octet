@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
+
 - The `/resume` empty states are now derived from the picker when it is drawn,
   so they cannot go stale (transcript-search hits no longer stay hidden behind an
   old message). Named-only (`^n`) hiding every row says to press `^n`, an
