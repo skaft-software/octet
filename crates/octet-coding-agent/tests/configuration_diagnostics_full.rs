@@ -71,7 +71,7 @@ fn octet_strict_config_environment_rejects_unknown_keys() {
     let output = invoke(root.path(), &home, &workspace, Some("true"), &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let expected = format!(
-        "Error: strict configuration rejected unknown keys:<U+000A>  - global config {}:1:1: unknown configuration key \"modle\"; did you mean \"model\"?\n",
+        "Error: strict configuration rejected unknown keys:\n  - global config {}:1:1: unknown configuration key \"modle\"; did you mean \"model\"?\n",
         home.join(".octet/config.toml").display()
     );
 
@@ -135,12 +135,12 @@ fn trusted_layers_preserve_diagnostic_order_and_overridden_typos() {
     let stderr = String::from_utf8_lossy(&strict.stderr);
     assert!(!strict.status.success());
     let expected = format!(
-        "Error: strict configuration rejected unknown keys:<U+000A>{}\n",
+        "Error: strict configuration rejected unknown keys:\n{}\n",
         diagnostics
             .iter()
             .map(|line| format!("  - {line}"))
             .collect::<Vec<_>>()
-            .join("<U+000A>")
+            .join("\n")
     );
     assert_eq!(stderr, expected);
     assert!(!stderr.contains("warning:"), "{stderr}");
