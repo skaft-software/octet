@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
+
 - A Pi input listener (`ctx.ui.onTerminalInput`) that is briefly slow, for example
   during a garbage collection or on a loaded machine, is no longer disabled
   until reload. Keys wait for it in order, as in Pi; only a listener that does

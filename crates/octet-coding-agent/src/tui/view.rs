@@ -1207,6 +1207,34 @@ impl PickerState {
             PickerScope::All => self.all_rows.as_deref().unwrap_or(&[]),
         }
     }
+
+    /// Refresh the empty-state surface after a filter, scope, or named-only
+    /// change (gh-556): an empty picker explains which recovery applies
+    /// instead of rendering a bare list, and the composer draft is untouched.
+    /// The lifecycle already carries a transient state (for example the
+    /// all-workspaces load) is left alone.
+    pub(crate) fn refresh_empty_state(&mut self) {
+        if matches!(self.surface.lifecycle, OrdinarySurfaceLifecycle::Loading(_)) {
+            return;
+        }
+        let filter = self.filter.trim().to_string();
+        if session_picker_ordering(self).is_empty() {
+            let message = if !filter.is_empty() {
+                format!(
+                    "No sessions match '{filter}'. Clear the search (Backspace) or press Tab to switch workspace scope."
+                )
+            } else if self.rows.is_empty() {
+                "No sessions in this workspace yet. Start a new session and it will appear here."
+                    .to_string()
+            } else {
+                "No sessions match the current scope. Press Tab to switch workspace scope."
+                    .to_string()
+            };
+            self.surface.lifecycle = OrdinarySurfaceLifecycle::empty(message);
+        } else if matches!(self.surface.lifecycle, OrdinarySurfaceLifecycle::Empty(_)) {
+            self.surface.lifecycle = OrdinarySurfaceLifecycle::Ready;
+        }
+    }
 }
 
 /// One user-message boundary available to `/fork`.
@@ -6092,16 +6120,23 @@ impl InteractiveShell {
         invalidate_editor_autocomplete(&mut state);
     }
 
-    /// Complete a unique slash-command prefix at the end of the prompt. A
-    /// mounted slot editor receives the completed draft instead of the hidden
-    /// mirror, so its own pastes and undo stay consistent with what it shows.
+    /// Complete the highlighted slash suggestion without submitting it. When
+    /// the popup is dismissed, only a unique prefix can complete. A mounted slot
+    /// editor receives the completed draft instead of the hidden mirror, so its
+    /// own pastes and undo stay consistent with what it shows.
     pub fn complete_slash_command(&mut self) {
         let mut state = self.state.borrow_mut();
         if state.editor.cursor() != state.editor.text().len() {
             return;
         }
         let suggestions = input_slash_suggestions(&state);
-        if let [suggestion] = suggestions.as_slice() {
+        if state.slash_popup_dismissed && suggestions.len() != 1 {
+            return;
+        }
+        let selected = state
+            .slash_selection
+            .min(suggestions.len().saturating_sub(1));
+        if let Some(suggestion) = suggestions.get(selected) {
             let completed = format!(
                 "/{}{}",
                 suggestion.name,
@@ -8804,6 +8839,8 @@ impl InteractiveShell {
                                     picker.surface.lifecycle =
                                         OrdinarySurfaceLifecycle::loading("all workspaces");
                                     state.pending_panel_requests.push(PanelRequest::LoadAll);
+                                } else {
+                                    picker.refresh_empty_state();
                                 }
                             }
                             KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => {
@@ -8815,6 +8852,7 @@ impl InteractiveShell {
                                 picker.named_only = !picker.named_only;
                                 picker.selected = 0;
                                 picker.scroll = 0;
+                                picker.refresh_empty_state();
                             }
                             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                                 picker.show_path = !picker.show_path;
@@ -8898,11 +8936,13 @@ impl InteractiveShell {
                                 picker.filter.push(character);
                                 picker.selected = 0;
                                 picker.scroll = 0;
+                                picker.refresh_empty_state();
                             }
                             KeyCode::Backspace if key.modifiers.is_empty() => {
                                 picker.filter.pop();
                                 picker.selected = 0;
                                 picker.scroll = 0;
+                                picker.refresh_empty_state();
                             }
                             _ => {}
                         }

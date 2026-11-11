@@ -54,9 +54,15 @@ struct Fixture {
     _dir: tempfile::TempDir,
     workspace: PathBuf,
     sandbox: SandboxConfig,
+    /// Unique per fixture. Retiring an owner is asynchronous and keeps a
+    /// fenced tombstone until its files are deleted, so a test that reused
+    /// another test's key could start inside that window and see its spills
+    /// refused (`spill_error=true`).
+    owner: String,
 }
 
 fn fixture() -> Fixture {
+    static NEXT_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().canonicalize().unwrap();
     let mut sandbox = SandboxConfig::new(&workspace);
@@ -69,6 +75,10 @@ fn fixture() -> Fixture {
         _dir: dir,
         workspace,
         sandbox,
+        owner: format!(
+            "parity-tools-{}",
+            NEXT_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
     }
 }
 
@@ -78,7 +88,7 @@ impl Fixture {
             workspace: &self.workspace,
             sandbox: &self.sandbox,
             execution_scope: "parity-tools",
-            resource_owner: "parity-tools",
+            resource_owner: &self.owner,
             active_skills: &[],
             registered_tools: &[],
             progress: ToolProgressSink::null(),
@@ -152,7 +162,7 @@ async fn bash_truncated_output_spills_the_full_stream_to_a_readable_path() {
         BashTool.definition().description
     );
     assert!(spill.exists(), "spill must survive the tool call");
-    BashTool::release_owner("parity-tools");
+    BashTool::release_owner(&f.owner);
     tokio::time::timeout(Duration::from_secs(5), async {
         while spill.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -205,7 +215,7 @@ async fn shell_wrappers_retain_spills_until_the_resource_owner_retires() {
         drop(tool);
         assert!(paths.iter().all(|path| path.exists()));
     }
-    BashTool::release_owner("parity-tools");
+    BashTool::release_owner(&f.owner);
     tokio::time::timeout(Duration::from_secs(5), async {
         while paths.iter().any(|path| path.exists()) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -250,7 +260,7 @@ async fn powershell_wrappers_retain_spills_until_the_resource_owner_retires() {
         drop(tool);
         assert!(paths.iter().all(|path| path.exists()));
     }
-    BashTool::release_owner("parity-tools");
+    BashTool::release_owner(&f.owner);
     tokio::time::timeout(Duration::from_secs(5), async {
         while paths.iter().any(|path| path.exists()) {
             tokio::time::sleep(Duration::from_millis(10)).await;
