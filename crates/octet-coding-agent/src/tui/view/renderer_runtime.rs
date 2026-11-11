@@ -891,8 +891,11 @@ pub(super) fn render_loop_with_terminal(
         // unchanged. Capture before writing so a newer resize during the paint
         // remains pending instead of being mistaken for the rendered geometry.
         let resize_epoch = state.borrow().resize_epoch;
-        tui.request_render_force(resize_epoch != painted_resize_epoch);
-        state.frame_written_at(tui.rendered_viewport_top());
+        {
+            let _span = octet_agent::performance_trace::Span::start("render.frame", 0);
+            tui.request_render_force(resize_epoch != painted_resize_epoch);
+            state.frame_written_at(tui.rendered_viewport_top());
+        }
         painted_resize_epoch = resize_epoch;
         resize_schedule.painted();
         last_render = Some(Instant::now());

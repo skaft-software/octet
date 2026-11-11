@@ -411,7 +411,9 @@ impl StreamingMarkdown {
             .reparsed_bytes
             .saturating_add(self.decoded.len() as u64);
         self.committed = markdown::parse(&self.decoded);
-        self.tail.clear();
+        // A finished stream cannot accept another delta. Retaining this buffer
+        // would keep the largest unstable suffix alive for the entire session.
+        self.tail = String::new();
         self.preview = Document::default();
         self.preview_source_len = 0;
         self.preview_source_has_newline = false;

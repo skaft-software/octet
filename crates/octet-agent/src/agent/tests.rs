@@ -1,3 +1,4 @@
+use super::compaction::CAPACITY_REBUILDS;
 use super::*;
 use crate::tool::DEFAULT_PREVIEW_MIN_EMIT_INTERVAL;
 use base64::Engine as _;
@@ -1020,6 +1021,76 @@ fn terminal_gate_capsule_stays_bounded_across_repeated_requests_and_decisions() 
             assert_eq!(terminal_gate_capsule(&evidence, &candidate), capsule);
         }
     }
+}
+
+/// An ordinary prompt must reuse the capacity estimate seeded at run start. The
+/// turn boundary used to invalidate it unconditionally, which forced a full
+/// re-estimate of the entire history on every request (per-turn cost grew with
+/// the session; found by the long-session benchmark).
+#[tokio::test]
+async fn ordinary_turns_reuse_the_seeded_capacity_estimate() {
+    struct Script(Mutex<VecDeque<Vec<AssistantPart>>>);
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for Script {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            _: Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, AiError> {
+            let content = self.0.lock().unwrap().pop_front().expect("scripted turn");
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(StreamEvent::Started { response_id: None }),
+                Ok(StreamEvent::Finished(octet_ai::Response {
+                    message: AssistantMessage {
+                        content,
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                    cost: None,
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    inference: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = active_tool_test_agent(
+        directory.path(),
+        Session::create(directory.path().join("capacity-reuse.jsonl")).unwrap(),
+        ExtensionHost::new(),
+    );
+    let script = Arc::new(Script(Mutex::new(VecDeque::from(
+        (0..3)
+            .map(|turn| vec![AssistantPart::Text(format!("answer {turn}"))])
+            .collect::<Vec<_>>(),
+    ))));
+    agent
+        .client
+        .register_host_stream_transport(agent.model.endpoint.id.clone(), script.clone());
+    CAPACITY_REBUILDS.with(|count| count.set(0));
+    for turn in 0..3 {
+        let mut run = agent
+            .prompt(UserInput::from(format!("question {turn}")))
+            .await
+            .unwrap();
+        while let Some(event) = run.next().await {
+            if let AgentEvent::RunFinished { reason, .. } = event {
+                assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+            }
+        }
+    }
+    assert!(script.0.lock().unwrap().is_empty());
+    assert_eq!(
+        CAPACITY_REBUILDS.with(|count| count.get()),
+        0,
+        "appending turns must advance the estimate, not rebuild it"
+    );
 }
 
 #[tokio::test]
@@ -2619,6 +2690,82 @@ fn request_estimate_from_message_sizes_matches_whole_request_serialization() {
             );
         }
     }
+}
+
+/// The estimate must follow the request inputs it was computed for: a FinishNow
+/// control makes the next request answer-only (no tools), a system change or model
+/// switch changes the prefix, and none of those moves the head or the tool generation.
+/// The cache used to rely on every call site invalidating it.
+#[test]
+fn capacity_estimate_follows_tool_surface_system_and_model_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("surface.jsonl")).unwrap();
+    let model = tool_media_model(Protocol::OpenAiChat, octet_ai::ModalitySet::none());
+    let tools = vec![
+        ToolDef {
+            async_execution: false,
+            name: "read".into(),
+            description: "Read a file ".repeat(200),
+            parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            constrained_sampling: None,
+        },
+        ToolDef {
+            async_execution: false,
+            name: "bash".into(),
+            description: "Run a command ".repeat(200),
+            parameters: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+            constrained_sampling: None,
+        },
+    ];
+    session.append(user_message("question".into())).unwrap();
+    let baseline = context_breakdown(
+        &session,
+        &model,
+        "system",
+        &session.context().unwrap(),
+        &tools,
+    );
+    let mut cache = ContextCapacityCache::seeded_for(
+        &session,
+        7,
+        &baseline,
+        capacity_inputs_key(&model, "system", &tools),
+    );
+    session.append(user_message("more".into())).unwrap();
+    let full = |system: &str, tools: &[ToolDef], model: &Model| {
+        reconcile_context_estimate(&session, model, system, &session.context().unwrap(), tools)
+    };
+
+    // Same surface: advances without a rebuild.
+    let with_tools = cache
+        .estimate(&session, &model, "system", &tools, 7)
+        .unwrap();
+    assert!(with_tools.input_tokens >= full("system", &tools, &model).input_tokens);
+    assert_eq!(cache.full_rebuilds(), 0);
+
+    // FinishNow: the next request sends no tools. Same head, same tool generation.
+    let answer_only = cache.estimate(&session, &model, "system", &[], 7).unwrap();
+    assert_eq!(answer_only, full("system", &[], &model));
+    assert!(answer_only.input_tokens < with_tools.input_tokens);
+    assert_eq!(cache.full_rebuilds(), 1);
+
+    // The surface can come back; the estimate follows it again.
+    let restored = cache
+        .estimate(&session, &model, "system", &tools, 7)
+        .unwrap();
+    assert_eq!(restored, full("system", &tools, &model));
+
+    // A different system prompt and a different model are different requests too.
+    let longer = "a much longer system prompt ".repeat(500);
+    let changed_system = cache
+        .estimate(&session, &model, &longer, &tools, 7)
+        .unwrap();
+    assert_eq!(changed_system, full(&longer, &tools, &model));
+    let other = tool_media_model(Protocol::OpenAiResponses, octet_ai::ModalitySet::none());
+    let switched = cache
+        .estimate(&session, &other, &longer, &tools, 7)
+        .unwrap();
+    assert_eq!(switched, full(&longer, &tools, &other));
 }
 
 #[test]

@@ -147,6 +147,8 @@ mod journal;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]
+mod snapcompact_cache;
+#[cfg(test)]
 mod store;
 #[cfg(test)]
 mod tool_images;

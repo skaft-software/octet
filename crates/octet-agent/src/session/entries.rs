@@ -271,6 +271,14 @@ impl Session {
             | EntryValue::SkillResourceRead { .. }
             | EntryValue::SkillDeactivated { .. } => *cache = None,
         }
+        // The newest compaction for the extended head chain changes only when
+        // the appended entry is itself a compaction; every other append keeps
+        // an already-resolved verdict valid.
+        if let EntryValue::Compaction { snapcompact, .. } =
+            &self.entries.last().expect("just appended").value
+        {
+            *self.snapcompact_cache.get_mut() = Some(snapcompact.is_some());
+        }
         Ok(id)
     }
 
@@ -349,6 +357,7 @@ impl Session {
         self.persist(&buf)?;
         self.head = Some(id);
         *self.context_cache.get_mut() = None;
+        *self.snapcompact_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
@@ -367,6 +376,7 @@ impl Session {
         self.persist(&buf)?;
         self.head = None;
         *self.context_cache.get_mut() = None;
+        *self.snapcompact_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
@@ -426,6 +436,7 @@ impl Session {
         self.head = Some(id.clone());
         self.next_id = next_id;
         *self.context_cache.get_mut() = None;
+        *self.snapcompact_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(id)
     }

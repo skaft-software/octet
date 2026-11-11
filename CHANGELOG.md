@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Offline long-session benchmarking: `benchmarks/long_session_bench.py` drives a
+  release binary through 100, 1,000 and 5,000 turns of a deterministic loopback
+  fake-provider session and records per-turn latency growth, resume latency,
+  RSS behaviour, persistence, CPU and streaming render cost, with independent
+  durable-transcript verification at each scale. `benchmarks/budget_gate.py`
+  runs the 100-turn scale and fails on a cap in
+  `benchmarks/performance_budget.json`; the protocol, metric boundaries and
+  gate mechanics are documented in `benchmarks/LONG-SESSION.md`.
+
+### Changed
+
+- Per-request preparation work no longer grows with the whole session
+  unnecessarily: a hook-prepared request no longer triggers a second full
+  context copy that the turn loop then discards, and its refusal diagnostic is
+  built only on refusal; the bitmap-compaction verdict is resolved
+  incrementally, walking the branch once between compaction, checkout or
+  branch changes instead of materializing every active entry on every
+  provider request. The context-capacity estimate seeded at run start is now
+  reused across turns instead of being invalidated and fully recomputed for
+  every provider request, which removes a per-request cost that grew linearly
+  with the session; the cached estimate is keyed on the model route, system
+  prompt and tool surface it was computed for.
+
 ### Fixed
 
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.

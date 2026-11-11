@@ -75,6 +75,9 @@ impl Session {
             head: None,
             next_id: 1,
             context_cache: RefCell::new(None),
+            snapcompact_cache: RefCell::new(None),
+            #[cfg(test)]
+            snapcompact_walk_entries: std::cell::Cell::new(0),
             responses_replay_cache: RefCell::new(None),
             #[cfg(test)]
             responses_replay_work: std::cell::Cell::new((0, 0)),
@@ -713,6 +716,9 @@ impl Session {
             index,
             head,
             context_cache: RefCell::new(None),
+            snapcompact_cache: RefCell::new(None),
+            #[cfg(test)]
+            snapcompact_walk_entries: std::cell::Cell::new(0),
             responses_replay_cache: RefCell::new(None),
             #[cfg(test)]
             responses_replay_work: std::cell::Cell::new((0, 0)),

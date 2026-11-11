@@ -1,0 +1,71 @@
+{
+  "schema": "octet.long-session.budget.v1",
+  "scope": {
+    "short_scale": 100,
+    "basis": "quiet-machine calibration on 2026-11-10/11, 1-minute load < 3, 9 runs (3 each: main, branch, branch+fix); caps are about 1.3-2x the worst observed value; see benchmarks/LONG-SESSION.md"
+  },
+  "checks": {
+    "turn_latency_growth_ratio": {
+      "cap": 1.25,
+      "note": "late vs early small-turn p50 at 100 turns; observed 0.99-1.03"
+    },
+    "turn_latency_p50_ms": {
+      "cap": 100.0,
+      "note": "observed 60.2-64.0 (1.56x headroom)"
+    },
+    "turn_latency_p95_ms": {
+      "cap": 100.0,
+      "note": "observed 64.1-66.3"
+    },
+    "late_small_p50_ms": {
+      "cap": 100.0,
+      "note": "observed 60.2-64.7"
+    },
+    "rss_growth_mib_per_100_turns": {
+      "cap": 35.0,
+      "note": "observed 23.1-23.6 (includes startup growth at 100 turns)"
+    },
+    "peak_rss_mib": {
+      "cap": 90.0,
+      "note": "observed 58.2-66.5"
+    },
+    "end_rss_mib": {
+      "cap": 90.0,
+      "note": "observed 58.2-66.5"
+    },
+    "cpu_ms_per_turn": {
+      "cap": 30.0,
+      "note": "observed 10.2-18.3 (includes startup CPU)"
+    },
+    "append_bytes_p50_per_turn": {
+      "cap": 3000,
+      "floor": 1000,
+      "note": "fixture-driven; observed 1671"
+    },
+    "session_mib_per_turn": {
+      "cap": 0.012,
+      "floor": 0.005,
+      "note": "fixture-driven; observed 0.0072"
+    },
+    "append_persist_p95_ms": {
+      "cap": 0.5,
+      "note": "traced Session::persist; observed 0.06-0.07 (needs a traced binary)"
+    },
+    "resume_100_ready_ms": {
+      "cap": 150.0,
+      "note": "observed 52.9-83.9"
+    },
+    "resume_100_rss_mib": {
+      "cap": 90.0,
+      "note": "observed 50.6-61.1"
+    },
+    "stream_turn_latency_ms": {
+      "cap": 600.0,
+      "note": "observed 383-415"
+    },
+    "stream_cpu_ms": {
+      "cap": 250.0,
+      "note": "observed 90-140"
+    }
+  }
+}

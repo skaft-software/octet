@@ -256,8 +256,12 @@ impl Agent {
         let extension_host = self.extensions.clone();
         let initial_context =
             observe_context_tracker(&context, &self.session, &model, &system, &initial_tool_defs)?;
-        let initial_capacity =
-            ContextCapacityCache::seeded(&self.session, initial_tool_revision, &initial_context);
+        let initial_capacity = ContextCapacityCache::seeded_for(
+            &self.session,
+            initial_tool_revision,
+            &initial_context,
+            capacity_inputs_key(&model, &system, &initial_tool_defs),
+        );
         if let Some(delegation) = &self.delegation {
             delegation.prepare_owning_run()?;
         }
@@ -664,13 +668,19 @@ impl Agent {
                 }
 
                 if background_tools.is_empty() && !native.has_pending() {
+                    // Only an actual append can change what the estimate covers;
+                    // invalidating on every turn forced a full re-estimate of the
+                    // whole history per request, so turn cost grew with the session.
+                    let appended_context = !pending_context.is_empty();
                     if let Err(error) = append_context_inputs(&mut pending_context, session, &model).await {
                         break 'run FinishReason::Failed(error);
                     }
                     for event in committed_custom_message_events(session, &mut custom_message_cursor) {
                         notify_observers(&observers, &event); yield event;
                     }
-                    context_capacity.invalidate();
+                    if appended_context {
+                        context_capacity.invalidate();
+                    }
                 }
 
                 if let Some(selection) = if native.connection.is_none() { pending_reasoning.take() } else { None } {
@@ -897,9 +907,16 @@ impl Agent {
                 }
                 let input_tokens = capacity.input_tokens;
                 let request_max_output_tokens = capacity.max_output_tokens;
-                let messages = match session.context() {
-                    Ok(m) => m,
-                    Err(e) => break 'run FinishReason::Failed(e.into()),
+                // A hook-prepared request already carries its projected
+                // context; cloning the session context again for it would
+                // deep-copy the whole history for nothing.
+                let prepared_messages = if capacity.effective_request.is_some() {
+                    None
+                } else {
+                    match session.context() {
+                        Ok(m) => Some(m),
+                        Err(e) => break 'run FinishReason::Failed(e.into()),
+                    }
                 };
                 let active_system = capacity.active_system;
                 let responses =
@@ -929,7 +946,8 @@ impl Agent {
                     Some(request) => request,
                     None => Request {
                     system: if active_system.is_empty() { None } else { Some(active_system.clone()) },
-                    messages,
+                    messages: prepared_messages
+                        .expect("prepared messages exist without hook preparation"),
                     tools: request_tool_defs.clone(),
                     tool_choice: if answer_only {
                         ToolChoice::None

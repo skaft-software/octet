@@ -190,6 +190,13 @@ pub(super) struct CapacityEstimate {
     pub(super) effective_request: Option<Request>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Full capacity rebuilds on this thread, so a run-level test can prove an
+    /// ordinary turn reuses the seeded estimate.
+    pub(super) static CAPACITY_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Total-only context accounting used by the pre-request capacity gate.
 ///
 /// The first value is seeded from the exact context observation. For ordinary
@@ -199,9 +206,30 @@ pub(super) struct CapacityEstimate {
 /// falls back to the exact estimator. Responses appends estimate only the new
 /// route-affine opaque replay items, not the complete unchanged prefix. The detailed category breakdown remains
 /// the on-demand telemetry path in [`context_breakdown`].
+/// Fingerprint of the request inputs that the cached estimate was computed for
+/// and that appended messages cannot change: the model route, the system prompt
+/// and the tool surface actually sent (an answer-only turn sends none).
+/// `tool_generation` still fences schema edits behind an unchanged surface.
+pub(super) fn capacity_inputs_key(model: &Model, system: &str, tools: &[ToolDef]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    model.endpoint.id.hash(&mut hasher);
+    model.spec.id.hash(&mut hasher);
+    system.hash(&mut hasher);
+    tools.len().hash(&mut hasher);
+    for tool in tools {
+        tool.name.hash(&mut hasher);
+        tool.description.hash(&mut hasher);
+        tool.async_execution.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 pub(super) struct ContextCapacityCache {
     pub(super) head: Option<EntryId>,
     pub(super) tool_generation: u64,
+    /// `None` adopts the inputs of the first estimate (seeds that cannot name them).
+    pub(super) inputs_key: Option<u64>,
     pub(super) structural_tokens: u64,
     pub(super) provider_tokens: Option<u64>,
     pub(super) responses_items: Option<usize>,
@@ -219,6 +247,7 @@ impl ContextCapacityCache {
         Self {
             head: session.head(),
             tool_generation,
+            inputs_key: None,
             structural_tokens: context.structural_tokens,
             provider_tokens: context.provider_tokens,
             responses_items: None,
@@ -226,6 +255,18 @@ impl ContextCapacityCache {
             #[cfg(test)]
             full_rebuilds: 0,
         }
+    }
+
+    /// Seeds for a run whose model, system prompt and tool surface are known.
+    pub(super) fn seeded_for(
+        session: &Session,
+        tool_generation: u64,
+        context: &ContextBreakdown,
+        inputs_key: u64,
+    ) -> Self {
+        let mut cache = Self::seeded(session, tool_generation, context);
+        cache.inputs_key = Some(inputs_key);
+        cache
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -346,6 +387,7 @@ impl ContextCapacityCache {
         tools: &[ToolDef],
         tool_generation: u64,
     ) -> RequestContextEstimate {
+        let _span = crate::performance_trace::Span::start("capacity.rebuild", 0);
         let estimate = reconcile_context_estimate(session, model, system, messages, tools);
         self.head = session.head();
         self.tool_generation = tool_generation;
@@ -364,6 +406,7 @@ impl ContextCapacityCache {
         #[cfg(test)]
         {
             self.full_rebuilds = self.full_rebuilds.saturating_add(1);
+            CAPACITY_REBUILDS.with(|count| count.set(count.get() + 1));
         }
         estimate
     }
@@ -376,12 +419,20 @@ impl ContextCapacityCache {
         tools: &[ToolDef],
         tool_generation: u64,
     ) -> Result<RequestContextEstimate, SessionError> {
-        let messages = session.context_ref()?;
+        let messages = {
+            let _span = crate::performance_trace::Span::start("capacity.context_ref", 0);
+            session.context_ref()?
+        };
+        let inputs_key = capacity_inputs_key(model, system, tools);
+        // A seed that could not name its inputs adopts the first estimate's.
+        let key_matches = *self.inputs_key.get_or_insert(inputs_key) == inputs_key;
         let can_advance = self.valid
             && self.tool_generation == tool_generation
+            && key_matches
             && self.advance_for_model(session, model);
         if !can_advance {
             self.rebuild(session, model, system, &messages, tools, tool_generation);
+            self.inputs_key = Some(inputs_key);
         }
         let input_tokens = self
             .provider_tokens
@@ -1202,6 +1253,7 @@ impl CompactionContext<'_> {
         provider_output_ceiling: u64,
         preparation: Option<&ProviderContextPreparation<'_>>,
     ) -> Result<CapacityEstimate, AgentError> {
+        let _span = crate::performance_trace::Span::start("request.capacity", 0);
         if !self
             .model
             .spec
