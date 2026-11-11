@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- A Pi extension that mounts its footer or a widget from `session_start` without awaiting it (as Pi's own examples do) no longer has the mount cancelled when the hook replies: a still-unanswered `ui/open` now survives a successful parent reply (a failed or cancelled parent still retires it).
+
 - A Pi extension provider whose stream reports an OpenAI Responses tool call (Pi's id form is `call_id|item_id`) no longer fails the turn with "tool call id is not a native provider identifier"; the id is forwarded unchanged.
 
 - A Pi extension's provider stream (`pi.registerProvider` with `streamSimple`) no longer fails with "unsupported_feature provider stream options.<name>" when the stream, or the Pi stream helper it calls, reads an option Pi does not set (`headers`, `env`, `fetch`, `samplingParams`, ...). Unset options read as `undefined`, as in Pi.

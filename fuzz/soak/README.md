@@ -65,12 +65,13 @@ Hard failures (exit 1):
 
 Recorded, not failing:
 
-6. **Mount-cancellation signature (known main bug).** On main the native
-   reader cancels the Pi footer mount's `ui/open` when the `session_start`
-   hook replies, so the bridge logs `-32800`/`request cancelled` diagnostics.
-   The driver counts those signatures and reports
-   `mount_cancel_signatures`; it is expected to be nonzero until the
-   surface-lease fix lands and must become zero afterwards.
+6. **Mount-cancellation signature.** The driver counts `-32800`/`request
+   cancelled` diagnostics on stderr and reports `mount_cancel_signatures`. The
+   host used to cancel an unawaited `ui/open` when its parent hook replied; that
+   is fixed and covered by `an_unawaited_ui_open_survives_the_parent_reply`
+   (octet-agent). The headless RPC mode has no UI frontend that answers
+   `ui/open`, so this counter is expected to stay zero and cannot by itself
+   prove the mount survives.
 
 Known on main / unverified here:
 

@@ -1167,6 +1167,14 @@ impl RemoteUiMailbox {
 }
 
 impl RemoteUiChildRequest {
+    /// A still-unanswered `ui/open` mounts a session-scoped surface. Pi's
+    /// `setFooter`/`setWidget` mount synchronously and extensions do not await
+    /// them from `session_start`, so a parent's successful reply must not cancel
+    /// the open (a cancelled or failed parent still does, via `settle_parent`).
+    pub(crate) fn is_surface_open(&self) -> bool {
+        matches!(self.operation, ExtensionRemoteUiOperation::Open { .. })
+    }
+
     pub(crate) fn prepare_response(
         &self,
         result: Option<&serde_json::Value>,
