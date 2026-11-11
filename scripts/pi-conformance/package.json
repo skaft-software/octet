@@ -1,0 +1,10 @@
+{
+  "name": "octet-pi-conformance-harness",
+  "private": true,
+  "type": "module",
+  "description": "Test-only: native Pi 1.5.0 and a VT emulator for the Pi conformance harness",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@xterm/headless": "6.0.0"
+  }
+}

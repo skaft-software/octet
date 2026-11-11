@@ -151,3 +151,33 @@ test('project_trust cannot revoke native trust either, and is not emitted for a 
   assert.deepEqual(silent.read().map(entry => entry.event), ['session_start']);
   await quiet.close();
 });
+
+// Pi awaits project_trust handlers before its UI starts, so a handler may ask the user
+// (pi examples/extensions/project-trust.ts opens a select; pi dist/core/project-trust.js). Octet's
+// startup cannot show a dialog until session_start has replied, and the host gives up on
+// session_start after 30 s; a handler still waiting for an answer must not hold the hook.
+test('a project_trust handler that waits for the user does not hold session_start', async t => {
+  const workspace = protectedWorkspace(t);
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-project-trust-dialog-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const log = join(root, 'events.jsonl'), factory = join(root, 'dialog.mjs');
+  writeFileSync(factory, `import { appendFileSync } from 'node:fs';
+const record = line => appendFileSync(${JSON.stringify(log)}, JSON.stringify(line) + '\\n');
+export default function (pi) {
+  pi.on('project_trust', async (_event, ctx) => {
+    record({ event: 'project_trust' });
+    const choice = await ctx.ui.select('Project trust', ['Trust', 'Do not trust']);
+    record({ event: 'answered', choice });
+    return { trusted: 'undecided' };
+  });
+  pi.on('session_start', () => record({ event: 'session_start' }));
+}
+`);
+  const peer = launch(t, [factory], { cwd: workspace });
+  await peer.init();
+  const started = await Promise.race([peer.start({ project_trusted: true, mode: 'tui' }), new Promise(resolve => setTimeout(() => resolve('held'), 5000).unref())]);
+  assert.notEqual(started, 'held', 'session_start was held by a project_trust handler waiting for the user');
+  const events = () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).event);
+  assert.deepEqual(events(), ['project_trust', 'session_start'], 'the handler ran first, and is still waiting');
+  await peer.close();
+});

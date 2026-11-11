@@ -66,6 +66,11 @@ export const fauxThinking = helper('ai', 'fauxThinking');
 export const fauxToolCall = helper('ai', 'fauxToolCall');
 export const cleanupSessionResources = helper('ai', 'cleanupSessionResources');
 export const registerSessionResourceCleanup = helper('ai', 'registerSessionResourceCleanup');
+// Pi 1.5.0 pi-ai/dist/utils/streaming-json.js, exported by dist/index.js. Providers that stream tool-call
+// arguments (examples/extensions/custom-provider-anthropic/index.ts) import both at load time; the manifest
+// routes them to the installed release (`added: 1.5.0`), so only the binding was missing.
+export const StreamingJsonParser = helperClass('ai', 'StreamingJsonParser');
+export const ToolCallArgumentsStream = helperClass('ai', 'ToolCallArgumentsStream');
 export const InMemoryModelsStore = helperClass('ai', 'InMemoryModelsStore');
 export const InMemoryCredentialStore = helperClass('ai', 'InMemoryCredentialStore');
 export const ModelsError = helperClass('ai', 'ModelsError');

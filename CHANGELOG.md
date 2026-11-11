@@ -41,6 +41,15 @@
 - A Pi extension's provider stream (`pi.registerProvider` with `streamSimple`) no longer fails with "unsupported_feature provider stream options.<name>" when the stream, or the Pi stream helper it calls, reads an option Pi does not set (`headers`, `env`, `fetch`, `samplingParams`, ...). Unset options read as `undefined`, as in Pi.
 
 - A manual `compact` over RPC that the compaction policy refuses (for example on a new, empty session: "no safe history to compact") now answers with an error response and a closing `compaction_end` event. It used to end the RPC server after `compaction_start` without any response.
+- Pi extensions that import `StreamingJsonParser` or `ToolCallArgumentsStream` from `@earendil-works/pi-ai`
+  (Pi 1.5.0 exports both; Pi's `custom-provider-anthropic` imports the second) no longer fail to load
+  with "octet shims lack or refuse ToolCallArgumentsStream". Both bind to the installed Pi release, as the
+  other inert pi-ai helpers do.
+
+- A Pi extension whose `project_trust` handler asks the user a question (Pi's `project-trust.ts`
+  opens a select dialog) no longer holds `session_start` until the host gives up after 30 s, which
+  cascaded into "reload failed" and bridge errors. A handler still waiting after a short grace
+  stops holding the hook and its dialog opens on the live UI, as Pi's does.
 
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
