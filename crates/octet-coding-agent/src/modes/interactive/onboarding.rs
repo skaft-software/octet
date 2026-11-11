@@ -122,7 +122,7 @@ fn pi_setup_hint(pi_agent_dir: Option<&Path>) -> Option<String> {
     let dir = pi_agent_dir?;
     dir.is_dir().then(|| {
         format!(
-            "Pi setup found at {}. Use it with `octet --enable-extension octet-pi-compat`, or preview importing it with `octet migrate pi --dry-run`.",
+            "Pi setup found at {}. To use it, run `octet extension install octet-pi-compat`, then start with `octet --enable-extension octet-pi-compat`. To preview importing it instead, run `octet migrate pi --dry-run`.",
             dir.display()
         )
     })
@@ -822,7 +822,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let hint = pi_setup_hint(Some(&dir)).expect("an existing Pi agent dir is announced");
         assert!(
-            hint.contains("octet --enable-extension octet-pi-compat"),
+            hint.contains("octet extension install octet-pi-compat")
+                && hint.contains("octet --enable-extension octet-pi-compat"),
             "{hint}"
         );
         assert!(hint.contains("octet migrate pi --dry-run"), "{hint}");
