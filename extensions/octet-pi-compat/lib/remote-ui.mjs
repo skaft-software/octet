@@ -8,6 +8,7 @@ import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@e
 import { isKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 import { inRender } from './ui-delivery.mjs';
 
+import { resolveFakeCursors } from './fake-cursor.mjs';
 const CURSOR_MARKER = '\x1b_pi:c\x07';
 const MAX_CAPTURE_READMISSIONS = 8;
 const MAX_FRAME_ROWS = 256;
@@ -61,7 +62,7 @@ function validatedLine(line) {
   // Pi's cursor marker is component metadata. Balanced, validated OSC 8 is
   // stripped to its label; all other controls (including other OSC, images and
   // cursor movement) are refused.
-  line = stripOsc8Links(line.replaceAll(CURSOR_MARKER, ''));
+  line = stripOsc8Links(resolveFakeCursors(line.replaceAll(CURSOR_MARKER, '')));
   const text = line.replace(/\x1b\[([0-9;]*)m/g, (_match, body) => {
     if (body.length > 128 || !/^\d+(;\d+)*$/.test(body)) invalid('ui/frame SGR parameters');
     const raw = body.split(';'), codes = raw.map(Number);
