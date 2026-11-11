@@ -223,6 +223,42 @@ def command(binary):
             "--model", f"custom/bench/{MODEL}"]
 
 
+class Ledger:
+    """Incremental tail reader for the durable session file.
+
+    A turn is complete when its checkpoint record is durable, not when its text
+    is painted: the renderer can show a finished answer while the run is still
+    settling. Submitting the next prompt before that boundary overlaps two runs
+    and loses checkpoints, so every turn waits for its own record here.
+    """
+    def __init__(self, path):
+        self.stream = path.open("rb")
+        self.pending = b""
+        self.checkpoints = 0
+
+    def advance(self):
+        data = self.stream.read()
+        if data:
+            self.pending += data
+            *lines, self.pending = self.pending.split(b"\n")
+            for line in lines:
+                record = json.loads(line)
+                if record["type"] == "checkpoint":
+                    self.checkpoints += 1
+        return self.checkpoints
+
+    def wait_checkpoints(self, expected, timeout):
+        deadline = time.monotonic() + timeout
+        while self.advance() < expected:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"turn did not settle: {self.checkpoints} durable checkpoints, expected {expected}")
+            time.sleep(.001)
+
+    def close(self):
+        self.stream.close()
+
+
 def verify_exchanges(scenario, exchanges, prompts=1):
     if scenario == "startup":
         if exchanges:
@@ -299,6 +335,7 @@ def interactive(binary, server, scenario, prompts, timeout):
     server.reset(scenario)
     with tempfile.TemporaryDirectory(prefix="octet-bench-") as tmp:
         root = Path(tmp); _, workspace, env = setup(root, server.server_port)
+        session = root / "live.jsonl"
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         original = termios.tcgetattr(master)
@@ -309,7 +346,7 @@ def interactive(binary, server, scenario, prompts, timeout):
         with tempfile.TemporaryFile() as errors:
             start = time.monotonic_ns()
             try:
-                child = subprocess.Popen(command(binary), cwd=workspace, env=env, stdin=slave, stdout=slave,
+                child = subprocess.Popen(command(binary) + ["--session", str(session)], cwd=workspace, env=env, stdin=slave, stdout=slave,
                                          stderr=errors, preexec_fn=controlling_tty)
             finally:
                 os.close(slave)
@@ -346,21 +383,37 @@ def interactive(binary, server, scenario, prompts, timeout):
                 await_frame(b"EDITABLE_MARKER")
                 os.write(master, b"\x15")  # clear the proof text
                 samples = []
+                ledger = None
                 for index in range(1, prompts + 1):
                     before = proc_sample(child.pid)
                     started = time.monotonic_ns()
                     os.write(master, f"BENCH_PROMPT_{index:03}\r".encode())
                     await_frame(f"BENCH_REPLY_{index:03}".encode())
-                    # Include completion bookkeeping and require quiet before another submit.
-                    quiet = time.monotonic() + 0.03
-                    while time.monotonic() < quiet:
-                        if select.select([master], [], [], 0.002)[0]:
-                            output.extend(os.read(master, 65536))
-                            quiet = time.monotonic() + 0.03
+                    # A turn is complete when its checkpoint is durable, not after an
+                    # arbitrary quiet period; the next prompt must not overlap it.
+                    deadline = time.monotonic() + timeout
+                    while ledger is None:
+                        if session.exists():
+                            ledger = Ledger(session)
+                        elif time.monotonic() > deadline:
+                            raise TimeoutError("session file was never created")
+                        else:
+                            time.sleep(.001)
+                    while True:
+                        try:
+                            ledger.wait_checkpoints(index, 0.01)
+                            break
+                        except TimeoutError:
+                            if select.select([master], [], [], 0)[0]:
+                                output.extend(os.read(master, 65536))
+                            if time.monotonic() > deadline:
+                                raise
                     after = proc_sample(child.pid)
                     samples.append({"prompt": index, "wall_ms": (time.monotonic_ns() - started) / 1e6,
                                     "cpu_ms": after["cpu_ms"] - before["cpu_ms"],
                                     "rss_bytes": after["rss_bytes"], "private_bytes": after["private_bytes"]})
+                if ledger is not None:
+                    ledger.close()
                 exchanges = server.snapshot()
                 verify_exchanges(scenario, exchanges, prompts)
                 os.write(master, b"\x04")

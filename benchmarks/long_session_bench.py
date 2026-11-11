@@ -23,7 +23,7 @@ import termios
 import threading
 import time
 
-from session_bench import FRAME_END, MODEL, PeakSampler, command, content_text, proc_sample, setup
+from session_bench import FRAME_END, MODEL, Ledger, PeakSampler, command, content_text, proc_sample, setup
 
 SCHEMA = "octet.long-session.v1"
 SCALES = (100, 1000, 5000)
@@ -219,42 +219,6 @@ def traces(raw):
     for phase, elapsed, size in PERF.findall(raw):
         metrics.setdefault(phase.decode(), []).append({"wall_ms": int(elapsed) / 1000, "bytes": int(size)})
     return metrics
-
-
-class Ledger:
-    """Incremental tail reader for the durable session file.
-
-    A turn is complete when its checkpoint record is durable, not when its text
-    is painted: the renderer can show a finished answer while the run is still
-    settling. Submitting the next prompt before that boundary overlaps two runs
-    and loses checkpoints, so every turn waits for its own record here.
-    """
-    def __init__(self, path):
-        self.stream = path.open("rb")
-        self.pending = b""
-        self.checkpoints = 0
-
-    def advance(self):
-        data = self.stream.read()
-        if data:
-            self.pending += data
-            *lines, self.pending = self.pending.split(b"\n")
-            for line in lines:
-                record = json.loads(line)
-                if record["type"] == "checkpoint":
-                    self.checkpoints += 1
-        return self.checkpoints
-
-    def wait_checkpoints(self, expected, timeout):
-        deadline = time.monotonic() + timeout
-        while self.advance() < expected:
-            if time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"turn did not settle: {self.checkpoints} durable checkpoints, expected {expected}")
-            time.sleep(.001)
-
-    def close(self):
-        self.stream.close()
 
 
 class Terminal:
