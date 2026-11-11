@@ -76,7 +76,7 @@ pub(super) fn is_official_bundle(id: &str) -> bool {
     official_bundle_ids().any(|candidate| candidate == id)
 }
 
-pub(super) async fn install_official(
+pub(crate) async fn install_official(
     root: &Path,
     id: &str,
     replace: bool,
@@ -785,7 +785,7 @@ pub(super) fn installed_skill_roots(root: &Path) -> Vec<PathBuf> {
     roots
 }
 
-pub(super) fn ensure_installed(root: &Path, id: &str) -> anyhow::Result<()> {
+pub(crate) fn ensure_installed(root: &Path, id: &str) -> anyhow::Result<()> {
     validate_bundle_id(id)?;
     #[cfg(windows)]
     let _lock = acquire_lock(root)?;

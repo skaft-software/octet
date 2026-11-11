@@ -1302,7 +1302,7 @@ pub fn extension_activation_menu_authoritative(config: &Config) -> anyhow::Resul
     Ok(project.values.enabled_extensions.is_none())
 }
 
-fn persist_extension_enabled_to_path(
+pub(crate) fn persist_extension_enabled_to_path(
     name: &str,
     enabled: bool,
     path: &std::path::Path,

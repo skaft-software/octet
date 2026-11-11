@@ -18,6 +18,7 @@ use globset::{GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod guided;
 mod migration_import;
 mod resource_collection;
 mod source_analysis;
@@ -55,16 +56,26 @@ const MAX_EXTENSION_MANIFEST_DEPTH: usize = 64;
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum MigrationCommand {
-    /// Inventory a Pi setup without executing packages or invoking a model.
+    /// Bring your Pi setup into octet: shows what it found, then asks before
+    /// turning anything on. Pi's own folder is never changed.
     Pi {
-        /// Explicitly state that this invocation must not modify either setup.
-        #[arg(long)]
+        /// Show what would happen and change nothing.
+        #[arg(long, conflicts_with_all = ["yes", "undo"])]
         dry_run: bool,
+        /// Turn the setup on without asking.
+        #[arg(long, short = 'y', conflicts_with = "undo")]
+        yes: bool,
+        /// Turn the Pi adapter off again.
+        #[arg(long)]
+        undo: bool,
+        /// List every package and extension with how it carries over.
+        #[arg(long, conflicts_with_all = ["json", "summary", "yes", "undo"])]
+        details: bool,
         /// Emit the versioned machine-readable report.
-        #[arg(long, conflicts_with = "summary")]
+        #[arg(long, conflicts_with_all = ["summary", "yes", "undo"])]
         json: bool,
         /// Emit only aggregate counts and diagnostics.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["yes", "undo"])]
         summary: bool,
         /// Pi's user agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent).
         #[arg(long, value_name = "DIR")]
@@ -498,10 +509,13 @@ struct MigrationReport {
     diagnostics: Vec<Diagnostic>,
 }
 
-pub fn run(command: MigrationCommand, invocation_cwd: &Path) -> anyhow::Result<()> {
+pub async fn run(command: MigrationCommand, invocation_cwd: &Path) -> anyhow::Result<()> {
     match command {
         MigrationCommand::Pi {
-            dry_run: _,
+            dry_run,
+            yes,
+            undo,
+            details,
             json,
             summary,
             pi_home,
@@ -519,16 +533,28 @@ pub fn run(command: MigrationCommand, invocation_cwd: &Path) -> anyhow::Result<(
                 .map(|path| absolute_path(path, invocation_cwd))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let report = scan_pi(&ScanOptions {
-                pi_home,
+                pi_home: pi_home.clone(),
                 project,
                 npm_roots,
             });
             if json {
                 crate::output::stdout_multiline(serde_json::to_string_pretty(&report)?);
-            } else {
-                print_human_report(&report, summary);
+                return Ok(());
             }
-            Ok(())
+            if details || summary {
+                print_human_report(&report, summary);
+                return Ok(());
+            }
+            let action = if undo {
+                guided::Action::Undo
+            } else if dry_run {
+                guided::Action::Preview
+            } else if yes {
+                guided::Action::Apply
+            } else {
+                guided::Action::Ask
+            };
+            guided::run(action, &report, &pi_home).await
         }
         MigrationCommand::Import { command } => {
             migration_import::run_import(command, invocation_cwd)
@@ -549,7 +575,7 @@ fn default_pi_home() -> anyhow::Result<PathBuf> {
 }
 
 fn print_human_report(report: &MigrationReport, summary_only: bool) {
-    crate::output::stdout_line("Pi migration dry run");
+    crate::output::stdout_line("Pi setup details (read-only)");
     crate::output::stdout_line("");
     crate::output::stdout_line("Sources:");
     for settings in &report.settings {

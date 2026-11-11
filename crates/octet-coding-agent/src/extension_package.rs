@@ -170,7 +170,7 @@ fn print_bundle_installed(
     );
 }
 
-pub(super) fn extensions_root() -> anyhow::Result<PathBuf> {
+pub(crate) fn extensions_root() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir()
         .filter(|path| path.is_absolute())
         .ok_or_else(|| anyhow::anyhow!("cannot manage extensions: user home is unavailable"))?;

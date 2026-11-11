@@ -175,7 +175,7 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if let Some(cli::TopLevelCommand::Migrate { command }) = top_level_command.clone() {
-        return migrate::run(command, &std::env::current_dir()?);
+        return migrate::run(command, &std::env::current_dir()?).await;
     }
     if let Some(cli::TopLevelCommand::Extension { command }) = top_level_command.clone() {
         return extension_package::run(command).await;
