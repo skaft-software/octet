@@ -58,8 +58,9 @@ use self::input_overlays::{input_path_suggestions, input_slash_suggestions};
 #[cfg(test)]
 use self::native_scrollback::{render_shell, render_shell_at, render_shell_update};
 pub(crate) use self::ordinary_surface::{
-    fit_prioritized_footer, footer_width, join_ordinary_metadata, render_ordinary_status,
-    FooterSegment, OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata, OrdinarySurfaceStatus,
+    fit_prioritized_footer, footer_width, join_ordinary_metadata, render_ordinary_note,
+    render_ordinary_status, FooterSegment, OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata,
+    OrdinarySurfaceStatus,
 };
 use self::output_window::bounded_tail_rows;
 #[cfg(test)]
@@ -1205,34 +1206,6 @@ impl PickerState {
         match self.scope {
             PickerScope::Current => &self.rows,
             PickerScope::All => self.all_rows.as_deref().unwrap_or(&[]),
-        }
-    }
-
-    /// Refresh the empty-state surface after a filter, scope, or named-only
-    /// change (gh-556): an empty picker explains which recovery applies
-    /// instead of rendering a bare list, and the composer draft is untouched.
-    /// The lifecycle already carries a transient state (for example the
-    /// all-workspaces load) is left alone.
-    pub(crate) fn refresh_empty_state(&mut self) {
-        if matches!(self.surface.lifecycle, OrdinarySurfaceLifecycle::Loading(_)) {
-            return;
-        }
-        let filter = self.filter.trim().to_string();
-        if session_picker_ordering(self).is_empty() {
-            let message = if !filter.is_empty() {
-                format!(
-                    "No sessions match '{filter}'. Clear the search (Backspace) or press Tab to switch workspace scope."
-                )
-            } else if self.rows.is_empty() {
-                "No sessions in this workspace yet. Start a new session and it will appear here."
-                    .to_string()
-            } else {
-                "No sessions match the current scope. Press Tab to switch workspace scope."
-                    .to_string()
-            };
-            self.surface.lifecycle = OrdinarySurfaceLifecycle::empty(message);
-        } else if matches!(self.surface.lifecycle, OrdinarySurfaceLifecycle::Empty(_)) {
-            self.surface.lifecycle = OrdinarySurfaceLifecycle::Ready;
         }
     }
 }
@@ -8852,8 +8825,6 @@ impl InteractiveShell {
                                     picker.surface.lifecycle =
                                         OrdinarySurfaceLifecycle::loading("all workspaces");
                                     state.pending_panel_requests.push(PanelRequest::LoadAll);
-                                } else {
-                                    picker.refresh_empty_state();
                                 }
                             }
                             KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => {
@@ -8865,7 +8836,6 @@ impl InteractiveShell {
                                 picker.named_only = !picker.named_only;
                                 picker.selected = 0;
                                 picker.scroll = 0;
-                                picker.refresh_empty_state();
                             }
                             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                                 picker.show_path = !picker.show_path;
@@ -8949,13 +8919,11 @@ impl InteractiveShell {
                                 picker.filter.push(character);
                                 picker.selected = 0;
                                 picker.scroll = 0;
-                                picker.refresh_empty_state();
                             }
                             KeyCode::Backspace if key.modifiers.is_empty() => {
                                 picker.filter.pop();
                                 picker.selected = 0;
                                 picker.scroll = 0;
-                                picker.refresh_empty_state();
                             }
                             _ => {}
                         }

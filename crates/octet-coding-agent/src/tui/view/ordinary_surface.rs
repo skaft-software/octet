@@ -208,6 +208,15 @@ pub(crate) fn render_ordinary_status(
     Some(theme.fg(tone.theme_role(), &format!("{marker} {text}")))
 }
 
+/// A muted, sanitized note with the status marker but no state word, for text
+/// that is not a lifecycle state (for example "nothing exists yet").
+pub(crate) fn render_ordinary_note(theme: &OctetTheme, text: &str) -> String {
+    let tone = OrdinaryStatusTone::Muted;
+    let detail = sanitize_ordinary_surface_cell(text, theme.unicode());
+    let marker = theme.glyph(tone.glyph());
+    theme.fg(tone.theme_role(), &format!("{marker} {detail}"))
+}
+
 /// Width-fitting class for a complete action-footer segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FooterPriority {

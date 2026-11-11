@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- The `/resume` empty states are now derived from the picker when it is drawn,
+  so they cannot go stale (transcript-search hits no longer stay hidden behind an
+  old message). Named-only (`^n`) hiding every row says to press `^n`, an
+  all-workspaces no-match no longer suggests switching scope or claims the
+  workspace is empty, a store with no sessions is not labelled "no matches",
+  and the guidance leads the filter echo so narrow terminals keep it. Follow-up
+  to #672.
+
 - A failed Codemode card no longer mounts an empty output block when its output
   is only the failure status, and the repeated status is dropped by comparing it
   with the status actually shown, skipping leading blank lines, so sanitized or
