@@ -89,7 +89,10 @@ while True:
             elif mutation == "unrelated":
                 models[1]["display_name"] = "unselected changed"
             request("mutate", "providers/update", {"provider": provider, "models": models})
-        open(PREFIX + ".mutated", "w").write(mutation)
+        # Publish atomically: the test polls for this path, then reads it.
+        with open(PREFIX + ".mutated.tmp", "w") as ack:
+            ack.write(mutation)
+        os.replace(PREFIX + ".mutated.tmp", PREFIX + ".mutated")
         mutated = True
     if not select.select([sys.stdin], [], [], 0.005)[0]:
         continue
@@ -313,7 +316,14 @@ providers = true
         .await
         .unwrap_or_else(|error| panic!("{label} capacity wait timeout: {error:?}"));
         if capacity == "slots" && matches!(mutation, "selected" | "withdraw" | "unrelated") {
-            std::fs::write(prefix.with_extension("mutate"), mutation).unwrap();
+            // Publish atomically: the fixture polls for this path, then reads
+            // it, so a plain write could hand it an empty mutation.
+            std::fs::write(prefix.with_extension("mutate.tmp"), mutation).unwrap();
+            std::fs::rename(
+                prefix.with_extension("mutate.tmp"),
+                prefix.with_extension("mutate"),
+            )
+            .unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !prefix.with_extension("mutated").exists() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
