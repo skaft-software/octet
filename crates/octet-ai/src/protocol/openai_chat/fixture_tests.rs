@@ -383,6 +383,91 @@ async fn chat_completion_diagnostics_distinguish_missing_usage_from_reported_zer
     }
 }
 
+/// Some Chat gateways (Gemini models through a Copilot-style proxy) attach a
+/// `usage` object to every chunk: zeros on the intermediate ones, the real
+/// totals on the terminal one. The terminal report is authoritative and is
+/// emitted exactly once, before `Finished`.
+fn repeated_usage_stream(trailing_usage_only: bool, done: bool) -> String {
+    let zero = r#""usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}"#;
+    let real = r#""usage":{"prompt_tokens":120,"completion_tokens":7,"total_tokens":127}"#;
+    let mut data = String::new();
+    data.push_str(&format!(
+        "data: {{\"id\":\"c1\",\"choices\":[{{\"delta\":{{\"role\":\"assistant\",\"content\":\"hel\"}}}}],{zero}}}\n\n"
+    ));
+    data.push_str(&format!(
+        "data: {{\"id\":\"c1\",\"choices\":[{{\"delta\":{{\"content\":\"lo\"}}}}],{zero}}}\n\n"
+    ));
+    if trailing_usage_only {
+        data.push_str(&format!(
+            "data: {{\"id\":\"c1\",\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],{zero}}}\n\n"
+        ));
+        data.push_str(&format!(
+            "data: {{\"id\":\"c1\",\"choices\":[],{real}}}\n\n"
+        ));
+    } else {
+        data.push_str(&format!(
+            "data: {{\"id\":\"c1\",\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],{real}}}\n\n"
+        ));
+    }
+    if done {
+        data.push_str("data: [DONE]\n\n");
+    }
+    data
+}
+
+#[tokio::test]
+async fn repeated_chunk_usage_reports_terminal_totals_once() {
+    let model = harness::model(Protocol::OpenAiChat, None);
+    for trailing_usage_only in [false, true] {
+        let data = repeated_usage_stream(trailing_usage_only, true);
+        let events = harness::drive(&model, decode_stream_event, data.as_bytes(), 0)
+            .await
+            .unwrap_or_else(|error| panic!("trailing={trailing_usage_only}: {error:?}"));
+        let usages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Usage(usage) => Some(*usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usages.len(), 1, "trailing={trailing_usage_only}");
+        assert_eq!(usages[0].input_tokens, 120);
+        assert_eq!(usages[0].output_tokens, 7);
+        assert_eq!(usages[0].total_tokens, 127);
+        let usage_at = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::Usage(_)))
+            .unwrap();
+        let finished_at = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::Finished(_)))
+            .unwrap();
+        assert!(usage_at < finished_at);
+        let response = harness::finished(&events);
+        assert_eq!(response.usage.total_tokens, 127);
+        assert!(!response
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == "chat_usage_missing"));
+    }
+}
+
+#[tokio::test]
+async fn repeated_chunk_usage_without_done_is_premature_eof_not_duplicate_usage() {
+    let model = harness::model(Protocol::OpenAiChat, None);
+    let data = repeated_usage_stream(true, false);
+    let error = harness::drive(&model, decode_stream_event, data.as_bytes(), 0)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            crate::error::AiError::StreamProtocol(crate::error::StreamProtocolError::PrematureEof)
+        ),
+        "expected PrematureEof, got {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn openrouter_reasoning_alias_decodes() {
     let model = harness::model(Protocol::OpenAiChat, None);
