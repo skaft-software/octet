@@ -735,30 +735,26 @@ fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<St
 }
 
 fn active_branch_catalog_title(session: &Session) -> Option<String> {
-    let mut oldest: Option<&str> = None;
-    let mut cursor = session.head_ref();
-    while let Some(id) = cursor {
-        let Some(entry) = session.entry(id) else {
-            break;
-        };
-        if let EntryValue::Message(Message::User(user)) = &entry.value {
-            if let Some(display) = entry
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.display_text.as_deref())
-            {
-                oldest = Some(display);
-            } else if let Some(UserPart::Text(text)) = user
-                .content
-                .iter()
-                .find(|part| matches!(part, UserPart::Text(_)))
-            {
-                oldest = Some(text);
-            }
-        }
-        cursor = entry.parent.as_ref();
-    }
-    oldest.map(trim_title)
+    let entry = session.oldest_active_user_text_entry()?;
+    let EntryValue::Message(Message::User(user)) = &entry.value else {
+        return None;
+    };
+    let text = if let Some(display) = entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.display_text.as_deref())
+    {
+        display
+    } else if let Some(UserPart::Text(text)) = user
+        .content
+        .iter()
+        .find(|part| matches!(part, UserPart::Text(_)))
+    {
+        text.as_str()
+    } else {
+        return None;
+    };
+    Some(trim_title(text))
 }
 
 /// Derive a compact title from the oldest user text on the active branch.

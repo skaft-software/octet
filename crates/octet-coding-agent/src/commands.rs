@@ -13,9 +13,10 @@ use octet_agent::{
     analyze_session_cache, analyze_session_cache_stats, CacheStats, EntryValue, Session,
     UsageRecordKind,
 };
-use octet_ai::{
-    AssistantPart, Cost, Message, Model, ModelId, Protocol, ResponsesRuntimeProfile, Usage,
-};
+use octet_ai::{Cost, Model, ModelId, Protocol, ResponsesRuntimeProfile, Usage};
+// The test modules build session fixtures through `use super::*`.
+#[cfg(test)]
+use octet_ai::{AssistantPart, Message};
 
 /// Parsed in-TUI command. Commands are deliberately separate from shell CLI
 /// options: only editor text beginning with `/` enters this grammar.
@@ -1263,26 +1264,7 @@ fn effect_policy(policy: octet_agent::EffectPolicy) -> &'static str {
 }
 
 fn session_activity_counts(session: &octet_agent::Session) -> (usize, usize) {
-    let mut model_turns = 0usize;
-    let mut tool_calls = 0usize;
-    let mut cursor = session.head();
-    while let Some(id) = cursor {
-        let Some(entry) = session.entry(&id) else {
-            break;
-        };
-        if let EntryValue::Message(Message::Assistant(message)) = &entry.value {
-            model_turns = model_turns.saturating_add(1);
-            tool_calls = tool_calls.saturating_add(
-                message
-                    .content
-                    .iter()
-                    .filter(|part| matches!(part, AssistantPart::ToolCall(_)))
-                    .count(),
-            );
-        }
-        cursor = entry.parent.clone();
-    }
-    (model_turns, tool_calls)
+    session.active_branch_activity_counts()
 }
 
 fn token_count(value: u64) -> String {
@@ -1355,7 +1337,7 @@ pub(crate) fn cache_miss_notice(app: &App, before: Option<u64>) -> Option<String
 
 /// Resumed sessions expose prior auxiliary usage without replaying private output.
 pub(crate) fn resumed_cache_warming_notice(app: &App) -> Option<String> {
-    if !app.config.show_cache_miss_notices {
+    if !app.config.show_cache_miss_notices || !app.agent.session().has_cache_warm_usage() {
         return None;
     }
     let count = app
@@ -1385,11 +1367,15 @@ pub(crate) fn cache_warming_text(
     status: &octet_agent::CacheWarmingStatus,
     session: &Session,
 ) -> String {
-    let records = session
-        .usage_records()
-        .iter()
-        .filter(|record| matches!(record.kind, UsageRecordKind::CacheWarm))
-        .collect::<Vec<_>>();
+    let records = if session.has_cache_warm_usage() {
+        session
+            .usage_records()
+            .iter()
+            .filter(|record| matches!(record.kind, UsageRecordKind::CacheWarm))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let picodollars = records
         .iter()
         .filter_map(|record| record.cost)

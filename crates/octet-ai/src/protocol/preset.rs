@@ -8,6 +8,42 @@ use crate::catalog::Model;
 use crate::declarations::{ThinkingFormat, ThinkingSelection};
 use crate::{AiError, ConfigError, ReasoningConfig, Request};
 
+pub(crate) fn apply_request_defaults_in_place(
+    model: &Model,
+    req: &mut Request,
+) -> Result<(), AiError> {
+    model
+        .spec
+        .preset
+        .validate()
+        .map_err(|error| ConfigError::Parse(error.to_string()))?;
+    model
+        .spec
+        .preset
+        .validate_protocol(model.spec.protocol)
+        .map_err(|error| ConfigError::Parse(error.to_string()))?;
+    if req.temperature.is_none() {
+        if let Some(value) = model.spec.preset.sampling_params.get("temperature") {
+            req.temperature = value.as_f64().map(|v| v as f32);
+        }
+    }
+    if req.stop.is_empty() {
+        if let Some(value) = model.spec.preset.sampling_params.get("stop") {
+            req.stop = if let Some(value) = value.as_str() {
+                vec![value.to_owned()]
+            } else {
+                value
+                    .as_array()
+                    .expect("validated stop array")
+                    .iter()
+                    .map(|value| value.as_str().expect("validated stop string").to_owned())
+                    .collect()
+            };
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn request_defaults<'a>(
     model: &Model,
     req: &'a Request,

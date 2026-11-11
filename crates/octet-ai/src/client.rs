@@ -1058,6 +1058,13 @@ impl AiClient {
             // protocol codec they cannot safely perform lossy wire-specific
             // degradation, so validate strictly rather than exposing an
             // unsupported canonical feature to an extension transport.
+            let mut req = req;
+            if let Some(history) = &host_options.history {
+                // The transport consumes its request, so it gets a copy and
+                // the caller keeps the history it lent.
+                let copy = req.messages.clone();
+                history.give_back(std::mem::replace(&mut req.messages, copy));
+            }
             let (mut request, diagnostics) = prepare_host_request(model, req)?;
             let native_model = transport.native_model();
             let custom_http_model = transport.custom_http_model(model);
@@ -1131,6 +1138,7 @@ impl AiClient {
                     on_payload: host_options.on_payload.clone(),
                     on_response: host_options.on_response.clone(),
                     provider_hooks: host_options.provider_hooks.clone(),
+                    history: None,
                     fetch: None,
                 };
                 let continuation = crate::NativeRequestContinuation {
@@ -1187,12 +1195,11 @@ impl AiClient {
         // cross-model reasoning, unsupported historical media, and interrupted
         // tool turns are normalized into valid canonical messages first.
         let mut req = req;
-        req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
+        // A history lent by the caller stays the caller's: it is rewritten
+        // only on a copy, and handed back below once the request is encoded.
+        let history = host_options.history.as_ref();
+        req.messages = crate::transform::transform_request_history(req.messages, model, history);
         let tool_definitions = req.tools.clone();
-        // Reject malformed schemas before a provider request can consume them.
-        // The same immutable snapshot is retained by response assembly below.
-        crate::json_repair::validate_tool_definitions(&tool_definitions)
-            .map_err(AiError::Decode)?;
         // Ambiguous bare JSON must remain visible in the default strict stream.
         // Lossy mode is the explicit opt-in for holding it to EOF and
         // interpreting a provider's text as compatibility tool syntax.
@@ -1204,22 +1211,39 @@ impl AiClient {
             crate::types::OutputModalities::Text => None,
         };
         // 1. Build the HTTP request parts via the protocol codec
-        let mut parts = match model.spec.protocol {
-            Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(model, &req)?,
-            Protocol::AnthropicMessages => crate::protocol::anthropic::build_request(model, &req)?,
-            Protocol::OpenAiResponses => {
-                crate::protocol::openai_responses::build_request(model, &req)?
+        let build_res = (|| {
+            // Reject malformed schemas before a provider request can consume them.
+            // The same immutable snapshot is retained by response assembly below.
+            crate::json_repair::validate_tool_definitions(&tool_definitions)
+                .map_err(AiError::Decode)?;
+            // Preset defaults are applied in place so the codec borrows the
+            // request instead of copying its whole history to carry them.
+            crate::protocol::preset::apply_request_defaults_in_place(model, &mut req)?;
+            match model.spec.protocol {
+                Protocol::OpenAiChat => {
+                    crate::protocol::openai_chat::build_request_with_history(model, &req, history)
+                }
+                Protocol::AnthropicMessages => {
+                    crate::protocol::anthropic::build_request(model, &req)
+                }
+                Protocol::OpenAiResponses => {
+                    crate::protocol::openai_responses::build_request(model, &req)
+                }
+                Protocol::BedrockConverse => crate::protocol::bedrock::build_request(model, &req),
+                Protocol::GoogleGenerativeAi => crate::protocol::google::build_request(model, &req),
+                Protocol::MistralConversations => {
+                    crate::protocol::mistral_conversations::build_request(model, &req)
+                }
+                Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req),
+                Protocol::ExtensionStream => {
+                    Err(crate::error::UnsupportedError::ExtensionStream.into())
+                }
             }
-            Protocol::BedrockConverse => crate::protocol::bedrock::build_request(model, &req)?,
-            Protocol::GoogleGenerativeAi => crate::protocol::google::build_request(model, &req)?,
-            Protocol::MistralConversations => {
-                crate::protocol::mistral_conversations::build_request(model, &req)?
-            }
-            Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req)?,
-            Protocol::ExtensionStream => {
-                return Err(crate::error::UnsupportedError::ExtensionStream.into())
-            }
-        };
+        })();
+        if let Some(history) = history {
+            history.give_back(std::mem::take(&mut req.messages));
+        }
+        let mut parts = build_res?;
 
         if let Some(trace) = &trace {
             trace.stage("encoded", &parts.body);

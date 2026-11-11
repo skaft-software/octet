@@ -53,6 +53,7 @@ pub use json_repair::{validate_json_schema_definition, validate_json_schema_valu
 pub mod media;
 pub mod model_metadata;
 pub mod pricing;
+mod request_history;
 mod request_trace;
 pub mod responses;
 mod responses_ws;
@@ -132,6 +133,8 @@ pub use mime::Mime;
 pub use pricing::{
     responses_cost_of, Cost, Pricing, PricingTier, TokenRate, PICODOLLARS_PER_MICRODOLLAR,
 };
+#[doc(hidden)]
+pub use request_history::{RequestHistory, ReturnedHistory};
 pub use responses::{
     validate_responses_input, ComputerUseEnvironment, ComputerUseTool, ResponsesCompactRequest,
     ResponsesCompactResponse, ResponsesConfigurationUpdate, ResponsesInput, ResponsesItem,

@@ -75,6 +75,26 @@ impl Session {
             head: None,
             next_id: 1,
             context_cache: RefCell::new(None),
+            context_stamps: RefCell::new(Vec::new()),
+            request_history: octet_ai::RequestHistory::new(),
+            context_lent: std::cell::Cell::new(false),
+            context_metrics: RefCell::new(ContextMetricsCache::default()),
+            #[cfg(test)]
+            context_clone_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            context_reconstruct_count: std::cell::Cell::new(0),
+            compaction_summary_cache: RefCell::new(Some(None)),
+            active_skills_cache: RefCell::new(None),
+            branch_stats_cache: RefCell::new(Some(ActiveBranchStatsCache::default())),
+            cache_stats_cache: RefCell::new(None),
+            unsettled_native_steering_cache: std::cell::Cell::new(Some(false)),
+            is_linear_chain: true,
+            has_any_compaction: false,
+            has_any_skill_entries: false,
+            has_unpriced_usage_flag: false,
+            has_priced_usage_flag: false,
+            has_delegated_agent_usage_flag: false,
+            has_cache_warm_usage_flag: false,
             snapcompact_cache: RefCell::new(None),
             #[cfg(test)]
             snapcompact_walk_entries: std::cell::Cell::new(0),
@@ -224,16 +244,19 @@ impl Session {
         reader.seek(std::io::SeekFrom::Start(0))?;
         let mut reader = BufReader::with_capacity(1024 * 1024, reader);
 
+        let estimated_entries = usize::try_from(file_len / 2048)
+            .unwrap_or(0)
+            .min(max_records);
         let mut header: Option<SessionHeader> = None;
-        let mut entries: Vec<Entry> = Vec::new();
-        let mut index: HashMap<EntryId, usize> = HashMap::new();
+        let mut entries: Vec<Entry> = Vec::with_capacity(estimated_entries);
+        let mut index: HashMap<EntryId, usize> = HashMap::with_capacity(estimated_entries);
         let mut head: Option<EntryId> = None;
         let mut max_id: u64 = 0;
         let mut total_cost_microdollars: u64 = 0;
         let mut total_cost_picodollars_remainder: u32 = 0;
-        let mut checkpoints: Vec<Checkpoint> = Vec::new();
-        let mut checkpoint_lines: Vec<usize> = Vec::new();
-        let mut usage_records: Vec<UsageRecord> = Vec::new();
+        let mut checkpoints: Vec<Checkpoint> = Vec::with_capacity(estimated_entries / 2);
+        let mut checkpoint_lines: Vec<usize> = Vec::with_capacity(estimated_entries / 2);
+        let mut usage_records: Vec<UsageRecord> = Vec::with_capacity(estimated_entries / 2);
         let mut usage_uncertainty_records = Vec::new();
         let mut usage_uncertainty_bounds = Vec::new();
         let mut cache_warm_records: Vec<CacheWarmRecord> = Vec::new();
@@ -243,6 +266,17 @@ impl Session {
         let mut invocation_entries = InvocationEntryIndex::default();
         let restored_deferred_runs = DeferredRunStore::new();
         let mut entry_labels: BTreeMap<EntryId, String> = BTreeMap::new();
+        let mut entries_form_single_chain = true;
+        let mut has_any_compaction = false;
+        let mut has_any_skill_entries = false;
+        let mut saw_responses_steering = false;
+        let mut linear_model_turns = 0usize;
+        let mut linear_tool_calls = 0usize;
+        let mut linear_oldest_user_text_entry_index = None;
+        let mut has_unpriced_usage_flag = false;
+        let mut has_priced_usage_flag = false;
+        let mut has_delegated_agent_usage_flag = false;
+        let mut has_cache_warm_usage_flag = false;
 
         // Byte offset of the end of the last accepted record, so a torn tail
         // can be truncated away below. Only one physical line is buffered at a
@@ -299,7 +333,7 @@ impl Session {
                     });
                 }
             };
-            let record: SessionRecord = match serde_json::from_str(line) {
+            let record: SessionRecord = match parse_session_record(line) {
                 Ok(record) => record,
                 // `read_until` returns a non-newline-terminated segment only
                 // at EOF, so malformed bytes are recoverable only here.
@@ -464,7 +498,29 @@ impl Session {
                         restored_invocations.restore_result(scope);
                     }
                     invocation_entries.record(&entry, &index, &settled);
-                    index.insert(entry.id.clone(), entries.len());
+                    let entry_idx = entries.len();
+                    let expected_parent = entries.last().map(|prev| &prev.id);
+                    if entry.parent.as_ref() != expected_parent {
+                        entries_form_single_chain = false;
+                    }
+                    if matches!(&entry.value, EntryValue::Compaction { .. }) {
+                        has_any_compaction = true;
+                    }
+                    if entry_is_skill_related(&entry.value) {
+                        has_any_skill_entries = true;
+                    }
+                    if matches!(&entry.value, EntryValue::ResponsesSteering { .. }) {
+                        saw_responses_steering = true;
+                    }
+                    if linear_oldest_user_text_entry_index.is_none() && entry_has_user_text(&entry)
+                    {
+                        linear_oldest_user_text_entry_index = Some(entry_idx);
+                    }
+                    if let Some(calls) = entry_assistant_tool_calls(&entry) {
+                        linear_model_turns += 1;
+                        linear_tool_calls += calls;
+                    }
+                    index.insert(entry.id.clone(), entry_idx);
                     entries.push(*entry);
                 }
                 SessionRecord::Head {
@@ -642,6 +698,21 @@ impl Session {
                         total_cost_microdollars =
                             total_cost_microdollars.saturating_add(request_cost);
                     }
+                    if record.cost.is_none() && record.cost_microdollars.is_none() {
+                        has_unpriced_usage_flag = true;
+                    }
+                    if record.cost_microdollars.is_some() {
+                        has_priced_usage_flag = true;
+                    }
+                    match &record.kind {
+                        UsageRecordKind::DelegatedAgent { .. } => {
+                            has_delegated_agent_usage_flag = true;
+                        }
+                        UsageRecordKind::CacheWarm => {
+                            has_cache_warm_usage_flag = true;
+                        }
+                        _ => {}
+                    }
                     usage_records.push(record);
                 }
             }
@@ -703,6 +774,22 @@ impl Session {
         ));
         let invocations = Arc::new(restored_invocations.attach_journal(Arc::clone(&writer)));
         let deferred_runs = Arc::new(restored_deferred_runs.attach_journal(Arc::clone(&writer)));
+        let is_linear_chain =
+            entries_form_single_chain && head.as_ref() == entries.last().map(|entry| &entry.id);
+        let branch_stats_cache = is_linear_chain.then(|| ActiveBranchStatsCache {
+            head: head.clone(),
+            model_turns: linear_model_turns,
+            tool_calls: linear_tool_calls,
+            oldest_user_text_entry_index: linear_oldest_user_text_entry_index,
+        });
+        let active_skills_cache = (is_linear_chain && !has_any_skill_entries)
+            .then(|| {
+                head.as_ref()
+                    .map(|head_id| (head_id.clone(), ActiveSkillState::default()))
+            })
+            .flatten();
+        let compaction_summary_cache = (!has_any_compaction).then_some(None);
+        let unsettled_native_steering_cache = (!saw_responses_steering).then_some(false);
         Ok(Self {
             header,
             path,
@@ -716,6 +803,26 @@ impl Session {
             index,
             head,
             context_cache: RefCell::new(None),
+            context_stamps: RefCell::new(Vec::new()),
+            request_history: octet_ai::RequestHistory::new(),
+            context_lent: std::cell::Cell::new(false),
+            context_metrics: RefCell::new(ContextMetricsCache::default()),
+            #[cfg(test)]
+            context_clone_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            context_reconstruct_count: std::cell::Cell::new(0),
+            compaction_summary_cache: RefCell::new(compaction_summary_cache),
+            active_skills_cache: RefCell::new(active_skills_cache),
+            branch_stats_cache: RefCell::new(branch_stats_cache),
+            cache_stats_cache: RefCell::new(None),
+            unsettled_native_steering_cache: std::cell::Cell::new(unsettled_native_steering_cache),
+            is_linear_chain,
+            has_any_compaction,
+            has_any_skill_entries,
+            has_unpriced_usage_flag,
+            has_priced_usage_flag,
+            has_delegated_agent_usage_flag,
+            has_cache_warm_usage_flag,
             snapcompact_cache: RefCell::new(None),
             #[cfg(test)]
             snapcompact_walk_entries: std::cell::Cell::new(0),
@@ -971,4 +1078,182 @@ impl Session {
             "no pending assistant tool batch".into(),
         ))
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastMessageEntryValue<'a> {
+    #[serde(rename = "type")]
+    value_type: &'a str,
+    // `present` refuses `null`: the general decoder reads a message entry as
+    // a map with exactly one variant key, so a second key is an error there
+    // even when its value is null.
+    #[serde(rename = "User", default, deserialize_with = "present")]
+    user: Option<octet_ai::UserMessage>,
+    #[serde(rename = "Assistant", default, deserialize_with = "present")]
+    assistant: Option<octet_ai::AssistantMessage>,
+}
+
+/// A field that, when it appears at all, must hold a `T` (not `null`).
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastMessageEntryRecord<'a> {
+    #[serde(rename = "type", borrow)]
+    record_type: &'a str,
+    id: EntryId,
+    #[serde(default)]
+    parent: Option<EntryId>,
+    #[serde(default)]
+    metadata: Option<EntryMetadata>,
+    #[serde(default)]
+    timestamp_unix_ms: Option<u64>,
+    #[serde(borrow)]
+    value: FastMessageEntryValue<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastHeadRecord<'a> {
+    #[serde(rename = "type")]
+    record_type: &'a str,
+    id: EntryId,
+    #[serde(default)]
+    total_cost_microdollars: u64,
+    #[serde(default)]
+    total_cost_picodollars_remainder: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastAssistantTurnKind<'a> {
+    kind: &'a str,
+    assistant: EntryId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastAssistantTurnUsageInner<'a> {
+    #[serde(borrow)]
+    kind: FastAssistantTurnKind<'a>,
+    usage: Usage,
+    #[serde(default)]
+    stop_reason: Option<StopReason>,
+    #[serde(default)]
+    endpoint: Option<EndpointId>,
+    #[serde(default)]
+    model: Option<ModelId>,
+    #[serde(default)]
+    completed_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    cost: Option<Cost>,
+    #[serde(default)]
+    cost_microdollars: Option<u64>,
+    #[serde(default)]
+    session_cost_microdollars: Option<u64>,
+    #[serde(default)]
+    session_cost_picodollars_remainder: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastUsageRecord<'a> {
+    #[serde(rename = "type", borrow)]
+    record_type: &'a str,
+    #[serde(borrow)]
+    record: FastAssistantTurnUsageInner<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastCheckpointRecord<'a> {
+    #[serde(rename = "type")]
+    record_type: &'a str,
+    prompt: EntryId,
+    head: EntryId,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    run_cost_microdollars: Option<u64>,
+}
+
+/// Decodes one session line exactly as `serde_json::from_str::<SessionRecord>`
+/// does, with direct decoders for the four record shapes that dominate long
+/// sessions. A direct decoder accepts only the canonical layout this crate
+/// writes and refuses anything else (unknown or duplicate fields, escaped
+/// tags, other variants), which then takes the general path, so the result
+/// and any error are always the general decoder's.
+pub(super) fn parse_session_record(line: &str) -> Result<SessionRecord, serde_json::Error> {
+    if line.starts_with(r#"{"type":"entry","#) {
+        if let Ok(fast) = serde_json::from_str::<FastMessageEntryRecord<'_>>(line) {
+            if fast.record_type == "entry" && fast.value.value_type == "message" {
+                let message = match (fast.value.user, fast.value.assistant) {
+                    (Some(user), None) => Some(Message::User(user)),
+                    (None, Some(assistant)) => Some(Message::Assistant(assistant)),
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    return Ok(SessionRecord::Entry(Box::new(Entry {
+                        id: fast.id,
+                        parent: fast.parent,
+                        metadata: fast.metadata,
+                        timestamp_unix_ms: fast.timestamp_unix_ms,
+                        value: EntryValue::Message(message),
+                    })));
+                }
+            }
+        }
+    } else if line.starts_with(r#"{"type":"head","#) {
+        if let Ok(fast) = serde_json::from_str::<FastHeadRecord<'_>>(line) {
+            if fast.record_type == "head" {
+                return Ok(SessionRecord::Head {
+                    id: fast.id,
+                    total_cost_microdollars: fast.total_cost_microdollars,
+                    total_cost_picodollars_remainder: fast.total_cost_picodollars_remainder,
+                });
+            }
+        }
+    } else if line.starts_with(r#"{"type":"usage","#) {
+        if let Ok(fast) = serde_json::from_str::<FastUsageRecord<'_>>(line) {
+            if fast.record_type == "usage" && fast.record.kind.kind == "assistant_turn" {
+                return Ok(SessionRecord::Usage {
+                    record: UsageRecord {
+                        kind: UsageRecordKind::AssistantTurn {
+                            assistant: fast.record.kind.assistant,
+                        },
+                        usage: fast.record.usage,
+                        stop_reason: fast.record.stop_reason,
+                        endpoint: fast.record.endpoint,
+                        model: fast.record.model,
+                        completed_at_unix_ms: fast.record.completed_at_unix_ms,
+                        cost: fast.record.cost,
+                        cost_microdollars: fast.record.cost_microdollars,
+                        session_cost_microdollars: fast.record.session_cost_microdollars,
+                        session_cost_picodollars_remainder: fast
+                            .record
+                            .session_cost_picodollars_remainder,
+                    },
+                });
+            }
+        }
+    } else if line.starts_with(r#"{"type":"checkpoint","#) {
+        if let Ok(fast) = serde_json::from_str::<FastCheckpointRecord<'_>>(line) {
+            if fast.record_type == "checkpoint" {
+                return Ok(SessionRecord::Checkpoint {
+                    prompt: fast.prompt,
+                    head: fast.head,
+                    usage: fast.usage,
+                    run_cost_microdollars: fast.run_cost_microdollars,
+                });
+            }
+        }
+    }
+    serde_json::from_str(line)
 }

@@ -392,3 +392,220 @@ fn native_responses_compaction_is_a_branch_local_replay_base() {
     };
     assert_eq!(output.items()[0].as_json()["id"], "old_raw");
 }
+
+#[test]
+fn a_lent_context_that_never_comes_back_is_rebuilt_from_the_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_path(&dir);
+    let mut session = Session::create(&path).unwrap();
+    let endpoint = EndpointId("openai".into());
+    let model = ModelId("gpt-5.4".into());
+
+    for turn in 0..5 {
+        let prompt_id = session.append(user(&format!("user turn {turn}"))).unwrap();
+        let lent = session.take_context_for_request().unwrap();
+        assert_eq!(lent.len(), turn * 2 + 1);
+        // A request that fails before it is encoded never hands the history
+        // back; the session must not wait for it or keep a stale copy.
+        drop(lent);
+        session.reclaim_lent_context();
+        assert_eq!(session.context_ref().unwrap().len(), turn * 2 + 1);
+
+        session
+            .append_assistant_turn(
+                octet_ai::AssistantMessage {
+                    content: vec![AssistantPart::Text(format!("assistant turn {turn}"))],
+                    model: model.clone(),
+                    protocol: octet_ai::Protocol::OpenAiChat,
+                },
+                endpoint.clone(),
+                model.clone(),
+                Usage {
+                    input_tokens: 100 + turn as u64 * 20,
+                    output_tokens: 10,
+                    total_tokens: 110 + turn as u64 * 20,
+                    ..Usage::default()
+                },
+                Some(Cost {
+                    input: 10,
+                    output: 5,
+                    reasoning: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    total: 15,
+                    total_picodollars_remainder: 0,
+                }),
+                StopReason::EndTurn,
+                None,
+            )
+            .unwrap();
+        session
+            .checkpoint_with_telemetry(
+                prompt_id,
+                Some(Usage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    total_tokens: 110,
+                    ..Usage::default()
+                }),
+                Some(15),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(session.context_clone_count.get(), 0);
+    // The first lend builds the context; after that every lent context was
+    // lost and rebuilt on the next access, once per turn. Appends extended
+    // the rebuilt cache in place.
+    assert_eq!(session.context_reconstruct_count.get(), 6);
+    assert_eq!(session.active_branch_activity_counts(), (5, 0));
+    assert!(session.has_priced_usage());
+    assert!(!session.has_unpriced_usage());
+
+    let reopened = Session::open(&path).unwrap();
+    assert!(reopened.is_linear_chain());
+    assert_eq!(reopened.active_branch_activity_counts(), (5, 0));
+    assert!(reopened.has_priced_usage());
+    assert!(!reopened.has_unpriced_usage());
+    assert_eq!(
+        reopened.latest_active_checkpoint().map(|cp| &cp.head),
+        reopened.head_ref()
+    );
+}
+
+/// Every change that rewrites earlier context gives the rewritten messages
+/// new stamps, so nothing kept for them (request encoding, context metrics)
+/// can be reused; a plain append keeps the stamps of the unchanged prefix.
+#[test]
+fn context_stamps_change_exactly_with_the_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create(temp_path(&dir)).unwrap();
+    let stamps = |session: &Session| {
+        let length = session.context_ref().unwrap().len();
+        let stamps = session.context_stamps.borrow().clone();
+        assert_eq!(stamps.len(), length);
+        stamps
+    };
+    let shares_none =
+        |before: &[u64], after: &[u64]| after.iter().all(|stamp| !before.contains(stamp));
+
+    session.append(user("question")).unwrap();
+    let first = session.append(assistant("answer")).unwrap();
+    let before = stamps(&session);
+    session.append(user("follow-up")).unwrap();
+    let after = stamps(&session);
+    assert_eq!(after[..2], before[..], "an append keeps the prefix");
+    assert!(shares_none(&before, &after[2..]));
+
+    // Two tool results merge into one context message: it is restamped.
+    session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            content: vec![
+                AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
+                    id: ToolCallId("a".into()),
+                    name: "read".into(),
+                    arguments_json: "{}".into(),
+                    argument_error: None,
+                }),
+                AssistantPart::ToolCall(octet_ai::ToolCall {
+                    async_execution: false,
+                    id: ToolCallId("b".into()),
+                    name: "read".into(),
+                    arguments_json: "{}".into(),
+                    argument_error: None,
+                }),
+            ],
+            model: ModelId("m".into()),
+            protocol: Protocol::AnthropicMessages,
+        })))
+        .unwrap();
+    session.append(tool_result("a", "one")).unwrap();
+    let before = stamps(&session);
+    session.append(tool_result("b", "two")).unwrap();
+    let after = stamps(&session);
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after[..before.len() - 1], before[..before.len() - 1]);
+    assert_ne!(after.last(), before.last());
+
+    let check_rebuilt = |session: &mut Session, change: &dyn Fn(&mut Session)| {
+        let before = stamps(session);
+        change(session);
+        let after = stamps(session);
+        assert!(shares_none(&before, &after), "{before:?} -> {after:?}");
+    };
+    check_rebuilt(&mut session, &|session| {
+        session.checkout(first.clone()).unwrap();
+    });
+    check_rebuilt(&mut session, &|session| {
+        session
+            .branch_with_summary(Some(first.clone()), "summary".into(), Default::default())
+            .unwrap();
+    });
+    check_rebuilt(&mut session, &|session| {
+        session
+            .append(EntryValue::SkillActivated {
+                descriptor: skill_descriptor("skill"),
+                instructions_hash: "hash".into(),
+                instructions: "instructions".into(),
+            })
+            .unwrap();
+    });
+    check_rebuilt(&mut session, &|session| {
+        let kept = session.append(user("kept")).unwrap();
+        session.compact("summary", kept).unwrap();
+    });
+    // A lent context that never came back is rebuilt with new stamps too.
+    check_rebuilt(&mut session, &|session| {
+        drop(session.take_context_for_request().unwrap());
+        session.reclaim_lent_context();
+    });
+}
+
+/// Cached skill state carried across appends must match a fresh resolution,
+/// including across a compaction whose skill snapshot is empty: the walk stops
+/// at that compaction, so skills activated before its kept range end there.
+#[test]
+fn cached_skill_state_matches_a_fresh_resolution_across_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_path(&dir);
+    let mut session = Session::create(&path).unwrap();
+    session
+        .append(EntryValue::SkillActivated {
+            descriptor: skill_descriptor("a"),
+            instructions_hash: "a-hash".to_string(),
+            instructions: "a-instructions".to_string(),
+        })
+        .unwrap();
+    session.append(user("before")).unwrap();
+    let head = session.head().unwrap();
+    assert_eq!(
+        session
+            .resolve_active_skills(&head)
+            .unwrap()
+            .active_skills
+            .len(),
+        1
+    );
+    let kept = session.append(user("kept")).unwrap();
+    session
+        .append(EntryValue::Compaction {
+            summary: "summary".to_string(),
+            snapcompact: None,
+            first_kept: kept,
+            active_skills: Vec::new(),
+            skill_resources: Vec::new(),
+            details: Default::default(),
+        })
+        .unwrap();
+    session.append(user("after")).unwrap();
+    let head = session.head().unwrap();
+    let cached = session.resolve_active_skills(&head).unwrap();
+    let reopened = Session::open_read_only(&path).unwrap();
+    let fresh = reopened.resolve_active_skills(&head).unwrap();
+    assert_eq!(
+        serde_json::to_value(&cached).unwrap(),
+        serde_json::to_value(&fresh).unwrap()
+    );
+    assert!(fresh.active_skills.is_empty());
+}

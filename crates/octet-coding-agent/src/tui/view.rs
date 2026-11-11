@@ -2894,6 +2894,9 @@ impl ShellState {
 
     fn refresh_subagent_committed_costs(&mut self, session: &Session) {
         self.subagent_committed_costs.clear();
+        if !session.has_delegated_agent_usage() {
+            return;
+        }
         for record in session.usage_records() {
             if let octet_agent::UsageRecordKind::DelegatedAgent { agent_id, .. } = &record.kind {
                 let cost = self
@@ -5594,9 +5597,7 @@ impl InteractiveShell {
     /// Refresh cumulative accounting without changing assistant-turn metrics.
     pub fn set_session_accounting(&mut self, session: &Session) {
         let session_cost_microdollars = session
-            .usage_records()
-            .iter()
-            .any(|record| record.cost_microdollars.is_some())
+            .has_priced_usage()
             .then(|| session.total_cost_microdollars());
         let mut state = self.state.borrow_mut();
         state.session_cost_microdollars = session_cost_microdollars;
@@ -9318,7 +9319,7 @@ impl InteractiveShell {
             state.follow_up_ready = false;
         }
         state.deferred_session_history = None;
-        state.latest_compaction_summary =
+        state.latest_compaction_summary = if session.has_any_compaction() {
             session
                 .entries()
                 .iter()
@@ -9326,7 +9327,10 @@ impl InteractiveShell {
                 .find_map(|entry| match &entry.value {
                     EntryValue::Compaction { summary, .. } => Some(summary.clone()),
                     _ => None,
-                });
+                })
+        } else {
+            None
+        };
         state.transcript_epoch = state.transcript_epoch.wrapping_add(1);
         state.next_transcript_commit_id = NextTranscriptCommitId::default();
         state.reset_terminal_images();
@@ -9360,11 +9364,7 @@ impl InteractiveShell {
         state.turn_streamed_output_bytes = 0;
         state.turn_output_tokens_before_generation = 0;
         state.usage_uncertain = session.has_uncertain_usage() || session.has_unpriced_usage();
-        state.session_cost_microdollars = session
-            .usage_records()
-            .iter()
-            .any(|record| record.cost_microdollars.is_some())
-            .then_some(session_cost);
+        state.session_cost_microdollars = session.has_priced_usage().then_some(session_cost);
         state.telemetry_model = checkpoint_model;
         // `update_status` computes cache diagnostics once and installs the raw
         // latest-turn rate immediately after hydration.

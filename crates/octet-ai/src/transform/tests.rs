@@ -481,3 +481,144 @@ fn history_pdfs_replay_only_to_models_that_read_them() {
         }
     }
 }
+
+fn fresh_stamps(count: usize) -> Vec<u64> {
+    (0..count).map(|_| RequestHistory::fresh_stamp()).collect()
+}
+
+fn user_text(text: &str) -> Message {
+    Message::User(UserMessage {
+        content: vec![UserPart::Text(text.to_string())],
+    })
+}
+
+fn assistant_text(model: &str, text: &str) -> Message {
+    Message::Assistant(AssistantMessage {
+        model: ModelId(model.to_string()),
+        protocol: Protocol::OpenAiChat,
+        content: vec![AssistantPart::Text(text.to_string())],
+    })
+}
+
+#[test]
+fn a_lent_history_is_checked_for_compatibility_once_per_message() {
+    let target = model("same-model", Protocol::OpenAiChat, true);
+    let history = RequestHistory::new();
+    let mut messages = vec![
+        user_text("turn 1"),
+        assistant_text("same-model", "answer 1"),
+        user_text("turn 2"),
+        assistant_text("same-model", "answer 2"),
+        user_text("turn 3"),
+    ];
+    let mut stamps = fresh_stamps(messages.len());
+
+    history.lend(stamps.clone());
+    take_compatibility_checks();
+    messages = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 5);
+
+    // The next turn: the user message that was pending is now replay history
+    // and is judged as such once; the four before it are not examined again.
+    messages.push(assistant_text("same-model", "answer 3"));
+    messages.push(user_text("turn 4"));
+    stamps.extend(fresh_stamps(2));
+    history.lend(stamps.clone());
+    messages = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 3);
+
+    // Nothing changed: only the still-pending user message is examined.
+    history.lend(stamps.clone());
+    messages = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 1);
+
+    // A changed message is examined again, with everything after it.
+    stamps[2] = RequestHistory::fresh_stamp();
+    history.lend(stamps.clone());
+    messages = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 5);
+
+    // Another target model shares none of the verdicts.
+    let other = model("other-model", Protocol::OpenAiChat, false);
+    history.lend(stamps);
+    let _ = transform_request_history(messages, &other, Some(&history));
+    assert_eq!(take_compatibility_checks(), 7);
+}
+
+#[test]
+fn a_lent_history_that_needs_rewriting_goes_back_to_its_owner_untouched() {
+    let target = model("reader", Protocol::OpenAiChat, true);
+    let history = RequestHistory::new();
+    let messages = vec![
+        user_text("question"),
+        Message::Assistant(AssistantMessage {
+            model: ModelId("writer".to_string()),
+            protocol: Protocol::OpenAiChat,
+            content: vec![
+                AssistantPart::Reasoning(ReasoningPart {
+                    text: Some("the writer's private reasoning".to_string()),
+                    state: None,
+                }),
+                AssistantPart::Text("answer".to_string()),
+            ],
+        }),
+        user_text("follow-up"),
+    ];
+    let canonical = serde_json::to_value(&messages).unwrap();
+    let rewritten = serde_json::to_value(transform_request_messages(&messages, &target)).unwrap();
+    assert_ne!(canonical, rewritten, "the fixture must need rewriting");
+
+    history.lend(fresh_stamps(messages.len()));
+    let sent = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(serde_json::to_value(&sent).unwrap(), rewritten);
+
+    // The request continues on a copy; handing that copy back later must not
+    // replace the owner's history with one target model's replay form.
+    history.give_back(sent);
+    let returned = history.reclaim().expect("the owner gets its history back");
+    assert_eq!(serde_json::to_value(&returned.messages).unwrap(), canonical);
+}
+
+#[test]
+fn an_unanswered_tool_call_is_never_kept_as_compatible_history() {
+    let target = model("same-model", Protocol::OpenAiChat, true);
+    let history = RequestHistory::new();
+    let call = Message::Assistant(AssistantMessage {
+        model: ModelId("same-model".to_string()),
+        protocol: Protocol::OpenAiChat,
+        content: vec![AssistantPart::ToolCall(ToolCall {
+            async_execution: false,
+            id: ToolCallId("call_1".to_string()),
+            name: "tool".to_string(),
+            arguments_json: "{}".to_string(),
+            argument_error: None,
+        })],
+    });
+    let result = Message::User(UserMessage {
+        content: vec![UserPart::ToolResult(ToolResult {
+            tool_call_id: ToolCallId("call_1".to_string()),
+            content: vec![ToolResultPart::Text("done".to_string())],
+            is_error: false,
+            added_tool_names: None,
+        })],
+    });
+    let mut messages = vec![user_text("go"), call, result];
+    let mut stamps = fresh_stamps(messages.len());
+
+    // The call is the final assistant turn and its result is pending input:
+    // the kept verdicts end before the call, where nothing is unanswered.
+    history.lend(stamps.clone());
+    take_compatibility_checks();
+    messages = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 3);
+
+    messages.push(assistant_text("same-model", "finished"));
+    stamps.extend(fresh_stamps(1));
+    history.lend(stamps.clone());
+    messages = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 3);
+
+    history.lend(stamps);
+    let _ = transform_request_history(messages, &target, Some(&history));
+    assert_eq!(take_compatibility_checks(), 0);
+}

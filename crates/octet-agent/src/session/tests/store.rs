@@ -456,3 +456,174 @@ fn corruption_before_the_trailing_record_is_rejected() {
         "{err}"
     );
 }
+
+/// The direct record decoders used on open must agree with the general
+/// `SessionRecord` decoder on every line, including near-miss variants of
+/// real lines that the direct decoders have to refuse.
+#[test]
+fn direct_record_decoding_matches_the_general_decoder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_path(&dir);
+    let endpoint = EndpointId("endpoint".into());
+    let model = ModelId("m".into());
+    let mut session = Session::create(&path).unwrap();
+    let prompt = session
+        .append_with_metadata(
+            user("first \"quoted\" prompt \u{1F600}"),
+            Some(EntryMetadata {
+                display_text: Some("first prompt".into()),
+                ..EntryMetadata::default()
+            }),
+        )
+        .unwrap();
+    session
+        .append_assistant_turn(
+            AssistantMessage {
+                content: vec![
+                    AssistantPart::Reasoning(octet_ai::ReasoningPart {
+                        text: Some("thinking".into()),
+                        state: None,
+                    }),
+                    AssistantPart::Text("calling".into()),
+                    AssistantPart::ToolCall(octet_ai::ToolCall {
+                        async_execution: false,
+                        id: ToolCallId("call-1".into()),
+                        name: "read".into(),
+                        arguments_json: r#"{"path":"a.rs"}"#.into(),
+                        argument_error: None,
+                    }),
+                ],
+                model: model.clone(),
+                protocol: Protocol::OpenAiChat,
+            },
+            endpoint.clone(),
+            model.clone(),
+            Usage {
+                input_tokens: 120,
+                output_tokens: 7,
+                total_tokens: 127,
+                ..Usage::default()
+            },
+            Some(Cost {
+                input: 10,
+                output: 5,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: 0,
+                total: 15,
+                total_picodollars_remainder: 3,
+            }),
+            StopReason::ToolUse,
+            None,
+        )
+        .unwrap();
+    session.append(tool_result("call-1", "contents")).unwrap();
+    let answer = session.append(assistant("done")).unwrap();
+    session
+        .checkpoint_with_telemetry(prompt.clone(), Some(Usage::default()), Some(15))
+        .unwrap();
+    session
+        .append(EntryValue::Config {
+            model: Some("m".into()),
+            reasoning: None,
+            reasoning_mode: None,
+        })
+        .unwrap();
+    session
+        .record_usage_uncertainty(endpoint, model, "assistant_turn")
+        .unwrap();
+    session.compact("summary", answer.clone()).unwrap();
+    session.checkout(prompt).unwrap();
+    session
+        .branch_with_summary(Some(answer), "branch".into(), Default::default())
+        .unwrap();
+    session.checkout_root().unwrap();
+    drop(session);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    for prefix in [
+        r#"{"type":"entry","#,
+        r#"{"type":"head","#,
+        r#"{"type":"usage","#,
+        r#"{"type":"checkpoint","#,
+    ] {
+        assert!(
+            lines.iter().any(|line| line.starts_with(prefix)),
+            "the fixture must exercise {prefix}"
+        );
+    }
+
+    // Near misses keep each direct decoder's prefix, so they reach it.
+    let mutations: &[(&str, &str)] = &[
+        (r#"{"type":"entry","#, r#"{"type":"entry","unknown":1,"#),
+        (r#"{"type":"entry","#, r#"{"type":"entry","id":"999","#),
+        (r#"{"type":"head","#, r#"{"type":"head","unknown":1,"#),
+        (r#"{"type":"head","#, r#"{"type":"head","id":"999","#),
+        (r#"{"type":"usage","#, r#"{"type":"usage","unknown":1,"#),
+        (
+            r#"{"type":"checkpoint","#,
+            r#"{"type":"checkpoint","unknown":1,"#,
+        ),
+        (
+            r#"{"type":"checkpoint","#,
+            r#"{"type":"checkpoint","usage":null,"#,
+        ),
+        (r#""type":"message","#, r#""type":"message","unknown":1,"#),
+        (r#""type":"message","#, r#""type":"message","#),
+        (r#""type":"message","#, r#""type":"config","#),
+        (
+            r#""type":"message","#,
+            r#""type":"message","User":{"content":[]},"#,
+        ),
+        (
+            r#""type":"message","#,
+            r#""type":"message","Assistant":null,"#,
+        ),
+        (
+            r#""kind":"assistant_turn","#,
+            r#""kind":"assistant_turn","unknown":1,"#,
+        ),
+        (
+            r#""kind":"assistant_turn","#,
+            r#""kind":"rejected_responses_turn","#,
+        ),
+        (r#""parent":"#, r#""parent":null,"parent":"#),
+        (r#""timestamp_unix_ms":"#, r#""timestamp_unix_ms":-"#),
+    ];
+    let mut compared = 0;
+    let mut accepted = 0;
+    for line in &lines {
+        let mut variants = vec![line.to_string(), line[..line.len() - 1].to_string()];
+        for (from, to) in mutations {
+            if line.contains(from) {
+                variants.push(line.replacen(from, to, 1));
+            }
+        }
+        for variant in variants {
+            let direct = crate::session::store::parse_session_record(&variant);
+            let general = serde_json::from_str::<SessionRecord>(&variant);
+            match (direct, general) {
+                (Ok(direct), Ok(general)) => {
+                    assert_eq!(
+                        serde_json::to_value(&direct).unwrap(),
+                        serde_json::to_value(&general).unwrap(),
+                        "{variant}"
+                    );
+                    accepted += 1;
+                }
+                (Err(direct), Err(general)) => {
+                    assert_eq!(direct.to_string(), general.to_string(), "{variant}");
+                }
+                (direct, general) => panic!(
+                    "decoders disagree on {variant}: direct {:?}, general {:?}",
+                    direct.is_ok(),
+                    general.is_ok()
+                ),
+            }
+            compared += 1;
+        }
+    }
+    assert!(compared > lines.len() * 2, "{compared}");
+    assert!(accepted >= lines.len(), "{accepted}");
+}

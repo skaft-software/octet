@@ -209,6 +209,10 @@ pub struct HostRequestOptions {
     /// Per-request transport override, used instead of the endpoint's
     /// registered host transport for this attempt only.
     pub fetch: Option<Arc<dyn HostStreamTransport>>,
+    /// The caller's reuse state when this request's messages are a history it
+    /// lent: see [`crate::RequestHistory`]. It never changes what is sent.
+    #[doc(hidden)]
+    pub history: Option<crate::RequestHistory>,
 }
 
 impl std::fmt::Debug for HostRequestOptions {
@@ -222,6 +226,7 @@ impl std::fmt::Debug for HostRequestOptions {
             .field("on_response", &self.on_response.is_some())
             .field("provider_hook_count", &self.provider_hooks.len())
             .field("fetch", &self.fetch.is_some())
+            .field("history", &self.history.is_some())
             .finish()
     }
 }

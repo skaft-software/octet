@@ -5344,4 +5344,212 @@ mod prepared_authority {
         assert_eq!(global.requests.load(Ordering::SeqCst), 0);
         assert_eq!(bound.calls.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn context_metrics_cache_serializes_each_appended_message_at_most_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create(dir.path().join("session.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let tracker = ContextTracker::default();
+
+        for i in 0..10 {
+            session
+                .append(EntryValue::Message(Message::User(UserMessage {
+                    content: vec![UserPart::Text(format!("user message {i}"))],
+                })))
+                .unwrap();
+            session
+                .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                    content: vec![AssistantPart::Text(format!("assistant reply {i}"))],
+                    model: model.spec.id.clone(),
+                    protocol: model.spec.protocol,
+                })))
+                .unwrap();
+        }
+
+        context_estimate::CONTEXT_MESSAGE_SERIALIZATIONS.with(|c| c.set(0));
+        let first_breakdown =
+            observe_context_tracker(&tracker, &session, &model, "system prompt", &[]).unwrap();
+        let first_serializations =
+            context_estimate::CONTEXT_MESSAGE_SERIALIZATIONS.with(|c| c.get());
+        assert_eq!(first_serializations, 20);
+
+        // Repeated breakdown and reconcile on unchanged context must do zero message serializations.
+        let second_breakdown =
+            observe_context_tracker(&tracker, &session, &model, "system prompt", &[]).unwrap();
+        let messages_ref = session.context_ref().unwrap();
+        let est = reconcile_context_estimate(&session, &model, "system prompt", &messages_ref, &[]);
+        drop(messages_ref);
+        let after_repeat = context_estimate::CONTEXT_MESSAGE_SERIALIZATIONS.with(|c| c.get());
+        assert_eq!(after_repeat, 20);
+        assert_eq!(first_breakdown, second_breakdown);
+        assert_eq!(est.structural_tokens, first_breakdown.structural_tokens);
+
+        // Appending 2 new messages must serialize only the 2 new messages.
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("new user message".into())],
+            })))
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("new assistant reply".into())],
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+            })))
+            .unwrap();
+
+        let third_breakdown =
+            observe_context_tracker(&tracker, &session, &model, "system prompt", &[]).unwrap();
+        let after_append = context_estimate::CONTEXT_MESSAGE_SERIALIZATIONS.with(|c| c.get());
+        assert_eq!(after_append, 22);
+
+        // Compare against uncached breakdown over a detached Vec<Message>.
+        let detached = session.context_ref().unwrap().to_vec();
+        let uncached = context_breakdown(&session, &model, "system prompt", &detached, &[]);
+        assert_eq!(third_breakdown, uncached);
+    }
+}
+
+/// An agent whose `gpt-4o-mini` route posts to `server` over plain HTTP.
+fn chat_http_test_agent(directory: &std::path::Path, server: &wiremock::MockServer) -> Agent {
+    let mut agent = active_tool_test_agent(
+        directory,
+        Session::create(directory.join("chat-http.jsonl")).unwrap(),
+        ExtensionHost::new(),
+    );
+    let endpoint = Arc::make_mut(&mut agent.model.endpoint);
+    endpoint.base_url = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+    endpoint.auth = octet_ai::Auth::None;
+    agent
+}
+
+async fn mount_chat_answers(server: &wiremock::MockServer, expected: u64) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5,\"total_tokens\":25}}\n\n",
+                    "data: [DONE]\n\n",
+                )),
+        )
+        .expect(expected)
+        .mount(server)
+        .await;
+}
+
+async fn run_to_completion(agent: &mut Agent, prompt: String) {
+    let mut run = agent.prompt(UserInput::from(prompt)).await.unwrap();
+    while let Some(event) = run.next().await {
+        if let AgentEvent::RunFinished { reason, .. } = event {
+            assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+        }
+    }
+}
+
+fn sent_messages(request: &wiremock::Request) -> Vec<serde_json::Value> {
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    body["messages"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn ordinary_turns_lend_the_session_context_instead_of_copying_it() {
+    let server = wiremock::MockServer::start().await;
+    mount_chat_answers(&server, 4).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = chat_http_test_agent(directory.path(), &server);
+
+    for turn in 0..4 {
+        run_to_completion(&mut agent, format!("question {turn}")).await;
+    }
+
+    // Every request carried the whole conversation so far, and each one
+    // extended the previous one unchanged.
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 4);
+    let mut previous: Vec<serde_json::Value> = Vec::new();
+    for (turn, request) in requests.iter().enumerate() {
+        let messages = sent_messages(request);
+        // system + (user, assistant) per earlier turn + this turn's user.
+        assert_eq!(messages.len(), 2 + 2 * turn, "turn {turn}");
+        assert_eq!(messages[..previous.len()], previous[..], "turn {turn}");
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            format!("question {turn}")
+        );
+        previous = messages;
+        previous.push(serde_json::json!({"role": "assistant", "content": "answer"}));
+    }
+    // The context was built once and lent to each request, never copied.
+    assert_eq!(agent.session.context_reconstruct_count.get(), 1);
+    assert_eq!(agent.session.context_clone_count.get(), 0);
+}
+
+#[tokio::test]
+async fn a_request_that_rewrites_history_leaves_the_session_context_unchanged() {
+    let server = wiremock::MockServer::start().await;
+    mount_chat_answers(&server, 2).await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = chat_http_test_agent(directory.path(), &server);
+    // Another model's reasoning is dropped from what this model is sent, but
+    // it stays in the session's own history.
+    agent
+        .session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("earlier question".into())],
+        })))
+        .unwrap();
+    agent
+        .session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            content: vec![
+                AssistantPart::Reasoning(octet_ai::ReasoningPart {
+                    text: Some("another model's reasoning".into()),
+                    state: None,
+                }),
+                AssistantPart::Text("earlier answer".into()),
+            ],
+            model: octet_ai::ModelId("another-model".into()),
+            protocol: Protocol::OpenAiChat,
+        })))
+        .unwrap();
+    let canonical = serde_json::to_value(&*agent.session.context_ref().unwrap()).unwrap();
+
+    run_to_completion(&mut agent, "question 0".into()).await;
+    run_to_completion(&mut agent, "question 1".into()).await;
+
+    // This model is sent the other model's reasoning as plain text...
+    let requests = server.received_requests().await.unwrap();
+    for request in &requests {
+        let earlier_answer = &sent_messages(request)[2];
+        assert_eq!(earlier_answer["role"], "assistant");
+        assert!(earlier_answer
+            .to_string()
+            .contains("another model's reasoning"));
+    }
+    // ...while the session keeps it as reasoning.
+    assert!(matches!(
+        &agent.session.context_ref().unwrap()[1],
+        Message::Assistant(message) if matches!(message.content[0], AssistantPart::Reasoning(_))
+    ));
+    let context = serde_json::to_value(&*agent.session.context_ref().unwrap()).unwrap();
+    assert_eq!(
+        context.as_array().unwrap()[..2],
+        canonical.as_array().unwrap()[..]
+    );
+    // The context rebuilt from the file, which never went through a request,
+    // agrees with the cache the requests lent and got back.
+    let reopened = Session::open_read_only(directory.path().join("chat-http.jsonl")).unwrap();
+    let rebuilt = serde_json::to_value(&*reopened.context_ref().unwrap()).unwrap();
+    assert_eq!(context, rebuilt);
+    assert_eq!(agent.session.context_reconstruct_count.get(), 1);
+    assert_eq!(agent.session.context_clone_count.get(), 0);
 }

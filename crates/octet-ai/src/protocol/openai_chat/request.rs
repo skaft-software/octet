@@ -15,12 +15,110 @@ use crate::protocol::{
     cache_control, cache_session_id, prompt_cache_key, Base64Bytes, CacheControl, HttpRequestParts,
     WireImageUrl,
 };
+use crate::request_history::{common_stamp_prefix, LentHistory, RequestHistory};
+use crate::transform::message_has_expiring_media;
 use crate::types::{
     AssistantPart, AudioFormat, AudioPayload, AudioVoice, ImageSource, Media, Message,
     OpenAiChatReasoningMode, OutputFormat, OutputModalities, Protocol, ReasoningConfig, Request,
     ToolChoice, ToolResultPart, UserPart,
 };
-use crate::validate::{normalize_request_reasoning, validate_request};
+use crate::validate::{normalize_request_reasoning, validate_lent_request};
+
+/// Everything besides the message itself that decides how one canonical
+/// message is written on the wire.
+///
+/// [`encode_canonical_message`] receives the route only through this value,
+/// so two requests with equal rules encode an equal message identically.
+#[derive(Clone, PartialEq, Eq)]
+struct ChatMessageRules {
+    model_id: crate::types::ModelId,
+    input_modalities: crate::types::ModalitySet,
+    thinking_format: Option<crate::ThinkingFormat>,
+    mistral_profile: bool,
+    deepseek_thinking: bool,
+    cerebras_reasoning: bool,
+    grammar_tools_enabled: bool,
+    /// How a replayed call to each grammar tool is written: its input
+    /// property, or `None` when the tool's grammar does not resolve. Tools
+    /// that are ordinary function tools are absent.
+    grammar_inputs: Vec<(String, Option<String>)>,
+}
+
+/// Serialized wire messages for the leading messages of a lent history.
+///
+/// It never covers a message whose encoding depends on the clock, and it is
+/// reused only for a request with equal [`ChatMessageRules`].
+#[derive(Default)]
+pub(crate) struct ChatPrefixCache {
+    rules: Option<ChatMessageRules>,
+    /// One stamp per canonical message serialized into `bytes`.
+    stamps: Vec<u64>,
+    /// Length of `bytes` after each of those messages.
+    byte_ends: Vec<usize>,
+    /// The wire messages, comma-separated, without the enclosing brackets.
+    bytes: Vec<u8>,
+}
+
+impl ChatPrefixCache {
+    fn truncate(&mut self, messages: usize) {
+        self.stamps.truncate(messages);
+        self.byte_ends.truncate(messages);
+        self.bytes
+            .truncate(self.byte_ends.last().copied().unwrap_or(0));
+        // A compacted or rewound history must not keep the old one's memory.
+        if self.bytes.capacity() > 2 * self.bytes.len() + MESSAGE_BYTES_CHUNK {
+            self.bytes.shrink_to_fit();
+            self.stamps.shrink_to_fit();
+            self.byte_ends.shrink_to_fit();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHAT_MESSAGE_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Canonical messages encoded by this thread since the last call.
+#[cfg(test)]
+pub(crate) fn take_chat_message_encodings() -> usize {
+    CHAT_MESSAGE_ENCODINGS.with(|count| count.replace(0))
+}
+
+const MESSAGE_BYTES_CHUNK: usize = 1024 * 1024;
+
+/// Grows a long-lived message buffer in fixed steps once it is large, so a
+/// long history does not hold up to twice its serialized size.
+fn reserve_message_bytes(buf: &mut Vec<u8>, additional: usize) {
+    let needed = buf.len().saturating_add(additional);
+    if needed <= buf.capacity() {
+        return;
+    }
+    if needed > MESSAGE_BYTES_CHUNK {
+        let target = needed.div_ceil(MESSAGE_BYTES_CHUNK) * MESSAGE_BYTES_CHUNK;
+        buf.reserve_exact(target - buf.len());
+    } else {
+        buf.reserve(additional);
+    }
+}
+
+fn json_error(error: serde_json::Error) -> AiError {
+    AiError::Decode(DecodeError::Json(error.to_string()))
+}
+
+/// Appends one wire message to a comma-separated list of them.
+///
+/// The message goes through `serde_json::Value` first, as the whole request
+/// body does, so its bytes are the ones a single serialization of the complete
+/// body would contain.
+fn append_wire_message(buf: &mut Vec<u8>, msg: &ChatCompletionsMessage) -> Result<(), AiError> {
+    let value = serde_json::to_value(msg).map_err(json_error)?;
+    reserve_message_bytes(buf, 512);
+    if !buf.is_empty() {
+        buf.push(b',');
+    }
+    serde_json::to_writer(buf, &value).map_err(json_error)
+}
 
 // --- Request DTOs ---
 
@@ -296,20 +394,35 @@ pub(super) fn mistral_tool_call_id(id: &str) -> String {
 }
 
 /// Builds the OpenAI Chat Completions HTTP request parts.
+#[cfg(test)]
 pub(crate) fn build_request(
     model: &crate::catalog::Model,
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
+    build_request_with_history(model, req, None)
+}
+
+/// [`build_request`] for a request whose messages may be the history lent
+/// through `history`. The request parts are the same either way; with a lent
+/// history, only the messages that changed since its last request are
+/// validated and serialized again.
+pub(crate) fn build_request_with_history(
+    model: &crate::catalog::Model,
+    req: &Request,
+    history: Option<&RequestHistory>,
+) -> Result<HttpRequestParts, AiError> {
     // 1. Normalize model-gated reasoning, then run validation.
     let defaults = crate::protocol::preset::request_defaults(model, req)?;
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
-    let diagnostics = validate_request(
+    let mut history = history.map(RequestHistory::lock);
+    let diagnostics = validate_lent_request(
         &req,
         &model.spec.capabilities,
         &model.spec.limits,
         Protocol::OpenAiChat,
         &model.spec.id,
         req.compatibility,
+        history.as_mut().and_then(|state| state.lent(&req.messages)),
     )?;
     let mistral_profile = model.endpoint.runtime.openai_chat_profile
         == crate::types::OpenAiChatRuntimeProfile::Mistral;
@@ -347,7 +460,6 @@ pub(crate) fn build_request(
             .preset
             .thinking_format
             .is_some_and(|format| format != crate::ThinkingFormat::OpenAi);
-    let mut messages = Vec::new();
     let cache_marker = if matches!(
         model.spec.cache.cache_control_format,
         Some(crate::types::CacheControlFormat::Anthropic)
@@ -356,343 +468,51 @@ pub(crate) fn build_request(
     } else {
         None
     };
-    if let Some(ref sys) = req.system {
-        // DeepSeek's documented Chat Completions examples use `system`; its
-        // reasoning extension is not OpenAI's developer-message convention.
-        let content = cache_marker.map_or_else(
-            || ChatInstructionContent::Text(sys.clone()),
-            |marker| {
-                ChatInstructionContent::Parts(vec![ChatContentPart::Text {
-                    text: sys.clone(),
-                    cache_control: Some(marker),
-                }])
-            },
-        );
-        if has_reasoning
-            && custom_profile.is_none_or(|profile| profile.supports_developer_role)
-            && !deepseek_thinking
-            && !matches!(reasoning_mode, Some(OpenAiChatReasoningMode::SystemMessage))
-            && !provider_uses_system_message
-        {
-            messages.push(ChatCompletionsMessage::Developer { content });
-        } else {
-            messages.push(ChatCompletionsMessage::System { content });
-        }
-    }
+    let system_is_developer = has_reasoning
+        && custom_profile.is_none_or(|profile| profile.supports_developer_role)
+        && !deepseek_thinking
+        && !matches!(reasoning_mode, Some(OpenAiChatReasoningMode::SystemMessage))
+        && !provider_uses_system_message;
 
     // 3. Map messages
-    for msg in &req.messages {
-        match msg {
-            Message::User(ref user) => {
-                let mut parts = Vec::new();
-                for part in &user.content {
-                    match part {
-                        UserPart::Text(ref text) => {
-                            parts.push(ChatContentPart::Text {
-                                text: text.clone(),
-                                cache_control: None,
-                            });
-                        }
-                        UserPart::Media(Media::Image(ref image)) => {
-                            if !model
-                                .spec
-                                .capabilities
-                                .input_modalities
-                                .contains(crate::types::Modality::Image)
-                            {
-                                continue;
-                            }
-
-                            let url = match &image.source {
-                                ImageSource::Url(url) => WireImageUrl::Url(url.to_string()),
-                                ImageSource::Inline(bytes) => {
-                                    // No documented default MIME; guessing a wire
-                                    // field is forbidden (design §75). Validation
-                                    // has already diagnosed the drop, so skip the
-                                    // part when the media type is absent.
-                                    let Some(media_type) = image.media_type.as_ref() else {
-                                        continue;
-                                    };
-                                    WireImageUrl::Inline {
-                                        media_type: media_type.to_string(),
-                                        data: bytes.clone(),
-                                    }
-                                }
-                                ImageSource::ProviderRef(_) => continue,
-                            };
-
-                            let detail = image.detail.map(|d| match d {
-                                crate::types::ImageDetail::Auto => "auto".to_string(),
-                                crate::types::ImageDetail::Low => "low".to_string(),
-                                crate::types::ImageDetail::High => "high".to_string(),
-                            });
-
-                            parts.push(ChatContentPart::ImageUrl {
-                                image_url: ChatImageUrl { url, detail },
-                            });
-                        }
-                        UserPart::Media(Media::Audio(ref audio)) => {
-                            if !model
-                                .spec
-                                .capabilities
-                                .input_modalities
-                                .contains(crate::types::Modality::Audio)
-                            {
-                                continue;
-                            }
-
-                            let format_str = match audio.format {
-                                AudioFormat::Wav => "wav".to_string(),
-                                AudioFormat::Mp3 => "mp3".to_string(),
-                                _ => continue,
-                            };
-
-                            let data = match &audio.payload {
-                                AudioPayload::Inline(bytes) => Base64Bytes::from(bytes),
-                                AudioPayload::InlineWithProviderRef { data, .. } => {
-                                    Base64Bytes::from(data)
-                                }
-                                AudioPayload::ProviderRef(_) => continue,
-                            };
-
-                            parts.push(ChatContentPart::InputAudio {
-                                input_audio: ChatInputAudio {
-                                    data,
-                                    format: format_str,
-                                },
-                            });
-                        }
-                        UserPart::Media(Media::Document(ref document)) => {
-                            if !model
-                                .spec
-                                .capabilities
-                                .input_modalities
-                                .contains(crate::types::Modality::Pdf)
-                            {
-                                continue;
-                            }
-                            parts.push(ChatContentPart::File {
-                                file: ChatFile {
-                                    filename: document.file_name().to_owned(),
-                                    file_data: WireImageUrl::Inline {
-                                        media_type: document.media_type.to_string(),
-                                        data: document.data.clone(),
-                                    },
-                                },
-                            });
-                        }
-                        UserPart::ToolResult(ref tr) => {
-                            // Preserve canonical order: flush any buffered user
-                            // content before this `role:"tool"` message rather
-                            // than emitting all tool results first (design §11).
-                            if !parts.is_empty() {
-                                messages.push(ChatCompletionsMessage::User {
-                                    content: compact_text_content(std::mem::take(&mut parts)),
-                                });
-                            }
-                            let mut text_parts = Vec::new();
-                            for tr_part in &tr.content {
-                                if let ToolResultPart::Text(ref text) = tr_part {
-                                    text_parts.push(text.clone());
-                                }
-                            }
-                            messages.push(ChatCompletionsMessage::Tool {
-                                tool_call_id: if mistral_profile {
-                                    mistral_tool_call_id(&tr.tool_call_id.0)
-                                } else {
-                                    crate::protocol::normalize_tool_call_id(&tr.tool_call_id.0)
-                                },
-                                content: text_parts.join("\n"),
-                            });
-                        }
+    let grammar_tools_enabled = crate::protocol::grammar_tools_for(model);
+    let rules = ChatMessageRules {
+        model_id: model.spec.id.clone(),
+        input_modalities: model.spec.capabilities.input_modalities,
+        thinking_format: model.spec.preset.thinking_format,
+        mistral_profile,
+        deepseek_thinking,
+        cerebras_reasoning,
+        grammar_tools_enabled,
+        grammar_inputs: if grammar_tools_enabled {
+            req.tools
+                .iter()
+                .filter_map(|tool| {
+                    match crate::protocol::grammar::input_property(&req.tools, &tool.name, true) {
+                        Ok(None) => None,
+                        Ok(Some(property)) => Some((tool.name.clone(), Some(property))),
+                        Err(_) => Some((tool.name.clone(), None)),
                     }
-                }
-                if !parts.is_empty() {
-                    messages.push(ChatCompletionsMessage::User {
-                        content: compact_text_content(parts),
-                    });
-                }
-            }
-            Message::Assistant(ref assistant) => {
-                let mut text_parts = Vec::new();
-                let mut mistral_content_parts = Vec::new();
-                let mut reasoning_parts = Vec::new();
-                let mut tool_calls = Vec::new();
-                let mut audio_ref = None;
-                // A gateway that returned `reasoning_details` for this exact
-                // model needs them back unchanged, with the reasoning text in
-                // `reasoning` rather than mixed into visible content.
-                let reasoning_details = (assistant.protocol == Protocol::OpenAiChat
-                    && assistant.model == model.spec.id)
-                    .then(|| replayable_reasoning_details(assistant, &model.spec.id))
-                    .filter(|details| !details.is_empty());
-                let mut details_reasoning_text = Vec::new();
-
-                for part in &assistant.content {
-                    match part {
-                        AssistantPart::Reasoning(reasoning) if reasoning_details.is_some() => {
-                            if let Some(text) = &reasoning.text {
-                                details_reasoning_text.push(text.clone());
-                            }
-                        }
-                        AssistantPart::Text(ref text) => {
-                            text_parts.push(text.clone());
-                            if mistral_profile {
-                                mistral_content_parts.push(ChatContentPart::Text {
-                                    text: text.clone(),
-                                    cache_control: None,
-                                });
-                            }
-                        }
-                        AssistantPart::Reasoning(reasoning)
-                            if mistral_profile
-                                && assistant.protocol == Protocol::OpenAiChat
-                                && assistant.model == model.spec.id =>
-                        {
-                            if let Some(text) = &reasoning.text {
-                                mistral_content_parts.push(ChatContentPart::Thinking {
-                                    thinking: vec![ChatThinkingPart::Text { text: text.clone() }],
-                                });
-                            }
-                        }
-                        // DeepSeek requires the previous turn's full
-                        // `reasoning_content` when that turn called a tool.
-                        // Sending it for ordinary same-model turns is allowed
-                        // (the API ignores it), and retaining the model check
-                        // prevents cross-model Chat reasoning from leaking in.
-                        AssistantPart::Reasoning(reasoning)
-                            if (deepseek_thinking
-                                || cerebras_reasoning
-                                || model.spec.preset.thinking_format
-                                    == Some(crate::ThinkingFormat::StringThinking))
-                                && assistant.protocol == Protocol::OpenAiChat
-                                && assistant.model == model.spec.id =>
-                        {
-                            if let Some(text) = &reasoning.text {
-                                reasoning_parts.push(text.clone());
-                            }
-                        }
-                        // Most OpenAI-compatible local servers expose reasoning
-                        // as a response-only field. Replaying an assistant turn
-                        // containing only that field serializes as `content:
-                        // null`, which llama.cpp rejects before it can see the
-                        // following tool result. Preserve it as ordinary
-                        // assistant text instead; DeepSeek is handled above
-                        // because it requires the dedicated field.
-                        AssistantPart::Reasoning(reasoning) => {
-                            if let Some(text) = &reasoning.text {
-                                text_parts.push(text.clone());
-                            }
-                        }
-                        AssistantPart::ToolCall(ref tc) => {
-                            let property = crate::protocol::grammar::input_property(
-                                &req.tools,
-                                &tc.name,
-                                crate::protocol::grammar_tools_for(model),
-                            )?;
-                            let custom = property
-                                .as_deref()
-                                .map(|property| {
-                                    crate::protocol::grammar::replay_input(
-                                        &tc.arguments_json,
-                                        property,
-                                    )
-                                    .map(|input| {
-                                        ChatCustomCall {
-                                            name: tc.name.clone(),
-                                            input,
-                                        }
-                                    })
-                                })
-                                .transpose()?;
-                            tool_calls.push(ChatToolCall {
-                                id: if mistral_profile {
-                                    mistral_tool_call_id(&tc.id.0)
-                                } else {
-                                    crate::protocol::normalize_tool_call_id(&tc.id.0)
-                                },
-                                r#type: if custom.is_some() {
-                                    "custom"
-                                } else {
-                                    "function"
-                                }
-                                .to_owned(),
-                                function: custom.is_none().then(|| ChatFunctionCall {
-                                    name: tc.name.clone(),
-                                    arguments: tc.arguments_json.clone(),
-                                }),
-                                custom,
-                            });
-                        }
-                        AssistantPart::Media(Media::Audio(ref audio)) => {
-                            // Design §7: only replay an assistant audio id whose
-                            // reference is still usable (same protocol, not
-                            // expired). An expired/wrong-protocol ref is dropped
-                            // rather than serialized.
-                            let reference = match &audio.payload {
-                                AudioPayload::InlineWithProviderRef { reference, .. } => {
-                                    Some(reference)
-                                }
-                                AudioPayload::ProviderRef(reference) => Some(reference),
-                                AudioPayload::Inline(_) => None,
-                            };
-                            if let Some(reference) = reference {
-                                if crate::validate::provider_ref_is_usable(
-                                    reference,
-                                    Protocol::OpenAiChat,
-                                ) {
-                                    audio_ref = Some(ChatAssistantAudioRef {
-                                        id: reference.id.clone(),
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                let content_str = if mistral_profile {
-                    (!mistral_content_parts.is_empty())
-                        .then_some(ChatInstructionContent::Parts(mistral_content_parts))
-                } else if text_parts.is_empty() {
-                    None
-                } else {
-                    Some(ChatInstructionContent::Text(text_parts.join("\n")))
-                };
-                let reasoning_content = (!mistral_profile && !reasoning_parts.is_empty())
-                    .then(|| reasoning_parts.join("\n"));
-                let tool_calls_opt = if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls)
-                };
-
-                let reasoning = if reasoning_details.is_some() {
-                    (!details_reasoning_text.is_empty()).then(|| details_reasoning_text.join(""))
-                } else {
-                    cerebras_reasoning
-                        .then(|| reasoning_content.clone())
-                        .flatten()
-                };
-                messages.push(ChatCompletionsMessage::Assistant {
-                    content: content_str,
-                    reasoning,
-                    reasoning_content: if cerebras_reasoning {
-                        None
-                    } else {
-                        reasoning_content
-                    },
-                    reasoning_details,
-                    tool_calls: tool_calls_opt,
-                    audio: audio_ref,
-                });
-            }
-        }
-    }
-
-    if let Some(marker) = cache_marker {
-        add_cache_control_to_last_conversation_message(&mut messages, marker);
-    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+    };
+    let mut unshared = ChatPrefixCache::default();
+    let mut tail_bytes: Vec<u8> = Vec::new();
+    let prefix = encode_conversation(
+        &req.messages,
+        &req.tools,
+        &rules,
+        cache_marker,
+        history.as_mut().and_then(|state| state.lent(&req.messages)),
+        &mut unshared,
+        &mut tail_bytes,
+    )
+    // Messages are encoded out of order here; report the error the ordered
+    // walk would have met first.
+    .map_err(|error| first_encoding_error(&req.messages, &req.tools, &rules).unwrap_or(error))?;
 
     // 4. Map tools and tool_choice
     // Registry announcements are local metadata, not a provider load operation.
@@ -918,7 +738,7 @@ pub(crate) fn build_request(
 
     let chat_req = ChatCompletionsRequest {
         model: model.spec.api_name.clone(),
-        messages,
+        messages: Vec::new(),
         tools: tools_opt,
         tool_choice: tool_choice_opt,
         max_tokens,
@@ -952,11 +772,99 @@ pub(crate) fn build_request(
         stream_options,
     };
 
-    let mut body = serde_json::to_value(&chat_req)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let mut body = serde_json::to_value(&chat_req).map_err(json_error)?;
     crate::protocol::preset::chat(model, &req, &mut body)?;
-    let body_bytes =
-        serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+
+    // The system message leads the list; it is small and written every time.
+    let mut system_bytes: Vec<u8> = Vec::new();
+    if let Some(ref sys) = req.system {
+        // DeepSeek's documented Chat Completions examples use `system`; its
+        // reasoning extension is not OpenAI's developer-message convention.
+        let content = cache_marker.map_or_else(
+            || ChatInstructionContent::Text(sys.clone()),
+            |marker| {
+                ChatInstructionContent::Parts(vec![ChatContentPart::Text {
+                    text: sys.clone(),
+                    cache_control: Some(marker),
+                }])
+            },
+        );
+        let message = if system_is_developer {
+            ChatCompletionsMessage::Developer { content }
+        } else {
+            ChatCompletionsMessage::System { content }
+        };
+        append_wire_message(&mut system_bytes, &message)?;
+    }
+
+    // Write the body as one serialization of the complete request would, with
+    // the message list spliced in from its already serialized parts.
+    let map = body
+        .as_object()
+        .expect("ChatCompletionsRequest serializes to a JSON object");
+    debug_assert_eq!(
+        map.get("messages"),
+        Some(&serde_json::Value::Array(Vec::new())),
+        "the message list is written from its serialized parts"
+    );
+    let message_parts = [
+        system_bytes.as_slice(),
+        prefix.bytes.as_slice(),
+        &tail_bytes,
+    ];
+    let mut body_bytes = Vec::with_capacity(
+        message_parts
+            .iter()
+            .map(|part| part.len() + 1)
+            .sum::<usize>()
+            + 4096,
+    );
+    body_bytes.push(b'{');
+    for (index, (key, value)) in map.iter().enumerate() {
+        if index > 0 {
+            body_bytes.push(b',');
+        }
+        serde_json::to_writer(&mut body_bytes, key).map_err(json_error)?;
+        body_bytes.push(b':');
+        if key == "messages" {
+            body_bytes.push(b'[');
+            let mut first = true;
+            for part in message_parts.iter().filter(|part| !part.is_empty()) {
+                if !first {
+                    body_bytes.push(b',');
+                }
+                first = false;
+                body_bytes.extend_from_slice(part);
+            }
+            body_bytes.push(b']');
+        } else {
+            serde_json::to_writer(&mut body_bytes, value).map_err(json_error)?;
+        }
+    }
+    body_bytes.push(b'}');
+    // Debug builds prove the splice against one serialization of the complete
+    // request on every call, so every test that sends a Chat request checks it.
+    #[cfg(debug_assertions)]
+    {
+        #[cfg(test)]
+        let counted = CHAT_MESSAGE_ENCODINGS.with(|count| count.get());
+        let mut reference = body.clone();
+        reference["messages"] = serde_json::to_value(reference_wire_messages(
+            &req,
+            &rules,
+            cache_marker,
+            system_is_developer,
+        )?)
+        .map_err(json_error)?;
+        let reference = serde_json::to_vec(&reference).map_err(json_error)?;
+        #[cfg(test)]
+        CHAT_MESSAGE_ENCODINGS.with(|count| count.set(counted));
+        assert!(
+            body_bytes == reference,
+            "the spliced Chat request body must equal its one-pass serialization"
+        );
+    }
+    drop(history);
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "chat/completions")?;
 
@@ -1040,10 +948,450 @@ fn compact_text_content(parts: Vec<ChatContentPart>) -> ChatInstructionContent {
     }
 }
 
+/// Serializes the conversation into the reusable prefix and `tail_bytes`.
+///
+/// The returned cache holds the wire messages of the leading canonical
+/// messages: the lent history's kept ones plus those appended now, or, for a
+/// request that carries no lent history, all of them in `unshared`.
+/// `tail_bytes` receives what must be written for this request only: messages
+/// whose encoding depends on the clock, and the newest message that can carry
+/// the cache marker together with everything after it.
+fn encode_conversation<'a>(
+    messages: &[Message],
+    tools: &[crate::types::ToolDef],
+    rules: &ChatMessageRules,
+    cache_marker: Option<CacheControl>,
+    lent: Option<LentHistory<'a>>,
+    unshared: &'a mut ChatPrefixCache,
+    tail_bytes: &mut Vec<u8>,
+) -> Result<&'a ChatPrefixCache, AiError> {
+    // The marker moves with the conversation, so the message that carries it
+    // and the ones after it are never part of the reusable prefix.
+    let mut reusable_len = messages.len();
+    let mut marked_tail: Vec<Vec<ChatCompletionsMessage>> = Vec::new();
+    if let Some(marker) = cache_marker {
+        for index in (0..messages.len()).rev() {
+            let mut encoded = Vec::new();
+            encode_canonical_message(&messages[index], rules, tools, &mut encoded)?;
+            let marked = add_cache_control_to_last_conversation_message(&mut encoded, marker);
+            marked_tail.push(encoded);
+            reusable_len = index;
+            if marked {
+                break;
+            }
+        }
+        marked_tail.reverse();
+    }
+
+    let (stamps, cache) = match lent {
+        Some(LentHistory { stamps, caches }) => (Some(stamps), &mut caches.chat),
+        None => (None, unshared),
+    };
+    if cache.rules.as_ref() != Some(rules) {
+        cache.truncate(0);
+        cache.rules = Some(rules.clone());
+    }
+    let unchanged = stamps.map_or(0, |stamps| {
+        common_stamp_prefix(&cache.stamps, stamps).min(reusable_len)
+    });
+    cache.truncate(unchanged);
+
+    let mut encoded = Vec::new();
+    let mut reusable = true;
+    for (index, message) in messages
+        .iter()
+        .enumerate()
+        .take(reusable_len)
+        .skip(unchanged)
+    {
+        encoded.clear();
+        encode_canonical_message(message, rules, tools, &mut encoded)?;
+        // Kept bytes must stay valid for a later request: stop at the first
+        // message that may be written differently once a reference expires.
+        reusable &= stamps.is_none() || !message_has_expiring_media(message);
+        let buf = if reusable {
+            &mut cache.bytes
+        } else {
+            &mut *tail_bytes
+        };
+        for wire in &encoded {
+            append_wire_message(buf, wire)?;
+        }
+        if let (true, Some(stamps)) = (reusable, stamps) {
+            cache.stamps.push(stamps[index]);
+            cache.byte_ends.push(cache.bytes.len());
+        }
+    }
+    for wire in marked_tail.iter().flatten() {
+        append_wire_message(tail_bytes, wire)?;
+    }
+    Ok(cache)
+}
+
+/// The error an in-order encoding of the whole conversation meets first.
+fn first_encoding_error(
+    messages: &[Message],
+    tools: &[crate::types::ToolDef],
+    rules: &ChatMessageRules,
+) -> Option<AiError> {
+    let mut encoded = Vec::new();
+    messages.iter().find_map(|message| {
+        encoded.clear();
+        encode_canonical_message(message, rules, tools, &mut encoded).err()
+    })
+}
+
+/// The complete wire message list, built in one ordered pass.
+#[cfg(debug_assertions)]
+fn reference_wire_messages(
+    req: &Request,
+    rules: &ChatMessageRules,
+    cache_marker: Option<CacheControl>,
+    system_is_developer: bool,
+) -> Result<Vec<ChatCompletionsMessage>, AiError> {
+    let mut messages = Vec::new();
+    if let Some(ref sys) = req.system {
+        let content = cache_marker.map_or_else(
+            || ChatInstructionContent::Text(sys.clone()),
+            |marker| {
+                ChatInstructionContent::Parts(vec![ChatContentPart::Text {
+                    text: sys.clone(),
+                    cache_control: Some(marker),
+                }])
+            },
+        );
+        messages.push(if system_is_developer {
+            ChatCompletionsMessage::Developer { content }
+        } else {
+            ChatCompletionsMessage::System { content }
+        });
+    }
+    for message in &req.messages {
+        encode_canonical_message(message, rules, &req.tools, &mut messages)?;
+    }
+    if let Some(marker) = cache_marker {
+        add_cache_control_to_last_conversation_message(&mut messages, marker);
+    }
+    Ok(messages)
+}
+
+/// Appends the wire messages for one canonical message.
+fn encode_canonical_message(
+    msg: &Message,
+    rules: &ChatMessageRules,
+    req_tools: &[crate::types::ToolDef],
+    messages: &mut Vec<ChatCompletionsMessage>,
+) -> Result<(), AiError> {
+    let ChatMessageRules {
+        model_id,
+        input_modalities,
+        thinking_format,
+        mistral_profile,
+        deepseek_thinking,
+        cerebras_reasoning,
+        grammar_tools_enabled,
+        grammar_inputs: _,
+    } = rules;
+    let (mistral_profile, deepseek_thinking, cerebras_reasoning, grammar_tools_enabled) = (
+        *mistral_profile,
+        *deepseek_thinking,
+        *cerebras_reasoning,
+        *grammar_tools_enabled,
+    );
+    #[cfg(test)]
+    CHAT_MESSAGE_ENCODINGS.with(|c| c.set(c.get() + 1));
+    match msg {
+        Message::User(ref user) => {
+            let mut parts = Vec::new();
+            for part in &user.content {
+                match part {
+                    UserPart::Text(ref text) => {
+                        parts.push(ChatContentPart::Text {
+                            text: text.clone(),
+                            cache_control: None,
+                        });
+                    }
+                    UserPart::Media(Media::Image(ref image)) => {
+                        if !input_modalities.contains(crate::types::Modality::Image) {
+                            continue;
+                        }
+
+                        let url = match &image.source {
+                            ImageSource::Url(url) => WireImageUrl::Url(url.to_string()),
+                            ImageSource::Inline(bytes) => {
+                                // No documented default MIME; guessing a wire
+                                // field is forbidden (design §75). Validation
+                                // has already diagnosed the drop, so skip the
+                                // part when the media type is absent.
+                                let Some(media_type) = image.media_type.as_ref() else {
+                                    continue;
+                                };
+                                WireImageUrl::Inline {
+                                    media_type: media_type.to_string(),
+                                    data: bytes.clone(),
+                                }
+                            }
+                            ImageSource::ProviderRef(_) => continue,
+                        };
+
+                        let detail = image.detail.map(|d| match d {
+                            crate::types::ImageDetail::Auto => "auto".to_string(),
+                            crate::types::ImageDetail::Low => "low".to_string(),
+                            crate::types::ImageDetail::High => "high".to_string(),
+                        });
+
+                        parts.push(ChatContentPart::ImageUrl {
+                            image_url: ChatImageUrl { url, detail },
+                        });
+                    }
+                    UserPart::Media(Media::Audio(ref audio)) => {
+                        if !input_modalities.contains(crate::types::Modality::Audio) {
+                            continue;
+                        }
+
+                        let format_str = match audio.format {
+                            AudioFormat::Wav => "wav".to_string(),
+                            AudioFormat::Mp3 => "mp3".to_string(),
+                            _ => continue,
+                        };
+
+                        let data = match &audio.payload {
+                            AudioPayload::Inline(bytes) => Base64Bytes::from(bytes),
+                            AudioPayload::InlineWithProviderRef { data, .. } => {
+                                Base64Bytes::from(data)
+                            }
+                            AudioPayload::ProviderRef(_) => continue,
+                        };
+
+                        parts.push(ChatContentPart::InputAudio {
+                            input_audio: ChatInputAudio {
+                                data,
+                                format: format_str,
+                            },
+                        });
+                    }
+                    UserPart::Media(Media::Document(ref document)) => {
+                        if !input_modalities.contains(crate::types::Modality::Pdf) {
+                            continue;
+                        }
+                        parts.push(ChatContentPart::File {
+                            file: ChatFile {
+                                filename: document.file_name().to_owned(),
+                                file_data: WireImageUrl::Inline {
+                                    media_type: document.media_type.to_string(),
+                                    data: document.data.clone(),
+                                },
+                            },
+                        });
+                    }
+                    UserPart::ToolResult(ref tr) => {
+                        // Preserve canonical order: flush any buffered user
+                        // content before this `role:"tool"` message rather
+                        // than emitting all tool results first (design §11).
+                        if !parts.is_empty() {
+                            messages.push(ChatCompletionsMessage::User {
+                                content: compact_text_content(std::mem::take(&mut parts)),
+                            });
+                        }
+                        let mut text_parts = Vec::new();
+                        for tr_part in &tr.content {
+                            if let ToolResultPart::Text(ref text) = tr_part {
+                                text_parts.push(text.clone());
+                            }
+                        }
+                        messages.push(ChatCompletionsMessage::Tool {
+                            tool_call_id: if mistral_profile {
+                                mistral_tool_call_id(&tr.tool_call_id.0)
+                            } else {
+                                crate::protocol::normalize_tool_call_id(&tr.tool_call_id.0)
+                            },
+                            content: text_parts.join("\n"),
+                        });
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                messages.push(ChatCompletionsMessage::User {
+                    content: compact_text_content(parts),
+                });
+            }
+        }
+        Message::Assistant(ref assistant) => {
+            let mut text_parts = Vec::new();
+            let mut mistral_content_parts = Vec::new();
+            let mut reasoning_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+            let mut audio_ref = None;
+            // A gateway that returned `reasoning_details` for this exact
+            // model needs them back unchanged, with the reasoning text in
+            // `reasoning` rather than mixed into visible content.
+            let reasoning_details = (assistant.protocol == Protocol::OpenAiChat
+                && &assistant.model == model_id)
+                .then(|| replayable_reasoning_details(assistant, model_id))
+                .filter(|details| !details.is_empty());
+            let mut details_reasoning_text = Vec::new();
+
+            for part in &assistant.content {
+                match part {
+                    AssistantPart::Reasoning(reasoning) if reasoning_details.is_some() => {
+                        if let Some(text) = &reasoning.text {
+                            details_reasoning_text.push(text.clone());
+                        }
+                    }
+                    AssistantPart::Text(ref text) => {
+                        text_parts.push(text.clone());
+                        if mistral_profile {
+                            mistral_content_parts.push(ChatContentPart::Text {
+                                text: text.clone(),
+                                cache_control: None,
+                            });
+                        }
+                    }
+                    AssistantPart::Reasoning(reasoning)
+                        if mistral_profile
+                            && assistant.protocol == Protocol::OpenAiChat
+                            && &assistant.model == model_id =>
+                    {
+                        if let Some(text) = &reasoning.text {
+                            mistral_content_parts.push(ChatContentPart::Thinking {
+                                thinking: vec![ChatThinkingPart::Text { text: text.clone() }],
+                            });
+                        }
+                    }
+                    // DeepSeek requires the previous turn's full
+                    // `reasoning_content` when that turn called a tool.
+                    // Sending it for ordinary same-model turns is allowed
+                    // (the API ignores it), and retaining the model check
+                    // prevents cross-model Chat reasoning from leaking in.
+                    AssistantPart::Reasoning(reasoning)
+                        if (deepseek_thinking
+                            || cerebras_reasoning
+                            || *thinking_format == Some(crate::ThinkingFormat::StringThinking))
+                            && assistant.protocol == Protocol::OpenAiChat
+                            && &assistant.model == model_id =>
+                    {
+                        if let Some(text) = &reasoning.text {
+                            reasoning_parts.push(text.clone());
+                        }
+                    }
+                    // Most OpenAI-compatible local servers expose reasoning
+                    // as a response-only field. Replaying an assistant turn
+                    // containing only that field serializes as `content:
+                    // null`, which llama.cpp rejects before it can see the
+                    // following tool result. Preserve it as ordinary
+                    // assistant text instead; DeepSeek is handled above
+                    // because it requires the dedicated field.
+                    AssistantPart::Reasoning(reasoning) => {
+                        if let Some(text) = &reasoning.text {
+                            text_parts.push(text.clone());
+                        }
+                    }
+                    AssistantPart::ToolCall(ref tc) => {
+                        let property = crate::protocol::grammar::input_property(
+                            req_tools,
+                            &tc.name,
+                            grammar_tools_enabled,
+                        )?;
+                        let custom = property
+                            .as_deref()
+                            .map(|property| {
+                                crate::protocol::grammar::replay_input(&tc.arguments_json, property)
+                                    .map(|input| ChatCustomCall {
+                                        name: tc.name.clone(),
+                                        input,
+                                    })
+                            })
+                            .transpose()?;
+                        tool_calls.push(ChatToolCall {
+                            id: if mistral_profile {
+                                mistral_tool_call_id(&tc.id.0)
+                            } else {
+                                crate::protocol::normalize_tool_call_id(&tc.id.0)
+                            },
+                            r#type: if custom.is_some() {
+                                "custom"
+                            } else {
+                                "function"
+                            }
+                            .to_owned(),
+                            function: custom.is_none().then(|| ChatFunctionCall {
+                                name: tc.name.clone(),
+                                arguments: tc.arguments_json.clone(),
+                            }),
+                            custom,
+                        });
+                    }
+                    AssistantPart::Media(Media::Audio(ref audio)) => {
+                        // Design §7: only replay an assistant audio id whose
+                        // reference is still usable (same protocol, not
+                        // expired). An expired/wrong-protocol ref is dropped
+                        // rather than serialized.
+                        let reference = match &audio.payload {
+                            AudioPayload::InlineWithProviderRef { reference, .. } => {
+                                Some(reference)
+                            }
+                            AudioPayload::ProviderRef(reference) => Some(reference),
+                            AudioPayload::Inline(_) => None,
+                        };
+                        if let Some(reference) = reference {
+                            if crate::validate::provider_ref_is_usable(
+                                reference,
+                                Protocol::OpenAiChat,
+                            ) {
+                                audio_ref = Some(ChatAssistantAudioRef {
+                                    id: reference.id.clone(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let content_str = if mistral_profile {
+                (!mistral_content_parts.is_empty())
+                    .then_some(ChatInstructionContent::Parts(mistral_content_parts))
+            } else if text_parts.is_empty() {
+                None
+            } else {
+                Some(ChatInstructionContent::Text(text_parts.join("\n")))
+            };
+            let reasoning_content = (!mistral_profile && !reasoning_parts.is_empty())
+                .then(|| reasoning_parts.join("\n"));
+            let tool_calls_opt = if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            };
+
+            let reasoning = if reasoning_details.is_some() {
+                (!details_reasoning_text.is_empty()).then(|| details_reasoning_text.join(""))
+            } else {
+                cerebras_reasoning
+                    .then(|| reasoning_content.clone())
+                    .flatten()
+            };
+            messages.push(ChatCompletionsMessage::Assistant {
+                content: content_str,
+                reasoning,
+                reasoning_content: if cerebras_reasoning {
+                    None
+                } else {
+                    reasoning_content
+                },
+                reasoning_details,
+                tool_calls: tool_calls_opt,
+                audio: audio_ref,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn add_cache_control_to_last_conversation_message(
     messages: &mut [ChatCompletionsMessage],
     marker: CacheControl,
-) {
+) -> bool {
     for message in messages.iter_mut().rev() {
         let applied = match message {
             ChatCompletionsMessage::User { content } => {
@@ -1057,9 +1405,10 @@ fn add_cache_control_to_last_conversation_message(
             | ChatCompletionsMessage::Tool { .. } => None,
         };
         if applied.is_some() {
-            return;
+            return true;
         }
     }
+    false
 }
 
 fn add_cache_control_to_instruction(

@@ -197,7 +197,7 @@ mod normalize_tool_call_id_tests;
 /// `[A-Za-z0-9_-]{1,64}` shape every provider accepts (design §11, §7).
 const MAX_TOOL_CALL_ID_LEN: usize = 64;
 
-fn tool_call_id_is_wire_valid(id: &str) -> bool {
+pub(crate) fn tool_call_id_is_wire_valid(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_TOOL_CALL_ID_LEN
         && id

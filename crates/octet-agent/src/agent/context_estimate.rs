@@ -681,6 +681,9 @@ pub(super) fn provider_context_estimate(session: &Session, model: &Model) -> Opt
                         }
                         return Some(tokens.saturating_add(trailing));
                     }
+                    if usage_records.len() == 0 && usage_by_assistant.is_empty() {
+                        break;
+                    }
                 }
             }
             _ => {}
@@ -688,6 +691,186 @@ pub(super) fn provider_context_estimate(session: &Session, model: &Model) -> Opt
         cursor = entry.parent.as_ref();
     }
     None
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static CONTEXT_MESSAGE_SERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn compute_message_metrics(
+    message: &Message,
+    summary: Option<&str>,
+    prev: Option<&crate::session::CachedMessageMetrics>,
+) -> crate::session::CachedMessageMetrics {
+    #[cfg(test)]
+    CONTEXT_MESSAGE_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    let mut bytes_writer = CountingWriter::default();
+    let serialized_bytes = serde_json::to_writer(&mut bytes_writer, message)
+        .ok()
+        .map(|()| bytes_writer.0);
+    let (inline_payload_bytes, semantic_media_tokens, non_media_tokens) = match serialized_bytes {
+        Some(bytes) => {
+            let (inline_bytes, media_toks) =
+                request_media_adjustment(std::slice::from_ref(message));
+            let non_media = bytes.saturating_sub(inline_bytes).div_ceil(4);
+            (inline_bytes, media_toks, non_media)
+        }
+        None => (0, 0, 0),
+    };
+    let is_tool = match message {
+        Message::User(user) => user
+            .content
+            .iter()
+            .any(|part| matches!(part, UserPart::ToolResult(_))),
+        Message::Assistant(assistant) => assistant
+            .content
+            .iter()
+            .any(|part| matches!(part, AssistantPart::ToolCall(_))),
+    };
+    let is_summary = summary.is_some_and(|summary| {
+        matches!(
+            message,
+            Message::User(user)
+                if user.content.len() == 1
+                    && matches!(&user.content[0], UserPart::Text(text) if text == summary)
+        )
+    });
+    let (prev_ser, prev_inline, prev_media, prev_conv, prev_tool, prev_sum) = match prev {
+        Some(p) => (
+            p.prefix_serialized_bytes,
+            p.prefix_inline_payload_bytes,
+            p.prefix_semantic_media_tokens,
+            p.prefix_conversation_tokens,
+            p.prefix_tool_result_tokens,
+            p.prefix_compaction_summary_tokens,
+        ),
+        None => (0, 0, 0, 0, 0, 0),
+    };
+    let (add_conv, add_tool, add_sum) = if serialized_bytes.is_none() {
+        (0, 0, 0)
+    } else if is_summary {
+        (0, 0, non_media_tokens)
+    } else if is_tool {
+        (0, non_media_tokens, 0)
+    } else {
+        (non_media_tokens, 0, 0)
+    };
+    crate::session::CachedMessageMetrics {
+        serialized_bytes,
+        inline_payload_bytes,
+        semantic_media_tokens,
+        non_media_tokens,
+        is_tool,
+        is_summary,
+        prefix_serialized_bytes: prev_ser.saturating_add(serialized_bytes.unwrap_or(0)),
+        prefix_inline_payload_bytes: prev_inline.saturating_add(inline_payload_bytes),
+        prefix_semantic_media_tokens: prev_media.saturating_add(semantic_media_tokens),
+        prefix_conversation_tokens: prev_conv.saturating_add(add_conv),
+        prefix_tool_result_tokens: prev_tool.saturating_add(add_tool),
+        prefix_compaction_summary_tokens: prev_sum.saturating_add(add_sum),
+    }
+}
+
+fn messages_match_session_context(session: &Session, messages: &[Message]) -> bool {
+    let borrow = session.context_cache.borrow();
+    borrow.as_deref().is_some_and(|cached| {
+        cached.len() == messages.len() && std::ptr::eq(cached.as_ptr(), messages.as_ptr())
+    })
+}
+
+fn sync_session_context_metrics<'a>(
+    session: &'a Session,
+    messages: &[Message],
+    summary: &Option<String>,
+) -> std::cell::Ref<'a, crate::session::ContextMetricsCache> {
+    {
+        let stamps = session.context_stamps.borrow();
+        debug_assert_eq!(stamps.len(), messages.len());
+        let mut cache = session.context_metrics.borrow_mut();
+        // Metrics are reused for the leading messages whose stamps match: a
+        // message keeps its stamp only while its content is unchanged.
+        let valid_prefix = if &cache.summary == summary {
+            cache
+                .stamps
+                .iter()
+                .zip(stamps.iter())
+                .take_while(|(kept, current)| kept == current)
+                .count()
+                .min(cache.messages.len())
+        } else {
+            cache.summary = summary.clone();
+            0
+        };
+        cache.stamps.truncate(valid_prefix);
+        cache.stamps.extend_from_slice(&stamps[valid_prefix..]);
+        if valid_prefix < cache.messages.len() || valid_prefix < messages.len() {
+            cache.messages.truncate(valid_prefix);
+            if valid_prefix == 0 {
+                cache.any_serialization_failed = false;
+            } else if cache.any_serialization_failed {
+                cache.any_serialization_failed = cache
+                    .messages
+                    .iter()
+                    .any(|item| item.serialized_bytes.is_none());
+            }
+            if cache.messages.capacity() < messages.len() {
+                let current_len = cache.messages.len();
+                let target = if messages.len() > 256 {
+                    messages.len().next_power_of_two()
+                } else {
+                    messages.len()
+                };
+                cache.messages.reserve(target - current_len);
+            }
+            for message in &messages[valid_prefix..] {
+                let metrics =
+                    compute_message_metrics(message, summary.as_deref(), cache.messages.last());
+                if metrics.serialized_bytes.is_none() {
+                    cache.any_serialization_failed = true;
+                }
+                cache.messages.push(metrics);
+            }
+        }
+    }
+    session.context_metrics.borrow()
+}
+
+fn estimate_request_tokens_from_cached_metrics(
+    system: &str,
+    messages: &[Message],
+    cache: &crate::session::ContextMetricsCache,
+    tools: &[ToolDef],
+) -> u64 {
+    if cache.any_serialization_failed {
+        return estimate_request_tokens(system, messages, tools);
+    }
+    let mut system_bytes = CountingWriter::default();
+    let mut tool_bytes = CountingWriter::default();
+    if serde_json::to_writer(&mut system_bytes, system).is_err()
+        || serde_json::to_writer(&mut tool_bytes, tools).is_err()
+    {
+        return 64;
+    }
+    let (total_message_bytes, inline_payload_bytes, semantic_tokens) = match cache.messages.last() {
+        Some(last) => (
+            last.prefix_serialized_bytes,
+            last.prefix_inline_payload_bytes,
+            last.prefix_semantic_media_tokens,
+        ),
+        None => (0, 0, 0),
+    };
+    let separators = (cache.messages.len() as u64).saturating_sub(1);
+    let bytes = total_message_bytes
+        .saturating_add(separators)
+        .saturating_add(6)
+        .saturating_add(system_bytes.0)
+        .saturating_add(tool_bytes.0);
+    bytes
+        .saturating_sub(inline_payload_bytes)
+        .div_ceil(4)
+        .saturating_add(semantic_tokens)
+        .saturating_add(64)
 }
 
 pub(super) fn reconcile_context_estimate(
@@ -698,7 +881,13 @@ pub(super) fn reconcile_context_estimate(
     tools: &[ToolDef],
 ) -> RequestContextEstimate {
     reconcile_context_estimate_with(session, model, system, tools, || {
-        estimate_request_tokens(system, messages, tools)
+        if messages_match_session_context(session, messages) {
+            let summary = visible_compaction_summary(session);
+            let cache = sync_session_context_metrics(session, messages, &summary);
+            estimate_request_tokens_from_cached_metrics(system, messages, &cache, tools)
+        } else {
+            estimate_request_tokens(system, messages, tools)
+        }
     })
 }
 
@@ -740,15 +929,7 @@ pub(super) fn serialized_tokens<T: Serialize>(value: &T) -> u64 {
 }
 
 pub(super) fn visible_compaction_summary(session: &Session) -> Option<String> {
-    active_branch_entries(session)
-        .into_iter()
-        .rev()
-        .find_map(|entry| {
-            let EntryValue::Compaction { summary, .. } = &entry.value else {
-                return None;
-            };
-            Some(format!("[summary of earlier conversation]\n{summary}"))
-        })
+    session.visible_compaction_summary()
 }
 
 pub(super) fn context_breakdown(
@@ -758,12 +939,97 @@ pub(super) fn context_breakdown(
     messages: &[Message],
     tools: &[ToolDef],
 ) -> ContextBreakdown {
-    // Serialize each message once: the sizes feed both the per-category split
-    // below and the whole-request structural estimate. Long sessions spent
-    // most of this function serializing the history twice.
+    let summary = visible_compaction_summary(session);
+    if messages_match_session_context(session, messages) {
+        let cache = sync_session_context_metrics(session, messages, &summary);
+        let estimate = reconcile_context_estimate_with(session, model, system, tools, || {
+            estimate_request_tokens_from_cached_metrics(system, messages, &cache, tools)
+        });
+        fn take_budget(remaining: &mut u64, requested: u64) -> u64 {
+            let accepted = requested.min(*remaining);
+            *remaining = remaining.saturating_sub(accepted);
+            accepted
+        }
+        let mut remaining_structural = estimate.structural_tokens;
+        let instruction_tokens = take_budget(&mut remaining_structural, serialized_tokens(&system));
+
+        let budget_for_messages = remaining_structural;
+        let full_count = cache
+            .messages
+            .partition_point(|item| item.prefix_requested() <= budget_for_messages);
+        let (
+            mut attachment_tokens,
+            mut conversation_tokens,
+            mut tool_result_tokens,
+            mut compaction_summary_tokens,
+            consumed_prefix,
+        ) = match full_count.checked_sub(1) {
+            Some(idx) => {
+                let item = &cache.messages[idx];
+                (
+                    item.prefix_semantic_media_tokens,
+                    item.prefix_conversation_tokens,
+                    item.prefix_tool_result_tokens,
+                    item.prefix_compaction_summary_tokens,
+                    item.prefix_requested(),
+                )
+            }
+            None => (0, 0, 0, 0, 0),
+        };
+        remaining_structural = remaining_structural.saturating_sub(consumed_prefix);
+
+        if full_count < cache.messages.len() && remaining_structural > 0 {
+            let item = &cache.messages[full_count];
+            if item.serialized_bytes.is_some() {
+                let media_tokens =
+                    take_budget(&mut remaining_structural, item.semantic_media_tokens);
+                attachment_tokens = attachment_tokens.saturating_add(media_tokens);
+                let accepted = take_budget(&mut remaining_structural, item.non_media_tokens);
+                if item.is_summary {
+                    compaction_summary_tokens = compaction_summary_tokens.saturating_add(accepted);
+                } else if item.is_tool {
+                    tool_result_tokens = tool_result_tokens.saturating_add(accepted);
+                } else {
+                    conversation_tokens = conversation_tokens.saturating_add(accepted);
+                }
+            }
+        }
+
+        let system_tokens = remaining_structural;
+        let other_tokens = estimate
+            .input_tokens
+            .saturating_sub(estimate.structural_tokens);
+        let total_tokens = system_tokens
+            .saturating_add(instruction_tokens)
+            .saturating_add(conversation_tokens)
+            .saturating_add(tool_result_tokens)
+            .saturating_add(attachment_tokens)
+            .saturating_add(compaction_summary_tokens)
+            .saturating_add(other_tokens);
+        debug_assert_eq!(total_tokens, estimate.input_tokens);
+
+        return ContextBreakdown {
+            system_tokens,
+            instruction_tokens,
+            conversation_tokens,
+            tool_result_tokens,
+            attachment_tokens,
+            compaction_summary_tokens,
+            other_tokens,
+            total_tokens,
+            structural_tokens: estimate.structural_tokens,
+            provider_tokens: estimate.provider_tokens,
+            context_limit: model.spec.limits.context_window,
+        };
+    }
+
+    // Fallback when caller supplies an arbitrary message slice not backed by
+    // the session's context cache.
     let message_bytes = messages
         .iter()
         .map(|message| {
+            #[cfg(test)]
+            CONTEXT_MESSAGE_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
             let mut bytes = CountingWriter::default();
             serde_json::to_writer(&mut bytes, message)
                 .ok()
@@ -786,7 +1052,6 @@ pub(super) fn context_breakdown(
     };
 
     let instruction_tokens = take(serialized_tokens(&system));
-    let summary = visible_compaction_summary(session);
     let mut conversation_tokens = 0u64;
     let mut tool_result_tokens = 0u64;
     let mut attachment_tokens = 0u64;
@@ -829,10 +1094,6 @@ pub(super) fn context_breakdown(
         }
     }
 
-    // Whatever remains in the serializer-derived total is request framing,
-    // tool definitions, and provider/runtime system structure. Provider usage
-    // above that structural estimate is authoritative but intentionally left in
-    // `other` rather than assigned with fabricated precision.
     let system_tokens = remaining_structural;
     let other_tokens = estimate
         .input_tokens

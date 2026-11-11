@@ -906,17 +906,7 @@ impl Agent {
                 }
                 let input_tokens = capacity.input_tokens;
                 let request_max_output_tokens = capacity.max_output_tokens;
-                // A hook-prepared request already carries its projected
-                // context; cloning the session context again for it would
-                // deep-copy the whole history for nothing.
-                let prepared_messages = if capacity.effective_request.is_some() {
-                    None
-                } else {
-                    match session.context() {
-                        Ok(m) => Some(m),
-                        Err(e) => break 'run FinishReason::Failed(e.into()),
-                    }
-                };
+                let has_hook_request = capacity.effective_request.is_some();
                 let active_system = capacity.active_system;
                 let responses =
                     if auto_compaction_mode == AgentCompactionMode::NativeResponses {
@@ -945,8 +935,7 @@ impl Agent {
                     Some(request) => request,
                     None => Request {
                     system: if active_system.is_empty() { None } else { Some(active_system.clone()) },
-                    messages: prepared_messages
-                        .expect("prepared messages exist without hook preparation"),
+                    messages: Vec::new(),
                     tools: request_tool_defs.clone(),
                     tool_choice: if answer_only {
                         ToolChoice::None
@@ -1077,6 +1066,29 @@ impl Agent {
                 };
                 let native_delta_has_results = native_delta.as_ref().is_some_and(|delta| delta.messages.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::ToolResult(_))))));
                 if abort.is_set() { break 'run FinishReason::Aborted; }
+                // Ordinary requests go through the client's request builder,
+                // which hands a lent context back once it is encoded and reuses
+                // its work for the messages that did not change. Native
+                // steering and a prewarmed request keep their own copy.
+                let lends_context = host_options.is_some()
+                    || (native.connection.is_none() && !native_enabled && responses_prewarm.is_none());
+                let host_options = if has_hook_request {
+                    host_options
+                } else if lends_context {
+                    request.messages = match session.take_context_for_request() {
+                        Ok(m) => m,
+                        Err(e) => break 'run FinishReason::Failed(e.into()),
+                    };
+                    let mut options = host_options.unwrap_or_default();
+                    options.history = Some(session.request_history().clone());
+                    Some(options)
+                } else {
+                    request.messages = match session.context() {
+                        Ok(m) => m,
+                        Err(e) => break 'run FinishReason::Failed(e.into()),
+                    };
+                    host_options
+                };
                 // Snapshot the actual request at REQUEST OPEN. The warmer alone
                 // decides eligibility before cloning it or allocating a timer.
                 if let Err(error) = cache_warmer.start(
@@ -1174,6 +1186,7 @@ impl Agent {
                         }
                     }
                 };
+                session.reclaim_lent_context();
                 let mut response_stream = match opened {
                     Err(error) if native_enabled => {
                         if opening_client.request_may_have_been_sent() {

@@ -5,7 +5,7 @@
 //! the entry tree — which entry is the parent, which branch is active —
 //! rather than about the bytes underneath it.
 
-use super::context::append_context_message;
+use super::context::append_to_context_cache;
 use super::*;
 
 impl Session {
@@ -244,33 +244,55 @@ impl Session {
             .collect::<Vec<_>>();
         self.invocations
             .commit_results(&scopes, || self.writer.persist(&buf))?;
+        self.reclaim_lent_context();
         self.invocation_entries
             .record(&entry, &self.index, &settled);
 
-        self.index.insert(id.clone(), self.entries.len());
+        let previous_head = self.head.clone();
+        let entry_idx = self.entries.len();
+        if matches!(&entry.value, EntryValue::Compaction { .. }) {
+            self.has_any_compaction = true;
+        }
+        let skill_related = entry_is_skill_related(&entry.value);
+        if skill_related {
+            self.has_any_skill_entries = true;
+        }
+        // A compaction bounds the skill walk at its own snapshot even when the
+        // snapshot is empty, so the state carried to the new head may change.
+        let resets_skill_state =
+            skill_related || matches!(&entry.value, EntryValue::Compaction { .. });
+        if matches!(&entry.value, EntryValue::ResponsesSteering { .. }) {
+            self.unsettled_native_steering_cache.set(None);
+        }
+        let assistant_calls = entry_assistant_tool_calls(&entry);
+        let is_user_text = entry_has_user_text(&entry);
+
+        self.index.insert(id.clone(), entry_idx);
         self.entries.push(entry);
         self.head = Some(id.clone());
         self.next_id = next_id;
 
-        let cache = self.context_cache.get_mut();
-        match &self.entries.last().expect("just appended").value {
-            EntryValue::Message(message) => {
-                if let Some(messages) = cache {
-                    append_context_message(messages, message);
-                }
+        if let Some(calls) = assistant_calls {
+            if let Some(stats) = self.branch_stats_cache.get_mut() {
+                stats.head = Some(id.clone());
+                stats.model_turns += 1;
+                stats.tool_calls += calls;
             }
-            EntryValue::ResponsesReasoning { .. }
-            | EntryValue::ResponsesSteering { .. }
-            | EntryValue::Config { .. }
-            | EntryValue::PromptTemplateSelected { .. }
-            | EntryValue::ResponsesTurn { .. }
-            | EntryValue::ResponsesCompaction { .. } => {}
-            EntryValue::Compaction { .. }
-            | EntryValue::BranchSummary { .. }
-            | EntryValue::SkillActivated { .. }
-            | EntryValue::SkillResourceRead { .. }
-            | EntryValue::SkillDeactivated { .. } => *cache = None,
+        } else if let Some(stats) = self.branch_stats_cache.get_mut() {
+            stats.head = Some(id.clone());
+            if stats.oldest_user_text_entry_index.is_none() && is_user_text {
+                stats.oldest_user_text_entry_index = Some(entry_idx);
+            }
         }
+
+        if resets_skill_state {
+            *self.active_skills_cache.get_mut() = None;
+        } else if let Some((cached_leaf, _)) = self.active_skills_cache.get_mut() {
+            if Some(&*cached_leaf) == previous_head.as_ref() {
+                *cached_leaf = id.clone();
+            }
+        }
+
         // The newest compaction for the extended head chain changes only when
         // the appended entry is itself a compaction; every other append keeps
         // an already-resolved verdict valid.
@@ -278,6 +300,54 @@ impl Session {
             &self.entries.last().expect("just appended").value
         {
             *self.snapcompact_cache.get_mut() = Some(snapcompact.is_some());
+        }
+
+        enum PostAppendContextAction {
+            None,
+            Append,
+            InvalidateForCompaction(String),
+            Invalidate,
+        }
+        let action = match &self.entries.last().expect("just appended").value {
+            EntryValue::Message(_) => PostAppendContextAction::Append,
+            EntryValue::ResponsesReasoning { .. }
+            | EntryValue::ResponsesSteering { .. }
+            | EntryValue::Config { .. }
+            | EntryValue::PromptTemplateSelected { .. }
+            | EntryValue::ResponsesTurn { .. }
+            | EntryValue::ResponsesCompaction { .. } => PostAppendContextAction::None,
+            EntryValue::Compaction { summary, .. } => {
+                PostAppendContextAction::InvalidateForCompaction(format!(
+                    "[summary of earlier conversation]\n{summary}"
+                ))
+            }
+            EntryValue::BranchSummary { .. }
+            | EntryValue::SkillActivated { .. }
+            | EntryValue::SkillResourceRead { .. }
+            | EntryValue::SkillDeactivated { .. } => PostAppendContextAction::Invalidate,
+        };
+        match action {
+            PostAppendContextAction::None => {}
+            PostAppendContextAction::Append => {
+                let EntryValue::Message(message) =
+                    &self.entries.last().expect("just appended").value
+                else {
+                    unreachable!("only message entries extend the context");
+                };
+                append_to_context_cache(
+                    self.context_cache.get_mut(),
+                    self.context_stamps.get_mut(),
+                    message,
+                );
+            }
+            PostAppendContextAction::InvalidateForCompaction(formatted_summary) => {
+                *self.compaction_summary_cache.get_mut() = Some(Some(formatted_summary));
+                *self.cache_stats_cache.get_mut() = None;
+                self.invalidate_context_cache();
+            }
+            PostAppendContextAction::Invalidate => {
+                self.invalidate_context_cache();
+            }
         }
         Ok(id)
     }
@@ -356,8 +426,14 @@ impl Session {
         self.write_head_record(&mut buf, &id, &self.total_cost_microdollars)?;
         self.persist(&buf)?;
         self.head = Some(id);
-        *self.context_cache.get_mut() = None;
+        self.is_linear_chain = self.is_linear_chain
+            && self.entries.last().map(|entry| &entry.id) == self.head.as_ref();
+        self.invalidate_context_cache();
+        *self.compaction_summary_cache.get_mut() = (!self.has_any_compaction).then_some(None);
         *self.snapcompact_cache.get_mut() = None;
+        *self.active_skills_cache.get_mut() = None;
+        *self.branch_stats_cache.get_mut() = None;
+        *self.cache_stats_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
@@ -375,8 +451,13 @@ impl Session {
         )?;
         self.persist(&buf)?;
         self.head = None;
-        *self.context_cache.get_mut() = None;
+        self.is_linear_chain = self.entries.is_empty();
+        self.invalidate_context_cache();
+        *self.compaction_summary_cache.get_mut() = Some(None);
         *self.snapcompact_cache.get_mut() = None;
+        *self.active_skills_cache.get_mut() = None;
+        *self.branch_stats_cache.get_mut() = Some(ActiveBranchStatsCache::default());
+        *self.cache_stats_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
@@ -431,12 +512,18 @@ impl Session {
         self.write_head_record(&mut bytes, &id, &self.total_cost_microdollars)?;
         self.persist(&bytes)?;
         self.invocation_entries.record(&entry, &self.index, &[]);
+        self.is_linear_chain = self.is_linear_chain
+            && entry.parent.as_ref() == self.entries.last().map(|prev| &prev.id);
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);
         self.head = Some(id.clone());
         self.next_id = next_id;
-        *self.context_cache.get_mut() = None;
+        self.invalidate_context_cache();
+        *self.compaction_summary_cache.get_mut() = (!self.has_any_compaction).then_some(None);
         *self.snapcompact_cache.get_mut() = None;
+        *self.active_skills_cache.get_mut() = None;
+        *self.branch_stats_cache.get_mut() = None;
+        *self.cache_stats_cache.get_mut() = None;
         *self.responses_replay_cache.get_mut() = None;
         Ok(id)
     }
@@ -704,5 +791,84 @@ impl Session {
     pub fn extension_entry(&self, id: &EntryId, namespace: &str) -> Option<ExtensionEntry> {
         let metadata = self.entry(id)?.metadata.as_ref()?;
         ExtensionEntry::from_value(&metadata.extension_metadata.get(namespace)?.value)
+    }
+
+    fn ensure_branch_stats_cache(&self) -> Ref<'_, ActiveBranchStatsCache> {
+        let needs_rebuild = self
+            .branch_stats_cache
+            .borrow()
+            .as_ref()
+            .is_none_or(|cache| cache.head != self.head);
+        if needs_rebuild {
+            let mut model_turns = 0usize;
+            let mut tool_calls = 0usize;
+            let mut oldest_user_text_entry_index = None;
+            if self.is_linear_chain {
+                for (idx, entry) in self.entries.iter().enumerate() {
+                    if oldest_user_text_entry_index.is_none() && entry_has_user_text(entry) {
+                        oldest_user_text_entry_index = Some(idx);
+                    }
+                    if let Some(calls) = entry_assistant_tool_calls(entry) {
+                        model_turns += 1;
+                        tool_calls += calls;
+                    }
+                }
+            } else {
+                let mut cursor = self.head.as_ref();
+                while let Some(id) = cursor {
+                    let Some(&idx) = self.index.get(id) else {
+                        break;
+                    };
+                    let entry = &self.entries[idx];
+                    if entry_has_user_text(entry) {
+                        oldest_user_text_entry_index = Some(idx);
+                    }
+                    if let Some(calls) = entry_assistant_tool_calls(entry) {
+                        model_turns += 1;
+                        tool_calls += calls;
+                    }
+                    cursor = entry.parent.as_ref();
+                }
+            }
+            *self.branch_stats_cache.borrow_mut() = Some(ActiveBranchStatsCache {
+                head: self.head.clone(),
+                model_turns,
+                tool_calls,
+                oldest_user_text_entry_index,
+            });
+        }
+        Ref::map(self.branch_stats_cache.borrow(), |cache| {
+            cache
+                .as_ref()
+                .expect("branch_stats_cache initialized immediately above")
+        })
+    }
+
+    /// Returns `(model_turns, tool_calls)` on the active branch in O(1) when cached.
+    pub fn active_branch_activity_counts(&self) -> (usize, usize) {
+        let stats = self.ensure_branch_stats_cache();
+        (stats.model_turns, stats.tool_calls)
+    }
+
+    /// Returns the oldest user entry on the active branch that carries user text.
+    pub fn oldest_active_user_text_entry(&self) -> Option<&Entry> {
+        let idx = self
+            .ensure_branch_stats_cache()
+            .oldest_user_text_entry_index?;
+        self.entries.get(idx)
+    }
+
+    /// True when all entries form one unbranched root-to-head chain.
+    pub fn is_linear_chain(&self) -> bool {
+        self.is_linear_chain
+    }
+
+    /// True when the session contains at least one compaction entry on any branch.
+    pub fn has_any_compaction(&self) -> bool {
+        self.has_any_compaction
+    }
+
+    pub(crate) fn entry_index(&self, id: &EntryId) -> Option<usize> {
+        self.index.get(id).copied()
     }
 }

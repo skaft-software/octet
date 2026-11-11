@@ -1,12 +1,83 @@
 //! Non-destructive normalization of canonical history for a target model.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::catalog::Model;
+use crate::request_history::{common_stamp_prefix, LentHistory, RequestHistory};
 use crate::types::{
-    AssistantMessage, AssistantPart, AudioPayload, ImageSource, Media, Message, Modality, Protocol,
-    ToolCallId, ToolResult, ToolResultPart, UserMessage, UserPart,
+    AssistantMessage, AssistantPart, AudioPayload, ImageSource, Media, Message, Modality,
+    ModelSpec, Protocol, ToolCallId, ToolResult, ToolResultPart, UserMessage, UserPart,
 };
+
+/// Leading messages of a lent history already found to need no rewriting for
+/// one target model.
+///
+/// The prefix always ends where no synchronous tool call is still waiting for
+/// its result, and never covers a message whose verdict depends on the clock.
+#[derive(Default)]
+pub(crate) struct CleanPrefix {
+    target: Option<Arc<ModelSpec>>,
+    stamps: Vec<u64>,
+}
+
+impl CleanPrefix {
+    /// Whether the kept verdicts were reached for `target`.
+    ///
+    /// [`message_needs_transform`] reads the model identity, its protocol and
+    /// its capabilities, and nothing else of the target.
+    fn is_for(&self, target: &Model) -> bool {
+        self.target.as_ref().is_some_and(|kept| {
+            Arc::ptr_eq(kept, &target.spec)
+                || (kept.id == target.spec.id
+                    && kept.protocol == target.spec.protocol
+                    && kept.capabilities == target.spec.capabilities)
+        })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMPATIBILITY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Messages examined for compatibility by this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn take_compatibility_checks() -> usize {
+    COMPATIBILITY_CHECKS.with(|count| count.replace(0))
+}
+
+fn media_has_expiry(media: &Media) -> bool {
+    match media {
+        Media::Image(image) => {
+            matches!(&image.source, ImageSource::ProviderRef(r) if r.expires_at.is_some())
+        }
+        Media::Audio(audio) => matches!(
+            &audio.payload,
+            AudioPayload::ProviderRef(r)
+                | AudioPayload::InlineWithProviderRef { reference: r, .. }
+                if r.expires_at.is_some()
+        ),
+        Media::Document(_) => false,
+    }
+}
+
+pub(crate) fn message_has_expiring_media(message: &Message) -> bool {
+    match message {
+        Message::User(user) => user.content.iter().any(|part| match part {
+            UserPart::Text(_) => false,
+            UserPart::Media(media) => media_has_expiry(media),
+            UserPart::ToolResult(result) => result.content.iter().any(|tr_part| match tr_part {
+                ToolResultPart::Text(_) => false,
+                ToolResultPart::Media(media) => media_has_expiry(media),
+            }),
+        }),
+        Message::Assistant(assistant) => assistant.content.iter().any(|part| match part {
+            AssistantPart::Media(media) => media_has_expiry(media),
+            _ => false,
+        }),
+    }
+}
 
 const IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 const TOOL_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
@@ -95,6 +166,210 @@ pub(crate) fn transform_request_messages(messages: &[Message], target: &Model) -
         })
         .collect();
     insert_missing_tool_results(transformed)
+}
+
+/// Whether the transform would change this message for `target`.
+///
+/// `is_pending_user` marks a user message after the final assistant turn: an
+/// input of the request being opened, which only has its tool-call identities
+/// normalized.
+fn message_needs_transform(message: &Message, is_pending_user: bool, target: &Model) -> bool {
+    if target.spec.protocol == Protocol::MistralConversations {
+        return matches!(message, Message::User(user) if user.content.is_empty());
+    }
+    match message {
+        Message::User(user) => {
+            if user.content.is_empty() {
+                return true;
+            }
+            if is_pending_user {
+                return user.content.iter().any(|part| {
+                    matches!(
+                        part,
+                        UserPart::ToolResult(result)
+                            if !crate::protocol::tool_call_id_is_wire_valid(&result.tool_call_id.0)
+                    )
+                });
+            }
+            user.content.iter().any(|part| match part {
+                UserPart::Text(_) => false,
+                UserPart::Media(Media::Image(image)) => {
+                    if !target
+                        .spec
+                        .capabilities
+                        .input_modalities
+                        .contains(Modality::Image)
+                    {
+                        true
+                    } else if let ImageSource::ProviderRef(reference) = &image.source {
+                        !(crate::validate::provider_ref_is_usable(reference, target.spec.protocol)
+                            && target.spec.protocol == Protocol::OpenAiResponses)
+                    } else {
+                        false
+                    }
+                }
+                UserPart::Media(Media::Audio(audio)) => !user_audio_is_replayable(audio, target),
+                UserPart::Media(Media::Document(_)) => !document_is_replayable(target),
+                UserPart::ToolResult(result) => {
+                    !crate::protocol::tool_call_id_is_wire_valid(&result.tool_call_id.0)
+                        || result.content.iter().any(|tr_part| match tr_part {
+                            ToolResultPart::Text(_) => false,
+                            ToolResultPart::Media(Media::Image(image)) => {
+                                if !target
+                                    .spec
+                                    .capabilities
+                                    .input_modalities
+                                    .contains(Modality::Image)
+                                    || target.spec.protocol == Protocol::OpenAiChat
+                                {
+                                    true
+                                } else if let ImageSource::ProviderRef(reference) = &image.source {
+                                    !(target.spec.protocol == Protocol::OpenAiResponses
+                                        && crate::validate::provider_ref_is_usable(
+                                            reference,
+                                            target.spec.protocol,
+                                        ))
+                                } else {
+                                    false
+                                }
+                            }
+                            ToolResultPart::Media(Media::Audio(_))
+                            | ToolResultPart::Media(Media::Document(_)) => true,
+                        })
+                }
+            })
+        }
+        Message::Assistant(assistant) => {
+            let same_model =
+                assistant.model == target.spec.id && assistant.protocol == target.spec.protocol;
+            assistant.content.iter().any(|part| match part {
+                AssistantPart::Text(_) => false,
+                AssistantPart::ProviderMetadata(_) => {
+                    !(same_model && target.spec.protocol == Protocol::GoogleGenerativeAi)
+                }
+                AssistantPart::ToolCall(call) => {
+                    !crate::protocol::tool_call_id_is_wire_valid(&call.id.0)
+                }
+                AssistantPart::Reasoning(_) => !same_model,
+                AssistantPart::Media(Media::Image(_))
+                | AssistantPart::Media(Media::Document(_)) => true,
+                AssistantPart::Media(Media::Audio(audio)) => {
+                    !assistant_audio_is_replayable(audio, target)
+                }
+            })
+        }
+    }
+}
+
+/// Whether [`transform_request_messages_owned`] would change `messages`.
+///
+/// With a lent history, the leading messages already found clean for this
+/// target are not examined again.
+fn request_messages_need_transform(
+    messages: &[Message],
+    target: &Model,
+    lent: Option<LentHistory<'_>>,
+) -> bool {
+    let final_assistant = messages
+        .iter()
+        .rposition(|message| matches!(message, Message::Assistant(_)));
+    // A user message is judged as replay history only once an assistant
+    // message follows it, so a verdict is kept for those messages alone.
+    let historical_len = final_assistant.map_or(0, |index| index + 1);
+
+    let mut kept = lent.map(|LentHistory { stamps, caches }| {
+        let clean = &mut caches.clean;
+        if !clean.is_for(target) {
+            clean.target = Some(target.spec.clone());
+            clean.stamps.clear();
+        }
+        let unchanged = common_stamp_prefix(&clean.stamps, stamps).min(historical_len);
+        clean.stamps.truncate(unchanged);
+        (stamps, clean)
+    });
+    let start = kept.as_ref().map_or(0, |(_, clean)| clean.stamps.len());
+
+    let mut pending_sync_calls: Vec<&ToolCallId> = Vec::new();
+    // End of the leading run whose verdict can be kept: historical, not
+    // dependent on the clock, and with every synchronous call answered.
+    let mut settled = start;
+    let mut can_settle = true;
+    let mut needs_transform = false;
+    for (index, message) in messages.iter().enumerate().skip(start) {
+        #[cfg(test)]
+        COMPATIBILITY_CHECKS.with(|count| count.set(count.get() + 1));
+        let is_pending_user = final_assistant.is_none_or(|assistant| index > assistant);
+        if message_needs_transform(message, is_pending_user, target) {
+            needs_transform = true;
+            break;
+        }
+        match message {
+            Message::Assistant(assistant) => {
+                // A following assistant turn with a call still unanswered
+                // gets a synthetic result inserted before it.
+                if !pending_sync_calls.is_empty() {
+                    needs_transform = true;
+                    break;
+                }
+                for part in &assistant.content {
+                    if let AssistantPart::ToolCall(call) = part {
+                        if !call.async_execution {
+                            pending_sync_calls.push(&call.id);
+                        }
+                    }
+                }
+            }
+            Message::User(user) => {
+                for part in &user.content {
+                    if let UserPart::ToolResult(result) = part {
+                        pending_sync_calls.retain(|id| *id != &result.tool_call_id);
+                    }
+                }
+            }
+        }
+        can_settle &= index < historical_len && !message_has_expiring_media(message);
+        if can_settle && pending_sync_calls.is_empty() {
+            settled = index + 1;
+        }
+    }
+    if let Some((stamps, clean)) = kept.as_mut() {
+        clean.stamps.extend_from_slice(&stamps[start..settled]);
+    }
+    needs_transform || !pending_sync_calls.is_empty()
+}
+
+/// Request-history normalization for a history that may be lent by its owner.
+///
+/// A lent history that needs no rewriting is returned as it is and stays lent.
+/// One that does need rewriting is handed back to its owner untouched, and the
+/// request continues on a rewritten copy: the owner's history is canonical and
+/// must never carry one target model's replay placeholders.
+pub(crate) fn transform_request_history(
+    messages: Vec<Message>,
+    target: &Model,
+    history: Option<&RequestHistory>,
+) -> Vec<Message> {
+    let Some(history) = history else {
+        return transform_request_messages_owned(messages, target);
+    };
+    let mut state = history.lock();
+    let Some(lent) = state.lent(&messages) else {
+        drop(state);
+        return transform_request_messages_owned(messages, target);
+    };
+    if !request_messages_need_transform(&messages, target, Some(lent)) {
+        // Debug builds prove the shortcut against the real transform on every
+        // request, so the whole test suite checks the two stay equivalent.
+        debug_assert_eq!(
+            serde_json::to_value(transform_request_messages_owned(messages.clone(), target)).ok(),
+            serde_json::to_value(&messages).ok(),
+            "a history judged compatible must be left unchanged by the transform"
+        );
+        return messages;
+    }
+    let rewritten = transform_request_messages_owned(messages.clone(), target);
+    state.give_back(messages);
+    rewritten
 }
 
 /// Owned request-history normalization used on the send path.

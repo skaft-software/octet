@@ -277,7 +277,7 @@ pub(super) async fn stream_http(
     let HttpStreamRequest {
         model,
         compatibility,
-        parts,
+        mut parts,
         mut headers,
         requested_audio_format,
         requested_service_tier,
@@ -298,8 +298,13 @@ pub(super) async fn stream_http(
             http::HeaderValue::from_static(LIFECYCLE_REQUEST_VALUE),
         );
     }
-    let request_body =
-        prepare_request_body(model.endpoint.runtime, &mut headers, parts.body.clone()).await;
+    let trace_body = trace.as_ref().map(|_| parts.body.clone());
+    let request_body = prepare_request_body(
+        model.endpoint.runtime,
+        &mut headers,
+        std::mem::take(&mut parts.body),
+    )
+    .await;
     if matches!(&model.endpoint.auth, crate::auth::Auth::RequestSigner(_)) {
         let resolved = crate::auth::resolve_headers_for_request(
             &model.endpoint.auth,
@@ -327,8 +332,8 @@ pub(super) async fn stream_http(
         crate::host_http::validate_custom_http_headers(&headers)?;
     }
 
-    if let Some(trace) = &trace {
-        trace.http_request(&model.spec.api_name, &parts.body);
+    if let (Some(trace), Some(body)) = (&trace, trace_body) {
+        trace.http_request(&model.spec.api_name, &body);
     }
 
     // 3. Send the HTTP request

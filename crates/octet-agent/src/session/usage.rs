@@ -66,6 +66,39 @@ impl Session {
     /// branch. Unlike checkpoint usage, this is one request rather than the
     /// sum of every autonomous tool turn in a submitted prompt.
     pub fn latest_active_assistant_usage(&self) -> Option<&UsageRecord> {
+        self.head.as_ref()?;
+        if self.usage_records.is_empty() {
+            return None;
+        }
+        if self.is_linear_chain {
+            // Every entry is on the active branch.
+            return self.usage_records.iter().rev().find(|record| {
+                matches!(
+                    &record.kind,
+                    UsageRecordKind::AssistantTurn { assistant }
+                        if self.index.contains_key(assistant)
+                )
+            });
+        }
+        if let Some(record) = self
+            .usage_records
+            .iter()
+            .rev()
+            .find(|record| matches!(&record.kind, UsageRecordKind::AssistantTurn { .. }))
+        {
+            if let UsageRecordKind::AssistantTurn { assistant } = &record.kind {
+                let mut cursor = self.head.as_ref();
+                for _ in 0..8 {
+                    let Some(id) = cursor else {
+                        break;
+                    };
+                    if id == assistant {
+                        return Some(record);
+                    }
+                    cursor = self.entry(id).and_then(|entry| entry.parent.as_ref());
+                }
+            }
+        }
         let mut active = std::collections::HashSet::<&str>::new();
         let mut cursor = self.head.as_ref();
         while let Some(id) = cursor {
@@ -341,6 +374,21 @@ impl Session {
         self.persist(&buffer)?;
         self.total_cost_microdollars = new_total;
         self.total_cost_picodollars_remainder = new_remainder;
+        if record.cost.is_none() && record.cost_microdollars.is_none() {
+            self.has_unpriced_usage_flag = true;
+        }
+        if record.cost_microdollars.is_some() {
+            self.has_priced_usage_flag = true;
+        }
+        match &record.kind {
+            UsageRecordKind::DelegatedAgent { .. } => {
+                self.has_delegated_agent_usage_flag = true;
+            }
+            UsageRecordKind::CacheWarm => {
+                self.has_cache_warm_usage_flag = true;
+            }
+            _ => {}
+        }
         self.usage_records.push(record);
         Ok(())
     }
@@ -423,9 +471,22 @@ impl Session {
     /// still be known; catalog availability for the active model cannot price
     /// a historical request, provider-selected tier, or child retroactively.
     pub fn has_unpriced_usage(&self) -> bool {
-        self.usage_records
-            .iter()
-            .any(|record| record.cost.is_none() && record.cost_microdollars.is_none())
+        self.has_unpriced_usage_flag
+    }
+
+    /// True when at least one usage record has an explicit `cost_microdollars`.
+    pub fn has_priced_usage(&self) -> bool {
+        self.has_priced_usage_flag
+    }
+
+    /// True when at least one usage record belongs to a `DelegatedAgent`.
+    pub fn has_delegated_agent_usage(&self) -> bool {
+        self.has_delegated_agent_usage_flag
+    }
+
+    /// True when at least one usage record belongs to a `CacheWarm` operation.
+    pub fn has_cache_warm_usage(&self) -> bool {
+        self.has_cache_warm_usage_flag
     }
 
     /// Conservative total admission exposure for all uncertain attempts.
@@ -477,6 +538,9 @@ impl Session {
     /// be blindly resumed after a process interruption. Preparation may precede
     /// actual dispatch; uncertainty deliberately fails closed at that gap.
     pub fn has_unsettled_native_steering(&self) -> bool {
+        if let Some(cached) = self.unsettled_native_steering_cache.get() {
+            return cached;
+        }
         let mut pending = std::collections::HashSet::new();
         for entry in &self.entries {
             if let EntryValue::ResponsesSteering {
@@ -496,7 +560,9 @@ impl Session {
                 }
             }
         }
-        !pending.is_empty()
+        let result = !pending.is_empty();
+        self.unsettled_native_steering_cache.set(Some(result));
+        result
     }
 
     /// Admission bounds alongside uncertainty evidence, in append order.
@@ -512,8 +578,29 @@ impl Session {
 
     /// Newest completed-prompt checkpoint on the active branch.
     pub fn latest_active_checkpoint(&self) -> Option<&Checkpoint> {
+        self.head.as_ref()?;
         if self.checkpoints.is_empty() {
             return None;
+        }
+        if self.is_linear_chain {
+            // Every entry is on the active branch.
+            return self
+                .checkpoints
+                .iter()
+                .rev()
+                .find(|checkpoint| self.index.contains_key(&checkpoint.head));
+        }
+        if let Some(last_cp) = self.checkpoints.last() {
+            let mut cursor = self.head.as_ref();
+            for _ in 0..8 {
+                let Some(id) = cursor else {
+                    break;
+                };
+                if id == &last_cp.head {
+                    return Some(last_cp);
+                }
+                cursor = self.entry(id).and_then(|entry| entry.parent.as_ref());
+            }
         }
         let mut active_entry_ids = std::collections::HashSet::<&str>::new();
         let mut cursor = self.head.as_ref();

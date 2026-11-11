@@ -31,7 +31,9 @@ mod request;
 mod response;
 mod stream;
 
+#[cfg(test)]
 pub(crate) use request::build_request;
+pub(crate) use request::{build_request_with_history, ChatPrefixCache};
 #[cfg(test)]
 pub(crate) use response::decode_response;
 pub(crate) use response::decode_response_with_tools;

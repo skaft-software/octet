@@ -1455,6 +1455,92 @@ struct ResponsesReplayCache {
     items: Option<Arc<Vec<octet_ai::responses::ResponsesReplayItem>>>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ActiveBranchStatsCache {
+    pub(crate) head: Option<EntryId>,
+    pub(crate) model_turns: usize,
+    pub(crate) tool_calls: usize,
+    pub(crate) oldest_user_text_entry_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CachedMessageMetrics {
+    pub(crate) serialized_bytes: Option<u64>,
+    pub(crate) inline_payload_bytes: u64,
+    pub(crate) semantic_media_tokens: u64,
+    pub(crate) non_media_tokens: u64,
+    pub(crate) is_tool: bool,
+    pub(crate) is_summary: bool,
+    pub(crate) prefix_serialized_bytes: u64,
+    pub(crate) prefix_inline_payload_bytes: u64,
+    pub(crate) prefix_semantic_media_tokens: u64,
+    pub(crate) prefix_conversation_tokens: u64,
+    pub(crate) prefix_tool_result_tokens: u64,
+    pub(crate) prefix_compaction_summary_tokens: u64,
+}
+
+impl CachedMessageMetrics {
+    #[inline]
+    pub(crate) fn prefix_requested(self) -> u64 {
+        self.prefix_semantic_media_tokens
+            .saturating_add(self.prefix_conversation_tokens)
+            .saturating_add(self.prefix_tool_result_tokens)
+            .saturating_add(self.prefix_compaction_summary_tokens)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ContextMetricsCache {
+    /// Stamps of the context messages the metrics below describe.
+    pub(crate) stamps: Vec<u64>,
+    pub(crate) summary: Option<String>,
+    pub(crate) messages: Vec<CachedMessageMetrics>,
+    pub(crate) any_serialization_failed: bool,
+}
+
+pub(crate) fn entry_has_user_text(entry: &Entry) -> bool {
+    let EntryValue::Message(Message::User(user)) = &entry.value else {
+        return false;
+    };
+    entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.display_text.as_deref())
+        .is_some()
+        || user
+            .content
+            .iter()
+            .any(|part| matches!(part, UserPart::Text(_)))
+}
+
+/// The number of tool calls in an assistant message entry.
+pub(crate) fn entry_assistant_tool_calls(entry: &Entry) -> Option<usize> {
+    match &entry.value {
+        EntryValue::Message(Message::Assistant(message)) => Some(
+            message
+                .content
+                .iter()
+                .filter(|part| matches!(part, octet_ai::AssistantPart::ToolCall(_)))
+                .count(),
+        ),
+        _ => None,
+    }
+}
+
+pub(crate) fn entry_is_skill_related(value: &EntryValue) -> bool {
+    match value {
+        EntryValue::SkillActivated { .. }
+        | EntryValue::SkillDeactivated { .. }
+        | EntryValue::SkillResourceRead { .. } => true,
+        EntryValue::Compaction {
+            active_skills,
+            skill_resources,
+            ..
+        } => !active_skills.is_empty() || !skill_resources.is_empty(),
+        _ => false,
+    }
+}
+
 /// An append-only JSONL session file.
 ///
 /// Entries form a tree via parent links; the durable head selects the active
@@ -1483,7 +1569,33 @@ pub struct Session {
     /// Cached model-visible context. Message appends update it in place;
     /// checkout and compaction invalidate it because they can change the
     /// active branch or summary boundary.
-    context_cache: RefCell<Option<Vec<Message>>>,
+    pub(crate) context_cache: RefCell<Option<Vec<Message>>>,
+    /// One stamp per message of `context_cache`, from
+    /// [`octet_ai::RequestHistory::fresh_stamp`]. A message keeps its stamp
+    /// only while its content is unchanged, so per-message work keyed by
+    /// stamp (request encoding, context metrics) is reused exactly.
+    pub(crate) context_stamps: RefCell<Vec<u64>>,
+    /// Reuse state for this session's provider requests; dropped with it.
+    pub(crate) request_history: octet_ai::RequestHistory,
+    /// `context_cache` is lent to the request being opened.
+    context_lent: std::cell::Cell<bool>,
+    pub(crate) context_metrics: RefCell<ContextMetricsCache>,
+    #[cfg(test)]
+    pub(crate) context_clone_count: std::cell::Cell<usize>,
+    #[cfg(test)]
+    pub(crate) context_reconstruct_count: std::cell::Cell<usize>,
+    compaction_summary_cache: RefCell<Option<Option<String>>>,
+    active_skills_cache: RefCell<Option<(EntryId, ActiveSkillState)>>,
+    branch_stats_cache: RefCell<Option<ActiveBranchStatsCache>>,
+    pub(crate) cache_stats_cache: RefCell<Option<crate::cache::CacheStatsCache>>,
+    unsettled_native_steering_cache: std::cell::Cell<Option<bool>>,
+    is_linear_chain: bool,
+    has_any_compaction: bool,
+    has_any_skill_entries: bool,
+    has_unpriced_usage_flag: bool,
+    has_priced_usage_flag: bool,
+    has_delegated_agent_usage_flag: bool,
+    has_cache_warm_usage_flag: bool,
     /// Cached bitmap-checkpoint verdict for the newest compaction on the
     /// current head chain; `None` re-resolves lazily by walking the parents.
     /// Compaction appends and non-compaction appends keep it valid: only a

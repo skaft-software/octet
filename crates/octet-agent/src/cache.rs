@@ -102,13 +102,20 @@ impl CacheStats {
 }
 
 #[derive(Clone, Debug)]
-struct PreviousRequest {
+pub(crate) struct PreviousRequest {
     prompt_tokens: u64,
     endpoint: Option<EndpointId>,
     model: Option<ModelId>,
     completed_at_unix_ms: Option<u64>,
     reported_cache: bool,
     branch_index: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CacheStatsCache {
+    usage_processed_len: usize,
+    previous: Option<PreviousRequest>,
+    stats: CacheStats,
 }
 
 fn prompt_tokens(usage: Usage) -> u64 {
@@ -174,10 +181,154 @@ fn active_branch(session: &Session) -> Vec<&EntryId> {
 /// Usage from abandoned branches is excluded. A persisted compaction entry
 /// resets the reusable-prefix baseline; a failed compaction provider call does
 /// not, because it did not alter model-visible context.
+fn step_cache_record(
+    record: &UsageRecord,
+    branch_index: usize,
+    compaction_between: bool,
+    stats: &mut CacheStats,
+    previous: &mut Option<PreviousRequest>,
+    mut misses: Option<&mut Vec<CacheMiss>>,
+    assistant: &EntryId,
+) {
+    stats.assistant_turns = stats.assistant_turns.saturating_add(1);
+    stats.cache_read_tokens = stats
+        .cache_read_tokens
+        .saturating_add(record.usage.cache_read_tokens);
+    stats.cache_write_tokens = stats
+        .cache_write_tokens
+        .saturating_add(record.usage.cache_write_tokens);
+
+    if compaction_between {
+        *previous = None;
+    }
+
+    let current_prompt_tokens = prompt_tokens(record.usage);
+    stats.latest_prompt_tokens = current_prompt_tokens;
+    stats.latest_cache_read_tokens = record.usage.cache_read_tokens;
+    if let Some(prior) = previous.as_ref() {
+        let current_reports_cache =
+            record.usage.cache_read_tokens > 0 || record.usage.cache_write_tokens > 0;
+        if current_prompt_tokens > 0 && (current_reports_cache || prior.reported_cache) {
+            let expected = prior.prompt_tokens.min(current_prompt_tokens);
+            stats.reusable_prefix_tokens = stats.reusable_prefix_tokens.saturating_add(expected);
+            let missed = expected.saturating_sub(record.usage.cache_read_tokens);
+            if missed > CACHE_MISS_NOISE_TOKENS {
+                let idle = idle_duration(prior, record);
+                let missed_cost = estimate_missed_cost(record.cost, record.usage, missed);
+                stats.missed_reusable_tokens = stats.missed_reusable_tokens.saturating_add(missed);
+                stats.miss_count = stats.miss_count.saturating_add(1);
+                if let Some(cost) = missed_cost {
+                    stats.missed_cost_microdollars =
+                        stats.missed_cost_microdollars.saturating_add(cost);
+                    stats.priced_miss_count = stats.priced_miss_count.saturating_add(1);
+                }
+                if let Some(misses) = misses.as_mut() {
+                    misses.push(CacheMiss {
+                        assistant: assistant.clone(),
+                        expected_reusable_tokens: expected,
+                        cache_read_tokens: record.usage.cache_read_tokens,
+                        missed_reusable_tokens: missed,
+                        missed_cost_microdollars: missed_cost,
+                        model_changed: route_changed(prior, record),
+                        idle,
+                        idle_past_short_ttl: idle.is_some_and(|idle| idle > SHORT_CACHE_TTL),
+                    });
+                }
+            }
+        }
+    }
+
+    if current_prompt_tokens > 0 {
+        let reported_cache = previous
+            .as_ref()
+            .is_some_and(|previous| previous.reported_cache)
+            || record.usage.cache_read_tokens > 0
+            || record.usage.cache_write_tokens > 0;
+        *previous = Some(PreviousRequest {
+            prompt_tokens: current_prompt_tokens,
+            endpoint: record.endpoint.clone(),
+            model: record.model.clone(),
+            completed_at_unix_ms: record.completed_at_unix_ms,
+            reported_cache,
+            branch_index,
+        });
+    }
+}
+
+fn next_completed_warm<'a>(
+    records: &'a [crate::session::CacheWarmRecord],
+    cursor: &mut usize,
+) -> Option<&'a crate::session::CacheWarmRecord> {
+    while *cursor < records.len() {
+        let item = &records[*cursor];
+        *cursor += 1;
+        if item.state == CacheWarmState::Completed {
+            return Some(item);
+        }
+    }
+    None
+}
+
 fn analyze_session_cache_impl(
     session: &Session,
     collect_misses: bool,
 ) -> (CacheStats, Vec<CacheMiss>) {
+    if session.is_linear_chain() {
+        let warm_records = session.cache_warm_records();
+        let mut warm_cursor = 0usize;
+        let mut stats = CacheStats::default();
+        let mut misses = Vec::new();
+        let mut previous: Option<PreviousRequest> = None;
+        let entries = session.entries();
+        let has_compaction = session.has_any_compaction();
+
+        for record in session.usage_records() {
+            if matches!(&record.kind, UsageRecordKind::CacheWarm) {
+                if let (Some(warm), Some(prior)) = (
+                    next_completed_warm(warm_records, &mut warm_cursor),
+                    previous.as_mut(),
+                ) {
+                    if warm
+                        .anchor
+                        .as_ref()
+                        .is_some_and(|anchor| session.entry_index(anchor).is_some())
+                        && prior.endpoint.as_ref() == Some(&warm.endpoint)
+                        && prior.model.as_ref() == Some(&warm.model)
+                    {
+                        prior.completed_at_unix_ms = record.completed_at_unix_ms;
+                    }
+                }
+                continue;
+            }
+            let UsageRecordKind::AssistantTurn { assistant } = &record.kind else {
+                continue;
+            };
+            let Some(branch_index) = session.entry_index(assistant) else {
+                continue;
+            };
+            let compaction_between = has_compaction
+                && previous.as_ref().is_some_and(|prev| {
+                    entries
+                        .get(prev.branch_index.saturating_add(1)..branch_index)
+                        .is_some_and(|between| {
+                            between
+                                .iter()
+                                .any(|entry| matches!(&entry.value, EntryValue::Compaction { .. }))
+                        })
+                });
+            step_cache_record(
+                record,
+                branch_index,
+                compaction_between,
+                &mut stats,
+                &mut previous,
+                collect_misses.then_some(&mut misses),
+                assistant,
+            );
+        }
+        return (stats, misses);
+    }
+
     let branch = active_branch(session);
     let positions: HashMap<&str, usize> = branch
         .iter()
@@ -222,15 +373,7 @@ fn analyze_session_cache_impl(
         let Some(&branch_index) = positions.get(assistant.0.as_str()) else {
             continue;
         };
-        stats.assistant_turns = stats.assistant_turns.saturating_add(1);
-        stats.cache_read_tokens = stats
-            .cache_read_tokens
-            .saturating_add(record.usage.cache_read_tokens);
-        stats.cache_write_tokens = stats
-            .cache_write_tokens
-            .saturating_add(record.usage.cache_write_tokens);
-
-        if previous.as_ref().is_some_and(|previous| {
+        let compaction_between = previous.as_ref().is_some_and(|previous| {
             branch
                 .get(previous.branch_index.saturating_add(1)..branch_index)
                 .is_some_and(|between| {
@@ -239,63 +382,16 @@ fn analyze_session_cache_impl(
                         .filter_map(|id| session.entry(id))
                         .any(|entry| matches!(&entry.value, EntryValue::Compaction { .. }))
                 })
-        }) {
-            previous = None;
-        }
-
-        let current_prompt_tokens = prompt_tokens(record.usage);
-        stats.latest_prompt_tokens = current_prompt_tokens;
-        stats.latest_cache_read_tokens = record.usage.cache_read_tokens;
-        if let Some(prior) = previous.as_ref() {
-            let current_reports_cache =
-                record.usage.cache_read_tokens > 0 || record.usage.cache_write_tokens > 0;
-            if current_prompt_tokens > 0 && (current_reports_cache || prior.reported_cache) {
-                let expected = prior.prompt_tokens.min(current_prompt_tokens);
-                stats.reusable_prefix_tokens =
-                    stats.reusable_prefix_tokens.saturating_add(expected);
-                let missed = expected.saturating_sub(record.usage.cache_read_tokens);
-                if missed > CACHE_MISS_NOISE_TOKENS {
-                    let idle = idle_duration(prior, record);
-                    let missed_cost = estimate_missed_cost(record.cost, record.usage, missed);
-                    stats.missed_reusable_tokens =
-                        stats.missed_reusable_tokens.saturating_add(missed);
-                    stats.miss_count = stats.miss_count.saturating_add(1);
-                    if let Some(cost) = missed_cost {
-                        stats.missed_cost_microdollars =
-                            stats.missed_cost_microdollars.saturating_add(cost);
-                        stats.priced_miss_count = stats.priced_miss_count.saturating_add(1);
-                    }
-                    if collect_misses {
-                        misses.push(CacheMiss {
-                            assistant: assistant.clone(),
-                            expected_reusable_tokens: expected,
-                            cache_read_tokens: record.usage.cache_read_tokens,
-                            missed_reusable_tokens: missed,
-                            missed_cost_microdollars: missed_cost,
-                            model_changed: route_changed(prior, record),
-                            idle,
-                            idle_past_short_ttl: idle.is_some_and(|idle| idle > SHORT_CACHE_TTL),
-                        });
-                    }
-                }
-            }
-        }
-
-        if current_prompt_tokens > 0 {
-            let reported_cache = previous
-                .as_ref()
-                .is_some_and(|previous| previous.reported_cache)
-                || record.usage.cache_read_tokens > 0
-                || record.usage.cache_write_tokens > 0;
-            previous = Some(PreviousRequest {
-                prompt_tokens: current_prompt_tokens,
-                endpoint: record.endpoint.clone(),
-                model: record.model.clone(),
-                completed_at_unix_ms: record.completed_at_unix_ms,
-                reported_cache,
-                branch_index,
-            });
-        }
+        });
+        step_cache_record(
+            record,
+            branch_index,
+            compaction_between,
+            &mut stats,
+            &mut previous,
+            collect_misses.then_some(&mut misses),
+            assistant,
+        );
     }
 
     (stats, misses)
@@ -309,6 +405,36 @@ pub fn analyze_session_cache(session: &Session) -> (CacheStats, Vec<CacheMiss>) 
 /// Analyze only aggregate cache statistics without allocating per-miss
 /// diagnostic records. This is the hot path for resume/footer telemetry.
 pub fn analyze_session_cache_stats(session: &Session) -> CacheStats {
+    if session.is_linear_chain() && !session.has_any_compaction() {
+        let usage_records = session.usage_records();
+        let mut cache_guard = session.cache_stats_cache.borrow_mut();
+        let cache = cache_guard.get_or_insert_with(CacheStatsCache::default);
+        if cache.usage_processed_len > usage_records.len() {
+            *cache = CacheStatsCache::default();
+        }
+        // A cache refresh only moves the previous request's completion time,
+        // which feeds per-miss idle diagnostics but no aggregate statistic,
+        // so the aggregates skip refreshes entirely.
+        for record in &usage_records[cache.usage_processed_len..] {
+            let UsageRecordKind::AssistantTurn { assistant } = &record.kind else {
+                continue;
+            };
+            let Some(branch_index) = session.entry_index(assistant) else {
+                continue;
+            };
+            step_cache_record(
+                record,
+                branch_index,
+                false,
+                &mut cache.stats,
+                &mut cache.previous,
+                None,
+                assistant,
+            );
+        }
+        cache.usage_processed_len = usage_records.len();
+        return cache.stats;
+    }
     analyze_session_cache_impl(session, false).0
 }
 
@@ -482,5 +608,43 @@ mod tests {
         record_turn(&mut session, "a", 13_000, 0, 0);
         let (_, misses) = analyze_session_cache(&session);
         assert!(misses.is_empty());
+    }
+
+    #[test]
+    fn analyze_session_cache_stats_incremental_matches_full_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create(dir.path().join("session.jsonl")).unwrap();
+        for i in 0..8u64 {
+            session.append(user(&format!("u-{i}"))).unwrap();
+            record_turn(
+                &mut session,
+                "claude-sonnet-4-6",
+                10_000 + i * 2_000,
+                if i == 0 { 0 } else { 8_000 + (i - 1) * 2_000 },
+                2_000,
+            );
+            let incremental = analyze_session_cache_stats(&session);
+            let (full, _) = analyze_session_cache(&session);
+            assert_eq!(incremental, full);
+            if i % 3 == 1 {
+                // A refresh between turns is charged but is not a turn.
+                session
+                    .record_cache_warm_usage(
+                        EndpointId("anthropic".into()),
+                        ModelId("claude-sonnet-4-6".into()),
+                        Usage {
+                            input_tokens: 10,
+                            cache_read_tokens: 9_000,
+                            ..Usage::default()
+                        },
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    analyze_session_cache_stats(&session),
+                    analyze_session_cache(&session).0
+                );
+            }
+        }
     }
 }

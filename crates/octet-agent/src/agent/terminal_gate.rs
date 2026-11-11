@@ -38,7 +38,7 @@ impl TerminalGateEvidence {
             return Ok(None);
         }
         let mut evidence = Self {
-            prior_context: recent_conversational_context(&session.context()?),
+            prior_context: recent_conversational_context(&session.context_ref()?),
             ..Self::default()
         };
         #[cfg(test)]

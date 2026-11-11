@@ -1828,3 +1828,308 @@ fn custom_chat_profile_is_a_strict_three_boolean_boundary() {
     unknown["max_output_tokens"] = serde_json::json!(99999);
     assert!(serde_json::from_value::<crate::CustomOpenAiChatProfile>(unknown).is_err());
 }
+
+fn fresh_stamps(count: usize) -> Vec<u64> {
+    (0..count)
+        .map(|_| crate::RequestHistory::fresh_stamp())
+        .collect()
+}
+
+fn user_text(text: &str) -> Message {
+    Message::User(UserMessage {
+        content: vec![UserPart::Text(text.to_string())],
+    })
+}
+
+fn assistant_text(model: &Model, text: &str) -> Message {
+    Message::Assistant(AssistantMessage {
+        model: model.spec.id.clone(),
+        protocol: Protocol::OpenAiChat,
+        content: vec![AssistantPart::Text(text.to_string())],
+    })
+}
+
+/// Builds `req` as the history lent through `history` under `stamps` and
+/// returns its body with the number of canonical messages encoded for it.
+///
+/// The body must be byte-for-byte the one the same request gets without a
+/// lent history. (Debug builds also compare every body with a one-pass
+/// serialization of the complete request.)
+fn build_lent(
+    history: &crate::RequestHistory,
+    model: &Model,
+    req: &Request,
+    stamps: &[u64],
+) -> (bytes::Bytes, usize) {
+    history.lend(stamps.to_vec());
+    super::request::take_chat_message_encodings();
+    let lent = build_request_with_history(model, req, Some(history)).unwrap();
+    let encodings = super::request::take_chat_message_encodings();
+    let plain = build_request(model, req).unwrap();
+    super::request::take_chat_message_encodings();
+    assert!(
+        lent.body == plain.body,
+        "a lent history must not change the request body"
+    );
+    (lent.body, encodings)
+}
+
+#[test]
+fn a_lent_history_is_serialized_once_per_message() {
+    let model = make_test_model(true, false, false, true, false, false);
+    let history = crate::RequestHistory::new();
+    let mut req = Request {
+        system: Some("You are a coding agent.".to_string()),
+        messages: vec![
+            user_text("turn 1"),
+            assistant_text(&model, "answer 1"),
+            user_text("turn 2"),
+            assistant_text(&model, "answer 2"),
+        ],
+        ..base_request()
+    };
+    let mut stamps = fresh_stamps(req.messages.len());
+
+    let (first, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 4);
+
+    req.messages.push(user_text("turn 3"));
+    req.messages.push(assistant_text(&model, "answer 3"));
+    stamps.extend(fresh_stamps(2));
+    let (_, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 2, "only the appended messages are serialized");
+
+    // The system prompt is not part of the kept messages.
+    req.system = Some("Another system prompt.".to_string());
+    let (body, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 0);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["messages"][0]["content"], "Another system prompt.");
+
+    // A history rewound to an earlier point reuses what it still shares.
+    req.system = Some("You are a coding agent.".to_string());
+    req.messages.truncate(4);
+    stamps.truncate(4);
+    let (rewound, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 0);
+    assert_eq!(rewound, first);
+
+    // A changed message is serialized again, with everything after it.
+    req.messages[1] = assistant_text(&model, "a compacted answer");
+    stamps[1] = crate::RequestHistory::fresh_stamp();
+    let (body, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 3);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["messages"][2]["content"], "a compacted answer");
+
+    // Another model shares nothing: its replay rules differ.
+    let mut other = model.clone();
+    Arc::make_mut(&mut other.spec).id = ModelId("other-model".to_string());
+    let (_, encodings) = build_lent(&history, &other, &req, &stamps);
+    assert_eq!(encodings, 4);
+}
+
+#[test]
+fn the_cache_marker_moves_without_serializing_the_history_again() {
+    let mut model = make_test_model(false, false, false, true, false, false);
+    Arc::make_mut(&mut model.spec).cache.cache_control_format =
+        Some(crate::types::CacheControlFormat::Anthropic);
+    let history = crate::RequestHistory::new();
+    let mut req = Request {
+        system: Some("system".to_string()),
+        messages: vec![
+            user_text("turn 1"),
+            assistant_text(&model, "answer 1"),
+            user_text("turn 2"),
+        ],
+        session_id: Some("stable-session".to_string()),
+        ..base_request()
+    };
+    let mut stamps = fresh_stamps(req.messages.len());
+
+    let (body, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 3);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["messages"][3]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+
+    // The message that carried the marker is serialized once more without
+    // it; the two before it are reused, and the marker lands on the newest.
+    req.messages.push(assistant_text(&model, "answer 2"));
+    req.messages.push(user_text("turn 3"));
+    stamps.extend(fresh_stamps(2));
+    let (body, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 3);
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["messages"][3]["content"], "turn 2");
+    assert_eq!(
+        parsed["messages"][5]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+}
+
+#[test]
+fn a_message_with_an_expiring_reference_is_never_kept() {
+    let model = make_test_model(true, false, false, true, false, false);
+    let history = crate::RequestHistory::new();
+    let expiring = Message::User(UserMessage {
+        content: vec![
+            UserPart::Text("look at this".to_string()),
+            UserPart::Media(Media::Image(crate::types::ImageMedia {
+                source: ImageSource::ProviderRef(crate::types::ProviderMediaRef {
+                    protocol: Protocol::OpenAiChat,
+                    id: "file-1".to_string(),
+                    expires_at: Some(
+                        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+                    ),
+                }),
+                media_type: None,
+                detail: None,
+            })),
+        ],
+    });
+    let req = Request {
+        messages: vec![
+            user_text("turn 1"),
+            assistant_text(&model, "answer 1"),
+            expiring,
+            assistant_text(&model, "answer 2"),
+            user_text("turn 3"),
+        ],
+        compatibility: crate::CompatibilityMode::Lossy,
+        ..base_request()
+    };
+    let stamps = fresh_stamps(req.messages.len());
+
+    let (_, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 5);
+    // What the reference encodes to may change when it expires, so it and
+    // every message after it are serialized for each request.
+    let (_, encodings) = build_lent(&history, &model, &req, &stamps);
+    assert_eq!(encodings, 3);
+}
+
+#[test]
+fn a_lent_history_gives_the_same_body_on_every_chat_profile() {
+    let tool_call = |model: &Model, id: &str| {
+        Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: Protocol::OpenAiChat,
+            content: vec![
+                AssistantPart::Reasoning(crate::types::ReasoningPart {
+                    text: Some("thinking about the tool".to_string()),
+                    state: None,
+                }),
+                AssistantPart::Text("calling a tool".to_string()),
+                AssistantPart::ToolCall(ToolCall {
+                    async_execution: false,
+                    id: ToolCallId(id.to_string()),
+                    name: "read".to_string(),
+                    arguments_json: r#"{"path":"a.rs"}"#.to_string(),
+                    argument_error: None,
+                }),
+            ],
+        })
+    };
+    let tool_result = |id: &str| {
+        Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(crate::types::ToolResult {
+                tool_call_id: ToolCallId(id.to_string()),
+                content: vec![ToolResultPart::Text("fn main() {}".to_string())],
+                is_error: false,
+                added_tool_names: None,
+            })],
+        })
+    };
+
+    let plain = make_test_model(true, false, false, true, false, false);
+    let reasoning = make_test_model(true, false, false, true, true, false);
+    let mut mistral = make_test_model(true, false, false, true, false, false);
+    Arc::make_mut(&mut mistral.endpoint)
+        .runtime
+        .openai_chat_profile = crate::types::OpenAiChatRuntimeProfile::Mistral;
+    let mut marked = make_test_model(true, false, false, true, true, false);
+    Arc::make_mut(&mut marked.spec).cache.cache_control_format =
+        Some(crate::types::CacheControlFormat::Anthropic);
+
+    for model in [plain, reasoning, mistral, marked] {
+        let history = crate::RequestHistory::new();
+        let mut req = Request {
+            system: Some("system".to_string()),
+            messages: vec![user_text("turn 1")],
+            tools: vec![crate::types::ToolDef {
+                async_execution: false,
+                constrained_sampling: None,
+                name: "read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            session_id: Some("stable-session".to_string()),
+            ..base_request()
+        };
+        let mut stamps = fresh_stamps(1);
+        // Every request of a growing conversation, including the ones that
+        // end on a tool result, a tool call's result pair and plain text.
+        for turn in 0..4 {
+            let id = format!("call{turn:05}");
+            for message in [
+                tool_call(&model, &id),
+                tool_result(&id),
+                assistant_text(&model, "done"),
+                user_text("next"),
+            ] {
+                req.messages.push(message);
+                stamps.extend(fresh_stamps(1));
+                if matches!(req.messages.last(), Some(Message::User(_))) {
+                    build_lent(&history, &model, &req, &stamps);
+                }
+            }
+        }
+        let (_, encodings) = build_lent(&history, &model, &req, &stamps);
+        assert!(
+            encodings <= 2,
+            "an unchanged history is not serialized again ({encodings})"
+        );
+    }
+}
+
+#[test]
+fn switching_models_serializes_the_history_again_for_the_new_model() {
+    let plain = make_test_model(true, false, false, true, false, false);
+    let mut reasoning = make_test_model(true, false, false, true, true, false);
+    Arc::make_mut(&mut reasoning.spec).id = crate::types::ModelId("another-model".to_string());
+    let history = crate::RequestHistory::new();
+    let req = Request {
+        system: Some("system".to_string()),
+        messages: vec![
+            user_text("turn 1"),
+            Message::Assistant(AssistantMessage {
+                model: reasoning.spec.id.clone(),
+                protocol: Protocol::OpenAiChat,
+                content: vec![
+                    AssistantPart::Reasoning(crate::types::ReasoningPart {
+                        text: Some("thinking".to_string()),
+                        state: None,
+                    }),
+                    AssistantPart::Text("answer 1".to_string()),
+                ],
+            }),
+            user_text("turn 2"),
+        ],
+        ..base_request()
+    };
+    let stamps = fresh_stamps(req.messages.len());
+
+    let (_, encodings) = build_lent(&history, &plain, &req, &stamps);
+    assert_eq!(encodings, 3);
+    let (_, encodings) = build_lent(&history, &plain, &req, &stamps);
+    assert_eq!(encodings, 0, "the same model reuses every message");
+    // The same history under another model's rules is encoded afresh, and
+    // switching back cannot reuse what was kept for the other model.
+    let (_, encodings) = build_lent(&history, &reasoning, &req, &stamps);
+    assert_eq!(encodings, 3);
+    let (_, encodings) = build_lent(&history, &plain, &req, &stamps);
+    assert_eq!(encodings, 3);
+}

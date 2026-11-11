@@ -252,12 +252,20 @@ impl Session {
         }
 
         self.persist(&buffer)?;
+        self.reclaim_lent_context();
 
+        let previous_head = self.head.clone();
         self.invocation_entries
             .record(&assistant_entry, &self.index, &[]);
+        let assistant_calls = entry_assistant_tool_calls(&assistant_entry);
+        let assistant_has_native_steering = assistant_entry
+            .metadata
+            .as_ref()
+            .is_some_and(|meta| meta.native_steering.is_some());
         self.entries.push(assistant_entry);
         self.index
             .insert(assistant_id.clone(), self.entries.len().saturating_sub(1));
+        let has_sidecar = sidecar_entry.is_some();
         if let Some(sidecar_entry) = sidecar_entry {
             self.invocation_entries
                 .record(&sidecar_entry, &self.index, &[]);
@@ -277,10 +285,39 @@ impl Session {
         self.next_id = next_id;
         self.total_cost_microdollars = new_total;
         self.total_cost_picodollars_remainder = new_remainder;
-        self.usage_records.push(usage_record);
-        if let Some(messages) = self.context_cache.get_mut() {
-            append_context_message(messages, &assistant_message);
+        if usage_record.cost.is_none() && usage_record.cost_microdollars.is_none() {
+            self.has_unpriced_usage_flag = true;
         }
+        if usage_record.cost_microdollars.is_some() {
+            self.has_priced_usage_flag = true;
+        }
+        self.usage_records.push(usage_record);
+        if let Some(calls) = assistant_calls {
+            if let Some(stats) = self.branch_stats_cache.get_mut() {
+                stats.head = self.head.clone();
+                stats.model_turns += 1;
+                stats.tool_calls += calls;
+            }
+        } else if let Some(stats) = self.branch_stats_cache.get_mut() {
+            stats.head = self.head.clone();
+        }
+        if let Some((cached_leaf, _)) = self.active_skills_cache.get_mut() {
+            if Some(&*cached_leaf) == previous_head.as_ref() {
+                if let Some(new_head) = self.head.clone() {
+                    *cached_leaf = new_head;
+                }
+            }
+        }
+        if assistant_has_native_steering {
+            self.unsettled_native_steering_cache.set(None);
+        } else if has_sidecar {
+            self.unsettled_native_steering_cache.set(Some(false));
+        }
+        append_to_context_cache(
+            self.context_cache.get_mut(),
+            self.context_stamps.get_mut(),
+            &assistant_message,
+        );
         Ok(assistant_id)
     }
 
@@ -362,7 +399,14 @@ impl Session {
     /// for ordinary appends and reused until checkout or compaction changes
     /// the active branch semantics.
     fn reconstruct_context(&self) -> Result<Vec<Message>, SessionError> {
-        let mut newest_first: Vec<Message> = Vec::new();
+        #[cfg(test)]
+        self.context_reconstruct_count
+            .set(self.context_reconstruct_count.get() + 1);
+        let mut newest_first: Vec<Message> = if self.is_linear_chain {
+            Vec::with_capacity(self.entries.len())
+        } else {
+            Vec::new()
+        };
         let mut summary: Option<(String, Option<SnapcompactCheckpoint>)> = None;
         let mut boundary: Option<EntryId> = None;
 
@@ -405,6 +449,13 @@ impl Session {
                 break;
             }
             cursor = entry.parent.as_ref();
+        }
+
+        if self.compaction_summary_cache.borrow().is_none() {
+            let formatted = summary
+                .as_ref()
+                .map(|(text, _)| format!("[summary of earlier conversation]\n{text}"));
+            *self.compaction_summary_cache.borrow_mut() = Some(formatted);
         }
 
         let mut messages: Vec<Message> = summary
@@ -485,14 +536,102 @@ impl Session {
         Ok(verdict)
     }
 
+    pub(crate) fn visible_compaction_summary(&self) -> Option<String> {
+        if let Some(cached) = self.compaction_summary_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        if !self.has_any_compaction {
+            *self.compaction_summary_cache.borrow_mut() = Some(None);
+            return None;
+        }
+        let mut cursor = self.head.as_ref();
+        let found = loop {
+            let Some(id) = cursor else {
+                break None;
+            };
+            let Some(entry) = self.entry(id) else {
+                break None;
+            };
+            if let EntryValue::Compaction { summary, .. } = &entry.value {
+                break Some(format!("[summary of earlier conversation]\n{summary}"));
+            }
+            cursor = entry.parent.as_ref();
+        };
+        *self.compaction_summary_cache.borrow_mut() = Some(found.clone());
+        found
+    }
+
+    /// Fills the context cache from the active branch when it is empty.
+    fn ensure_context_cache(&self) -> Result<(), SessionError> {
+        self.reclaim_lent_context();
+        if self.context_cache.borrow().is_none() {
+            let messages = self.reconstruct_context()?;
+            let mut stamps = self.context_stamps.borrow_mut();
+            stamps.clear();
+            restamp_context(&mut stamps, 0, messages.len());
+            *self.context_cache.borrow_mut() = Some(messages);
+        }
+        Ok(())
+    }
+
+    /// Takes back the context lent by [`Self::take_context_for_request`].
+    ///
+    /// The provider client hands the lent vector back unmodified once the
+    /// request body is encoded. If it never got that far, the cache stays
+    /// empty and the next access rebuilds it from the entries.
+    pub(crate) fn reclaim_lent_context(&self) {
+        if !self.context_lent.replace(false) {
+            return;
+        }
+        if let Some(returned) = self.request_history.reclaim() {
+            debug_assert!(self.context_cache.borrow().is_none());
+            *self.context_stamps.borrow_mut() = returned.stamps;
+            *self.context_cache.borrow_mut() = Some(returned.messages);
+        }
+    }
+
+    /// Drops the cached context. A context still lent to a request is
+    /// abandoned, so it can never come back over the new state.
+    pub(crate) fn invalidate_context_cache(&mut self) {
+        if self.context_lent.replace(false) {
+            drop(self.request_history.reclaim());
+        }
+        *self.context_cache.get_mut() = None;
+        self.context_stamps.get_mut().clear();
+    }
+
+    /// Lends the cached model-visible context to the provider request being
+    /// opened instead of deep-cloning it.
+    ///
+    /// Pass [`Self::request_history`] with the request
+    /// ([`octet_ai::HostRequestOptions::history`]) so the client can return
+    /// the vector and reuse the work it did for the unchanged messages; call
+    /// [`Self::reclaim_lent_context`] once the request is open. Without the
+    /// handle the vector is simply consumed and the cache rebuilt later.
+    pub(crate) fn take_context_for_request(&self) -> Result<Vec<Message>, SessionError> {
+        self.ensure_context_cache()?;
+        let messages = self
+            .context_cache
+            .borrow_mut()
+            .take()
+            .expect("context cache initialized immediately above");
+        let stamps = std::mem::take(&mut *self.context_stamps.borrow_mut());
+        self.request_history.lend(stamps);
+        self.context_lent.set(true);
+        Ok(messages)
+    }
+
+    /// The handle that lets a provider request reuse work across this
+    /// session's requests and return a context lent to it.
+    pub(crate) fn request_history(&self) -> &octet_ai::RequestHistory {
+        &self.request_history
+    }
+
     /// Borrows the cached model-visible context without deep-cloning message
     /// text, tool output, or media. The first call reconstructs the active
     /// branch; ordinary appends update that cache incrementally.
     pub fn context_ref(&self) -> Result<Ref<'_, [Message]>, SessionError> {
-        if self.context_cache.borrow().is_none() {
-            let messages = self.reconstruct_context()?;
-            *self.context_cache.borrow_mut() = Some(messages);
-        }
+        self.ensure_context_cache()?;
         Ok(Ref::map(self.context_cache.borrow(), |cache| {
             cache
                 .as_deref()
@@ -506,6 +645,9 @@ impl Session {
     /// require ownership; it avoids copying the complete conversation.
     pub fn context(&self) -> Result<Vec<Message>, SessionError> {
         let _span = crate::performance_trace::Span::start("session.context_clone", 0);
+        #[cfg(test)]
+        self.context_clone_count
+            .set(self.context_clone_count.get() + 1);
         Ok(self.context_ref()?.to_vec())
     }
 
@@ -585,6 +727,19 @@ impl Session {
         &self,
         leaf_id: &EntryId,
     ) -> Result<ActiveSkillState, SessionError> {
+        if let Some((cached_id, cached_state)) = self.active_skills_cache.borrow().as_ref() {
+            if cached_id == leaf_id {
+                return Ok(cached_state.clone());
+            }
+        }
+        if !self.has_any_skill_entries && self.is_linear_chain {
+            if !self.index.contains_key(leaf_id) {
+                return Err(SessionError::UnknownEntry(leaf_id.clone()));
+            }
+            let empty = ActiveSkillState::default();
+            *self.active_skills_cache.borrow_mut() = Some((leaf_id.clone(), empty.clone()));
+            return Ok(empty);
+        }
         let mut cursor = Some(leaf_id);
         let mut deactivated = std::collections::HashSet::new();
         let mut active_skills: Vec<SkillActivatedSnapshot> = Vec::new();
@@ -686,10 +841,12 @@ impl Session {
         skill_resources.retain(|r| active_activation_ids.contains(&r.activation_id));
         active_skills.reverse();
 
-        Ok(ActiveSkillState {
+        let state = ActiveSkillState {
             active_skills,
             skill_resources,
-        })
+        };
+        *self.active_skills_cache.borrow_mut() = Some((leaf_id.clone(), state.clone()));
+        Ok(state)
     }
 }
 
@@ -827,26 +984,54 @@ fn bound_tool_result_images(messages: &mut [Message]) {
     }
 }
 
-/// Appends one newly persisted message to an already materialized context.
-pub(super) fn append_context_message(messages: &mut Vec<Message>, message: &Message) {
+/// Extends a cached context, if any, with a newly appended message and gives
+/// every message the append changed a fresh stamp.
+pub(super) fn append_to_context_cache(
+    cache: &mut Option<Vec<Message>>,
+    stamps: &mut Vec<u64>,
+    message: &Message,
+) {
+    let Some(messages) = cache else {
+        return;
+    };
+    let unchanged = append_context_message(messages, message);
+    restamp_context(stamps, unchanged, messages.len());
+}
+
+/// Keeps the first `unchanged` stamps and gives each later message of a
+/// `len`-message context a fresh one.
+pub(super) fn restamp_context(stamps: &mut Vec<u64>, unchanged: usize, len: usize) {
+    stamps.truncate(unchanged.min(len));
+    stamps.extend((stamps.len()..len).map(|_| octet_ai::RequestHistory::fresh_stamp()));
+}
+
+/// Appends `message` to a cached context and returns how many leading
+/// messages kept their content.
+pub(super) fn append_context_message(messages: &mut Vec<Message>, message: &Message) -> usize {
     let adds_tool_images = matches!(message, Message::User(turn) if turn_has_tool_images(turn));
+    let prev_len = messages.len();
     if let Message::User(current) = message {
         if is_tool_result_turn(current) {
             if let Some(Message::User(previous)) = messages.last_mut() {
                 if is_tool_result_turn(previous) {
+                    let unchanged = prev_len.saturating_sub(1);
                     merge_tool_result_turn(previous, &current.content);
                     if adds_tool_images {
                         bound_tool_result_images(messages);
+                        return 0;
                     }
-                    return;
+                    return unchanged;
                 }
             }
         }
     }
+    let unchanged = prev_len;
     messages.push(message.clone());
     if adds_tool_images {
         bound_tool_result_images(messages);
+        return 0;
     }
+    unchanged
 }
 
 /// Merges consecutive user messages that contain tool results and their
