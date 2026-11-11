@@ -58,8 +58,9 @@ use self::input_overlays::{input_path_suggestions, input_slash_suggestions};
 #[cfg(test)]
 use self::native_scrollback::{render_shell, render_shell_at, render_shell_update};
 pub(crate) use self::ordinary_surface::{
-    fit_prioritized_footer, footer_width, join_ordinary_metadata, render_ordinary_status,
-    FooterSegment, OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata, OrdinarySurfaceStatus,
+    fit_prioritized_footer, footer_width, join_ordinary_metadata, render_ordinary_note,
+    render_ordinary_status, FooterSegment, OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata,
+    OrdinarySurfaceStatus,
 };
 use self::output_window::bounded_tail_rows;
 #[cfg(test)]
@@ -1205,34 +1206,6 @@ impl PickerState {
         match self.scope {
             PickerScope::Current => &self.rows,
             PickerScope::All => self.all_rows.as_deref().unwrap_or(&[]),
-        }
-    }
-
-    /// Refresh the empty-state surface after a filter, scope, or named-only
-    /// change (gh-556): an empty picker explains which recovery applies
-    /// instead of rendering a bare list, and the composer draft is untouched.
-    /// The lifecycle already carries a transient state (for example the
-    /// all-workspaces load) is left alone.
-    pub(crate) fn refresh_empty_state(&mut self) {
-        if matches!(self.surface.lifecycle, OrdinarySurfaceLifecycle::Loading(_)) {
-            return;
-        }
-        let filter = self.filter.trim().to_string();
-        if session_picker_ordering(self).is_empty() {
-            let message = if !filter.is_empty() {
-                format!(
-                    "No sessions match '{filter}'. Clear the search (Backspace) or press Tab to switch workspace scope."
-                )
-            } else if self.rows.is_empty() {
-                "No sessions in this workspace yet. Start a new session and it will appear here."
-                    .to_string()
-            } else {
-                "No sessions match the current scope. Press Tab to switch workspace scope."
-                    .to_string()
-            };
-            self.surface.lifecycle = OrdinarySurfaceLifecycle::empty(message);
-        } else if matches!(self.surface.lifecycle, OrdinarySurfaceLifecycle::Empty(_)) {
-            self.surface.lifecycle = OrdinarySurfaceLifecycle::Ready;
         }
     }
 }
@@ -6121,33 +6094,46 @@ impl InteractiveShell {
     }
 
     /// Complete the highlighted slash suggestion without submitting it. When
-    /// the popup is dismissed, only a unique prefix can complete. A mounted slot
-    /// editor receives the completed draft instead of the hidden mirror, so its
-    /// own pastes and undo stay consistent with what it shows.
+    /// the popup is dismissed, only a unique prefix can complete. Tab never
+    /// inserts a suggestion the user cannot see: a popup that is not drawn, or
+    /// that an extension's autocomplete overlay replaced, completes nothing.
+    /// A mounted slot editor receives the completed draft instead of the hidden
+    /// mirror, so its own pastes and undo stay consistent with what it shows.
     pub fn complete_slash_command(&mut self) {
+        let native_input = self
+            .state
+            .native()
+            .lock()
+            .expect("native mailbox poisoned")
+            .accepting_input;
         let mut state = self.state.borrow_mut();
-        if state.editor.cursor() != state.editor.text().len() {
+        let (popup_visible, overlay_shown) = if native_input {
+            let source =
+                tern_completion::Completion::capture(&state).map(|completion| completion.source);
+            (
+                source == Some(tern_completion::Source::Slash),
+                source == Some(tern_completion::Source::Extension),
+            )
+        } else {
+            let width = state.size.0;
+            let overlay = input_overlays::extension_autocomplete_shown(&state);
+            let drawn = !shell_chrome(&state, width, Instant::now())
+                .suggestions
+                .is_empty();
+            (drawn && !overlay, overlay)
+        };
+        let Some(completed) =
+            input_overlays::slash_completion(&state, popup_visible, overlay_shown)
+        else {
             return;
-        }
-        let suggestions = input_slash_suggestions(&state);
-        if state.slash_popup_dismissed && suggestions.len() != 1 {
-            return;
-        }
-        let selected = state
-            .slash_selection
-            .min(suggestions.len().saturating_sub(1));
-        if let Some(suggestion) = suggestions.get(selected) {
-            let completed = format!(
-                "/{}{}",
-                suggestion.name,
-                if suggestion.accepts_argument { " " } else { "" }
-            );
-            state.editor.set_text(completed.clone());
-            state.slash_popup_dismissed = true;
-            invalidate_editor_autocomplete(&mut state);
-            drop(state);
-            self.set_composer_slot_text(completed);
-        }
+        };
+        state.editor.set_text(completed.clone());
+        state.slash_popup_dismissed = true;
+        state.slash_selection = 0;
+        state.slash_scroll = 0;
+        invalidate_editor_autocomplete(&mut state);
+        drop(state);
+        self.set_composer_slot_text(completed);
     }
 
     pub fn slash_popup_open(&self) -> bool {
@@ -8839,8 +8825,6 @@ impl InteractiveShell {
                                     picker.surface.lifecycle =
                                         OrdinarySurfaceLifecycle::loading("all workspaces");
                                     state.pending_panel_requests.push(PanelRequest::LoadAll);
-                                } else {
-                                    picker.refresh_empty_state();
                                 }
                             }
                             KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => {
@@ -8852,7 +8836,6 @@ impl InteractiveShell {
                                 picker.named_only = !picker.named_only;
                                 picker.selected = 0;
                                 picker.scroll = 0;
-                                picker.refresh_empty_state();
                             }
                             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                                 picker.show_path = !picker.show_path;
@@ -8936,13 +8919,11 @@ impl InteractiveShell {
                                 picker.filter.push(character);
                                 picker.selected = 0;
                                 picker.scroll = 0;
-                                picker.refresh_empty_state();
                             }
                             KeyCode::Backspace if key.modifiers.is_empty() => {
                                 picker.filter.pop();
                                 picker.selected = 0;
                                 picker.scroll = 0;
-                                picker.refresh_empty_state();
                             }
                             _ => {}
                         }

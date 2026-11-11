@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Ctrl+C at an idle, empty prompt now closes octet, as the welcome hint says.
+  During a running response Ctrl+C still only stops the run; press it again
+  once the run has stopped to exit. Ctrl+D exits at any time (#673).
+
 - A Pi extension that mounts its footer or a widget from `session_start` without awaiting it (as Pi's own examples do) no longer has the mount cancelled when the hook replies: a still-unanswered `ui/open` now survives a successful parent reply (a failed or cancelled parent still retires it).
 
 - A Pi extension provider whose stream reports an OpenAI Responses tool call (Pi's id form is `call_id|item_id`) no longer fails the turn with "tool call id is not a native provider identifier"; the id is forwarded unchanged.
@@ -38,6 +42,26 @@
   during a garbage collection or on a loaded machine, is no longer disabled
   until reload. Keys wait for it in order, as in Pi; only a listener that does
   not answer for a full second is latched off, with one warning.
+
+- The `/resume` empty states are now derived from the picker when it is drawn,
+  so they cannot go stale (transcript-search hits no longer stay hidden behind an
+  old message). Named-only (`^n`) hiding every row says to press `^n`, an
+  all-workspaces no-match no longer suggests switching scope or claims the
+  workspace is empty, a store with no sessions is not labelled "no matches",
+  and the guidance leads the filter echo so narrow terminals keep it. Follow-up
+  to #672.
+
+- A failed Codemode card no longer mounts an empty output block when its output
+  is only the failure status, and the repeated status is dropped by comparing it
+  with the status actually shown, skipping leading blank lines, so sanitized or
+  over-long statuses dedupe too, with one fewer copy of the output per render.
+  Follow-up to #678.
+
+- Tab completion of a `/command` keeps a name you typed in full (`/skill:review`
+  no longer becomes `/skill:review-pr`) until you move the highlight, completes
+  only a suggestion that is on screen (not when the popup is hidden on a short
+  terminal or an extension's autocomplete replaced it), and resets the popup
+  selection afterwards. Follow-up to #675.
 
 - A partially typed `/command` completion menu now includes commands that an
   extension registers after the keystroke as soon as the extension finishes

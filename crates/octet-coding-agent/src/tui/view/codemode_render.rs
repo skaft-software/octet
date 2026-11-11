@@ -3,6 +3,7 @@
 use sexy_tui_rs::{visible_width, RichRenderer};
 
 use super::terminal_text::sanitize_for_terminal;
+use super::tool_render::bounded_tool_failure_reason;
 use super::tool_render::tool_value_indent_width;
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel};
 use crate::tui::theme::OctetTheme;
@@ -78,28 +79,42 @@ pub(super) fn render_source(
     rows
 }
 
-/// The failure projection already shows the status line that the tool writes at
-/// the top of its captured output, so only the duplicate is dropped. The match
-/// is exact and leading: output that merely mentions a status stays intact.
-fn without_repeated_failure_status<'a>(panel: &ToolPanel, output: &'a str) -> &'a str {
-    let Some(reason) = panel.failure_reason.as_deref().map(str::trim) else {
-        return output;
+/// Byte length of the leading blank lines plus a first non-empty line that only
+/// repeats the failure status the card already shows. The status compared is
+/// the displayed one (`bounded_tool_failure_reason`: sanitized, first non-empty
+/// line, bounded), and the output line is bounded the same way, so leading blank
+/// lines, sanitized text and over-long statuses still dedupe. The match is exact
+/// and leading: output that merely mentions a status stays intact.
+fn repeated_failure_status_len(panel: &ToolPanel, sanitized: &str) -> usize {
+    let Some(reason) = bounded_tool_failure_reason(panel) else {
+        return 0;
     };
-    match output.split_once('\n') {
-        Some((first, rest)) if first.trim() == reason => rest,
-        Some(_) => output,
-        None if output.trim() == reason => "",
-        None => output,
+    let mut offset = 0;
+    for line in sanitized.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            offset += line.len();
+            continue;
+        }
+        if crate::presentation::concise_line(trimmed) == reason {
+            return offset + line.len();
+        }
+        return 0;
     }
+    0
 }
 
 /// A bounded literal preview; long single-line JSON cannot flood the native
 /// surface. This is UI elision, not a claim that captured bytes were discarded.
+/// One owned copy per call: the sanitized text is trimmed in place.
 pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
-    let sanitized = sanitize_for_terminal(&panel.output);
-    let output = without_repeated_failure_status(panel, &sanitized);
+    let mut output = sanitize_for_terminal(&panel.output);
+    let skip = repeated_failure_status_len(panel, &output);
+    if skip > 0 {
+        output.drain(..skip);
+    }
     if expanded {
-        return output.to_owned();
+        return output;
     }
     let mut end = 0;
     let mut lines = 1;
@@ -111,12 +126,11 @@ pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
         end = offset + ch.len_utf8();
     }
     if end == output.len() {
-        output.to_owned()
+        output
     } else {
-        format!(
-            "{}\n(output preview; Ctrl+O for full output)",
-            &output[..end]
-        )
+        output.truncate(end);
+        output.push_str("\n(output preview; Ctrl+O for full output)");
+        output
     }
 }
 
@@ -318,5 +332,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn codemode_failure_dedupe_uses_the_displayed_reason_and_first_nonblank_line() {
+        // Leading blank lines do not hide the repeated status.
+        let p = failed_panel(
+            "return 1",
+            "\n  \nScript failed\nWall time 0.0 seconds",
+            "Script failed",
+        );
+        assert_eq!(output_text(&p, true), "Wall time 0.0 seconds");
+        assert_eq!(output_text(&p, false), "Wall time 0.0 seconds");
+
+        // The reason is shown sanitized; terminal controls in it still dedupe.
+        let p = failed_panel(
+            "return 1",
+            "Script failed\nWall time 0.0 seconds",
+            "Script\x1b[3J failed",
+        );
+        assert_eq!(output_text(&p, true), "Wall time 0.0 seconds");
+
+        // A reason longer than the display bound is shown truncated; the
+        // matching first output line is still the same status.
+        let long = format!("Script failed: {}", "x".repeat(300));
+        let p = failed_panel("return 1", &format!("{long}\nWall time 0.0 seconds"), &long);
+        assert_eq!(output_text(&p, true), "Wall time 0.0 seconds");
+
+        // A multi-line reason is shown as its first non-empty line.
+        let p = failed_panel(
+            "return 1",
+            "Script failed\nWall time 0.0 seconds",
+            "\nScript failed\nstack frame",
+        );
+        assert_eq!(output_text(&p, true), "Wall time 0.0 seconds");
+
+        // Unrelated first lines are kept, blank lines included.
+        let p = failed_panel("return 1", "\nmanual note\nScript failed", "Script failed");
+        assert_eq!(output_text(&p, true), "\nmanual note\nScript failed");
     }
 }

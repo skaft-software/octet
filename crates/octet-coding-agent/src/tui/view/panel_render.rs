@@ -14,9 +14,10 @@ use sexy_tui_rs::{visible_width, wrap_text_with_ansi, CURSOR_MARKER};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
-    fit_line, fit_prioritized_footer, join_ordinary_metadata, render_ordinary_status, subdued_text,
-    FooterSegment, ForkMessage, MessagePicker, OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata,
-    Panel, PanelAction, PickerScope, PickerSort, PickerState, ShellState,
+    fit_line, fit_prioritized_footer, join_ordinary_metadata, render_ordinary_note,
+    render_ordinary_status, subdued_text, FooterSegment, ForkMessage, MessagePicker,
+    OrdinarySurfaceLifecycle, OrdinarySurfaceMetadata, Panel, PanelAction, PickerScope, PickerSort,
+    PickerState, ShellState,
 };
 use crate::tui::fuzzy::{fuzzy_match, parse_search_query, SearchMode, TokenKind};
 use crate::tui::layout::{PickerLayout, PresentationLayout, MAX_APPROVAL_DETAIL_ROWS};
@@ -34,6 +35,7 @@ use search_filter::{
 };
 pub(super) use session_picker::format_age as session_age;
 pub(super) use session_picker::panel_action_footer;
+pub(super) use session_picker::session_empty_message;
 pub(super) use session_picker::session_picker_ordering;
 #[cfg(test)]
 use session_picker::session_rows_are_stacked;

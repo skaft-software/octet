@@ -2075,6 +2075,46 @@ fn model_preview_carries_only_bounded_public_facts() {
 }
 
 #[test]
+fn session_picker_native_empty_message_follows_the_picker_state() {
+    use super::super::PickerState;
+    use crate::session_store::SessionMeta;
+    let (mut shell, mut surface, _) = setup(2);
+    let session = SessionMeta {
+        id: "session".into(),
+        path: "/tmp/one.jsonl".into(),
+        title: "First prompt".into(),
+        name: None,
+        tags: Vec::new(),
+        pinned: false,
+        archived: false,
+        trashed_at_ms: None,
+        purge_after_ms: None,
+        forked_from_session_id: None,
+        forked_from_entry_id: None,
+        message_count: 1,
+        modified: std::time::SystemTime::now(),
+        workspace: Some("/tmp/project".into()),
+    };
+    let mut picker = PickerState::new(vec![session], None);
+    picker.filter = "zzz".into();
+    shell.open_panel(Panel::SessionPicker {
+        picker: Box::new(picker),
+    });
+    surface.flush(&shell.state).unwrap();
+    let props = surface.sent.layer[0].p.as_ref().unwrap().as_map();
+    let message = props["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("No sessions match 'zzz'"), "{message}");
+    assert!(message.contains("Backspace"), "{message}");
+    // Clearing the filter leaves no stale message behind.
+    if let Some(Panel::SessionPicker { picker }) = shell.state.borrow_mut().panel.as_mut() {
+        picker.filter.clear();
+    }
+    surface.flush(&shell.state).unwrap();
+    let props = surface.sent.layer[0].p.as_ref().unwrap().as_map();
+    assert!(props["message"].is_null(), "{:?}", props["message"]);
+}
+
+#[test]
 fn session_picker_keeps_preview_actions_loading_and_host_selection() {
     use super::super::{OrdinarySurfaceLifecycle, PickerState};
     use crate::session_store::SessionMeta;

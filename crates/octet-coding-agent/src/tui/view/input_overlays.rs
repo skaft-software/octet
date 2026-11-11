@@ -417,6 +417,52 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     lines
 }
 
+/// Whether an extension autocomplete overlay is what the popup row shows.
+pub(super) fn extension_autocomplete_shown(state: &ShellState) -> bool {
+    !render_extension_autocomplete(state, 2, 2).is_empty()
+}
+
+/// The draft Tab produces for the slash popup, or `None` when Tab does nothing.
+/// The one selector for the product path: the highlighted row completes, except
+/// that a name typed in full stays itself while the selection is still at its
+/// default (`/skill:review` must not become `/skill:review-pr`). Pi applies the
+/// selected item the same way, with the exact name ranked first
+/// (pi-tui dist/components/editor.js:540, dist/autocomplete.js:208-231). With
+/// the popup dismissed only a unique prefix completes, and a popup that is not
+/// on screen, or one an extension overlay replaced, completes nothing.
+pub(super) fn slash_completion(
+    state: &ShellState,
+    popup_visible: bool,
+    overlay_shown: bool,
+) -> Option<String> {
+    if overlay_shown || state.editor.cursor() != state.editor.text().len() {
+        return None;
+    }
+    let suggestions = input_slash_suggestions(state);
+    if state.slash_popup_dismissed {
+        if suggestions.len() != 1 {
+            return None;
+        }
+    } else if !popup_visible {
+        return None;
+    }
+    let typed = state.editor.text().strip_prefix('/').unwrap_or_default();
+    let selected = state
+        .slash_selection
+        .min(suggestions.len().saturating_sub(1));
+    let exact = suggestions.iter().position(|entry| entry.name == typed);
+    let chosen = match exact {
+        Some(exact) if selected == 0 => exact,
+        _ => selected,
+    };
+    let suggestion = suggestions.get(chosen)?;
+    Some(format!(
+        "/{}{}",
+        suggestion.name,
+        if suggestion.accepts_argument { " " } else { "" }
+    ))
+}
+
 fn render_extension_autocomplete(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
     if max_rows < 2 || !super::normal_editor_focused(state) {
         return Vec::new();
