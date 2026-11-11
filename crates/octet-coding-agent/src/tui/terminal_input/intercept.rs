@@ -1,15 +1,23 @@
 //! One cancellation-safe, bounded pre-native lane shared by every input consumer.
 //!
 //! Pi 1.0.2 hands each decoded key string to its live input-listener `Set` and
-//! only then to the focused component. Octet keeps the host-reserved grammar
-//! and open slash popup ahead of that chain; listeners then run in registration
-//! order and can consume or replace editor input. One deliberate bound remains:
-//! a listener that does not answer inside
-//! [`INPUT_BUDGET`] is latched off and its input is delivered unchanged, because
-//! Pi would block the input loop indefinitely and octet must never let a stuck
-//! extension freeze typing. A listener that *reports* an error is only recorded
-//! once and keeps its subscription, matching Pi's habit of letting the chain
-//! continue while a broken callback cannot silently rewrite input.
+//! only then to the focused component (pi-tui `dist/tui.js:719-735`,
+//! `handleTerminalInput`: a synchronous loop over `inputListeners`, with no
+//! deadline). Octet keeps the host-reserved grammar and open slash popup ahead
+//! of that chain; listeners then run in registration order and can consume or
+//! replace editor input.
+//!
+//! A slow listener is not a failing one. While a key waits for its chain the
+//! lane holds that one event and stops reading the source, so nothing is
+//! delivered past or reordered around it; further bytes wait in the kernel's
+//! terminal buffer, which bounds them. The one deliberate bound is
+//! [`INPUT_HANG_LIMIT`]: a chain that has not answered after that long is
+//! hung, because Pi would block the input loop indefinitely and octet must
+//! never let a stuck extension freeze typing. Its listener is latched off with
+//! one warning naming the extension, and the held key is delivered unchanged.
+//! A listener that *reports* an error is only recorded once and keeps its
+//! subscription, matching Pi's habit of letting the chain continue while a
+//! broken callback cannot silently rewrite input.
 
 use super::*;
 use octet_agent::extension_process::{
@@ -18,8 +26,11 @@ use octet_agent::extension_process::{
 };
 use std::sync::Mutex;
 
-/// Whole chain budget for one input event. Pi has no deadline at all.
-const INPUT_BUDGET: Duration = Duration::from_millis(50);
+/// How long one input event may wait for its whole listener chain before the
+/// listener that did not answer is treated as hung. Pi has no deadline at all;
+/// a merely slow listener (a garbage collection, a loaded machine) must keep
+/// its subscription.
+const INPUT_HANG_LIMIT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct Circuit {
@@ -189,7 +200,7 @@ impl PendingInput {
         self.pending = Some((
             revision,
             Box::pin(async move {
-                let deadline = tokio::time::Instant::now() + INPUT_BUDGET;
+                let deadline = tokio::time::Instant::now() + INPUT_HANG_LIMIT;
                 // `None` means no listener answered; the original event is then
                 // delivered unchanged instead of an invented one.
                 let mut admitted: Option<(String, Vec<Event>)> = None;

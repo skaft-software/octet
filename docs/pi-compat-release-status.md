@@ -107,7 +107,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_session_replacement_tests` | 10 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch and before-hook cancellation |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
 | `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
-| `pi_ui_contract_tests` | 14 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane and editor calls during prompt hooks |
+| `pi_ui_contract_tests` | 15 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane (including a slow listener) and editor calls during prompt hooks |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
 | `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
 | `resource_paths::pi_app_tests` | 8 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
@@ -176,8 +176,8 @@ are the behavioral evidence.
   lane after native reserved actions, the open slash popup and native
   search-query ownership, but before the composer slot editor. The
   adapter keeps Pi's live `Set` ordering (consume, replace, deduplicate identity,
-  drop removed listeners, ignore promises) under a 50 ms whole-chain budget with
-  a latched-off circuit breaker and one bounded diagnostic per owner.
+  drop removed listeners, ignore promises) with a slow listener waited for in order and a 1 s
+  hang limit for the whole chain behind a latched-off circuit breaker and one bounded diagnostic per owner.
 - `artifact/publish` acknowledgement: the host returns `{artifact_id}` (protocol
   reference), the adapter read `id`. Every Pi image failed on the real host while
   synthetic-host tests passed because they replied `{id}`. Fixed both.
