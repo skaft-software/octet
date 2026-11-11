@@ -11,6 +11,42 @@ import { join } from 'node:path';
 process.env.OCTET_PI_COMPAT_CACHE = mkdtempSync(join(tmpdir(), 'octet-pi-cache-'));
 const { startupCacheDirectory, jitiCacheOptions, writePersisted } = await import('../lib/startup-cache.mjs');
 
+test('default caches stay outside the watched extension tree', () => {
+  const root = mkdtempSync(join(tmpdir(), 'octet-cache-location-'));
+  const extension = join(root, 'extensions', 'octet-pi-compat'), cacheHome = join(root, 'cache');
+  const env = { ...process.env, OCTET_EXTENSION_DIR: extension, XDG_CACHE_HOME: cacheHome };
+  delete env.OCTET_PI_COMPAT_CACHE;
+  try {
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+      import { startupCacheDirectory, writePersisted } from ${JSON.stringify(new URL('../lib/startup-cache.mjs', import.meta.url).href)};
+      console.log(startupCacheDirectory());
+      writePersisted('probe.json', { schema: 'probe' });
+    `], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), join(cacheHome, 'octet-pi-compat'));
+    assert.equal(existsSync(extension), false, 'cache writes must not trigger an extension-generation reload');
+    assert.equal(existsSync(join(cacheHome, 'octet-pi-compat', 'probe.json')), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('review capture pins the runtime to the same cache outside its output bundle', () => {
+  const root = mkdtempSync(join(tmpdir(), 'octet-capture-cache-'));
+  const output = join(root, 'extensions', 'octet-pi-compat'), cacheHome = join(root, 'cache');
+  const entry = join(root, 'extension.ts');
+  writeFileSync(entry, 'export default pi => pi.on("session_start", () => {});');
+  const env = { ...process.env, XDG_CACHE_HOME: cacheHome };
+  delete env.OCTET_PI_COMPAT_CACHE;
+  delete env.OCTET_EXTENSION_DIR;
+  try {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../configure.mjs', import.meta.url)),
+      '--reviewed', '--output', output, entry], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(readFileSync(join(output, 'extension.toml'), 'utf8').includes(`OCTET_PI_COMPAT_CACHE = ${JSON.stringify(join(cacheHome, 'octet-pi-compat'))}`));
+    assert.equal(existsSync(join(output, '.cache')), false);
+    assert.ok(readdirSync(join(cacheHome, 'octet-pi-compat', 'jiti')).length);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('the startup cache directory is owner-only and reused', () => {
   const directory = startupCacheDirectory();
   assert.equal(directory, process.env.OCTET_PI_COMPAT_CACHE);

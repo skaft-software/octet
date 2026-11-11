@@ -327,8 +327,10 @@ test('captured ctx.signal cancels cooperative completion work on retirement and 
   assert.equal(h.compacts().length, 9); assert.equal(h.diagnostics.length, 0);
 });
 
-test('actual hook/run root carries recursion marker into both before and after compaction callbacks', async t => {
+test('actual hook/run root refuses recursive compaction and isolates its callback failure', async t => {
   const h = await setup(t);
+  const reports = [], report = h.runtime.reportCallbackError.bind(h.runtime);
+  t.mock.method(h.runtime, 'reportCallbackError', (...args) => { reports.push(args); report(...args); });
   const kept = { id: 'kept', parent: null, value: { type: 'message', User: { content: [{ Text: 'kept' }] } } };
   const grant = { grant_id: 'a'.repeat(64), activation_epoch: 2, operation_id: 'operation:2', owner, expected_head: 'kept' };
   for (const [id, hook] of [[20, 'session_before_compact'], [21, 'session_compact']]) {
@@ -337,7 +339,11 @@ test('actual hook/run root carries recursion marker into both before and after c
       ? { kind: 'before_compact', reason: 'manual', first_kept: 'kept', preparation: { messages: [], turn_prefix_messages: [], previous_summary: null }, branch_entries: [kept], custom_instructions: null }
       : { kind: 'compacted', reason: 'manual', entry: { id: 'compacted', parent: 'kept', value: { type: 'compaction', summary: 'real', first_kept: 'kept' } }, from_extension: true };
     await h.runtime.receive({ id, method: 'hook/run', params: { hook, payload, session_leaf: grant, context: context() } });
-    assert.match(h.reply(id).error?.message, /recursive compaction/);
+    // The callback is skipped like other throwing Pi handlers; this does not
+    // admit the recursive operation or fail the outer native compaction.
+    assert.equal(h.reply(id).result?.session_operation.action, 'continue');
+    assert.match(reports.at(-1)[2].message, /recursive compaction/);
+    assert.ok(h.frames.some(frame => frame.method === 'notification' && frame.params.message.includes(`${hook} hook`) && frame.params.message.includes('skipped')));
   }
   assert.equal(h.compacts().length, 0);
 });

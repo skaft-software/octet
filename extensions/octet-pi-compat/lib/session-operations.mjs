@@ -56,12 +56,14 @@ export async function sessionOperation(runtime, params, store) {
     if (hook === 'session_before_compact') {
       fields(body, ['kind', 'reason', 'first_kept', 'preparation', 'branch_entries', 'custom_instructions'], 'compaction operation');
       if (!['manual', 'threshold', 'overflow'].includes(body.reason)) invalid('compaction reason');
-      const preparation = body.preparation;
+      const preparation = body.preparation, calls = new Map();
       event = { type: hook, reason: body.reason, signal,
         ...(body.custom_instructions === null ? {} : { customInstructions: body.custom_instructions }),
         branchEntries: translateSessionEntries(body.branch_entries, runtime.namespace),
-        preparation: strict({ firstKeptEntryId: body.first_kept, messagesToSummarize: canonicalToPi(preparation.messages),
-          turnPrefixMessages: canonicalToPi(preparation.turn_prefix_messages), isSplitTurn: preparation.turn_prefix_messages.length > 0,
+        // The summary input is observed, never replayed to the original provider.
+        // Keep tool identities across the split-turn boundary as well.
+        preparation: strict({ firstKeptEntryId: body.first_kept, messagesToSummarize: canonicalToPi(preparation.messages, calls, { observation: true }),
+          turnPrefixMessages: canonicalToPi(preparation.turn_prefix_messages, calls, { observation: true }), isSplitTurn: preparation.turn_prefix_messages.length > 0,
           ...(preparation.previous_summary === null ? {} : { previousSummary: preparation.previous_summary }) }, 'native compaction preparation') };
     } else if (hook === 'session_compact') {
       fields(body, ['kind', 'reason', 'entry', 'from_extension'], 'compaction committed');
@@ -91,7 +93,19 @@ export async function sessionOperation(runtime, params, store) {
     let decision = { action: 'continue' };
     for (const entry of [...runtime.events.get(hook) || []]) {
       live(); const child = { ...store, factory: entry.factory };
-      const result = await cancellable(runtime.scope.run(child, () => entry.handler(facade({ ...event }, `${hook} event`), createContext(runtime, child))), signal);
+      let result;
+      try {
+        result = await cancellable(runtime.scope.run(child, () => entry.handler(facade({ ...event }, `${hook} event`), createContext(runtime, child))), signal);
+        if (store.errors.length) throw store.errors[0];
+      } catch (error) {
+        live();
+        // Pi 1.5.0 dist/core/extensions/runner.js:813-839 reports throwing
+        // session handlers and continues. Explicit vetoes still apply below;
+        // cancellation, owner refusals and failed native writes stay fatal.
+        if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+        runtime.reportCallbackError(hook, entry.factory, error, store.state);
+        continue;
+      }
       live();
       if (result === undefined) continue;
       if (!['session_before_compact', 'session_before_tree'].includes(hook)) unsupported(`${hook} result`, 'observation follows actual commit');

@@ -198,7 +198,9 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
     } else unsupported(`canonical context role ${role}`);
     const projected = output.slice(start);
     const origin = { replay, canonical: plainJSON(message, 'canonical source message', contextBytes()), projected: JSON.stringify(projected), count: projected.length };
-    projected.forEach((item, index) => projectionOrigins.set(item, { origin, index }));
+    // An observation may omit an unrepresentable signature. Never let its
+    // unchanged visible projection restore that hidden state on conversion.
+    if (!observation || replay) projected.forEach((item, index) => projectionOrigins.set(item, { origin, index }));
   }
   return output;
 }

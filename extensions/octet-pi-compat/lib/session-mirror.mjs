@@ -73,7 +73,10 @@ export function translateSessionEntries(entries, namespace) {
         cursor = previous.parent;
       }
       const { type, ...canonical } = value;
-      const messages = canonicalToPi([canonical], calls);
+      // Session-manager entries are read-only observations, not provider replay.
+      // As with model-turn observations, a foreign opaque signature must not make
+      // history unreadable or acquire authority to replay that continuation.
+      const messages = canonicalToPi([canonical], calls, { observation: true });
       if (messages.length !== 1) unsupported('native mixed-message session entry', 'cannot fabricate extra Pi entry identities');
       const message = messages[0];
       const metadata = entry.metadata?.tool_output?.metadata;

@@ -74,6 +74,21 @@ test('source restoration cannot conceal unknown nested fields or malformed image
   }
 });
 
+test('read-only session history omits foreign signatures without restoring opaque state', () => {
+  const state = { protocol: 'open_ai_responses', model: 'foreign', kind: { OpenAiReasoning: { item_id: 'rs_1', encrypted_content: 'opaque' } } };
+  const native = { Assistant: { model: 'model', protocol: 'open_ai_responses', content: [{ Reasoning: { text: 'visible', state } }] } };
+  const before = structuredClone(native);
+  // Strict projection still refuses the same mismatch that used to block guards.
+  assert.throws(() => canonicalToPi([native]), /signature producer must match/);
+  assert.throws(() => canonicalToPi([native], new Map(), { replay: true }), /signature producer must match/);
+  const observed = canonicalToPi([native], new Map(), { observation: true });
+  assert.deepEqual(observed[0].content, [{ type: 'thinking', thinking: 'visible' }]);
+  assert.deepEqual(piToCanonical(observed)[0].Assistant.content, [{ Reasoning: { text: 'visible', state: null } }]);
+  const mirror = translateSessionEntries([entry('a', null, native)], 'actual');
+  assert.deepEqual(mirror[0].message.content, observed[0].content);
+  assert.deepEqual(native, before);
+});
+
 test('session image entries retain original IDs, parent order, actual timestamps and Pi details including null', () => {
   for (const details of [null, { source: 'read', nested: [false, 1, 'é'] }]) {
     const entries = [entry('request', null, user([image()])), entry('assistant', 'request', assistant),

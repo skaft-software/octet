@@ -63,6 +63,7 @@ function capture(extensions, routes = {}, { cwd = process.cwd(), env = process.e
 export function configure({ output, extensions, reviewed, overwrite = false, providerCredentials = false, routes = {}, cwd = process.cwd(), env = process.env, piAgentDir, piTheme, themePaths = [], mirrorPiSetup = false, expectedSourceHashes, piSetupFingerprint, mirrorExcluded = [], capturedRegistrations, captureCacheDir }) {
   if (!reviewed) throw new Error('Factory execution requires --reviewed (review every entrypoint and its imports first)');
   output = resolve(output);
+  captureCacheDir ??= mirrorCacheDirectory(env);
   if (basename(output) !== 'octet-pi-compat') throw new Error('--output direct-child directory must be named octet-pi-compat');
   if ((!extensions.length && !mirrorPiSetup) || extensions.length > 64) throw new Error('Supply 1..64 explicitly reviewed entrypoints');
   extensions = extensions.map(p => realpathSync(resolve(p)));
@@ -85,7 +86,7 @@ export function configure({ output, extensions, reviewed, overwrite = false, pro
   let registrations = capturedRegistrations && structuredClone(capturedRegistrations);
   const capturedHere = !registrations;
   if (!registrations) {
-    const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: captureCacheDir ?? join(output, '.cache') });
+    const captured = capture(extensions, routes, { cwd, env, piAgentDir, piTheme, cacheDir: captureCacheDir });
     if (captured.error || captured.status !== 0) throw new Error(`registration capture failed: ${captured.error?.message || captured.stderr.slice(-4096)}`);
     const skippedAtCapture = captured.stderr.split('\n').filter(line => line.startsWith('[pi-compat] skipped '));
     if (skippedAtCapture.length) throw new Error(`registration capture skipped extensions:\n${skippedAtCapture.join('\n').slice(0, 4096)}`);
@@ -347,10 +348,9 @@ export async function configureMirror({ output, reviewed, expectedFingerprint, o
   const options = { cwd, env: { ...env, OCTET_PI_AGENT_DIR: agentDir }, piAgentDir: agentDir, piTheme, activeNativeTools };
   const cached = cache ? mirrorCache(prepared, { env: options.env, activeNativeTools, strict, providerCredentials }) : undefined;
   const reused = cached?.read();
-  // The automatic mirror's output is a fresh per-launch directory, so its
-  // .cache would transform every factory cold at each capture. Its captures use
-  // the adapter's persistent startup cache instead.
-  const captureCacheDir = resolve(cache ? mirrorCacheDirectory(env) ?? join(output, '.cache') : join(output, '.cache'));
+  // Capture and runtime share one persistent cache outside the watched bundle.
+  // Cache writes are not executable edits and must not trigger live reload.
+  const captureCacheDir = mirrorCacheDirectory(env);
   const combined = reused || !cache || activeNativeTools.size ? undefined : await captureCombined(setup.extensions, { ...options, cacheDir: captureCacheDir,
     nativeSources: Object.fromEntries(Object.entries(prepared.sourceHashes).map(([entry, hashes]) => [realpathSync(entry), hashes])),
     warmFiles: Object.entries(prepared.sourceHashes).flatMap(([entry, hashes]) =>

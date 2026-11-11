@@ -18,6 +18,18 @@
 
 ### Fixed
 
+- Pi compaction callbacks can observe opaque reasoning and split-turn tool results
+  without failing history conversion. A throwing compaction or tree callback is
+  warned and skipped; explicit vetoes, cancellation and failed native writes still stop.
+
+- Pi adapter caches live outside the watched extension directory. Cache writes no
+  longer cause an automatic adapter restart, duplicate startup hooks or a footer
+  switching back to the native footer while the adapter starts again.
+
+- Pi permission hooks can inspect session history containing opaque reasoning from
+  another model without failing every tool call. Read-only history omits an
+  unrepresentable signature; provider replay and permission decisions remain guarded.
+
 - `octet update` on Windows updates a release ZIP unpacked outside the installer's default
   folder in place, instead of refusing with "could not detect how this octet was installed".
   Top-level errors keep their line breaks; the manual-update hint printed literal `<U+000A>`.
