@@ -32,7 +32,14 @@ Compatibility concerns public extensions, not Pi's private internals or complete
 
 ## Use your Pi setup
 
-With octet **0.10.3+**, Node **22.19+** and your existing Pi setup:
+With Node **22.19+** and your existing Pi setup, the easiest way is:
+
+```bash
+octet migrate pi
+```
+
+It shows what it found and asks once before installing and turning on the
+adapter (see [Migrating from Pi](pi-migration.md)). The manual equivalent is:
 
 ```bash
 octet extension install octet-pi-compat
@@ -48,7 +55,9 @@ To install a downloaded bundle explicitly, use
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
 that session: your enabled Pi extensions, skills, prompt templates, themes,
-`keybindings.json`, the global context file and the selected model. A Pi footer
+`keybindings.json` and the global context file. The model and thinking level come
+from octet's own config; when Pi's default model differs, octet says so in one
+line at startup (switch with `/model`). A Pi footer
 extension such as `powerline-footer` draws the footer, so it matches the one in
 Pi. Nothing is written to your Pi directory or to octet's saved settings, and
 turning the adapter off returns octet to its own setup. Enabling is the review:
@@ -125,7 +134,6 @@ own version and does not load the Pi package, printing one line at startup:
 
 | Pi package | octet uses instead | Startup line |
 |---|---|---|
-| `pi-subagents` | the `octet-subagents` bundle | `pi-subagents: replaced by octet-subagents` |
 | `@narumitw/pi-goal` | built-in `/goal` | `pi-goal: octet uses its built-in /goal` |
 | Pi codemode (`"defaultTools": ["+codemode"]`) | the `octet-codemode` bundle, when installed and admitted | — |
 

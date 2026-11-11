@@ -2,7 +2,34 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `octet migrate pi` is now one guided command: a short overview a newcomer can read, a note
+  on what turning the setup on does, and one question. Yes installs the Pi adapter, backs up
+  octet's config to `~/.octet/backups/` and enables the adapter; Pi's settings are never
+  written. `--dry-run` previews, `--yes` skips the question, `--undo` turns the adapter off,
+  and `--details` prints the full per-package list that used to be the default output.
+
+- pi-subagents loads through the Pi adapter like any other Pi package instead of being
+  replaced by octet-subagents, so its commands (`/subagents-doctor`, `/subagent-cost`, …) work.
+
+- With the Pi adapter on, octet says in one startup line when its model differs from your
+  Pi default model (switch with `/model`).
+
 ### Fixed
+
+- `octet update` on Windows updates a release ZIP unpacked outside the installer's default
+  folder in place, instead of refusing with "could not detect how this octet was installed".
+  Top-level errors keep their line breaks; the manual-update hint printed literal `<U+000A>`.
+
+- octet-codemode started from source never reuses a cached build made from other source. A
+  stale build in `~/.cache/octet-codemode` made codemode fail every start.
+
+- Extension startup failures read in plain words ("its process exited during startup")
+  instead of "extension runtime Launch".
+
+- Pi session browsers such as `/sessions` now say that octet keeps its own sessions and to
+  use `/resume`, instead of failing with "SessionManager.list is not a function".
 
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 

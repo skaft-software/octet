@@ -319,11 +319,14 @@ first. It isn't stable.
 ## Pi import
 
 ```text
-octet migrate pi --dry-run [--json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
+octet migrate pi [--dry-run | --yes | --undo | --details | --json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
 ```
 
-The dry run only reads. It uses no model tokens, runs no package code and
-changes no files. `--json` gives versioned machine output, and `--npm-root` adds
+Without flags it shows a short overview and asks before turning your Pi setup on
+(installing and enabling the Pi adapter, with octet's config backed up first).
+`--dry-run` shows the overview and changes nothing; `--yes` skips the question;
+`--undo` turns the adapter off. The scan uses no model tokens and runs no
+package code, and Pi's settings are never written. `--json` gives versioned machine output, and `--npm-root` adds
 an explicit legacy `node_modules` search root. `octet migrate import pi` and
 `octet migrate restore` are separate, explicit steps that never copy credentials
 or modify Pi sources. Inventory classifications aren't runtime compatibility
