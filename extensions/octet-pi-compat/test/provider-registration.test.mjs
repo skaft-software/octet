@@ -219,6 +219,28 @@ test('a custom stream reading an option Pi does not set gets undefined instead o
   cancelProviderStream(value.runtime, 'stream-1');
 });
 
+// Pi's OpenAI Responses stream names a tool call `${call_id}|${item_id}`
+// (pi-ai api/openai-responses-shared.js); the id must reach the host unchanged.
+test('a tool call id containing "|" (Pi Responses ids) is forwarded, not refused', async () => {
+  const id = 'call_abc|fc_123';
+  const call = { type: 'toolCall', id, name: 'probe', arguments: { n: 1 } };
+  const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 };
+  const value = await registered(() => (async function* () {
+    const partial = { content: [call] };
+    yield { type: 'start', partial };
+    yield { type: 'toolcall_start', contentIndex: 0, partial };
+    yield { type: 'toolcall_delta', contentIndex: 0, delta: '{"n":1}', partial };
+    yield { type: 'toolcall_end', contentIndex: 0, toolCall: call, partial };
+    yield { type: 'done', reason: 'toolUse', message: { content: [call], usage } };
+  })());
+  await prepareProviderStream(value.runtime, params(value), value.store);
+  startProviderStream(value.runtime, 'stream-1');
+  await until(() => value.frames.some(frame => frame.params?.kind === 'finished' || frame.params?.kind === 'error'));
+  const events = value.frames.filter(frame => frame.method === 'provider/event').map(frame => frame.params);
+  assert.equal(events.some(event => event.kind === 'error'), false, JSON.stringify(events));
+  assert.equal(events.find(event => event.kind === 'tool_call_start').payload.id, id);
+});
+
 for (const operation of ['replace', 'remove']) test(`acknowledged native ${operation} aborts an already accepted custom callback`, async () => {
   let signal;
   const value = await registered((_, __, options) => { signal = options.signal; return { [Symbol.asyncIterator]() { return this; }, next: () => new Promise(() => {}) }; });

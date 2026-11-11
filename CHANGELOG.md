@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- A Pi extension provider whose stream reports an OpenAI Responses tool call (Pi's id form is `call_id|item_id`) no longer fails the turn with "tool call id is not a native provider identifier"; the id is forwarded unchanged.
+
 - A Pi extension's provider stream (`pi.registerProvider` with `streamSimple`) no longer fails with "unsupported_feature provider stream options.<name>" when the stream, or the Pi stream helper it calls, reads an option Pi does not set (`headers`, `env`, `fetch`, `samplingParams`, ...). Unset options read as `undefined`, as in Pi.
 
 - A manual `compact` over RPC that the compaction policy refuses (for example on a new, empty session: "no safe history to compact") now answers with an error response and a closing `compaction_end` event. It used to end the RPC server after `compaction_start` without any response.

@@ -171,6 +171,14 @@ export function modelRegistry(getHost, runtime = {}) {
   };
   return strict(registry, 'ctx.modelRegistry');
 }
+// A tool call id is opaque text the provider invented, forwarded unchanged:
+// Pi's OpenAI Responses stream uses `${call_id}|${item_id}` (pi-ai
+// api/openai-responses-shared.js). The host accepts any non-empty id.
+function toolCallId(value) {
+  bounded(value, 'tool call id', 256);
+  if (value === '') invalid('tool call id is empty');
+  return value;
+}
 function identifier(value, label) {
   bounded(value, label, 256);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)) invalid(`${label} is not a native provider identifier`);
@@ -541,7 +549,7 @@ export function startProviderStream(runtime, id) {
           if (blocks.has(index)) invalid('duplicate provider content block');
           const block = { kind, text: '', ended: false }; blocks.set(index, block);
           const part = event.partial?.content?.[index];
-          await emit(`${native}_start`, { index, ...(kind === 'toolcall' ? { id: identifier(part?.id, 'tool call id'), name: identifier(part?.name, 'tool name') } : {}) });
+          await emit(`${native}_start`, { index, ...(kind === 'toolcall' ? { id: toolCallId(part?.id), name: identifier(part?.name, 'tool name') } : {}) });
         } else {
           const block = blocks.get(index); if (!block || block.kind !== kind || block.ended) invalid('unbalanced provider content event');
           if (phase === 'delta') { const delta = bounded(event.delta, 'provider delta', 131072, { controls: true }); block.text += delta; bounded(block.text, 'provider block', 786432, { controls: true }); await emit(kind === 'toolcall' ? 'tool_call_args_delta' : `${native}_delta`, { index, delta }); }
