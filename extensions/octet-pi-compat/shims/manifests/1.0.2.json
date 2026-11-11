@@ -1185,6 +1185,11 @@
         "surface": "inert",
         "source": "shim"
       },
+      "renderFakeCursor": {
+        "surface": "inert",
+        "source": "shim",
+        "note": "not shipped by Pi 1.0.2; supplied for extensions written against later releases"
+      },
       "CancellableLoader": {
         "surface": "inert",
         "source": "shim"

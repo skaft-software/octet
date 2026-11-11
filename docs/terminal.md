@@ -168,7 +168,8 @@ While octet works:
   it interrupts active work and sends the oldest queued follow-up **after** the
   run settles. It never submits an unqueued draft.
 - Ctrl+C clears a draft. With no draft, it aborts active work without sending
-  anything, and does nothing when idle. A Ctrl+C abort also cancels a send that
+  anything; once the run has stopped, another Ctrl+C closes octet, as it does
+  at any idle empty prompt. A Ctrl+C abort also cancels a send that
   Escape had armed. Failures and closing leave follow-ups unsent.
 - Ctrl+D closes octet from any input, after active work and child processes are
   cleaned up.
@@ -244,7 +245,7 @@ composer history. Click-drag highlights transcript text without Shift. Release
 copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under
 a stationary pointer does not expand the selected range on release; a displaced
 release still counts as movement when terminals coalesce drag events. Ctrl+C keeps
-its draft-clear/interrupt meaning. Composer, footer and separator rows are not
+its draft-clear/interrupt/exit meaning. Composer, footer and separator rows are not
 transcript text. Shell selections include the retained, progress-normalized,
 sanitized command output, rather than mapping output rows to the command header.
 Each wrapped output row maps only its visible fragment, including wide Unicode

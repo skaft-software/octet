@@ -436,6 +436,44 @@ impl Drop for PtyOctet {
 }
 
 #[test]
+fn ctrl_c_closes_an_empty_prompt_and_restores_terminal() {
+    let _guard = PTY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let octet = PtyOctet::spawn(directory.path());
+
+    let (status, elapsed, output) = octet.interrupt();
+    assert_eq!(status.code(), Some(0));
+    assert!(elapsed < EXIT_DEADLINE, "Ctrl-C shutdown took {elapsed:?}");
+    let _ = assert_resume_notice(directory.path(), &output);
+}
+
+#[test]
+fn ctrl_c_clears_a_draft_before_closing() {
+    let _guard = PTY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let mut octet = PtyOctet::spawn(directory.path());
+    octet.write_input(b"\x1b[200~UNSENT-DRAFT\x1b[201~");
+    octet.wait_until(READY_DEADLINE, |output| {
+        contains_bytes(output, b"UNSENT-DRAFT")
+    });
+    octet.write_input(&[3]);
+    // A fresh draft must still be accepted after the first Ctrl-C.
+    octet.write_input(b"\x1b[200~STILL-EDITING\x1b[201~");
+    octet.wait_until(READY_DEADLINE, |output| {
+        contains_bytes(output, b"STILL-EDITING")
+    });
+    octet.write_input(&[3]);
+
+    let (status, _, output) = octet.interrupt();
+    assert_eq!(status.code(), Some(0));
+    let _ = assert_resume_notice(directory.path(), &output);
+}
+
+#[test]
 fn ctrl_d_prints_one_resume_command_after_terminal_restoration() {
     let _guard = PTY_TEST_LOCK
         .lock()

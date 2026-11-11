@@ -99,3 +99,22 @@ test('native result hooks retain transformed presentation instead of reconstruct
   const result = await h.run(() => read.execute('read', { path: 'a' }));
   assert.equal(result.content[0].text, 'native output');
 });
+
+// Pi 1.5.0 coding-agent dist/core/tools/bash.js:135-157 and :160-175: bash-spawn-hook.ts passes `spawnHook` to
+// createBashTool; the hook's returned command, cwd and env are what runs.
+test('bash commandPrefix and spawnHook shape the command, cwd and env the native shell receives', async () => {
+  const h = host();
+  const seen = [];
+  const bash = createBuiltinDefinition('bash', '/workspace', {
+    commandPrefix: 'set -e',
+    spawnHook: context => { seen.push(context); return { command: `source ~/.profile\n${context.command}`, cwd: '/elsewhere', env: { ...context.env, PI_SPAWN_HOOK: "it's 1" } }; },
+  });
+  await h.run(() => bash.execute('id', { command: 'echo hi' }));
+  assert.equal(seen[0].command, 'set -e\necho hi');
+  assert.equal(seen[0].cwd, '/workspace');
+  const sent = h.calls.at(-1).params.arguments;
+  assert.equal(sent.command, "export PI_SPAWN_HOOK='it'\\''s 1'\nsource ~/.profile\nset -e\necho hi");
+  assert.ok(sent.cwd.endsWith('/elsewhere'));
+  assert.throws(() => createBuiltinDefinition('bash', '/workspace', { spawnHook: 1 }), /spawnHook/);
+  assert.throws(() => createBuiltinDefinition('bash', '/workspace', { operations: {} }), /unsupported_feature/);
+});

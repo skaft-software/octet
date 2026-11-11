@@ -57,6 +57,34 @@ fn reasoning_ingress_distinguishes_absent_unknown_false_and_malformed() {
 }
 
 #[test]
+fn effort_levels_and_a_structured_default_decode_from_one_reasoning_object() {
+    // Some inventories publish the accepted levels as `effort` and the default as
+    // {"type": "effort", "value": ...} inside the model's reasoning object.
+    let decoded = decode_reasoning_metadata(&serde_json::json!({
+        "capabilities": {"reasoning": {
+            "supported": true,
+            "default": {"type": "effort", "value": "max"},
+            "effort": ["low", "high", "max"]
+        }}
+    }))
+    .unwrap();
+    let options = decoded.options.expect("exact effort levels");
+    assert_eq!(options.values, ["low", "high", "max"]);
+    assert_eq!(options.default.as_deref(), Some("max"));
+    assert_eq!(decoded.control, Some(ReasoningControl::Effort));
+    assert_eq!(decoded.supported, Some(true));
+    // Without a declared level list there is nothing exact to select, so the
+    // assertion still fails closed instead of inventing a range.
+    assert!(decode_reasoning_metadata(&serde_json::json!({
+        "capabilities": {"reasoning": {
+            "supported": true,
+            "default": {"type": "effort", "value": "max"}
+        }}
+    }))
+    .is_err());
+}
+
+#[test]
 fn mistral_conversations_discovery_does_not_invent_reasoning_controls() {
     for provider in ["mistral", "openrouter"] {
         let declaration = BUILTIN_PROVIDER_DECLARATIONS

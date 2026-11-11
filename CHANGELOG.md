@@ -6,6 +6,26 @@
 
 - Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
 
+- Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or
+  `setHiddenThinkingLabel` (Pi's `working-message-test.ts`) no longer fail their
+  `session_start` hook with "contains terminal controls". Pi renders those labels through its
+  themed loader; the host label is printable text, so the styling is dropped and the text kept.
+
+- Pi extensions that call `ctx.ui.setWorkingIndicator` (or another chrome setter) from
+  `session_start`, such as Pi's `working-indicator.ts`, no longer report "Pi compatibility
+  error: request cancelled". The host cancels a chrome request still pending when its parent
+  hook settles; the update is now sent once the hook has replied, as Pi's void setters outlive
+  their handler.
+
+- Pi extensions that build the bash tool with `commandPrefix` or `spawnHook` (for example Pi's
+  `bash-spawn-hook.ts`) are no longer refused at configure time with "option would not be
+  honored". The prefixed command, and the command, cwd and environment changes the hook returns,
+  are what the native shell runs (environment changes as exports in front of the command).
+
+- Pi extensions that import `renderFakeCursor` from `@earendil-works/pi-tui` (for example
+  Pi's `overlay-test.ts`) no longer fail with "renderFakeCursor is not a function".
+  The helper is provided and a frame carries the fake cursor as reverse video, as Pi draws it.
+
 - A Pi input listener (`ctx.ui.onTerminalInput`) that is briefly slow, for example
   during a garbage collection or on a loaded machine, is no longer disabled
   until reload. Keys wait for it in order, as in Pi; only a listener that does
@@ -57,6 +77,23 @@
   or `ctx.ui.input(...)` (Pi's `commands.ts` example) no longer fail with
   `not_foreground_owner ... requires a live request`; the later dialog opens on a
   remote selector or input surface like Pi's.
+
+- GitHub Copilot startup registers the account's chat models again. The
+  authenticated inventory also lists legacy, embedding and partial records that
+  omit `supported_endpoints`, `capabilities` or a chat token limit; one such
+  sibling used to reject the whole inventory, so no `github-copilot/<id>` model
+  was advertised even though sign-in and token exchange succeeded. Each
+  unsupported entry is now skipped on its own, and the models the integration
+  supports are registered. A record is no longer rejected for publishing no
+  `policy`: only a `policy` naming another state withdraws a model, and the live
+  inventory omits the field on enabled picker models.
+
+- OpenCode Go startup registers its models again. Its inventory publishes a
+  model's exact effort levels as `effort` next to a structured default
+  (`{"type": "effort", "value": …}`); discovery accepted only `values` and
+  failed the whole provider, so no `opencode-go/<id>` model was advertised.
+  Both spellings now decode to the same exact contract, and a default that names
+  no published level remains malformed.
 
 - Read-only reports and document panels no longer drop scrolling keys pressed
   just after their first frame appears, including during streaming responses.
