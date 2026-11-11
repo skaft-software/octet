@@ -21,6 +21,24 @@ fn paste_gesture() -> Event {
 }
 
 #[tokio::test]
+async fn idle_ctrl_c_clears_a_draft_then_closes_without_submitting() {
+    for draft in ["", "unsent draft"] {
+        let mut events = Vec::new();
+        if !draft.is_empty() {
+            events.push(Event::Paste(draft.into()));
+            events.push(ctrl_key('c'));
+        }
+        events.push(ctrl_key('c'));
+        // Keep the stream open: EOF must not masquerade as Ctrl-C closing.
+        let (shell, idle) = tokio::time::timeout(Duration::from_secs(2), idle_shell_after(events))
+            .await
+            .expect("Ctrl-C must close an empty prompt");
+        assert!(matches!(idle, Idle::Quit));
+        assert!(shell.pending().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn idle_clipboard_gesture_inserts_native_text_without_submitting() {
     clipboard_read::set_test_text(Some("pasted from the clipboard".to_owned()));
     // Ctrl-D settles the idle wait without submitting or discarding the
