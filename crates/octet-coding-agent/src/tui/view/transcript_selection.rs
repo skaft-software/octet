@@ -555,6 +555,7 @@ pub(super) struct CopyRows {
 }
 
 impl CopyRows {
+    #[cfg(test)]
     fn build(
         painted: &[String],
         copy_text: &str,
@@ -564,6 +565,7 @@ impl CopyRows {
         Self::build_visible(painted, copy_text, geometry, output_start, 0..painted.len())
     }
 
+    #[cfg(test)]
     fn build_visible(
         painted: &[String],
         copy_text: &str,

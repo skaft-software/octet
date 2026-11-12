@@ -241,9 +241,9 @@ pub(super) fn project_compact_bash_output(
     let mut output_rows = Vec::new();
     for output_line in &compact.lines {
         let text = if theme.is_compiled_default() {
-            theme.fg("tool_output", &output_line)
+            theme.fg("tool_output", output_line)
         } else {
-            subdued_text(theme, &output_line)
+            subdued_text(theme, output_line)
         };
         output_rows.extend(wrap_hanging(&text, output_indent, output_indent, width));
     }
