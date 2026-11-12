@@ -164,4 +164,3 @@ finally:
         os.close(bundle)
 PY
 }
-

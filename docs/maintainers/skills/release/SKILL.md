@@ -17,9 +17,23 @@ of truth; extension manifests also pin `requires_octet`.
 
 ## 1. Prepare the version bump
 
-Run the [`/cl`](../../prompts/cl.md) audit, update `CHANGELOG.md`, add
-`docs/releases/vX.Y.Z.md`, and bump the workspace and pinned extension versions.
-Review release notes, required checks and any release-specific limitations.
+Run the [`/cl`](../../prompts/cl.md) audit, update the current `CHANGELOG.md`
+section, and bump the workspace and pinned extension versions. Then run:
+
+```sh
+python3 scripts/release-notes.py sync
+python3 scripts/release-notes.py check
+python3 scripts/check-changelog.py
+```
+
+The changelog is the only release-text source. `sync` writes only the current
+workspace version's public and bundled notes, preserving the section verbatim;
+never regenerate historical notes. `render` prints the GitHub body and
+`artifact --commit FULL_SHA` prints the matching website `release.json` without
+deploying it. Review release notes and required checks. A main-origin release
+redesign remains blocked on the
+[published-client identity boundary](../../../release/legacy-identity-boundary.md);
+the tag-based workflow below has not been replaced.
 For local candidate checks, read `scripts/package-octet-release.sh` first, package
 into an isolated output directory, and smoke-test the packaged binary's startup,
 version, help and model listing. A real provider prompt and the
