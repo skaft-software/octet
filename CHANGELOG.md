@@ -2,19 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- A retained screenshot no longer makes a session look over its context window when an
-  extension registers a context hook (for example through the Pi adapter). The hooked
-  capacity check sized a replayed Responses window by its raw bytes, so a 110 KB image
-  counted as about 37,000 tokens and failed the turn before any request was sent, even
-  right after compaction. Media from your history now gets the same per-item allowance as
-  the extension-free check; opaque provider content is still counted in full.
-
-- Launching inside a home subdirectory no longer adopts a dotfiles repository
-  at `~/.git` as its workspace, tool cwd and resume scope. Ordinary project and
-  worktree roots, explicit `--workspace` overrides and existing sessions are kept.
-
 ## [0.10.4] - Release candidate
 
 ### Changed
@@ -39,6 +26,17 @@
   Pi default model (switch with `/model`).
 
 ### Fixed
+
+- A retained screenshot no longer makes a session look over its context window when an
+  extension registers a context hook (for example through the Pi adapter). The hooked
+  capacity check sized a replayed Responses window by its raw bytes, so a 110 KB image
+  counted as about 37,000 tokens and failed the turn before any request was sent, even
+  right after compaction. Media from your history now gets the same per-item allowance as
+  the extension-free check; opaque provider content is still counted in full.
+
+- Launching inside a home subdirectory no longer adopts a dotfiles repository
+  at `~/.git` as its workspace, tool cwd and resume scope. Ordinary project and
+  worktree roots, explicit `--workspace` overrides and existing sessions are kept.
 
 - Typing while a large session starts no longer restarts the Pi adapter. An unanswered
   keystroke-interception request was cancelled and, when the adapter (busy parsing the
