@@ -250,10 +250,10 @@ class ReleaseToolchainTests(unittest.TestCase):
         self.assertIn(execute, job)
         self.assertLess(job.index(build), job.index(execute))
         # Cold compilation must not consume the existing test execution budget.
-        for name, run in (("Build workspace test binaries", build),
-                          ("Run workspace tests", execute)):
+        for name, minutes, run in (("Build workspace test binaries", 15, build),
+                                   ("Run workspace tests", 25, execute)):
             self.assertIn("      - name: " + name + "\n"
-                          "        timeout-minutes: 15" + run, job)
+                          f"        timeout-minutes: {minutes}" + run, job)
         self.assertIn('          OCTET_PTY_TRACE: "1"', job)
 
     def test_node_adapter_tests_reuse_the_prepared_pi_reference(self):

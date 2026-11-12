@@ -234,8 +234,11 @@ jobs:
       - name: Build workspace test binaries
         timeout-minutes: 15
         run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
+      # Execution has its own budget: macOS reached 14m14s before the Pi
+      # conformance and soak suites joined, and together exceed 15 minutes
+      # without any test hanging.
       - name: Run workspace tests
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-fail-fast
         env:
           OCTET_PTY_TRACE: "1"
