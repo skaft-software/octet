@@ -59,7 +59,7 @@ impl ExecutableExtensions {
         self.remote_ui_wake.clone()
     }
 
-    fn sync_remote_ui(&mut self, shell: &mut InteractiveShell) -> bool {
+    pub(super) fn sync_remote_ui(&mut self, shell: &mut InteractiveShell) -> bool {
         for error in self
             .remote_ui
             .reconcile(self.resource_owner.as_deref(), shell.terminal_dimensions())
@@ -76,6 +76,7 @@ impl ExecutableExtensions {
         if let Some(write) = shell.take_composer_slot_write() {
             self.remote_ui.deliver_editor_text(&write, shell);
         }
+        self.remote_ui.settle_held(shell);
         let changed = shell.set_remote_ui(self.remote_ui.projection());
         if changed {
             shell.render();

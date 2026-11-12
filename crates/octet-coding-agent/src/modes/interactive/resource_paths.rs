@@ -52,11 +52,25 @@ where
     request_extension_ui(shell, app);
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut completed = None;
     loop {
+        // Resource readiness includes a released chrome handoff. Keep the same
+        // input owner alive for its checkpoint/frame, or its one-second fallback,
+        // instead of returning a ready session with its editor still hidden.
+        if !app.executable_extensions.chrome_handoff_settling() {
+            if let Some(result) = completed.take() {
+                return result;
+            }
+        }
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => anyhow::bail!("resource discovery cancelled by shutdown"),
-            result = &mut future => return result,
+            result = &mut future, if completed.is_none() => {
+                match result {
+                    Ok(value) => completed = Some(Ok(value)),
+                    Err(error) => return Err(error),
+                }
+            },
             event = next_frontend_wake(input, &wake, &mut tick) => {
                 let event = match event {
                     FrontendWake::Input(Some(event)) => event?,
@@ -187,10 +201,15 @@ where
     shell.set_session_keybindings(&app.user_keybindings);
     app.executable_extensions
         .refresh_frontend_keybindings(shell);
+    // The published palette reaches extensions before any chrome held during
+    // this phase is handed over, so none of it paints with the replaced one.
+    app.executable_extensions
+        .set_chrome_handoff_pending(app.resource_paths_pending(), shell);
     update_status(shell, app);
     if repainted {
         shell.render();
     }
+    pump(shell, input, app, std::future::ready(Ok(()))).await?;
     Ok(diagnostics)
 }
 
@@ -493,6 +512,459 @@ mod tests {
             assert_eq!(entry.data["hook"], hook);
         }
         app.executable_extensions.shutdown().await;
+    }
+
+    /// A palette-contributing peer that also installs a custom editor from
+    /// `session_start`, the way a Pi extension calls `setEditorComponent`.
+    /// Every frame names the palette it was rendered with, so a frame painted
+    /// before the resource-selected palette reached the extension is visible
+    /// as `palette=native`. Optional marker files select failure shapes.
+    const HANDOFF_PEER: &str = r#"
+import json, os, sys, time
+root = sys.argv[1]
+flag = lambda name: os.path.exists(os.path.join(root, name))
+state = dict(theme=None, surface=None, text='', revision=0, checkpoint=0, parent=None, owner=None)
+def send(value):
+    print(json.dumps(dict(jsonrpc='2.0', **value)), flush=True)
+def marker():
+    path = (state['theme'] or {}).get('path')
+    return os.path.basename(path) if path else 'native'
+def frame():
+    s = state['surface']
+    if s is None:
+        return
+    send(dict(method='ui/frame', params=dict(resource_owner=state['owner'], surface_id='handoff-editor',
+        revision=state['revision'], columns=s['columns'], rows=s['rows'],
+        lines=['CUSTOM-EDITOR palette=' + marker() + ' text=' + state['text']])))
+    state['revision'] += 1
+for line in sys.stdin:
+    m = json.loads(line)
+    method, p = m.get('method'), m.get('params', {})
+    with open(os.path.join(root, 'handoff-wire.log'), 'a') as log:
+        log.write(str(method or m.get('id')) + (' ' + json.dumps(p) if method == 'ui/closed' else '') + ('' if 'error' not in m else ' error=' + json.dumps(m['error'])) + '\n')
+    if method == 'initialize':
+        features = p['protocol']['required_features'] + ['resource_paths_v1', 'remote_ui', 'composer']
+        send(dict(id=m['id'], result=dict(api_version='0.4', tools=[], commands=[dict(name='release-start', description='unused')],
+            protocol=dict(version='0.4', features=features, limits=dict(max_concurrent_requests=4)))))
+    elif method == 'hook/run':
+        host = p.get('context', {}).get('host') or {}
+        if host.get('theme') is not None:
+            state['theme'] = host['theme']
+        if p['hook'] == 'session_start':
+            state.update(parent=m['id'], owner=p['context']['resource_owner'])
+            if flag('setup-dialog'):
+                send(dict(id='open-dialog', method='ui/open', params=dict(parent_request_id=m['id'],
+                    resource_owner=state['owner'], surface_id='setup-dialog', title='Setup', placement='fullscreen')))
+            send(dict(id='open-editor', method='ui/open', params=dict(parent_request_id=m['id'],
+                resource_owner=state['owner'], surface_id='handoff-editor', title='Handoff editor', placement='editor')))
+        elif p['hook'] == 'resources_discover':
+            if flag('hold-discover'):
+                while not flag('release-discover'):
+                    time.sleep(0.001)
+            if flag('fail-discover'):
+                send(dict(id=m['id'], error=dict(code=-32000, message='discovery failed')))
+            else:
+                send(dict(id=m['id'], result=dict(resource_paths=json.load(open(os.path.join(root, 'reply.json'))))))
+        else:
+            send(dict(id=m['id'], result=dict(disposition=dict(action='continue'))))
+    elif m.get('id') == 'open-dialog':
+        if 'result' in m:
+            send(dict(method='ui/frame', params=dict(resource_owner=state['owner'], surface_id='setup-dialog',
+                revision=0, columns=m['result']['columns'], rows=m['result']['rows'], lines=['SETUP-DIALOG'])))
+    elif m.get('id') == 'open-editor':
+        if 'error' in m:
+            send(dict(id=state['parent'], error=m['error']))
+            continue
+        state['surface'] = m['result']
+        frame()
+        if flag('seed-text'):
+            # A programmatic setText on the component, e.g. a restored draft.
+            state['text'] = 'seeded by extension'
+            state['checkpoint'] += 1
+            send(dict(id='checkpoint-' + str(state['checkpoint']), method='composer/set', params=dict(
+                parent_request_id=state['parent'], resource_owner=state['owner'], text=state['text'],
+                editor_checkpoint=dict(surface_id='handoff-editor', mount_id=state['surface']['editor_mount_id'],
+                    input_revision=0, checkpoint_revision=state['checkpoint']))))
+        send(dict(id=state['parent'], result=dict(disposition=dict(action='continue'))))
+    elif method == 'context/updated':
+        if (p.get('host') or {}).get('theme') is not None:
+            state['theme'] = p['host']['theme']
+            if not flag('no-rerender'):
+                frame()
+    elif method == 'ui/editor-text':
+        state['text'] = p['text']
+        if flag('no-rerender'):
+            continue
+        state['checkpoint'] += 1
+        send(dict(id='checkpoint-' + str(state['checkpoint']), method='composer/set', params=dict(
+            parent_request_id=state['parent'], resource_owner=state['owner'], text=state['text'],
+            editor_checkpoint=dict(surface_id='handoff-editor', mount_id=state['surface']['editor_mount_id'],
+                input_revision=0, checkpoint_revision=state['checkpoint']))))
+    elif isinstance(m.get('id'), str) and m['id'].startswith('checkpoint-'):
+        # Like the Pi adapter: a frame never claims text its checkpoint has
+        # not had acknowledged.
+        frame()
+    elif method == 'ui/resize':
+        state['surface'].update(columns=p['columns'], rows=p['rows'])
+        frame()
+    elif method == 'shutdown':
+        send(dict(id=m['id'], result={}))
+        break
+"#;
+
+    struct Handoff {
+        _temp: tempfile::TempDir,
+        root: std::path::PathBuf,
+        app: App,
+        shell: InteractiveShell,
+        process: octet_agent::extension_process::ExtensionProcess,
+        published: std::path::PathBuf,
+    }
+
+    async fn handoff_fixture(markers: &[&str]) -> Handoff {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for marker in markers {
+            std::fs::write(root.join(marker), "").unwrap();
+        }
+        let (app, process) = crate::extensions::resource_paths::consumer_tests::remote_ui_fixture(
+            &root,
+            HANDOFF_PEER,
+        )
+        .await;
+        let published = root.join("pi-themes/published-pi.json");
+        std::fs::create_dir_all(published.parent().unwrap()).unwrap();
+        std::fs::write(
+            &published,
+            crate::extensions::resource_paths::pi_theme::fixture("Published Pi", "#2468ac")
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("reply.json"),
+            serde_json::json!({"theme_paths": [published], "default_theme": published}).to_string(),
+        )
+        .unwrap();
+        let mut shell = InteractiveShell::test_shell();
+        shell.finish_startup();
+        Handoff {
+            _temp: temp,
+            root,
+            app,
+            shell,
+            process,
+            published,
+        }
+    }
+
+    async fn frame_text(shell: &mut InteractiveShell) -> String {
+        shell.render();
+        sexy_tui_rs::strip_terminal_sequences(
+            &shell.dump_rendered_frame().await.unwrap().join("\n"),
+        )
+    }
+
+    /// Run `session_start` exactly as the idle loop does (the frontend's own
+    /// extension-UI consumer applies `ui/open` and frames), until the start has
+    /// settled and its frame has been drained. Resource publication has not run.
+    async fn settle_session_start(fixture: &mut Handoff) {
+        assert!(fixture.app.resource_paths_pending());
+        // Production publishes the foreground session before scheduling its
+        // starts. Without this boundary a fast peer can open a surface before
+        // the first UI pump, whose initial host-state update then retires it.
+        fixture.app.executable_extensions.refresh_host_state(
+            fixture.app.agent.session(),
+            &fixture.app.model,
+            &fixture.app.reasoning,
+            &fixture.app.sessions,
+        );
+        let starts = tokio::spawn(
+            fixture
+                .app
+                .executable_extensions
+                .resource_session_starts()
+                .unwrap(),
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !starts.is_finished() {
+                request_extension_ui(&mut fixture.shell, &mut fixture.app);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "session_start must settle while the frontend consumes its UI; peer saw: {}",
+                std::fs::read_to_string(fixture.root.join("handoff-wire.log")).unwrap_or_default()
+            )
+        });
+        starts.await.unwrap().unwrap();
+        // The frame preceded the hook reply on the same pipe.
+        request_extension_ui(&mut fixture.shell, &mut fixture.app);
+    }
+
+    /// Drain like the idle loop until the custom editor owns the composer
+    /// slot. No intermediate frame may contain `forbidden`.
+    async fn until_editor_visible(fixture: &mut Handoff, forbidden: Option<&str>) -> String {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                request_extension_ui(&mut fixture.shell, &mut fixture.app);
+                let frame = frame_text(&mut fixture.shell).await;
+                if let Some(forbidden) = forbidden {
+                    assert!(
+                        !frame.contains(forbidden),
+                        "a custom editor frame painted with the replaced palette:\n{frame}"
+                    );
+                }
+                if fixture.shell.composer_slot_mount().is_some() {
+                    return frame;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the custom editor must take over once its palette is published: handoff_pending={} resources_pending={} running={} peer saw: {}",
+                fixture.app.executable_extensions.chrome_handoff_pending(),
+                fixture.app.resource_paths_pending(),
+                fixture.process.is_running(),
+                std::fs::read_to_string(fixture.root.join("handoff-wire.log")).unwrap_or_default(),
+            )
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_custom_editor_first_paints_with_the_resource_selected_palette() {
+        let mut fixture = handoff_fixture(&[]).await;
+        settle_session_start(&mut fixture).await;
+        // The editor exists and has painted, but the resource generation that
+        // selects the palette has not been published: the native composer
+        // keeps the slot and stays editable.
+        assert!(fixture.app.executable_extensions.chrome_handoff_pending());
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        let pending = frame_text(&mut fixture.shell).await;
+        assert!(!pending.contains("CUSTOM-EDITOR"), "{pending}");
+        let paste = Event::Paste("handoff draft".into());
+        assert!(!fixture.app.executable_extensions.route_remote_ui_event(
+            &mut fixture.shell,
+            &paste,
+            false
+        ));
+        let _ = handle_cancellable_wait_input(&mut fixture.shell, paste);
+        assert_eq!(
+            fixture.shell.extension_editor_snapshot().text,
+            "handoff draft"
+        );
+        assert!(frame_text(&mut fixture.shell)
+            .await
+            .contains("handoff draft"));
+
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fixture.shell.theme().source_path(),
+            Some(fixture.published.as_path())
+        );
+        assert!(!fixture.app.executable_extensions.chrome_handoff_pending());
+        // Publication itself never exposes the frame rendered before it.
+        let published = frame_text(&mut fixture.shell).await;
+        assert!(!published.contains("palette=native"), "{published}");
+        // Only the frame answering the delivered draft carries that text, so
+        // this is the checkpoint-fenced frame, not a deadline reveal.
+        let visible = until_editor_visible(&mut fixture, Some("palette=native")).await;
+        assert!(
+            visible.contains("CUSTOM-EDITOR palette=published-pi.json text=handoff draft"),
+            "{visible}"
+        );
+        fixture.process.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extension_free_startup_never_holds_chrome() {
+        let (_directory, mut app) = crate::compaction::tests::app_for_estimate();
+        let mut shell = InteractiveShell::test_shell();
+        assert!(!app.resource_paths_pending());
+        request_extension_ui(&mut shell, &mut app);
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        refresh_resource_paths(&mut app, &mut shell, &mut input)
+            .await
+            .unwrap();
+        request_extension_ui(&mut shell, &mut app);
+        assert!(!app.executable_extensions.chrome_handoff_pending());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_custom_editor_keeps_native_input_and_close_while_resources_are_pending() {
+        let mut fixture = handoff_fixture(&["hold-discover"]).await;
+        settle_session_start(&mut fixture).await;
+        // Discovery never answers; the user types into the native composer
+        // and then closes. The held editor takes neither event.
+        let mut input = futures_util::stream::iter([
+            Ok(Event::Paste("typed while pending".into())),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+            ))),
+        ])
+        .chain(futures_util::stream::pending());
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
+        )
+        .await
+        .expect("closing must end a phase that holds custom chrome")
+        .expect("closing during the handoff is not an error");
+        assert!(fixture.shell.close_requested());
+        assert!(fixture.app.resource_paths_pending());
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        assert_eq!(
+            fixture.shell.extension_editor_snapshot().text,
+            "typed while pending"
+        );
+        let frame = frame_text(&mut fixture.shell).await;
+        assert!(!frame.contains("CUSTOM-EDITOR"), "{frame}");
+        std::fs::write(fixture.root.join("release-discover"), "").unwrap();
+        fixture.process.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_editor_programmatic_draft_reaches_the_native_composer() {
+        let mut fixture = handoff_fixture(&["seed-text"]).await;
+        settle_session_start(&mut fixture).await;
+        request_extension_ui(&mut fixture.shell, &mut fixture.app);
+        // The component's own draft is not discarded because it is held: the
+        // native composer, which owns input meanwhile, adopts it.
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        assert_eq!(
+            fixture.shell.extension_editor_snapshot().text,
+            "seeded by extension"
+        );
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input)
+            .await
+            .unwrap();
+        let visible = until_editor_visible(&mut fixture, Some("palette=native")).await;
+        assert!(
+            visible.contains("CUSTOM-EDITOR palette=published-pi.json text=seeded by extension"),
+            "{visible}"
+        );
+        assert_eq!(
+            fixture.shell.extension_editor_snapshot().text,
+            "seeded by extension"
+        );
+        fixture.process.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_dialog_is_not_held_while_its_palette_owner_is_pending() {
+        let mut fixture = handoff_fixture(&["setup-dialog"]).await;
+        settle_session_start(&mut fixture).await;
+        request_extension_ui(&mut fixture.shell, &mut fixture.app);
+        assert!(fixture.app.resource_paths_pending());
+        // A dialog is an interaction, not chrome: it is shown at once, even
+        // though the editor opened by the same start is still held.
+        assert!(fixture.shell.has_remote_fullscreen_mount());
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        let frame = frame_text(&mut fixture.shell).await;
+        assert!(frame.contains("SETUP-DIALOG"), "{frame}");
+        fixture.process.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_resource_discovery_still_hands_over_held_chrome() {
+        let mut fixture = handoff_fixture(&["fail-discover"]).await;
+        settle_session_start(&mut fixture).await;
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The withdrawn overlay is still a publication: readiness is not
+        // stranded behind a generation that will never contribute a palette.
+        assert!(!fixture.app.resource_paths_pending());
+        let visible = until_editor_visible(&mut fixture, None).await;
+        assert!(visible.contains("CUSTOM-EDITOR"), "{visible}");
+        fixture.process.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn published_editor_handoff_keeps_native_input_and_close_responsive() {
+        let mut fixture = handoff_fixture(&["no-rerender"]).await;
+        settle_session_start(&mut fixture).await;
+        let wire = fixture.root.join("handoff-wire.log");
+        // Wait for the actual post-publication draft fence, not a timing guess.
+        let paste = futures_util::stream::once(async move {
+            while !std::fs::read_to_string(&wire)
+                .unwrap_or_default()
+                .contains("ui/editor-text")
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            Ok(Event::Paste("typed during draft handoff".into()))
+        });
+        let mut input = paste
+            .chain(futures_util::stream::iter([Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+            )))]))
+            .chain(futures_util::stream::pending())
+            .boxed();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
+        )
+        .await
+        .expect("published chrome handoff must keep pumping native input")
+        .unwrap();
+        assert!(!fixture.app.resource_paths_pending());
+        assert!(fixture.shell.close_requested());
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        assert_eq!(
+            fixture.shell.extension_editor_snapshot().text,
+            "typed during draft handoff"
+        );
+        assert!(!frame_text(&mut fixture.shell)
+            .await
+            .contains("CUSTOM-EDITOR"));
+        fixture.process.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_chrome_that_never_rerenders_is_revealed_at_the_bounded_deadline() {
+        let mut fixture = handoff_fixture(&["no-rerender"]).await;
+        settle_session_start(&mut fixture).await;
+        assert!(fixture.shell.composer_slot_mount().is_none());
+        let started = std::time::Instant::now();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
+        )
+        .await
+        .expect("resource readiness must not wait indefinitely for a silent editor")
+        .unwrap();
+        // This component answers neither the palette nor the draft. Its only
+        // frame predates the palette; resource readiness must pump all the way
+        // to the fallback rather than claim the hidden editor is already ready.
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(fixture.shell.composer_slot_mount().is_some());
+        let visible = frame_text(&mut fixture.shell).await;
+        assert!(
+            visible.contains("CUSTOM-EDITOR palette=native"),
+            "{visible}"
+        );
+        fixture.process.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

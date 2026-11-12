@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- An extension's custom editor, footer, header or widgets opened during startup or reload (such as a Pi extension's editor set in `session_start`) now appear only once the extension-selected theme is installed, so they no longer flash in the wrong colors. The native composer stays editable meanwhile, setup dialogs still appear immediately, and anything that never redraws appears within one second.
+
 - A retained screenshot no longer makes a session look over its context window when an
   extension registers a context hook (for example through the Pi adapter). The hooked
   capacity check sized a replayed Responses window by its raw bytes, so a 110 KB image

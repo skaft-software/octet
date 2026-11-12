@@ -387,6 +387,14 @@ impl ExecutableExtensions {
                                 "editor checkpoint owner is no longer foreground".into(),
                             )
                         } else {
+                            if self.remote_ui.has_held() {
+                                // Frames read before this checkpoint predate
+                                // its acknowledgement; a held editor may only
+                                // be revealed by a frame that follows it.
+                                for frame in pending.process.take_remote_ui_frames() {
+                                    self.remote_ui.accept_frame(&pending.process, frame);
+                                }
+                            }
                             match pending.process.commit_editor_checkpoint(
                                 &pending.request_id,
                                 pending.generation,

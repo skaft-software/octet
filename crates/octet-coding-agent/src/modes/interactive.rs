@@ -5294,6 +5294,10 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     // Owning &mut App proves no Run can have an in-flight request. Startup and
     // other idle hook pumps need the same consumer as an idle command; never
     // leave a synchronous setter waiting behind the hook which called it.
+    // Persistent chrome an extension opens before the palette owner has
+    // published is held; the native composer keeps the slot until then.
+    app.executable_extensions
+        .set_chrome_handoff_pending(app.resource_paths_pending(), shell);
     let model_control = app
         .executable_extensions
         .next_model_control_request()

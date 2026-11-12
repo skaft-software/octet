@@ -82,6 +82,13 @@ shutdown diagnostics stay visible. Fresh sessions skip the replay worker
 entirely, and resumed sessions still restore their history. `--models` inventory
 discovery also runs after the shell owns input, not before the first paint.
 
+An extension's custom editor, footer, header, or widgets that appear during
+startup (for example a Pi extension's `setEditorComponent` in `session_start`)
+take over only after the theme its extensions select (such as your Pi theme) is
+installed. Until then the native composer stays in place and editable, and what
+you typed carries over into the custom editor. Setup dialogs still appear
+immediately. See [remote UI](extensions/remote-ui.md#palette-handoff-for-persistent-chrome).
+
 Fresh-start composer rows are reserved before the welcome, without provisional
 model branding. The welcome is static and fits the pane height. Typing and late
 update hints do not move it or clear saved history. Cursor placement is part of
