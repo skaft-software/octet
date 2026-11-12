@@ -113,7 +113,9 @@ argument. The subscription choices are ChatGPT (Codex), GitHub Copilot, Grok, Ki
 [first-run behavior and credential
 privacy](providers.md#first-run-setup-unreleased). The `octet setup` subcommand
 below still configures explicit custom endpoints, and print and RPC modes never
-open onboarding.
+open onboarding. With no provider, headless startup recommends `octet --safe-mode`
+in a terminal for that first-run flow, or `octet setup --help` for endpoint options;
+it omits an empty availability list.
 
 ```text
 octet --login codex

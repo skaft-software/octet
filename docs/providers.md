@@ -460,8 +460,9 @@ concurrent change instead of overwriting it. The probe (`GET /models`) follows
 no redirects. Receipts, diagnostics, sessions and caches never contain API key
 or secret header values, and setup writes no telemetry. A cancel, a review-only
 run, an offline failure or a concurrent change leaves the registry unchanged.
-Print and RPC modes never open the guided flow: an unresolved model reports the
-`octet setup --yes` recovery.
+Print and RPC modes never open the guided flow. With no provider, startup points
+to `octet --safe-mode` in a terminal for interactive setup, or `octet setup --help`
+for explicit endpoint options. Empty model inventories omit the availability list.
 
 </details>
 

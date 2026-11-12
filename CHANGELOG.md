@@ -14,6 +14,7 @@
 ### Fixed
 
 - Thinking and tool toggles stay independent. ([#724](https://github.com/skaft-software/octet/pull/724) by [@gafiatulin](https://github.com/gafiatulin))
+- Headless startup points to working first-run setup commands and omits empty model availability lists.
 - Evaluation reports and session-share reviews preserve their multiline layout in terminals and pipes.
 - List commands print aligned tables in a terminal; piped output stays tab-separated.
 - `octet migrate pi` shows styled text on terminals and plain text with `NO_COLOR`, `--color never` or pipes.

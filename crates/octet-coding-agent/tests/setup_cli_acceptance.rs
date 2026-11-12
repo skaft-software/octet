@@ -723,13 +723,14 @@ fn print_and_rpc_unresolved_startup_are_actionable_and_noninteractive() {
         let output = capture_command(command);
         assert!(!output.status.success(), "{name} unexpectedly started");
         assert!(
-            output.stderr.contains("octet setup --yes"),
+            output.stderr.contains("octet setup --help")
+                && output.stderr.contains("octet --safe-mode"),
             "{name} omitted setup recovery command: {}",
             output.stderr
         );
         assert!(
-            output.stderr.contains("available:"),
-            "{name} omitted bounded availability details: {}",
+            !output.stderr.contains("(available:"),
+            "{name} printed an empty availability list: {}",
             output.stderr
         );
         assert!(
@@ -737,6 +738,13 @@ fn print_and_rpc_unresolved_startup_are_actionable_and_noninteractive() {
             "{name} wrote response stdout"
         );
         assert!(!output.stderr.contains("Set up a provider"));
+        assert!(!output.stderr.contains("octet setup --yes"));
+        let mut command = fixture.base_command();
+        command.args(["setup", "--help"]);
+        let help = capture_command(command);
+        assert!(help.status.success(), "{}", help.stderr);
+        assert!(help.stdout.contains("--endpoint"));
+        assert!(help.stdout.contains("--preset"));
         assert_no_provider_state(&fixture);
         assert_secret_free(&output);
         assert_no_prompt(&output);
