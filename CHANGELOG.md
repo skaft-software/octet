@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A retained screenshot no longer makes a session look over its context window when an
+  extension registers a context hook (for example through the Pi adapter). The hooked
+  capacity check sized a replayed Responses window by its raw bytes, so a 110 KB image
+  counted as about 37,000 tokens and failed the turn before any request was sent, even
+  right after compaction. Media from your history now gets the same per-item allowance as
+  the extension-free check; opaque provider content is still counted in full.
+
 ## [0.10.4] - Release candidate
 
 ### Changed

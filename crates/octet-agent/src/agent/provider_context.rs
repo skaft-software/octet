@@ -625,7 +625,20 @@ pub(super) fn effective_request_estimate(request: &Request) -> u64 {
         let mut bytes = CountingWriter::default();
         serde_json::to_writer(&mut bytes, &(input, &request.tools))
             .expect("provider input serializes");
-        canonical.max(bytes.0.div_ceil(4).saturating_add(64))
+        // The explicit window is what will be sent, so it is sized from its
+        // own bytes. Canonical media it carries uses the same semantic
+        // allowance as the canonical estimate instead of counting base64 as
+        // text; opaque provider content stays fully byte-counted.
+        let (inline_payload_bytes, semantic_tokens) =
+            explicit_input_media_adjustment(input, &request.messages);
+        canonical.max(
+            bytes
+                .0
+                .saturating_sub(inline_payload_bytes)
+                .div_ceil(4)
+                .saturating_add(semantic_tokens)
+                .saturating_add(64),
+        )
     } else {
         canonical
     }

@@ -173,6 +173,135 @@ pub(super) fn responses_replay_media_adjustment(replay: &[ResponsesReplayItem]) 
     (inline_payload_bytes, semantic_tokens)
 }
 
+/// Identity of one inline base64 payload: its encoded length and the SHA-256
+/// of the encoded characters. Equal keys mean byte-identical wire payloads.
+type InlinePayloadKey = (u64, [u8; 32]);
+
+fn inline_media_payload_key(media: &Media) -> Option<InlinePayloadKey> {
+    use base64::engine::general_purpose::STANDARD;
+    use sha2::Digest as _;
+
+    let data: &[u8] = match media {
+        Media::Image(image) => match &image.source {
+            ImageSource::Inline(data) => data,
+            ImageSource::Url(_) | ImageSource::ProviderRef(_) => return None,
+        },
+        Media::Audio(audio) => match &audio.payload {
+            AudioPayload::Inline(data) | AudioPayload::InlineWithProviderRef { data, .. } => data,
+            AudioPayload::ProviderRef(_) => return None,
+        },
+        Media::Document(document) => &document.data,
+    };
+    let mut hasher = sha2::Sha256::new();
+    {
+        // Stream the encoding into the digest; a retained screenshot is never
+        // materialized a second time as a base64 string just to be measured.
+        let mut encoder = base64::write::EncoderWriter::new(&mut hasher, &STANDARD);
+        encoder.write_all(data).expect("hashing cannot fail");
+        encoder.finish().expect("hashing cannot fail");
+    }
+    Some((inline_media_payload_bytes(media), hasher.finalize().into()))
+}
+
+fn canonical_inline_media(messages: &[Message]) -> HashMap<InlinePayloadKey, Vec<u64>> {
+    let mut canonical = HashMap::<InlinePayloadKey, Vec<u64>>::new();
+    let mut observe = |media: &Media| {
+        if let Some(key) = inline_media_payload_key(media) {
+            canonical.entry(key).or_default().push(media_tokens(media));
+        }
+    };
+    for message in messages {
+        match message {
+            Message::User(user) => {
+                for part in &user.content {
+                    match part {
+                        UserPart::Media(media) => observe(media),
+                        UserPart::ToolResult(result) => {
+                            for part in &result.content {
+                                if let ToolResultPart::Media(media) = part {
+                                    observe(media);
+                                }
+                            }
+                        }
+                        UserPart::Text(_) => {}
+                    }
+                }
+            }
+            Message::Assistant(assistant) => {
+                for part in &assistant.content {
+                    if let AssistantPart::Media(media) = part {
+                        observe(media);
+                    }
+                }
+            }
+        }
+    }
+    canonical
+}
+
+/// Semantic media adjustment for an explicit provider input window.
+///
+/// An explicit Responses input is opaque provider JSON. A `data:` URL in it is
+/// discounted from byte sizing only when its base64 payload is byte-identical
+/// to inline media in the canonical `messages` that projection represents, and
+/// each canonical media item discounts at most one payload. A field name, item
+/// type or data-URL shape alone is never authority: opaque provider output and
+/// unmatched payloads remain fully byte-counted.
+pub(super) fn explicit_input_media_adjustment(
+    input: &ResponsesInput,
+    messages: &[Message],
+) -> (u64, u64) {
+    use sha2::Digest as _;
+
+    fn visit(
+        value: &serde_json::Value,
+        canonical: &mut HashMap<InlinePayloadKey, Vec<u64>>,
+        adjustment: &mut (u64, u64),
+    ) {
+        match value {
+            serde_json::Value::String(text) => {
+                let Some(payload) = text
+                    .strip_prefix("data:")
+                    .and_then(|rest| rest.split_once(";base64,"))
+                    .map(|(_, payload)| payload)
+                else {
+                    return;
+                };
+                let key = (
+                    payload.len() as u64,
+                    sha2::Sha256::digest(payload.as_bytes()).into(),
+                );
+                if let Some(tokens) = canonical.get_mut(&key).and_then(Vec::pop) {
+                    adjustment.0 = adjustment.0.saturating_add(key.0);
+                    adjustment.1 = adjustment.1.saturating_add(tokens);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, canonical, adjustment);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for value in fields.values() {
+                    visit(value, canonical, adjustment);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
+    let mut canonical = canonical_inline_media(messages);
+    let mut adjustment = (0, 0);
+    if canonical.is_empty() {
+        return adjustment;
+    }
+    for item in input.items() {
+        visit(item.as_json(), &mut canonical, &mut adjustment);
+    }
+    adjustment
+}
+
 pub(super) fn tool_schema_bytes(tools: &[ToolDef]) -> usize {
     let mut bytes = CountingWriter::default();
     // ToolDef is internally constructed from serializable strings and JSON
