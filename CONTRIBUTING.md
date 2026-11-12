@@ -12,6 +12,10 @@ linear fast-forward commits, each checked by the full `scripts/gate.sh` on the
 exact commit (see [AGENTS.md](AGENTS.md)). `main` is always releasable, and the
 owner chooses when to release.
 
+Opening or reopening a PR adds its human author as an assignee, preserving any
+existing assignees. Bots and the repository owner are excluded. This automation
+reads event metadata only; it never checks out or executes contribution code.
+
 ## Development setup
 
 The octet source supports macOS and Linux and needs Rust 1.89 or newer. A native
