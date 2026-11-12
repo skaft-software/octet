@@ -20,7 +20,8 @@ diagnosed and reuses the nearest older one; a release below 1.0.2, a pre-release
 or another major series is refused. Nothing silently downgrades Pi.
 
 See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
-Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
+Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter. The
+source tree is the unreleased v0.10.4 candidate.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).

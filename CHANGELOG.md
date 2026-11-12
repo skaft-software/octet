@@ -227,6 +227,15 @@
   write authority. Coalesced chrome updates recheck ownership and cancellation
   before native delivery; retained same-session contexts still survive turns.
 
+### Known limitations
+
+- Windows `octet update` from an extracted release folder is fixed in source but not yet
+  re-verified on a real Windows install of 0.10.3; attended Windows desktop use remains
+  unqualified.
+- Resuming a very large Pi session still parses its whole history once in the adapter: on a
+  240 MB history that takes about 3.5 s and peaks near 1.6 GB of adapter memory.
+- Pi `models.json` HTTP providers and managed git packages remain unsupported.
+
 ## [0.10.3] - 2026-11-06
 
 ### Fixed
