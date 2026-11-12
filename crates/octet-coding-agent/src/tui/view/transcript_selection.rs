@@ -160,7 +160,9 @@ fn presented_tool(
 
 pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> String {
     let block = &state.transcript[index];
-    match block {
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
+    let text = match block {
         TranscriptBlock::Tool(_) => presented_tool(state, index, None).text,
         TranscriptBlock::Reasoning(reasoning)
             if !reasoning.reasoning_expanded && !state.verbose_tools =>
@@ -184,7 +186,10 @@ pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> Str
             String::new()
         }
         _ => block_copy_text(block),
-    }
+    };
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| work.copy_text_bytes += text.len());
+    text
 }
 
 /// Side-effect-free semantic selection projection. Prompt expansion can read
@@ -238,7 +243,20 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
         (selection.focus, selection.anchor)
     };
     let cache = state.transcript_cache.borrow();
-    for index in start.block..=end.block {
+    // Intersect the selection with the painted window before visiting blocks.
+    // An offscreen anchor can otherwise make every drag scan settled history.
+    let first = cache
+        .block_starts
+        .partition_point(|row| *row <= start_row)
+        .saturating_sub(1)
+        .max(start.block);
+    let after = cache
+        .block_starts
+        .partition_point(|row| *row < start_row + lines.len())
+        .min(end.block.saturating_add(1));
+    for index in first..after {
+        #[cfg(test)]
+        super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
         let Some(&block_start) = cache.block_starts.get(index) else {
             continue;
         };
@@ -466,6 +484,8 @@ fn align_copy_row(
     content_left: u16,
     literal: bool,
 ) -> AlignedCopyRow {
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| work.rows_mapped += 1);
     let plain = strip_terminal_sequences(line);
     let mut aligned = AlignedCopyRow {
         painted: line.to_owned(),
@@ -943,7 +963,12 @@ fn painted_copy_rows(
     };
     let painted = {
         let cache = state.transcript_cache.borrow();
-        cache.lines.get(start..start.checked_add(length)?)?.to_vec()
+        let rows = cache.lines.get(start..start.checked_add(length)?)?;
+        #[cfg(test)]
+        super::fullscreen_work_tests::record(|work| {
+            work.bytes_cloned += rows.iter().map(String::len).sum::<usize>();
+        });
+        rows.to_vec()
     };
     visible_block_copy_rows(
         state,

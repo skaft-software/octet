@@ -312,6 +312,13 @@ impl RenderedGeometry {
             })
             .collect::<Vec<_>>();
         copy_rows.retain(&blocks.iter().map(|block| block.id).collect());
+        #[cfg(test)]
+        super::fullscreen_work_tests::record(|work| {
+            work.bytes_cloned += cache.lines[start..end]
+                .iter()
+                .map(String::len)
+                .sum::<usize>();
+        });
         Self {
             fence,
             panel: PanelRenderReceipt::capture(state, &chrome.panel),

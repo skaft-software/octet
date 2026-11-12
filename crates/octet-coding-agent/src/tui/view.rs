@@ -115,6 +115,9 @@ use self::viewport::{
 
 use crate::presentation::tool_display::is_subagent_tool;
 
+#[cfg(test)]
+mod fullscreen_work_tests;
+
 /// Maximum physical rows retained in a collapsed command-output tail.
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.

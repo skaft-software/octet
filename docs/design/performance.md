@@ -163,6 +163,85 @@ live-grid repair bound or saved-snapshot product guarantee is claimed. Keep
 physical-terminal reflow, selection, paint smoothness, and long-duration
 qualification separate from library and PTY evidence.
 
+### Fullscreen navigation and selection audit
+
+For unchanged fullscreen application-owned history, navigation retains the
+completed-frame receipt; `InteractiveShell::render` only tries the capacity-one
+render notification channel. The async input owner does not wait for private
+layout or terminal writes. `RenderModel::capture` publishes shared transcript
+roots under the shell mutex, `RenderOwner::accept` compares shared roots, and
+`ShellComponent` renders a bounded viewport. Presentation requests coalesce, not
+wheel deltas, pointer events, or accepted semantic content. Slow capture/feedback,
+copy projection under the input lock, and blocked output can still delay input or
+its visible feedback. Stale pointer receipts deliberately cannot guess new cells;
+edge-drag focus waits for compatible completed geometry after scrolling.
+
+Let n be cached message slots, v visible rows, k message slots intersecting those
+rows, B the bytes/rows in touched blocks, and S the selected projection size:
+
+| Event | Call path after input decoding | Work before → after targeted fix |
+| --- | --- | --- |
+| Wheel / PageUp / PageDown | `intercept_transcript_input` / `input_dispatch` → `scroll_lines` / `scroll` → `retain_viewport_anchor` → render notification; renderer `upgrade_viewport_anchor` → `render_shell_viewport_update` | Anchor identity lookup O(n) → O(1) when its hint is current; structural identity moves retain the O(n) fallback. Visible-block lookup is O(log n). |
+| Drag / Shift-click / selection repaint | `begin_transcript_selection` / `extend_transcript_selection` → `transcript_position_at_screen_cell` → receipt hit test → `selection_position_for_visual_cell`; repaint `decorate_selection` | Selected-message traversal O(n) → O(log n + k), intersecting selection and viewport before projecting text. |
+| Edge drag | `extend_transcript_selection` → row-capacity receipt → ±2 row delta → `retain_viewport_anchor` → clamped hit test → same repaint | Same bounded metadata traversal; repeated input never requests synchronous private layout. |
+| Copy / displaced release | `end_transcript_selection` → `copy_selected_plain_text` → `semantic_selected_text` → `presented_block_copy_text` → native helper / OSC 52 | Unchanged: O(selected messages + S), plus endpoint-block projection; includes offscreen text and current disclosure. Native helper runs off-thread; semantic projection and stdout-lock acquisition remain synchronous. |
+
+The warm-cache regression `fullscreen_scroll_and_selection_work_is_viewport_bounded`
+uses synthetic 100/1,000-message histories at 80×24, exercising wheel in both
+directions, page navigation, an offscreen selection anchor, drag and edge scroll.
+Counters cover visited anchor/selection slots and copy projections, laid-out
+replacement rows, aligned copy rows, viewport cells, cloned layout-row bytes at
+viewport/receipt/hit-mapping slices, and materialized semantic copy-text bytes
+(not total allocator traffic). A separate
+burst regression accepts 64 wheel steps before one paint and checks all 192 rows
+of navigation intent. No timing or physical-emulator smoothness claim follows.
+
+| Per event + repaint, 100 / 1,000 messages | Before: visits | After: visits | Laid-out rows | Aligned rows | Viewport cells | Layout-row clone bytes / copy-text bytes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Wheel up | 19 / 19 | 19 / 19 | 0 / 0 | 6 / 6 | 219 / 219 | 1,541 / 342, both sizes |
+| Wheel down | 110 / 1,010 | 20 / 20 | 0 / 0 | 7 / 7 | 219 / 219 | 1,541 / 360, both sizes |
+| PageUp | 20 / 20 | 20 / 20 | 0 / 0 | 11 / 11 | 220 / 220 | 1,541 / 360, both sizes |
+| Drag with offscreen anchor | 106 / 1,006 | 23 / 23 | 0 / 0 | 5 / 5 | 220 / 220 | 1,407 / 378, both sizes |
+| Edge drag | 111 / 1,011 | 29 / 29 | 0 / 0 | 9 / 9 | 220 / 220 | 1,541 / 468, both sizes |
+
+Other listed counters are identical before/after. Copy intentionally still visits
+85 / 985 selected messages and materializes 1,530 / 17,730 semantic bytes; its
+exact forward/reverse selection output is asserted, not viewport-clipped.
+
+**Remaining boundary:** this is not yet a general O(v + log n) end-to-end bound.
+With bounded-size messages and no zero-height runs, k ≤ O(v) and block-local
+projection is bounded. For an arbitrarily large individual block,
+`presented_block_copy_text` materializes its complete text even on threaded hit
+tests. `painted_copy_rows` clones the whole painted block on the private/inline
+path. Anchor conversion and selection decoration create fresh alignment memos;
+`BlockCopyMemo::reusable_rows` still compares complete text and prior painted
+prefixes. Alignment searches can cost O(rows × copy bytes) on decorated rows.
+Tool copy projection re-renders disclosed output and traverses its prefix.
+Completed receipts retain O(v) rows, but constructing them can still cost O(B)
+or worse; zero-height block runs can also make k depend on n. Image cropping
+has a fixed 512-row lookbehind, not a whole-history scan. Terminal diff/output
+remain viewport-sized, without unconditional full-screen replay on navigation.
+
+Flat `TranscriptCache` row splices and following-offset updates remain O(n)
+when a historical block changes height; width/theme/disclosure changes, history
+hydration and branch replacement also retain broad work. They are not made cheap
+by isolating the renderer. Optional extension presentation maps can add capture
+work independent of the visible transcript. Native-scrollback replay is unchanged.
+Retained source/layout space remains O(total history); this fix adds O(1) state.
+Hint lookup and range intersection use O(1) auxiliary space. Viewport/receipt
+projection uses O(visible cells + touched block bytes) temporary space, with
+block-sized alignment memos; copy needs O(selected text + endpoint block bytes).
+
+The follow-up is a layout-owned row-to-source index shared by anchor conversion,
+highlighting and receipts: emit exact sanitized/disclosed source spans with each
+presenter's rows, address rows/commit IDs through indexed nonempty chunks, and
+reuse them by block/layout revision without cloning complete block text on input.
+Keep cold layout interruptible and publication/feedback bounded; retain the
+current canonical native replay and authoritative history. Estimated size is
+800–1,200 changed lines including Unicode/decorated/tool/empty-row, reflow,
+branch/prepend, stale-receipt and blocked-renderer tests. That redesign is not
+part of this targeted fix.
+
 ## Visual stability is separate from throughput
 
 Streaming regressions also record actual shell/renderer ANSI/vt100 frames. They

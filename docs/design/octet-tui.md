@@ -213,6 +213,11 @@ projection over those source offsets. A release copies only a transcript-owned
 press/drag, so chrome cannot recopy a stale selection. OSC 52 encodes once after
 bounding the UTF-8 source to 49,152 bytes, writes a BEL-terminated 64 KiB maximum
 base64 payload under the stdout lock, and leaves semantic/native copy complete.
+Fullscreen selection painting intersects the selected block range with the visible
+row window before projecting copy text. Ordinary anchor promotion checks its
+retained block hint before searching identities. These avoid history-wide scans
+on unchanged navigation; large individual block mappings and historical layout
+mutations retain the boundaries described in the performance contract.
 
 Held-key repeats are accepted only for text editing and navigation. One-shot
 actions such as submit, panel confirmation, close, abort, and reasoning/summary expansion

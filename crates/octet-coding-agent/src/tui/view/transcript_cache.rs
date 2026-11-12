@@ -272,6 +272,8 @@ impl ShellState {
                     });
                     let start = cache.lines.len();
                     let length = rendered.lines.len();
+                    #[cfg(test)]
+                    super::fullscreen_work_tests::record(|work| work.rows_laid_out += length);
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
@@ -312,6 +314,8 @@ impl ShellState {
                     let start = cache.lines.len();
                     first_changed = first_changed.min(start);
                     let length = rendered.lines.len();
+                    #[cfg(test)]
+                    super::fullscreen_work_tests::record(|work| work.rows_laid_out += length);
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
@@ -353,6 +357,10 @@ impl ShellState {
                             && update.stable_rows <= old_length
                             && update.geometry == cache.block_geometries[index]
                     }) {
+                        #[cfg(test)]
+                        super::fullscreen_work_tests::record(|work| {
+                            work.rows_laid_out += update.replacement.len()
+                        });
                         let replacement_start = start.saturating_add(update.stable_rows);
                         first_changed = first_changed.min(replacement_start);
                         let new_length =
@@ -394,6 +402,8 @@ impl ShellState {
                         )
                     });
                     let new_length = rendered.lines.len();
+                    #[cfg(test)]
+                    super::fullscreen_work_tests::record(|work| work.rows_laid_out += new_length);
                     cache
                         .lines
                         .splice(start..start + old_length, rendered.lines);
