@@ -250,7 +250,7 @@ class ReleaseToolchainTests(unittest.TestCase):
         self.assertIn(execute, job)
         self.assertLess(job.index(build), job.index(execute))
         # Cold compilation must not consume the existing test execution budget.
-        for name, minutes, run in (("Build workspace test binaries", 15, build),
+        for name, minutes, run in (("Build workspace test binaries", 30, build),
                                    ("Run workspace tests", 25, execute)):
             self.assertIn("      - name: " + name + "\n"
                           f"        timeout-minutes: {minutes}" + run, job)

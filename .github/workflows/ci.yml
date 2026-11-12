@@ -231,8 +231,10 @@ jobs:
           rg --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       # Cold compilation has its own bound; retain the full execution budget.
+      # rust-cache saves only after success, so a lockfile change compiles cold
+      # on macOS and must fit this budget or every later run stays cold.
       - name: Build workspace test binaries
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: cargo test --workspace --all-targets --all-features --profile ci-test --locked --no-run
       # Execution has its own budget: macOS reached 14m14s before the Pi
       # conformance and soak suites joined, and together exceed 15 minutes
