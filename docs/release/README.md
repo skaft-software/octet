@@ -145,6 +145,8 @@ hosted approvals, tag creation, OIDC, provenance, native installation or a real
 
 ## Release text
 
+Credited contributions lead each subsection in Unreleased and releases from 0.10.4 onward; `python3 scripts/check-changelog.py --fix` repairs ordering without changing frozen history.
+
 Only edit the dated current-version section in `CHANGELOG.md`. `release-notes.py
 sync` updates only that version's public and bundled notes; historical notes are
 frozen. The GitHub body and attached `release.json` use the same generated text.

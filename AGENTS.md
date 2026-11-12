@@ -118,6 +118,10 @@ Fixed, Removed or Breaking Changes subsections. Write positive, present-tense,
 user-facing bullets: one line, at most 160 characters excluding a trailing credit
 ` ([#n](https://github.com/skaft-software/octet/pull/n) by [@user](https://github.com/user))`.
 Omit Known limitations and maintainer-only tooling. Older sections are frozen.
+In each subsection of Unreleased and releases from 0.10.4 onward, credited outside
+contributions lead uncredited bullets, preserving order within each group (`--fix`
+repairs ordering). When landing an outside PR, add its credited bullet at the top
+of the subsection.
 Run `python3 scripts/check-changelog.py`; human prose review is still required.
 
 ## Public text

@@ -42,6 +42,59 @@ PROSE_RULES = (
 )
 
 
+def current_section(heading: str) -> bool:
+    numeric = re.match(r"^##\s+\[?(\d+)\.(\d+)\.(\d+)", heading)
+    return heading == "## [Unreleased]" or (
+        numeric is not None and tuple(map(int, numeric.groups())) >= (0, 10, 4)
+    )
+
+
+def fix(text: str) -> tuple[str, list[str]]:
+    """Stable-partition bullet blocks, leaving all other bytes in their slots."""
+    lines = text.splitlines(keepends=True)
+    replacements = []
+    moved = []
+    bullets = []
+    active = False
+    subsection = False
+
+    def finish() -> None:
+        ordered = [item for item in bullets if item[2]] + [item for item in bullets if not item[2]]
+        for (start, end, _), (source, source_end, credited) in zip(bullets, ordered):
+            if start == source:
+                continue
+            original = "".join(lines[source:source_end]).rstrip("\r\n")
+            ending = lines[end - 1][len(lines[end - 1].rstrip("\r\n")):]
+            replacements.append((start, end, original + ending))
+            if credited:
+                moved.append(f"moved credited contribution from line {source + 1} to line {start + 1}")
+        bullets.clear()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip("\r\n")
+        if re.match(r"^##(?:\s|$)", line):
+            finish()
+            active = current_section(line)
+            subsection = False
+        elif line.startswith("### "):
+            finish()
+            subsection = line[4:] in SUBSECTIONS
+        elif active and subsection and line.startswith("- "):
+            end = i + 1
+            while end < len(lines) and lines[end].strip() and not lines[end].startswith(("- ", "#")):
+                end += 1
+            body = " ".join(part.strip() for part in lines[i:end])
+            bullets.append((i, end, PR_LINK.search(body) is not None))
+            i = end
+            continue
+        i += 1
+    finish()
+    for start, end, replacement in sorted(replacements, reverse=True):
+        lines[start:end] = [replacement]
+    return "".join(lines), moved
+
+
 def check(text: str) -> list[tuple[int, str]]:
     errors: list[tuple[int, str]] = []
 
@@ -56,10 +109,7 @@ def check(text: str) -> list[tuple[int, str]]:
     seen_unreleased = False
     for start, lines in sections:
         heading = lines[0]
-        numeric = re.match(r"^##\s+\[?(\d+)\.(\d+)\.(\d+)", heading)
-        if heading != "## [Unreleased]" and (
-            numeric is None or tuple(map(int, numeric.groups())) < (0, 10, 4)
-        ):
+        if not current_section(heading):
             continue  # Historical structure AND prose are frozen, tagged or not.
         match = HEADING.fullmatch(heading)
         raw_version = re.match(r"^##\s+\[([^]]+)\]", heading)
@@ -88,6 +138,7 @@ def check(text: str) -> list[tuple[int, str]]:
         subsection: str | None = None
         subsection_line = start
         bullet_count = 0
+        first_uncredited: int | None = None
 
         def finish_subsection() -> None:
             if subsection is not None and bullet_count == 0:
@@ -105,6 +156,7 @@ def check(text: str) -> list[tuple[int, str]]:
                 subsection = line[4:]
                 subsection_line = number
                 bullet_count = 0
+                first_uncredited = None
                 if subsection not in SUBSECTIONS:
                     error(number, "subsection must be one of: " + ", ".join(SUBSECTIONS))
                 else:
@@ -131,6 +183,10 @@ def check(text: str) -> list[tuple[int, str]]:
                 error(number, f"bullet wraps onto lines {number + 1}-{start + end - 1}; use one line")
             body = " ".join(parts)
             link = PR_LINK.search(body)
+            if link and first_uncredited is not None:
+                error(number, f"credited contributions lead their subsection; move above line {first_uncredited}")
+            elif not link and first_uncredited is None:
+                first_uncredited = number
             statement = body[:link.start()] if link else body
             if LINK_LIKE.search(statement):
                 error(number, "credits must be a single trailing attributed PR link in the prescribed form")
@@ -151,9 +207,18 @@ def check(text: str) -> list[tuple[int, str]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changelog", type=Path, default=ROOT / "CHANGELOG.md")
+    parser.add_argument("--fix", action="store_true", help="move credited contributions above uncredited bullets")
     args = parser.parse_args()
     try:
-        errors = check(args.changelog.read_text(encoding="utf-8"))
+        text = args.changelog.read_bytes().decode("utf-8")
+        if args.fix:
+            fixed, moved = fix(text)
+            if fixed != text:
+                args.changelog.write_bytes(fixed.encode("utf-8"))
+            for message in moved:
+                print(f"{args.changelog}: {message}")
+            text = fixed
+        errors = check(text.replace("\r\n", "\n"))
     except (OSError, UnicodeError) as exc:
         print(f"{args.changelog}:1: cannot check changelog: {exc}", file=sys.stderr)
         return 1

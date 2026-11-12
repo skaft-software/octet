@@ -107,6 +107,62 @@ class CheckChangelogTests(unittest.TestCase):
         for statement in ("OpenCode Go exposes its routes.", "The fake cursor uses reverse video."):
             self.assertEqual(checker.check(PREFIX + "### Fixed\n- " + statement), [])
 
+    def test_credited_contributions_lead_each_current_subsection(self):
+        ordered = "### Fixed\n\n- Sessions resume." + CREDIT + "\n- Tools work.\n"
+        for heading in ("", "## [0.10.4] - 2026-11-12\n", "## [1.0.0] - Release candidate\n"):
+            with self.subTest(heading=heading):
+                self.assertEqual(checker.check(PREFIX + heading + ordered), [])
+                unordered = ordered.replace("- Sessions resume." + CREDIT + "\n- Tools work.",
+                                            "- Tools work.\n- Sessions resume." + CREDIT)
+                text = PREFIX + heading + unordered
+                number = text.splitlines().index("- Tools work.") + 1
+                self.assertEqual(checker.check(text), [
+                    (number + 1, f"credited contributions lead their subsection; move above line {number}")])
+
+    def test_credit_order_resets_at_subsections_and_releases(self):
+        text = (PREFIX + "### Added\n- Tools work.\n### Fixed\n- Sessions resume." + CREDIT
+                + "\n- Reports scroll.\n\n## [0.10.4] - 2026-11-12\n### Fixed\n- Sessions resume." + CREDIT + "\n")
+        self.assertEqual(checker.check(text), [])
+
+    def test_historical_credit_order_is_not_checked(self):
+        for heading in ("## [0.10.3]", "## 0.9.5"):
+            self.assertEqual(checker.check(GOOD + "\n" + heading
+                                          + "\n### Fixed\n- Tools work.\n- Sessions resume." + CREDIT + "\n"), [])
+
+    def test_fix_stably_partitions_only_current_bullets_and_is_idempotent(self):
+        first = "- Sessions resume." + CREDIT
+        second = "- Reports scroll." + CREDIT.replace("456", "789")
+        body = "### Fixed\n\n- Tools work.\n\n" + first + "\n- Windows open.\n" + second
+        ordered = "### Fixed\n\n" + first + "\n\n" + second + "\n- Tools work.\n- Windows open."
+        history = "\n\n## [0.10.3]\n" + body
+        before = PREFIX + body + "\n\n## [0.10.4] - 2026-11-12\n" + body + history
+        after = PREFIX + ordered + "\n\n## [0.10.4] - 2026-11-12\n" + ordered + history
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "CHANGELOG.md"
+            command = [sys.executable, str(SCRIPTS / "check-changelog.py"), "--changelog", str(path)]
+            # CRLF, blank-line positions, Unicode and the absent final newline stay intact.
+            before = before.replace("Windows", "Windows π").replace("\n", "\r\n").encode()
+            after = after.replace("Windows", "Windows π").replace("\n", "\r\n").encode()
+            path.write_bytes(before)
+            result = subprocess.run(command + ["--fix"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(path.read_bytes(), after)
+            self.assertEqual(result.stdout.count("moved credited contribution"), 4)
+            self.assertIn("from line 9 to line 7", result.stdout)
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            again = subprocess.run(command + ["--fix"], capture_output=True, text=True)
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(again.stdout, "")
+            self.assertEqual(path.read_bytes(), after)
+
+    def test_fix_preserves_final_newline_and_wrapped_blocks(self):
+        for ending in ("", "\n", "\r\n"):
+            before = PREFIX + "### Fixed\n- Tools work.\n- Sessions\n  resume." + CREDIT + ending
+            expected = PREFIX + "### Fixed\n- Sessions\n  resume." + CREDIT + "\n- Tools work." + ending
+            fixed, _ = checker.fix(before)
+            self.assertEqual(fixed, expected)
+            self.assertEqual(checker.fix(fixed), (fixed, []))
+
     def test_cli_is_offline_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "CHANGELOG.md"
