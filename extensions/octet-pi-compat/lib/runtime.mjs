@@ -287,7 +287,14 @@ export class Runtime {
     // replacement surface (for example after a loading screen) before the
     // response is written. Keep the origin and abort signal so explicit
     // cancellation still retires that UI; omit only the settlement parent.
-    const detachedUi = store.detached && (method === 'ui/open' || method === 'ui/close');
+    // A persistent slot (footer, header, widget, statuses) set from a hook is
+    // Pi chrome that outlives the handler: Pi's setFooter is synchronous. Its
+    // open/close is likewise never cancelled by the hook's settlement, or a
+    // host busy for longer than the presentation join (e.g. a very large
+    // session) mounts a surface the adapter has already abandoned and the
+    // footer never paints until unrelated input.
+    const slotUi = store.surface?.slotKey !== undefined;
+    const detachedUi = (store.detached || slotUi) && (method === 'ui/open' || method === 'ui/close');
     const response = this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
     }, { parent: live && !detachedUi && !independentCheckpoint ? store.id : undefined,

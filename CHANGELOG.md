@@ -20,6 +20,15 @@
 
 ### Fixed
 
+- Pi hooks on very large sessions reuse the history the adapter already prepared for that
+  exact revision (same digest) instead of reading and parsing the whole document again per
+  hook. On a 240 MB history `resources_discover` took 0.2 s instead of 3.6 s and no longer
+  timed out.
+
+- A Pi footer, header or widget set from a hook that returns before the UI mount is
+  acknowledged now paints. The mount was cancelled with its hook while the host still
+  mounted it, so on large sessions the footer stayed blank until the next keystroke.
+
 - Resuming a session with thousands of entries no longer re-encodes and
   re-sends its whole history to every extension on each UI refresh. Unchanged
   sessions keep their published view; any new record, label, usage, host change,
