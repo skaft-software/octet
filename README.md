@@ -33,7 +33,8 @@ and **drive your computer** in the same conversation, which is why it exists.
 ## Install
 
 macOS Apple silicon/Intel and GNU/Linux x86-64, no Node.js required. This pins the exact
-release — recommended for CI and scripted installs:
+release — recommended for CI and scripted installs. The source is the 0.10.4 release candidate;
+these commands install the published 0.10.3:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf \

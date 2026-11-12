@@ -4,7 +4,7 @@ set -eu
 # Exact-version 0.10.3 release tooling. Published assets must match this version.
 # See the version-pinned release record for publication and installation evidence.
 repository="skaft-software/octet"
-version="0.10.3"
+version="0.10.4"
 tag="v$version"
 release_source_commit="__OCTET_RELEASE_SOURCE_COMMIT__"
 release_base="https://github.com/$repository/releases/download/$tag"

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.4] - Release candidate
+
 ### Changed
 
 - `octet migrate pi` is now one guided command: a short overview a newcomer can read, a note

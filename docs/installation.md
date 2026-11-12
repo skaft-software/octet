@@ -6,6 +6,8 @@
 
 ## octet 0.10.3
 
+The source tree is the octet **0.10.4 release candidate**, an unreleased source candidate: v0.10.4 is not yet published, and v0.10.4 is not yet published to npm. The commands below install the published 0.10.3 release.
+
 A Pi-compatibility fix release. Install the native agent below, then
 [enable the optional Pi adapter](pi-compatibility.md). The
 [release notes](releases/v0.10.3.md) describe changes and known boundaries.
