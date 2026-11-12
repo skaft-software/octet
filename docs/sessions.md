@@ -57,6 +57,19 @@ recoverable. The session stays on disk, hidden from the picker, and the web UI's
 trash can restore it. You can't trash the current session. A session from
 another workspace can't be resumed into the same live app.
 
+### Workspace scope
+
+The default picker, `sessions list`, `--continue` and `--resume ID` use the
+[resolved workspace](cli.md#workspace-selection). Unrelated directories under
+home remain separate even when home has a dotfiles `.git` repository; ordinary
+Git projects and worktrees still share sessions across their own subdirectories.
+
+Sessions previously created under the broader home workspace are not moved or
+relabelled. Browse them with the picker's all-workspaces Tab, or launch
+`octet --workspace "$HOME" --resume` (add an ID for explicit selection).
+Cross-workspace discovery doesn't grant a live session permission to switch
+workspaces; explicit by-ID resume remains scoped to the selected workspace.
+
 ## The session goal
 
 `/goal <objective>` stores a durable objective for the current session;

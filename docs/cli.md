@@ -57,6 +57,20 @@ becomes model input. In print/plain it reports on stderr. RPC `get_state` and
 `cache_warmed` with `usage`, exact integer `cost`, and `extensionOverride`,
 without assistant-message or turn events. Its usage is session-only.
 
+## Workspace selection
+
+Without `--workspace`, octet starts from the process's current directory (not
+`$PWD`), uses the nearest ancestor with a `.git` directory or worktree `.git`
+file, and otherwise keeps the current directory. Discovery stops **before your
+home directory**: a dotfiles repository at `~/.git` doesn't make all your home
+projects share one workspace. Launching at home still uses home. Paths are
+canonicalized, including symlinked home and invocation paths.
+
+`--workspace PATH` always wins, including `--workspace "$HOME"`. The selected
+root controls relative tool paths, default shell cwd, trusted project resources
+and [workspace-scoped sessions](sessions.md#resume-and-branch). A subdirectory
+of an ordinary project still uses that project's Git root by default.
+
 ## Tools and limits
 
 | Option | What it does |

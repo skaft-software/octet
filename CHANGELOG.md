@@ -11,6 +11,10 @@
   right after compaction. Media from your history now gets the same per-item allowance as
   the extension-free check; opaque provider content is still counted in full.
 
+- Launching inside a home subdirectory no longer adopts a dotfiles repository
+  at `~/.git` as its workspace, tool cwd and resume scope. Ordinary project and
+  worktree roots, explicit `--workspace` overrides and existing sessions are kept.
+
 ## [0.10.4] - Release candidate
 
 ### Changed
