@@ -14,6 +14,7 @@
 ### Fixed
 
 - Thinking and tool toggles stay independent. ([#724](https://github.com/skaft-software/octet/pull/724) by [@gafiatulin](https://github.com/gafiatulin))
+- `octet migrate pi` shows styled text on terminals and plain text with `NO_COLOR`, `--color never` or pipes.
 - Extension editors, footers and widgets opened at startup appear once, in the right theme; the native composer stays editable and keeps your draft.
 - A Pi footer set at startup paints without waiting for a keystroke, and shows the branch of ancestor repositories and worktrees.
 - Large resumed sessions stay responsive with the Pi adapter: typing during startup is safe, and hooks reuse the prepared history.

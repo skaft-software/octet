@@ -8,6 +8,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use super::{MigrationPath, MigrationReport};
+use crate::output::{StyledLine, TextStyle::*};
 
 pub(super) const ADAPTER: &str = "octet-pi-compat";
 const MINIMUM_NODE: (u64, u64) = (22, 19);
@@ -75,29 +76,16 @@ struct Style {
 }
 
 impl Style {
-    fn detect() -> Self {
+    fn detect(mode: crate::config::ColorMode) -> Self {
         Self {
-            color: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+            color: std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none()
+                && mode != crate::config::ColorMode::Never,
         }
     }
-    fn paint(&self, code: &str, text: &str) -> String {
-        if self.color {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
-    }
-    fn bold(&self, text: &str) -> String {
-        self.paint("1", text)
-    }
-    fn dim(&self, text: &str) -> String {
-        self.paint("2", text)
-    }
-    fn ok(&self, text: &str) -> String {
-        self.paint("32", text)
-    }
-    fn warn(&self, text: &str) -> String {
-        self.paint("33", text)
+
+    fn print(&self, line: StyledLine) {
+        crate::output::stdout_styled_line(&line, self.color);
     }
 }
 
@@ -115,22 +103,25 @@ fn home_relative(path: &Path) -> String {
 }
 
 /// The overview block, as lines. Pure so it can be tested byte for byte.
-pub(super) fn overview_lines(pi_home: &Path, overview: &Overview, color: bool) -> Vec<String> {
-    let style = Style { color };
-    let mut lines = vec![format!(
-        "{}  {}",
-        style.bold("Your Pi setup"),
-        style.dim(&home_relative(pi_home))
-    )];
-    lines.push(String::new());
+fn overview_lines(pi_home: &Path, overview: &Overview) -> Vec<StyledLine> {
+    let mut lines = vec![StyledLine::default()
+        .text(Bold, "Your Pi setup")
+        .text(Plain, "  ")
+        .text(Dim, home_relative(pi_home))];
+    lines.push(StyledLine::default());
     if overview.is_empty() {
-        lines.push(
-            "  Nothing to bring over: no enabled extensions, skills, prompts or themes.".into(),
-        );
+        lines.push(StyledLine::default().text(
+            Plain,
+            "  Nothing to bring over: no enabled extensions, skills, prompts or themes.",
+        ));
         return lines;
     }
     let mut row = |label: &str, value: String, note: &str| {
-        lines.push(format!("  {:<12}{:<22}{}", label, value, style.dim(note)));
+        lines.push(
+            StyledLine::default()
+                .text(Plain, format!("  {label:<12}{value:<22}"))
+                .text(Dim, note),
+        );
     };
     if overview.extensions > 0 {
         row(
@@ -179,44 +170,58 @@ pub(super) fn overview_lines(pi_home: &Path, overview: &Overview, color: bool) -
         );
     }
     if overview.blocked > 0 || overview.warnings > 0 {
-        lines.push(String::new());
+        lines.push(StyledLine::default());
         if overview.blocked > 0 {
-            lines.push(format!(
-                "  {} {} can't run in octet yet",
-                style.warn("!"),
-                plural(overview.blocked, "item", "items")
-            ));
+            lines.push(
+                StyledLine::default()
+                    .text(Plain, "  ")
+                    .text(Warning, "!")
+                    .text(
+                        Plain,
+                        format!(
+                            " {} can't run in octet yet",
+                            plural(overview.blocked, "item", "items")
+                        ),
+                    ),
+            );
         }
         if overview.warnings > 0 {
-            lines.push(format!(
-                "  {} {} could not be fully checked",
-                style.warn("!"),
-                plural(overview.warnings, "file", "files")
-            ));
+            lines.push(
+                StyledLine::default()
+                    .text(Plain, "  ")
+                    .text(Warning, "!")
+                    .text(
+                        Plain,
+                        format!(
+                            " {} could not be fully checked",
+                            plural(overview.warnings, "file", "files")
+                        ),
+                    ),
+            );
         }
-        lines.push(format!(
-            "    {}",
-            style.dim("See which: octet migrate pi --details")
-        ));
+        lines.push(
+            StyledLine::default()
+                .text(Plain, "    ")
+                .text(Dim, "See which: octet migrate pi --details"),
+        );
     }
     lines
 }
 
-fn what_changes_lines(color: bool) -> Vec<String> {
-    let style = Style { color };
+fn what_changes_lines() -> Vec<StyledLine> {
     vec![
-        String::new(),
-        style.bold("What turning it on does"),
-        "  · Installs the Pi adapter and turns it on in octet (your octet config is backed up first)".into(),
-        "  · Leaves your Pi settings as they are. Pi keeps working exactly as before".into(),
-        "  · Runs your Pi extensions with your user permissions, as Pi does; they keep their data where Pi keeps it".into(),
-        String::new(),
+        StyledLine::default(),
+        StyledLine::default().text(Bold, "What turning it on does"),
+        StyledLine::default().text(Plain, "  · Installs the Pi adapter and turns it on in octet (your octet config is backed up first)"),
+        StyledLine::default().text(Plain, "  · Leaves your Pi settings as they are. Pi keeps working exactly as before"),
+        StyledLine::default().text(Plain, "  · Runs your Pi extensions with your user permissions, as Pi does; they keep their data where Pi keeps it"),
+        StyledLine::default(),
     ]
 }
 
-fn print(lines: Vec<String>) {
+fn print(lines: Vec<StyledLine>, style: &Style) {
     for line in lines {
-        crate::output::stdout_line(line);
+        style.print(line);
     }
 }
 
@@ -287,8 +292,9 @@ pub(super) async fn run(
     action: Action,
     report: &MigrationReport,
     pi_home: &Path,
+    color: crate::config::ColorMode,
 ) -> anyhow::Result<()> {
-    let style = Style::detect();
+    let style = Style::detect(color);
     let config = crate::cli::global_config_path()
         .ok_or_else(|| anyhow::anyhow!("your home directory is unavailable"))?;
 
@@ -299,33 +305,38 @@ pub(super) async fn run(
         }
         let backup = backup_config(&config)?;
         crate::cli::persist_extension_enabled_to_path(ADAPTER, false, &config)?;
-        crate::output::stdout_line(format!("{} Pi adapter turned off.", style.ok("✓")));
+        style.print(
+            StyledLine::default()
+                .text(Success, "✓")
+                .text(Plain, " Pi adapter turned off."),
+        );
         crate::output::stdout_line("  Your Pi setup and Pi itself were not touched.");
         if let Some(backup) = backup {
-            crate::output::stdout_line(style.dim(&format!(
-                "  Previous octet config: {}",
-                home_relative(&backup)
-            )));
+            style.print(StyledLine::default().text(
+                Dim,
+                format!("  Previous octet config: {}", home_relative(&backup)),
+            ));
         }
         return Ok(());
     }
 
     let overview = Overview::from_report(report);
-    print(overview_lines(pi_home, &overview, style.color));
+    print(overview_lines(pi_home, &overview), &style);
     if overview.is_empty() {
         return Ok(());
     }
     if adapter_enabled(&config) {
         crate::output::stdout_line("");
-        crate::output::stdout_line(format!(
-            "{} Already on. Start octet as usual: {}",
-            style.ok("✓"),
-            style.bold("octet")
-        ));
-        crate::output::stdout_line(style.dim("  Turn it off: octet migrate pi --undo"));
+        style.print(
+            StyledLine::default()
+                .text(Success, "✓")
+                .text(Plain, " Already on. Start octet as usual: ")
+                .text(Bold, "octet"),
+        );
+        style.print(StyledLine::default().text(Dim, "  Turn it off: octet migrate pi --undo"));
         return Ok(());
     }
-    print(what_changes_lines(style.color));
+    print(what_changes_lines(), &style);
 
     let node = node_version();
     let node_ok = node.is_some_and(|version| version >= MINIMUM_NODE);
@@ -333,11 +344,12 @@ pub(super) async fn run(
         let found = node.map_or("not found".to_owned(), |(major, minor)| {
             format!("found {major}.{minor}")
         });
-        crate::output::stdout_line(format!(
-            "{} Pi extensions need Node.js {}.{} or newer ({found}).",
-            style.warn("!"),
-            MINIMUM_NODE.0,
-            MINIMUM_NODE.1
+        style.print(StyledLine::default().text(Warning, "!").text(
+            Plain,
+            format!(
+                " Pi extensions need Node.js {}.{} or newer ({found}).",
+                MINIMUM_NODE.0, MINIMUM_NODE.1
+            ),
         ));
         crate::output::stdout_line(
             "  Install it from https://nodejs.org, then run octet migrate pi again.",
@@ -347,19 +359,24 @@ pub(super) async fn run(
 
     let proceed = match action {
         Action::Preview => {
-            crate::output::stdout_line(format!(
-                "Nothing was changed. To turn it on: {}",
-                style.bold("octet migrate pi")
-            ));
+            style.print(
+                StyledLine::default()
+                    .text(Plain, "Nothing was changed. To turn it on: ")
+                    .text(Bold, "octet migrate pi"),
+            );
             return Ok(());
         }
         Action::Apply => true,
         Action::Ask if std::io::stdin().is_terminal() => confirm("Turn on your Pi setup in octet?"),
         Action::Ask => {
-            crate::output::stdout_line(format!(
-                "Nothing was changed. To turn it on without a prompt: {}",
-                style.bold("octet migrate pi --yes")
-            ));
+            style.print(
+                StyledLine::default()
+                    .text(
+                        Plain,
+                        "Nothing was changed. To turn it on without a prompt: ",
+                    )
+                    .text(Bold, "octet migrate pi --yes"),
+            );
             return Ok(());
         }
         Action::Undo => unreachable!("handled above"),
@@ -371,25 +388,26 @@ pub(super) async fn run(
 
     let root = crate::extension_package::extensions_root()?;
     if crate::extension_bundle::ensure_installed(&root, ADAPTER).is_err() {
-        crate::output::stdout_line(style.dim("Installing the Pi adapter…"));
+        style.print(StyledLine::default().text(Dim, "Installing the Pi adapter…"));
         crate::extension_bundle::install_official(&root, ADAPTER, false, &|_, _| {}).await?;
     }
     let backup = backup_config(&config)?;
     crate::cli::persist_extension_enabled_to_path(ADAPTER, true, &config)?;
 
     crate::output::stdout_line("");
-    crate::output::stdout_line(format!(
-        "{} Done. Start octet as usual: {}",
-        style.ok("✓"),
-        style.bold("octet")
-    ));
+    style.print(
+        StyledLine::default()
+            .text(Success, "✓")
+            .text(Plain, " Done. Start octet as usual: ")
+            .text(Bold, "octet"),
+    );
     if let Some(backup) = backup {
-        crate::output::stdout_line(style.dim(&format!(
-            "  Previous octet config: {}",
-            home_relative(&backup)
-        )));
+        style.print(StyledLine::default().text(
+            Dim,
+            format!("  Previous octet config: {}", home_relative(&backup)),
+        ));
     }
-    crate::output::stdout_line(style.dim("  Turn it off any time: octet migrate pi --undo"));
+    style.print(StyledLine::default().text(Dim, "  Turn it off any time: octet migrate pi --undo"));
     Ok(())
 }
 
@@ -412,7 +430,10 @@ mod tests {
 
     #[test]
     fn overview_is_short_plain_and_points_at_details() {
-        let lines = overview_lines(Path::new("/nowhere/.pi/agent"), &overview(), false);
+        let lines = overview_lines(Path::new("/nowhere/.pi/agent"), &overview())
+            .iter()
+            .map(|line| line.render(false, false))
+            .collect::<Vec<_>>();
         let text = lines.join("\n");
         assert_eq!(
             text,
@@ -432,15 +453,26 @@ mod tests {
 
     #[test]
     fn empty_setup_says_so_in_one_line() {
-        let lines = overview_lines(Path::new("/p"), &Overview::default(), false);
+        let lines = overview_lines(Path::new("/p"), &Overview::default())
+            .iter()
+            .map(|line| line.render(false, false))
+            .collect::<Vec<_>>();
         assert_eq!(lines.len(), 3);
         assert!(lines[2].contains("Nothing to bring over"));
     }
 
     #[test]
     fn color_is_only_added_when_requested() {
-        let plain = overview_lines(Path::new("/p"), &overview(), false).join("\n");
-        let colored = overview_lines(Path::new("/p"), &overview(), true).join("\n");
+        let plain = overview_lines(Path::new("/p"), &overview())
+            .iter()
+            .map(|line| line.render(false, false))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let colored = overview_lines(Path::new("/p"), &overview())
+            .iter()
+            .map(|line| line.render(true, true))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(!plain.contains('\x1b'));
         assert!(colored.contains("\x1b[1m"));
     }

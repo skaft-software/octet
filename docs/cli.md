@@ -339,7 +339,9 @@ octet migrate pi [--dry-run | --yes | --undo | --details | --json] [--pi-home PA
 Without flags it shows a short overview and asks before turning your Pi setup on
 (installing and enabling the Pi adapter, with octet's config backed up first).
 `--dry-run` shows the overview and changes nothing; `--yes` skips the question;
-`--undo` turns the adapter off. The scan uses no model tokens and runs no
+`--undo` turns the adapter off. The overview uses styling only on a terminal;
+`NO_COLOR`, `--color never` and redirected output keep it plain. Untrusted paths
+remain control-safe in either form. The scan uses no model tokens and runs no
 package code, and Pi's settings are never written. `--json` gives versioned machine output, and `--npm-root` adds
 an explicit legacy `node_modules` search root. `octet migrate import pi` and
 `octet migrate restore` are separate, explicit steps that never copy credentials

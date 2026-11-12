@@ -509,7 +509,11 @@ struct MigrationReport {
     diagnostics: Vec<Diagnostic>,
 }
 
-pub async fn run(command: MigrationCommand, invocation_cwd: &Path) -> anyhow::Result<()> {
+pub async fn run(
+    command: MigrationCommand,
+    invocation_cwd: &Path,
+    color: crate::config::ColorMode,
+) -> anyhow::Result<()> {
     match command {
         MigrationCommand::Pi {
             dry_run,
@@ -554,7 +558,7 @@ pub async fn run(command: MigrationCommand, invocation_cwd: &Path) -> anyhow::Re
             } else {
                 guided::Action::Ask
             };
-            guided::run(action, &report, &pi_home).await
+            guided::run(action, &report, &pi_home, color).await
         }
         MigrationCommand::Import { command } => {
             migration_import::run_import(command, invocation_cwd)

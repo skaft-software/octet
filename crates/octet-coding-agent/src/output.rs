@@ -406,6 +406,54 @@ fn write_multiline(mut writer: impl Write, value: &str, terminal: bool) {
     }
 }
 
+/// Trusted attributes are kept separate from untrusted text until emission.
+#[derive(Clone, Copy)]
+pub(crate) enum TextStyle {
+    Plain,
+    Bold,
+    Dim,
+    Success,
+    Warning,
+}
+
+#[derive(Default)]
+pub(crate) struct StyledLine(Vec<(TextStyle, String)>);
+
+impl StyledLine {
+    pub(crate) fn text(mut self, style: TextStyle, text: impl Into<String>) -> Self {
+        self.0.push((style, text.into()));
+        self
+    }
+
+    pub(crate) fn render(&self, terminal: bool, color: bool) -> String {
+        let mut line = String::new();
+        for (style, text) in &self.0 {
+            let safe = safe_line(text, terminal);
+            let code = match style {
+                TextStyle::Plain => "",
+                TextStyle::Bold => "1",
+                TextStyle::Dim => "2",
+                TextStyle::Success => "32",
+                TextStyle::Warning => "33",
+            };
+            if terminal && color && !code.is_empty() {
+                line.push_str(&format!("\x1b[{code}m{safe}\x1b[0m"));
+            } else {
+                line.push_str(&safe);
+            }
+        }
+        line
+    }
+}
+
+pub(crate) fn stdout_styled_line(line: &StyledLine, color: bool) {
+    let _ = writeln!(
+        io::stdout().lock(),
+        "{}",
+        line.render(stdout_is_terminal(), color)
+    );
+}
+
 pub(crate) fn stdout_line(value: impl Display) {
     let terminal = stdout_is_terminal();
     write_line(io::stdout().lock(), &value.to_string(), terminal);

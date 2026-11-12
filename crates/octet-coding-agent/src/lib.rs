@@ -175,7 +175,16 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if let Some(cli::TopLevelCommand::Migrate { command }) = top_level_command.clone() {
-        return migrate::run(command, &std::env::current_dir()?).await;
+        let color = cli
+            .color
+            .clone()
+            .or_else(|| std::env::var("OCTET_COLOR").ok());
+        let color = color
+            .as_deref()
+            .map(config::ColorMode::parse)
+            .transpose()?
+            .unwrap_or_default();
+        return migrate::run(command, &std::env::current_dir()?, color).await;
     }
     if let Some(cli::TopLevelCommand::Extension { command }) = top_level_command.clone() {
         return extension_package::run(command).await;
