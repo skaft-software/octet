@@ -1,0 +1,48 @@
+name: octet release surfaces
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['octet binary release']
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Select completed publication without waiting
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          audit=true
+          if [[ "$EVENT" == workflow_run ]]; then
+            audit=$(gh api --method GET --paginate \
+              "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?filter=latest&per_page=100" \
+              --jq '.jobs[] | select(.name == "Mark the verified release as Latest") | .conclusion == "success"')
+          fi
+          echo "audit=$audit" >> "$GITHUB_OUTPUT"
+      # workflow_run always audits trusted main, never the triggering checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.publication.outputs.audit == 'true'
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Compare GitHub, npm, docs and website (GET only)
+        if: steps.publication.outputs.audit == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/check-release-surfaces.py --live

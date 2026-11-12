@@ -249,6 +249,27 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 </details>
 
+## Read-only channel audit
+
+`release-surfaces.yml` compares GitHub Latest, all five npm `latest` dist-tags,
+current installation-document pins, bundled notes and
+`https://skaft.org/octet/release.json`. It runs daily, on explicit dispatch and
+after a successful Latest promotion. It performs GETs only, has a five-minute job
+bound, installs no toolchains and never waits for another workflow. An unavailable
+surface (including a registry HTTP 401) is a failure, not an omitted package.
+
+Network audit mode is restricted to that workflow. Offline evidence can be
+replayed with:
+
+```sh
+python3 scripts/check-release-surfaces.py --fixtures /path/to/evidence.json
+```
+
+The fixture object has `github` (the Latest API object), `npm` (package names
+mapped to dist-tag objects) and `website` (the release JSON object). The audit
+never changes releases, registry tags, docs or the separately deployed website.
+A disagreement needs owner reconciliation, not automatic publication.
+
 ## Other channels
 
 The version-pinned v0.10.4 shell installer targets macOS arm64 and x64 and
