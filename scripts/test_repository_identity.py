@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -276,6 +277,21 @@ class SourceDistributionVersionTests(unittest.TestCase):
                 self.assertIn(f'\nversion = "{self.version}"\n', manifest)
                 self.assertIn(f'\nrequires_octet = "={self.version}"\n', manifest)
                 self.assertIn('\napi_version = "0.4"\n', manifest)
+
+    def test_native_hello_build_pins_the_workspace_host_without_a_literal_version(self):
+        recipe = (self.root / "examples/extensions/native-hello/build.sh").read_text()
+        self.assertNotRegex(recipe, r'requires_octet\s*=\s*[\"\']=?[0-9]+\.[0-9]+\.[0-9]+')
+        generator = recipe.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "build"
+            for version in ("7.8.9", "7.8.10"):
+                (root / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+                subprocess.run([sys.executable, "-c", generator, str(out), str(root)],
+                               check=True, capture_output=True, text=True)
+                for language in ("rust", "c", "cpp"):
+                    manifest = out / f"extensions/native-hello-{language}/extension.toml"
+                    self.assertIn(f'requires_octet = "={version}"\n', manifest.read_text())
 
     def test_current_notes_are_identical_and_in_the_finite_documentation_inventory(self):
         name = f"docs/releases/v{self.version}.md"
