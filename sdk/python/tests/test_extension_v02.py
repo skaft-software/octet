@@ -991,9 +991,14 @@ class AgentSessionTests(unittest.TestCase):
     def test_agent_session_active_cap_accepts_sixteen_but_not_seventeen(self):
         from unittest.mock import Mock
 
-        extension = Extension(api_version="0.2", stderr=io.StringIO())
+        extension = Extension(api_version="0.4", stderr=io.StringIO())
         host = RunningExtension(extension)
-        host.start(initialize_v02(optional=["agent_sessions"]))
+        initialize = initialize_v02(optional=["agent_sessions"])
+        initialize["params"]["api_version"] = "0.4"
+        initialize["params"]["protocol"]["version"] = "0.4"
+        initialized = host.start(initialize)
+        self.assertEqual(initialized["result"]["api_version"], "0.4")
+        self.assertIn("agent_sessions", initialized["result"]["protocol"]["features"])
         extension.request = Mock(return_value={"agent_id": "worker"})
         arguments = dict(task_name="reader", message="x", idempotency_key="key",
                          tools=["read"], max_depth=1, max_output_bytes=512,
