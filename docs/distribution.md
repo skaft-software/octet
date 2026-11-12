@@ -58,25 +58,25 @@ The release workflows don't publish every source package automatically:
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
 | Six executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
-| npm CLI | `release-octet.yml` with `publish_npm=true` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Disabled by default. |
+| npm CLI | `release.py ship` → `release-octet.yml` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Mandatory unless explicitly skipped with a recorded reason. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
-Normal native and extension publication starts with the single canonical
-`vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
-creates a draft GitHub Release from the checked-in notes, verifies the uploaded
-signed native assets' GitHub digests, then publishes the native release; a
-separate job marks it Latest only after the published-install smoke passes, so
-`octet update` never advertises an asset set that failed public installation.
-The extension workflow waits for that binary run before publishing its bundles.
-The protected environment must admit the canonical tag without removing required
-reviewers. Dedicated binary and extension tooling tags remain available for
-workflow-only repairs. See the
-[release runbook](maintainers/skills/release/SKILL.md). The currently observed
-protected-environment policy does not yet allow `v*` tags; an authorized
-administrator must update it separately before the one-tag flow can publish.
+The owner starts an unsigned candidate from a qualified main push with
+`scripts/release.py`. One draft holds the native matrix (including Windows), six
+extension bundles, prepacked npm tarballs and digest receipts. Pause, resume and
+respin do not tag or publish anything. See the [owner runbook](release/README.md).
+
+Only `ship` creates the canonical and two tooling tags, all at the candidate SHA.
+Protected jobs sign on the two dedicated tooling-tag refs described in the
+runbook, preserving the accepted tag-scoped identities. The existing `stable-release-publish` policy
+already admits those refs; keep its reviewers and settings unchanged. All release
+workflows are dispatch-only: pushing canonical or tooling tags starts no release.
+Native public-install smokes on Linux, macOS and Windows, npm provenance and npm
+install verification precede Latest promotion. `--skip-npm --reason '…'` is the
+only lifecycle npm exemption; the receipt and summary retain the reason.
 
 The npm, Homebrew and installer-repair handoffs accept native signatures from
 either the canonical tag (with workflow commit equal to the source commit) or
@@ -85,12 +85,10 @@ the legacy binary tooling tag. They remain separate publication channels.
 The maintainer pushes directly to `main`; contributors use squash PRs gated by
 `ci-required`, not a merge queue. PRs run the fast CI tier (or the full tier with
 `ci:full`); main pushes and manual `ci.yml` dispatches run the full matrix.
-Tag a main commit with a completed, successful full-tier **main push** run. GitHub
-runs push CI only for the pushed head, not intermediate commits. If the desired
-commit has no such run, dispatch `ci.yml` on that exact ref, verify its full-tier
-success, then manually dispatch the release workflows from the unchanged
-canonical tag (or the dedicated workflow-only repair tags). A canonical tag-push
-run deliberately waits only for main push CI and cannot use that dispatch.
+`start` requires a completed successful full-tier **main push** CI run for the
+exact candidate SHA and every release-required lane. No runner waits for CI or
+another workflow. GitHub tests only the pushed main head, so prefer that head.
+Manual repair retains its exact-source qualification and explicit waiver below.
 
 The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with

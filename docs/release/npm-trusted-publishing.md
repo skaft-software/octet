@@ -75,8 +75,13 @@ workflow uses GitHub OIDC with `npm publish --provenance`, never `NPM_TOKEN`,
 `NODE_AUTH_TOKEN`, a checked-in `.npmrc`, or another long-lived registry
 credential. The environment is the human approval boundary.
 
-For a future version, canonical binary tag runs leave npm publication disabled.
-After verifying trusted-publisher configuration, dispatch `release-octet.yml`
+Normal releases use `scripts/release.py ship X.Y.Z`: candidate tarballs are
+packed before ship and verified against the receipt before publication. npm and
+all platform installation/provenance gates must succeed before GitHub Latest
+moves. Only `--skip-npm --reason 'reviewed incident'` exempts npm, with the reason
+frozen in the receipt and job summaries. No tarball is rebuilt at ship.
+
+For an existing release's separate npm recovery, dispatch `release-octet.yml`
 from protected `main` with `release_tag=vX.Y.Z` and `publish_npm=true`. This
 npm-only path verifies and smokes the existing immutable native release; it does
 not rebuild or re-sign its assets. The npm manifest binds the publication

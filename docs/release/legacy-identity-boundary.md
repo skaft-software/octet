@@ -1,33 +1,30 @@
 # Published 0.10.3 compatibility boundary
 
-## Finding and decision required
+## Owner decision and implemented path
 
-A checksum signature produced by `release-octet.yml@refs/heads/main` is **not
-accepted by the published 0.10.3 shell installer's verifier**. Keeping the workflow
-filename does not preserve its accepted identity. Do not broaden that verifier,
-claim a main-dispatched signature is compatible, or substitute an offline policy
-replay for hosted signing evidence.
+Compatibility means an installed 0.10.3 binary can run `octet update` to the new
+release. It downloads the **target version's** installer, not the frozen 0.10.3
+installer. Verified in tagged `update.rs:1094–1140` (shell) and `1146–1213`
+(PowerShell). The helper at `1287–1335` bounds size/time and checks successful,
+nonempty downloads; it does not verify signatures or certificate identities.
+The installed-version check at `1337–1369` compares version output, not signatures.
 
-There is also a distinction between two requirements:
+The frozen installer cannot verify a different version's asset set, and a signer
+on `main` is not accepted. Neither is needed. Candidate builds are unsigned.
+At ship, protected jobs in the unchanged workflow filenames run on
+`octet-binaries-vX.Y.Z` and `octet-serve-vX.Y.Z`, with all three tags at the source
+SHA. The new version-pinned installer accepts the binary tooling-tag identity;
+the published 0.10.3 SAN uses that same pattern. No environment policy change or
+verifier relaxation is required. See the [runbook](README.md).
 
-1. **An existing 0.10.3 binary updates to the new release.** Its updater downloads
-   the *target version's* installer, which then verifies that target's assets.
-2. **The frozen, published 0.10.3 shell installer verifies a new release's assets.**
-   This cannot work unchanged: its version, signer workflow SHA and complete asset
-   set are pinned to 0.10.3. Even a new checksum manifest with an otherwise accepted
-   old identity fails its exact asset-set check.
+`extension_bundle.rs:96–115` currently checks HTTPS downloads and SHA-256, not
+Sigstore identities. There is **no extension client identity regex** to replay.
+The extension workflow's actual exact-identity verifier is tested instead, and
+published-install/update smoke retains the client checksum/trust checks. Do not
+claim that the extension client independently verifies Sigstore certificates.
 
-The lifecycle/signing implementation is blocked on clarifying this boundary.
-The existing tag workflows, repair entry points, approvals and verifiers are
-unchanged. There is no new owner release CLI, candidate workflow or npm promotion
-path in this change. The notes, lint and read-only surface audit are independent.
-
-If the intended requirement is (1), an accepted tag-scoped signing continuation
-*after* protected main-origin shipping creates the tag is a possible design to
-validate next. It must retain the exact workflow filename, workflow-name,
-repository, issuer and workflow-SHA binding below; neither a new signing filename
-nor a main-ref identity is accepted just because it signs the same checksums.
-No such continuation has been implemented or hosted-qualified here.
+Offline policy/contract tests prove ref construction and enforcement, not hosted
+OIDC certificates or a real 0.10.3 update. Those need an authorized rehearsal.
 
 ## Immutable evidence
 
@@ -78,8 +75,8 @@ In the tagged `crates/octet-coding-agent/src/update.rs`, `run_installer` at line
 1094–1140 downloads `/v{version}/install-octet.sh` and executes the completed
 bounded download. `run_windows_installer` at lines 1146–1214 similarly downloads
 the target PowerShell installer and supplies `-Version`. The old Rust updater
-itself does not verify Sigstore identities. This explains why (1) and (2) above
-are different compatibility contracts.
+itself does not verify Sigstore identities. Updating via the target installer
+and replaying a frozen old installer are different compatibility contracts.
 
 ## Offline regression evidence
 
@@ -92,6 +89,6 @@ The certificate DER and downloaded-asset hashes are recorded in
 `scripts/fixtures/release-v0103/evidence.json`.
 
 These are policy tests, **not cryptographic verification, a hosted OIDC
-qualification, Windows qualification, or an end-to-end update test**. No new
-candidate was built or signed. Published tags/assets and repository settings were
-not changed.
+qualification, Windows qualification, or an end-to-end update test**. No hosted
+candidate has been built or signed during offline implementation. Published
+tags/assets and repository settings were not changed.

@@ -1,7 +1,7 @@
 ---
 name: release
 description: Prepare, package, publish, verify, and recover octet releases. Use for release preparation, local packaging checks, publishing, and failed release CI.
-version: 0.1.0
+version: 0.2.0
 required-tools:
   - read
   - bash
@@ -11,14 +11,12 @@ tags:
 ---
 # Releasing octet
 
-Run repository commands from the repo root. Read the release workflows and
-scripts before running them. The workspace version in `Cargo.toml` is the source
-of truth; extension manifests also pin `requires_octet`.
+Read the [owner runbook](../../../release/README.md), workflows and scripts first.
+Use one owner at a time. Tags and GitHub writes require explicit authorization.
+The workspace version is authoritative; extension `requires_octet` pins match it.
 
-## 1. Prepare the version bump
-
-Run the [`/cl`](../../prompts/cl.md) audit, update the current `CHANGELOG.md`
-section, and bump the workspace and pinned extension versions. Then run:
+Run the [`/cl`](../../prompts/cl.md) audit, prepare versions and a dated changelog
+section, then generate current notes only. Historical notes are frozen.
 
 ```sh
 python3 scripts/release-notes.py sync
@@ -26,106 +24,55 @@ python3 scripts/release-notes.py check
 python3 scripts/check-changelog.py
 ```
 
-The changelog is the only release-text source. `sync` writes only the current
-workspace version's public and bundled notes, preserving the section verbatim;
-never regenerate historical notes. `render` prints the GitHub body and
-`artifact --commit FULL_SHA` prints the matching website `release.json` without
-deploying it. Review release notes and required checks. A main-origin release
-redesign remains blocked on the
-[published-client identity boundary](../../../release/legacy-identity-boundary.md);
-the tag-based workflow below has not been replaced.
-For local candidate checks, read `scripts/package-octet-release.sh` first, package
-into an isolated output directory, and smoke-test the packaged binary's startup,
-version, help and model listing. A real provider prompt and the
-[interactive-testing skill](../interactive-testing/SKILL.md) are separate,
-explicitly authorized acceptance checks; startup alone is not a passing smoke test.
+The changelog is the only release-text source. Notes preserve its section
+verbatim, including `###` subsections. `render` prints the GitHub body;
+`artifact --commit FULL_SHA` prints website JSON without deploying it.
+Review, commit, run the full gate and use the normal owner main push process.
 
-## 2. Qualify the exact main commit
+```sh
+python3 scripts/release.py prepare X.Y.Z
+python3 scripts/release.py start X.Y.Z
+python3 scripts/release.py status X.Y.Z
+python3 scripts/release.py ship X.Y.Z
+```
 
-The maintainer pushes directly to `main`. Contributors use squash PRs gated by
-`ci-required`; there is no merge queue. PR CI is the fast tier unless labelled
-`ci:full`. Pushes to main and manual `ci.yml` dispatches run the full matrix.
-Identify the actual main commit, not a PR head or synthetic merge commit. Every
-release source must be an ancestor of `origin/main`.
+Prepare is local/read-only. Start requires completed successful full-tier main
+push CI for the exact SHA with all release-required lanes successful, not skipped.
+One unsigned candidate run builds the native matrix (including Windows), six
+extension bundles and prepacked npm tarballs into one draft. No tags or signing
+until ship. No runner polls CI or another workflow.
 
-Before tagging, require a completed successful full-tier main **push** CI run for
-that exact commit, with every release-required lane successful (not skipped).
-GitHub runs push CI only for the pushed head. An intermediate main commit may
-have no push run: prefer the qualified pushed head. Otherwise dispatch `ci.yml`
-on the desired exact ref, verify its full-tier success, and use the manual
-release recovery path below. A green fast-tier PR is not release qualification.
+```sh
+python3 scripts/release.py pause X.Y.Z
+python3 scripts/release.py resume X.Y.Z
+python3 scripts/release.py respin X.Y.Z
+python3 scripts/release.py respin X.Y.Z --sha FULL_NEW_MAIN_SHA
+python3 scripts/release.py abort X.Y.Z
+```
 
-## 3. Push one canonical tag
+Resume reuses successful build jobs; respin requests a new generation. Paused
+receipts block ship. Abort deletes only an untagged draft. State is reconstructed
+from remote receipts and runs. If a dispatch outcome is unknown, reconcile before
+replaying; never launch duplicate builds to work around delayed Actions visibility.
 
-Before tagging, confirm that `stable-release-publish` allows `v*` tags. Its
-currently observed custom policy allows `main`, `octet-binaries-v*` and
-`octet-serve-v*`, but not canonical tags; an authorized administrator must update
-that policy separately without removing the existing required reviewers.
+Ship freezes verified digests and the npm decision, creates three same-SHA tags,
+and dispatches protected signing on `octet-serve-vX.Y.Z` then
+`octet-binaries-vX.Y.Z`. Keep `stable-release-publish` settings/reviewers unchanged.
+The CLI waits locally for the extension handoff. Published-install, npm provenance
+and npm install verification gate Latest. npm is mandatory unless first ship uses
+`--skip-npm --reason 'reviewed incident'`; retain the receipt/summary reason.
+Never move/recreate tags or replace public assets. Repeat ship to recover.
 
-Create and push exactly one new `vX.Y.Z` tag pointing at that main commit. Never
-move or re-push an existing release tag. The tag version must match `Cargo.toml`
-and the checked-in release notes. The tag triggers both the binary and extension
-release workflows; no prior GitHub Release or second tooling tag is needed.
+All release workflows are dispatch-only. Dedicated workflow-only repair tags
+(including same-commit tags), `octet-installer-v*`, and explicit
+`force_release=true` plus `force_reason` remain available for manual recovery.
+A waiver says **WAIVED, not passed**, and waives CI only. See the runbook for
+exact repair commands, [distribution](../../../distribution.md) and
+[npm trusted publishing](../../../release/npm-trusted-publishing.md).
 
-## 4. Let the workflows qualify and publish
-
-On a canonical tag push, the binary workflow waits up to 75 minutes for the
-latest exact-source `main` push CI run, then requires its successful conclusion
-and all required lanes. A manual dispatch or repair accepts the latest
-exact-source main push or manual CI run. A failed run or timeout stops
-publication; inspect the failure rather than treating it as qualified. If no
-main push run exists, a tag-push run cannot use dispatch evidence: keep the tag
-immutable and use manual recovery. After the existing protected publish
-approval, the workflow creates a draft GitHub Release from the checked-in notes,
-attaches signed binary assets, verifies their GitHub digests, and then publishes
-it as a stable release. A separate job marks it Latest only after every
-published-install smoke passes, so `octet update` and the startup notice never
-advertise assets that failed public installation. A failed upload leaves the
-previous Latest release available.
-The extension workflow waits for that exact binary tag-push run to succeed before
-building and attaching the six official bundles. Its wait is bounded at 350
-minutes, including binary build and approval time. Signing, environment approval,
-and source/version checks remain mandatory.
-
-npm and Homebrew remain separate, explicitly dispatched channels; a tag push
-alone does not publish them. Their handoffs and the installer-repair path accept
-both the canonical-tag signer (bound to the source commit) and the legacy binary
-tooling-tag signer. See the
-[npm trusted-publishing contract](../../../release/npm-trusted-publishing.md) and
-[distribution guide](../../../distribution.md).
-
-## 5. Verify
-
-Inspect both workflow results and the exact-version GitHub Release. Verify the
-native archives, installers, six extension bundles, checksums and signatures,
-and the published install/update smoke results. Record what was actually
-verified; do not describe an unrun check as qualified.
-
-## Recovery and CI waiver
-
-Keep the canonical tag immutable. `octet-binaries-vX.Y.Z` and
-`octet-serve-vX.Y.Z` remain dedicated workflow-only repair tags: their tooling
-commit must descend from the source and change only release workflows. They do
-not replace the normal canonical-tag flow. `octet-installer-vX.Y.Z` remains the
-separate installer repair path.
-
-For a source with no main push CI run, dispatch `ci.yml` on that exact source
-ref and wait for the full matrix to succeed. Then dispatch `release-octet.yml`
-from the unchanged canonical `vX.Y.Z` tag with `release_tag=vX.Y.Z` (without a
-waiver); once it succeeds, dispatch `release-serve.yml` from that same tag. This
-also recovers a failed automatic extension waiter. A dedicated tooling tag is
-needed only when the workflow itself needs repair, not to rerun unchanged code.
-
-Only an authorized manual binary-workflow dispatch can set `force_release=true`;
-it must also supply a non-empty, single-line `force_reason`. The job summary
-records **Source CI qualification WAIVED: <reason> by <actor>**. The protected
-binary and installer publish jobs also put the waiver first in the release notes;
-npm-only dispatches record it in the summary. This waives only the source CI
-gate, not main ancestry, version, audit, protected publishing or signing.
-A binary draft is owned by its workflow run. A rerun resumes it when every
-existing asset matches the new candidate byte for byte or, for the freshly
-signed Sigstore bundles, still verifies the identical candidate under the exact
-workflow identity; the extension and npm evidence uploads follow the same rule.
-Anything else stops for inspection instead of replacing assets. Inspect failed
-jobs before recovery and never replace immutable assets or silently relabel a
-waiver as a CI pass.
+Inspect actual runs, assets and public install/update results; don't claim unrun
+checks passed. [Signer policy tests](../../../release/legacy-identity-boundary.md)
+are not hosted OIDC or end-to-end update qualification. Local packaging/startup
+checks aren't live-provider or [interactive testing](../interactive-testing/SKILL.md).
+Website and Homebrew deployment remain separate owner handoffs. Require the
+read-only channel audit to reconcile public surfaces after ship.

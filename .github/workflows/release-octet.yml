@@ -1,13 +1,14 @@
 name: octet binary release
 
+run-name: ${{ inputs.candidate && format('octet {0} {1} ship', inputs.release_tag, inputs.candidate) || github.ref_name }}
+
 on:
-  push:
-    tags:
-      - "v*"
-      - "octet-binaries-v*"
-      - "octet-installer-v*"
   workflow_dispatch:
     inputs:
+      candidate:
+        description: Frozen candidate generation (owner CLI only)
+        required: false
+        type: string
       release_tag:
         description: Existing canonical stable octet tag to package
         required: true
@@ -32,6 +33,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: octet-binary-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
 permissions:
   actions: read
   contents: read
@@ -45,7 +50,7 @@ jobs:
   resolve:
     name: Resolve canonical release
     runs-on: ubuntu-24.04
-    timeout-minutes: 85
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -54,6 +59,7 @@ jobs:
       core_workflow_commit: ${{ steps.release.outputs.core_workflow_commit }}
       core_workflow_tag: ${{ steps.release.outputs.core_workflow_tag }}
       mode: ${{ steps.release.outputs.mode }}
+      skip_npm: ${{ steps.release.outputs.skip_npm }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -63,6 +69,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_CANDIDATE: ${{ inputs.candidate }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
           INPUT_FORCE_REASON: ${{ inputs.force_reason }}
@@ -70,7 +77,15 @@ jobs:
           INPUT_PUBLISH_NPM: ${{ inputs.publish_npm }}
         run: |
           set -euo pipefail
+          if [[ -n "${INPUT_CANDIDATE:-}" ]]; then
+            python3 scripts/release.py _resolve "${INPUT_RELEASE_TAG#v}" \
+              --candidate "$INPUT_CANDIDATE" --role ship >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mode=binaries
+          if [[ "$GITHUB_REF_NAME" == octet-installer-* ]]; then
+            mode=installer
+          fi
           if [[ -n "$INPUT_RELEASE_TAG" ]]; then
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
@@ -307,38 +322,22 @@ jobs:
                 echo "Keep the tag immutable; never re-tag or move it." >&2
               fi
             }
-            for attempt in {0..150}; do
-              ci_run=$(gh api --method GET \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-                -f head_sha="$source_commit" -f per_page=100 \
-                --jq "$ci_filter")
-              if [[ "$ci_run" =~ ^[0-9]+$ ]]; then
-                ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
-                  --jq '[.head_sha, .status, .conclusion] | @tsv')
-                IFS=$'\t' read -r ci_sha ci_status ci_conclusion <<< "$ci_identity"
-                if [[ "$ci_sha" != "$source_commit" ]]; then
-                  echo "CI run $ci_run is not bound to $source_commit: $ci_identity" >&2
-                  exit 1
-                fi
-                if [[ "$ci_status" == completed ]]; then
-                  if [[ "$ci_conclusion" != success ]]; then
-                    echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
-                    ci_recovery_hint
-                    exit 1
-                  fi
-                  break
-                fi
-                echo "waiting for CI run $ci_run for $source_commit: $ci_status"
-              else
-                echo "waiting for a source-bound CI run for $source_commit"
-              fi
-              if (( attempt == 150 )); then
-                echo "timed out after 75 minutes waiting for source CI for $source_commit" >&2
-                ci_recovery_hint
-                exit 1
-              fi
-              sleep 30
-            done
+            ci_run=$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f head_sha="$source_commit" -f per_page=100 --jq "$ci_filter")
+            if [[ ! "$ci_run" =~ ^[0-9]+$ ]]; then
+              echo "source CI is not ready; qualify locally and retry the unchanged ref" >&2
+              ci_recovery_hint
+              exit 1
+            fi
+            ci_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run" \
+              --jq '[.head_sha, .status, .conclusion] | @tsv')
+            IFS=$'\t' read -r ci_sha ci_status ci_conclusion <<< "$ci_identity"
+            if [[ "$ci_sha" != "$source_commit" || "$ci_status" != completed || "$ci_conclusion" != success ]]; then
+              echo "latest CI run $ci_run did not qualify $source_commit: $ci_identity" >&2
+              ci_recovery_hint
+              exit 1
+            fi
             ci_jobs=$(gh api --paginate \
               "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run/jobs?filter=latest&per_page=100" \
               --jq '.jobs[] | [.name, .conclusion] | @tsv')
@@ -625,7 +624,7 @@ jobs:
   publish:
     name: Sign and attach octet binaries
     needs: [resolve, build, build-windows]
-    if: needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && (needs.resolve.outputs.mode == 'ship' || (needs.resolve.outputs.mode == 'binaries' && needs.build.result == 'success' && needs['build-windows'].result == 'success'))
     runs-on: ubuntu-24.04
     # Human approval is required only when the immutable artifacts are ready to
     # receive write/OIDC privileges, not while unprivileged validation runs.
@@ -643,7 +642,15 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
+      - name: Download digest-verified unsigned candidate
+        if: needs.resolve.outputs.mode == 'ship'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: python3 scripts/release.py _download "$VERSION" --candidate "$CANDIDATE" --role ship --group native --assets release-assets
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: needs.resolve.outputs.mode != 'ship'
         with:
           pattern: octet-core-*
           path: release-assets
@@ -814,12 +821,18 @@ jobs:
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
           WORKFLOW_TAG: ${{ github.ref_name }}
           WORKFLOW_COMMIT: ${{ needs.resolve.outputs.workflow_commit }}
+          INPUT_CANDIDATE: ${{ inputs.candidate }}
           INPUT_FORCE_RELEASE: ${{ inputs.force_release }}
           INPUT_FORCE_REASON: ${{ inputs.force_reason }}
           COSIGN_IDENTITY: https://github.com/${{ github.workflow_ref }}
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if [[ -n "${INPUT_CANDIDATE:-}" ]]; then
+            python3 scripts/release.py _download "${RELEASE_TAG#v}" --candidate "$INPUT_CANDIDATE" --role ship --group website --assets release-assets
+            python3 scripts/release.py _publish "${RELEASE_TAG#v}" --candidate "$INPUT_CANDIDATE" --role ship --assets release-assets
+            exit 0
+          fi
           verify=(
             --certificate-identity "$COSIGN_IDENTITY"
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
@@ -986,7 +999,7 @@ jobs:
   verify-published:
     name: Verify binary install on ${{ matrix.target }}
     needs: [resolve, publish]
-    if: always() && needs.resolve.result == 'success' && (needs.resolve.outputs.mode == 'npm' || (needs.resolve.outputs.mode == 'binaries' && needs.publish.result == 'success'))
+    if: always() && needs.resolve.result == 'success' && (needs.resolve.outputs.mode == 'npm' || ((needs.resolve.outputs.mode == 'binaries' || needs.resolve.outputs.mode == 'ship') && needs.publish.result == 'success'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -1068,22 +1081,40 @@ jobs:
             | HOME="$test_home" "$host_binary" \
             | grep -F '"type":"hello"' >/dev/null
 
+      - name: Verify official extension installation and update
+        if: needs.resolve.outputs.mode == 'ship' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/octet-official-extension-home"
+          mkdir -p "$HOME"
+          launcher="$RUNNER_TEMP/octet-binary-install-home/bin/octet"
+          for extension in octet-codemode octet-computer-use octet-mcp octet-pi-compat octet-subagents octet-web-search; do
+            "$launcher" extension install "$extension"
+            "$launcher" extension update "$extension"
+            "$launcher" extension list | grep -F "$extension"
+            test ! -e "$HOME/.octet/config.toml"
+            "$launcher" extension remove "$extension"
+          done
+
   promote-latest:
     name: Mark the verified release as Latest
-    needs: [resolve, publish, verify-published]
+    needs: [resolve, publish, verify-published, verify-windows-published, verify-npm-published, smoke-npm-published, smoke-npm-windows]
     # Latest drives `octet update`, the startup notice and generic installers,
     # so it moves only after every published-install smoke job has succeeded.
-    if: needs.resolve.result == 'success' && needs.publish.result == 'success' && needs['verify-published'].result == 'success' && needs.resolve.outputs.mode == 'binaries'
+    if: always() && needs.resolve.result == 'success' && needs.publish.result == 'success' && needs['verify-published'].result == 'success' && needs['verify-windows-published'].result == 'success' && needs.resolve.outputs.mode == 'ship' && ((needs.resolve.outputs.skip_npm == 'true') || (needs['verify-npm-published'].result == 'success' && needs['smoke-npm-published'].result == 'success' && needs['smoke-npm-windows'].result == 'success'))
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Promote the immutable release that passed public installation
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          INPUT_CANDIDATE: ${{ inputs.candidate }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
         run: |
           set -euo pipefail
@@ -1099,6 +1130,9 @@ jobs:
             echo "tag $RELEASE_TAG no longer resolves to the immutable source $SOURCE_COMMIT" >&2
             exit 1
           fi
+          python3 scripts/release.py _resolve "${RELEASE_TAG#v}" --candidate "$INPUT_CANDIDATE" --role ship >/dev/null
+          # Recheck all dist-tags unless a reasoned skip is frozen in the receipt.
+          python3 scripts/release-promote.py "${RELEASE_TAG#v}"
           # Idempotent: re-running a resumed workflow only reasserts Latest.
           gh release edit "$RELEASE_TAG" --latest
           echo "release $RELEASE_TAG is Latest after the published-install smoke passed"
@@ -1107,7 +1141,7 @@ jobs:
     name: Package verified npm artifacts
     needs: [resolve, verify-published]
     # The binary publish job is intentionally skipped in npm-only mode.
-    if: always() && needs.resolve.result == 'success' && needs['verify-published'].result == 'success' && needs.resolve.outputs.mode == 'npm'
+    if: always() && needs.resolve.result == 'success' && needs['verify-published'].result == 'success' && (needs.resolve.outputs.mode == 'npm' || (needs.resolve.outputs.mode == 'ship' && needs.resolve.outputs.skip_npm != 'true'))
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -1193,6 +1227,8 @@ jobs:
       - name: Build and validate npm tarballs from the verified assets
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_CANDIDATE: ${{ inputs.candidate }}
           VERSION: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -1201,11 +1237,15 @@ jobs:
         run: |
           set -euo pipefail
           source_date_epoch=$(git -C source show -s --format=%ct "$SOURCE_COMMIT")
-          SOURCE_DATE_EPOCH="$source_date_epoch" source/scripts/package-octet-npm.sh \
-            "$VERSION" \
-            "$PWD/release-assets" \
-            "$RUNNER_TEMP/npm-assets" \
-            "$PWD/release-assets/OCTET_SHA256SUMS"
+          if [[ -n "${INPUT_CANDIDATE:-}" ]]; then
+            python3 source/scripts/release.py _download "$VERSION" --candidate "$INPUT_CANDIDATE" --role ship --group npm --assets "$RUNNER_TEMP/npm-assets"
+          else
+            SOURCE_DATE_EPOCH="$source_date_epoch" source/scripts/package-octet-npm.sh \
+              "$VERSION" \
+              "$PWD/release-assets" \
+              "$RUNNER_TEMP/npm-assets" \
+              "$PWD/release-assets/OCTET_SHA256SUMS"
+          fi
           python3 source/scripts/create-octet-npm-manifest.py \
             "$VERSION" \
             "$TAG" \
@@ -1231,7 +1271,7 @@ jobs:
   publish-npm:
     name: Publish npm packages with trusted publishing
     needs: [resolve, package-npm]
-    if: always() && needs.resolve.result == 'success' && needs['package-npm'].result == 'success' && needs.resolve.outputs.mode == 'npm'
+    if: always() && needs.resolve.result == 'success' && needs['package-npm'].result == 'success' && (needs.resolve.outputs.mode == 'npm' || (needs.resolve.outputs.mode == 'ship' && needs.resolve.outputs.skip_npm != 'true'))
     runs-on: ubuntu-24.04
     environment: stable-release-publish
     permissions:
@@ -1517,7 +1557,7 @@ jobs:
   verify-npm-published:
     name: Verify published npm provenance
     needs: [resolve, publish-npm]
-    if: always() && needs.resolve.result == 'success' && needs['publish-npm'].result == 'success' && needs.resolve.outputs.mode == 'npm'
+    if: always() && needs.resolve.result == 'success' && needs['publish-npm'].result == 'success' && (needs.resolve.outputs.mode == 'npm' || (needs.resolve.outputs.mode == 'ship' && needs.resolve.outputs.skip_npm != 'true'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1600,7 +1640,7 @@ jobs:
   smoke-npm-published:
     name: Smoke published npm package on ${{ matrix.target }}
     needs: [resolve, verify-npm-published]
-    if: always() && needs.resolve.result == 'success' && needs['verify-npm-published'].result == 'success' && needs.resolve.outputs.mode == 'npm'
+    if: always() && needs.resolve.result == 'success' && needs['verify-npm-published'].result == 'success' && (needs.resolve.outputs.mode == 'npm' || (needs.resolve.outputs.mode == 'ship' && needs.resolve.outputs.skip_npm != 'true'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -1960,3 +2000,51 @@ jobs:
           printf '%s\n' '{"protocol_version":1,"request_id":"portable-installer-smoke","command":"hello"}' \
             | HOME="$test_home" "$host_binary" \
             | grep -F "\"sdk_version\":\"$VERSION\"" >/dev/null
+
+  verify-windows-published:
+    name: Verify published Windows installer
+    needs: [resolve, publish]
+    if: needs.resolve.outputs.mode == 'ship'
+    runs-on: windows-2022
+    steps:
+      - name: Install exact release and smoke native Windows binaries
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'install-octet.ps1'
+          Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/download/v$env:VERSION/install-octet.ps1" -OutFile $installer
+          $bin = Join-Path $env:RUNNER_TEMP 'installed-bin'
+          & $installer -Version $env:VERSION -InstallDirectory $bin
+          if ((& "$bin/octet.exe" --version) -ne "octet $env:VERSION") { throw 'installed Windows version differs' }
+          & "$bin/octet.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'installed Windows help failed' }
+          $hello = '{"protocol_version":1,"request_id":"published-smoke","command":"hello"}' | & "$bin/octet-host.exe"
+          if ($LASTEXITCODE -ne 0 -or ($hello | ConvertFrom-Json).type -ne 'hello') { throw 'installed Windows host failed' }
+
+  smoke-npm-windows:
+    name: Smoke published Windows npm package
+    needs: [resolve, verify-npm-published]
+    if: needs.resolve.outputs.mode == 'ship' && needs.resolve.outputs.skip_npm != 'true'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22.13.0"
+      - name: Install exact npm version without lifecycle scripts
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:RUNNER_TEMP 'npm-prefix'
+          npm install --global --prefix $prefix --registry https://registry.npmjs.org/ --ignore-scripts --no-audit --no-fund "@skaft/octet@$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows npm installation failed' }
+          if ((& "$prefix/octet.cmd" --version) -ne "octet $env:VERSION") { throw 'Windows npm version differs' }
+          & "$prefix/octet.cmd" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Windows npm help failed' }
+          $hello = '{"protocol_version":1,"request_id":"npm-smoke","command":"hello"}' | & "$prefix/octet-host.cmd"
+          if ($LASTEXITCODE -ne 0 -or ($hello | ConvertFrom-Json).type -ne 'hello') { throw 'Windows npm host failed' }
+          npm uninstall --global --prefix $prefix --ignore-scripts --no-audit --no-fund @skaft/octet
+          if ($LASTEXITCODE -ne 0 -or (Test-Path "$prefix/octet.cmd")) { throw 'Windows npm uninstall failed' }

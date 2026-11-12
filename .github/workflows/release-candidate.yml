@@ -1,0 +1,430 @@
+name: octet candidate
+run-name: ${{ format('octet v{0} {1} build', inputs.version, inputs.candidate) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Prepared workspace version
+        required: true
+        type: string
+      source_commit:
+        description: Exact qualified main push SHA
+        required: true
+        type: string
+      candidate:
+        description: Receipt generation
+        required: true
+        type: string
+
+concurrency:
+  group: octet-candidate-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_OFFLINE: "false"
+
+jobs:
+  resolve:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      source_commit: ${{ steps.release.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          python3 scripts/release.py _resolve "$VERSION" --sha "$SOURCE_COMMIT" --candidate "$CANDIDATE" >> "$GITHUB_OUTPUT"
+          python3 scripts/check-changelog.py
+          python3 scripts/release-notes.py check
+
+  security:
+    name: Audit release dependencies
+    needs: resolve
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+      # Release audits and artifacts intentionally use clean dependency/build
+      # state. Pull-request or branch caches must never enter a privileged
+      # publish path.
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+      - run: cargo audit
+      - run: cargo deny check
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [resolve, security]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Check out immutable release source and tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          path: source
+          fetch-depth: 0
+      # Keep release optimization independent from the workspace's 1.89 MSRV.
+      # This immutable action revision installs Rust 1.97.1.
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+      - name: Verify release Rust compiler
+        run: test "$(rustc --version | awk '{print $2}')" = "1.97.1"
+      # Build release artifacts from clean runner state. CI caches remain useful
+      # for unprivileged validation jobs, never for publishable binaries.
+      - name: Build optimized octet binaries
+        working-directory: source
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p octet-coding-agent --bins
+      - name: Verify standalone binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="source/target/${{ matrix.target }}/release/octet"
+          host_binary="source/target/${{ matrix.target }}/release/octet-host"
+          test -x "$binary"
+          test -x "$host_binary"
+          test "$("$binary" --version)" = "octet ${{ needs.resolve.outputs.version }}"
+          test_home="$RUNNER_TEMP/octet-binary-smoke-home"
+          mkdir -p "$test_home"
+          HOME="$test_home" "$binary" --help >/dev/null
+          HOME="$test_home" "$binary" extension --help >/dev/null
+          printf '%s\n' '{"protocol_version":1,"request_id":"release-smoke","command":"hello"}' \
+            | HOME="$test_home" "$host_binary" \
+            | grep -F '"type":"hello"' >/dev/null
+      - name: Package target-specific archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          source/scripts/package-octet-release.sh \
+            "${{ matrix.target }}" \
+            "$RUNNER_TEMP/octet-release" \
+            "${{ needs.resolve.outputs.tag }}" \
+            source
+          source/scripts/package-octet-release.sh \
+            "${{ matrix.target }}" \
+            "$RUNNER_TEMP/octet-release-reproducibility-check" \
+            "${{ needs.resolve.outputs.tag }}" \
+            source
+          archive="$RUNNER_TEMP/octet-release/octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
+          repeated_archive="$RUNNER_TEMP/octet-release-reproducibility-check/octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
+          test -f "$archive"
+          cmp "$archive" "$repeated_archive"
+          tar -tzf "$archive"
+          package="octet-${{ needs.resolve.outputs.version }}-${{ matrix.target }}"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/$package/octet-host"
+          python3 source/scripts/check-release-journey.py \
+            --binary "$RUNNER_TEMP/$package/octet" \
+            --host-binary "$RUNNER_TEMP/$package/octet-host" \
+            --expected-version "${{ needs.resolve.outputs.version }}" \
+            --report "$RUNNER_TEMP/JOURNEY-${{ matrix.target }}.json"
+          if tar -tzf "$archive" | grep -E '(^|/)(\.DS_Store|__pycache__|research|plans|reports|superpowers)(/|$)'; then
+            echo "release archive contains a local-only asset" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: octet-core-${{ matrix.target }}
+          path: ${{ runner.temp }}/octet-release/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    needs: resolve
+    runs-on: windows-2022
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          path: source
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Verify release Rust compiler
+        shell: pwsh
+        run: |
+          if ((rustc --version) -notmatch '^rustc 1\.97\.1(?: |$)' -or $LASTEXITCODE -ne 0) { throw 'unexpected Rust compiler' }
+      - name: Build and smoke-test native Windows binaries
+        working-directory: source
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc -p octet-coding-agent --bins
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed' }
+          $release = 'target/x86_64-pc-windows-msvc/release'
+          if ((& "$release/octet.exe" --version) -ne "octet $env:VERSION") { throw 'Windows version smoke test failed' }
+          $request = '{"protocol_version":1,"request_id":"release-smoke","command":"hello"}'
+          $hello = $request | & "$release/octet-host.exe"
+          if ($LASTEXITCODE -ne 0 -or $hello -notmatch '"type":"hello"') { throw 'Windows host smoke test failed' }
+      - name: Qualify controlled admission, edits and temporary bulk on MSVC
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- effect::tests tools::edit::tests extension_bulk::tests extension_bulk_host::tests::temporary_storage_never_promises_durability
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC policy/edit/temporary-bulk qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test agent_run controlled_shell_
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC shell admission qualification failed' }
+      - name: Qualify native MSVC runtime and terminal
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib tui::terminal
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC terminal qualification failed' }
+          # Windows is a preview platform in 0.9.6. This rename-race test hit
+          # ERROR_SHARING_VIOLATION on the MSVC release runner (it passes in
+          # Windows CI); skipped here at the maintainer's direction, tracked
+          # for repair after 0.9.6.
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --lib -- secure_fs tools::bash::tests extension_process::tests::windows_python_entrypoints_launch_through_an_interpreter --skip secure_fs::tests::windows_publication_stays_bound_to_original_parent
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC runtime qualification failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-agent --test windows_process_current
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC process qualification failed' }
+      - name: Qualify managed extension updates and recovery on MSVC
+        working-directory: source
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --lib -- extension_bundle::tests extension_package:: resource_resolver::tests
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC extension package qualification failed' }
+      - name: Package and qualify the MSVC archive
+        working-directory: source
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'target/x86_64-pc-windows-msvc/release'
+          python scripts/package-octet-windows-zip.py $release "$env:RUNNER_TEMP/octet-release" $env:VERSION (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+          python scripts/package-octet-windows-zip.py $release "$env:RUNNER_TEMP/octet-release-repeat" $env:VERSION (Get-Location).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Windows repeat packaging failed' }
+          $name = "octet-$env:VERSION-x86_64-pc-windows-msvc"
+          $archive = "$env:RUNNER_TEMP/octet-release/$name.zip"
+          if ((Get-FileHash $archive).Hash -ne (Get-FileHash "$env:RUNNER_TEMP/octet-release-repeat/$name.zip").Hash) { throw 'Windows archives differ' }
+          Expand-Archive $archive "$env:RUNNER_TEMP/windows-packaged"
+          $package = Join-Path "$env:RUNNER_TEMP/windows-packaged" $name
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            if ((& "$package/octet.exe" --version) -ne "octet $env:VERSION" -or $LASTEXITCODE -ne 0) { throw 'Packaged Windows version failed' }
+            $request = '{"protocol_version":1,"request_id":"packaged-smoke","command":"hello"}'
+            $hello = $request | & "$package/octet-host.exe"
+            if ($LASTEXITCODE -ne 0 -or ($hello | ConvertFrom-Json).type -ne 'hello') { throw 'Packaged Windows host failed' }
+          } finally {
+            $env:PATH = $savedPath
+          }
+          # Test the exact executable extracted from the publishable ZIP.
+          $env:OCTET_CONPTY_BINARY = Join-Path $package 'octet.exe'
+          cargo test --locked --target x86_64-pc-windows-msvc --profile ci-test -p octet-coding-agent --test windows_conpty -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged MSVC ConPTY qualification failed' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: octet-core-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/octet-release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  build-bundles:
+    name: Build executable-extension bundles
+    needs: [resolve, security]
+    runs-on: ubuntu-24.04
+    steps:
+      # Dispatch builds execute only their immutable triggering commit, which
+      # resolve requires to equal the canonical source. Only dedicated tag
+      # pushes may select a different source for a workflow-only tooling repair.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
+      # Extension release bundles and their smoke-test launcher are built from
+      # clean runner state for the same trust reason as the audit jobs.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22.19.0"
+      - name: Verify the no-Node codemode extension
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path extensions/octet-codemode/Cargo.toml
+          cd extensions/octet-codemode
+          cargo test --locked --release
+          python3 -m unittest discover -s tests
+      - name: Package the official executable-extension catalog reproducibly
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.version }}"
+          while IFS= read -r extension; do
+            [[ -n "$extension" ]] || continue
+            scripts/package-octet-extension-release.sh \
+              "$extension" \
+              "$RUNNER_TEMP/octet-extension-release" \
+              "${{ needs.resolve.outputs.tag }}"
+            scripts/package-octet-extension-release.sh \
+              "$extension" \
+              "$RUNNER_TEMP/octet-extension-release-reproducibility-check" \
+              "${{ needs.resolve.outputs.tag }}"
+            archive="$RUNNER_TEMP/octet-extension-release/$extension-$version.tar.gz"
+            repeated="$RUNNER_TEMP/octet-extension-release-reproducibility-check/$extension-$version.tar.gz"
+            test -f "$archive"
+            cmp "$archive" "$repeated"
+          done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
+      - name: Verify package inclusion, local install, discovery, list, and removal
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.version }}"
+          cargo build --locked -p octet-coding-agent --no-default-features
+          launcher="$PWD/target/debug/octet"
+          package_home="$RUNNER_TEMP/octet-bundle-package-home"
+          mkdir -p "$package_home"
+          while IFS= read -r extension; do
+            [[ -n "$extension" ]] || continue
+            archive="$RUNNER_TEMP/octet-extension-release/$extension-$version.tar.gz"
+            python3 - "$extension" "$archive" <<'PY'
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
+
+          extension, archive = sys.argv[1:3]
+          prefix = f"extensions/{extension}/"
+          tracked = subprocess.run(
+              ["git", "ls-files", "--", f"extensions/{extension}"],
+              check=True,
+              text=True,
+              stdout=subprocess.PIPE,
+          ).stdout.splitlines()
+          expected = {f"{extension}/{path.removeprefix(prefix)}" for path in tracked}
+          with tarfile.open(archive, "r:gz") as bundle:
+              files = {member.name for member in bundle.getmembers() if member.isfile()}
+              if any(not (member.isfile() or member.isdir()) for member in bundle.getmembers()):
+                  raise SystemExit(f"{extension} bundle contains a link or special file")
+              if extension == "octet-pi-compat":
+                  # Reproduce exact lockfile-derived files, not a node_modules prefix allowlist.
+                  source = pathlib.Path(prefix)
+                  with tempfile.TemporaryDirectory() as temporary:
+                      staging = pathlib.Path(temporary)
+                      for name in ("package.json", "package-lock.json"):
+                          shutil.copyfile(source / name, staging / name)
+                      subprocess.run([
+                          "npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit",
+                          "--no-fund", "--bin-links=false",
+                      ], cwd=staging, check=True)
+                      modules = staging / "node_modules"
+                      for path in modules.rglob("*"):
+                          if path.is_symlink():
+                              raise SystemExit("locked npm dependencies contain a link")
+                      shutil.copyfile(source / "LICENSE.pi", modules / "@earendil-works/pi-tui/LICENSE")
+                      for path in modules.rglob("*"):
+                          if not path.is_file():
+                              continue
+                          name = f"{extension}/{path.relative_to(staging).as_posix()}"
+                          expected.add(name)
+                          if name in files and bundle.extractfile(name).read() != path.read_bytes():
+                              raise SystemExit(f"{extension} locked dependency content mismatch: {name}")
+          if files != expected:
+              missing = sorted(expected - files)
+              unexpected = sorted(files - expected)
+              raise SystemExit(
+                  f"{extension} release inclusion mismatch; missing={missing}, unexpected={unexpected}"
+              )
+          PY
+            (
+              cd "$(dirname "$archive")"
+              HOME="$package_home" "$launcher" extension install --path "./$(basename "$archive")"
+            )
+            test -f "$package_home/.octet/extensions/$extension/extension.toml"
+            test -f "$package_home/.octet/extensions/$extension/install.json"
+            (
+              cd "$(dirname "$archive")"
+              HOME="$package_home" "$launcher" extension update --path "./$(basename "$archive")"
+            )
+            HOME="$package_home" "$launcher" extension list | grep -F "$extension"
+            test ! -e "$package_home/.octet/config.toml"
+            HOME="$package_home" "$launcher" extension remove "$extension"
+            test ! -e "$package_home/.octet/extensions/$extension"
+          done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: octet-executable-extension-bundles
+          path: ${{ runner.temp }}/octet-extension-release/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  attach:
+    name: Pack npm and attach unsigned candidate
+    needs: [resolve, build, build-windows, build-bundles]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "22.19.0"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: octet-core-*
+          path: native-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: octet-executable-extension-bundles
+          path: candidate-assets
+      - name: Pack, do not publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          set -euo pipefail
+          (cd native-assets && sha256sum ./*.tar.gz ./*.zip | sort -k2 > OCTET_SHA256SUMS)
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$SOURCE_COMMIT")
+          scripts/package-octet-npm.sh "$VERSION" native-assets npm-assets native-assets/OCTET_SHA256SUMS
+          cp native-assets/*.tar.gz native-assets/*.zip npm-assets/*.tgz candidate-assets/
+          python3 scripts/release-notes.py artifact --commit "$SOURCE_COMMIT" > candidate-assets/release.json
+          python3 scripts/release.py _attach "$VERSION" --candidate "$CANDIDATE" --assets candidate-assets

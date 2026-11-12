@@ -30,7 +30,10 @@ class ServeReleaseTrustTests(unittest.TestCase):
         for name, job in self.jobs.items():
             if name != "resolve":
                 self.assertRegex(job, r"    needs: (?:resolve|\[[^\n]*\bresolve\b[^\n]*\])\n")
-                self.assertNotIn("always()", job)
+                if name != "publish":
+                    self.assertNotIn("always()", job)
+                else:
+                    self.assertIn("needs.resolve.result == 'success'", job)
 
     def test_dispatch_executes_trigger_sha_not_input_selected_source(self):
         for name in ("security", "launcher", "build-bundles", "publish", "verify-published"):
@@ -41,8 +44,7 @@ class ServeReleaseTrustTests(unittest.TestCase):
                 )
                 self.assertEqual(1, len(checkouts))
                 self.assertIn(
-                    "ref: ${{ github.event_name == 'push' && "
-                    "needs.resolve.outputs.source_commit || github.sha }}\n",
+                    "ref: ${{ needs.resolve.outputs.source_commit }}\n",
                     checkouts[0],
                 )
 
@@ -142,7 +144,6 @@ gh() {
         for overrides in (
             {"ref_type": "branch", "ref": "main"},
             {"ref": "v0.8.1"},
-            {"ref": "octet-serve-v0.8.2"},
             {"workflow_sha": TOOLING},
             {"tag": "v0.8.2;echo injection"},
             {"tag": "v0.8.2-rc.1"},
@@ -152,24 +153,26 @@ gh() {
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual("", output)
 
-    def test_canonical_push_waits_for_successful_binary_release(self):
-        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(f"source_commit={SOURCE}\n", output)
-        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="",
-                                          binary_states=["missing", "in_progress", "completed"])
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("waiting for the binary release run", result.stdout)
-        self.assertIn("waiting for binary release run 42: in_progress", result.stdout)
-        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="",
-                                          binary_conclusion="failure")
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("binary release run 42 did not succeed", result.stderr)
-        self.assertEqual("", output)
-        result, output = self.run_resolve(event="push", ref="v0.8.2", tag="", draft="true")
+    def test_release_resolve_never_waits_for_binary_workflow(self):
+        # A legacy repair may attach only to a published release. Candidate ship
+        # uses the receipt path and the owner waits locally before binary dispatch.
+        for binary_states in ([], ["missing", "in_progress", "completed"], ["failure"]):
+            result, output = self.run_resolve(binary_states=binary_states)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(f"source_commit={SOURCE}\n", output)
+            self.assertNotIn("waiting for", result.stdout)
+        self.assertNotIn("release-octet.yml/runs", self.jobs["resolve"])
+        self.assertNotIn("sleep ", self.jobs["resolve"])
+        result, output = self.run_resolve(draft="true")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("still a draft", result.stderr)
         self.assertEqual("", output)
+
+    def test_same_commit_tooling_dispatch_needs_no_workflow_diff(self):
+        result, output = self.run_resolve(ref="octet-serve-v0.8.2", changed_paths="", serve_changed=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(f"source_commit={SOURCE}\n", output)
+        self.assertIn(f"workflow_commit={SOURCE}\n", output)
 
     def test_release_source_must_be_on_main_even_without_a_repair(self):
         result, output = self.run_resolve(ancestor=False)
