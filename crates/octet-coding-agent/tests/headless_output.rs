@@ -38,7 +38,7 @@ fn terminal_capture(mut command: Command, columns: u16) -> (String, Output) {
     use std::os::fd::FromRawFd;
     let mut master = -1;
     let mut slave = -1;
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: 40,
         ws_col: columns,
         ws_xpixel: 0,
@@ -51,8 +51,8 @@ fn terminal_capture(mut command: Command, columns: u16) -> (String, Output) {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                std::ptr::addr_of_mut!(size),
             )
         },
         0
