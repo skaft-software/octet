@@ -152,6 +152,32 @@ impl ExtensionAgentSessionPolicy {
     }
 }
 
+/// Check under the manager's journal admission lock so spawns and retained
+/// worker continuations cannot race past the same owner's active cap.
+pub(super) fn ensure_extension_child_concurrency(
+    state: &ManagerState,
+    principal: &str,
+    resource_owner: &str,
+    policy: &ExtensionAgentSessionPolicy,
+) -> Result<(), String> {
+    let active_count = state
+        .records
+        .values()
+        .filter(|record| {
+            record.extension_principal.as_deref() == Some(principal)
+                && record.extension_resource_owner.as_deref() == Some(resource_owner)
+                && record.status.is_running()
+        })
+        .count();
+    if active_count >= policy.max_concurrent_children {
+        return Err(format!(
+            "extension child concurrency limit reached ({})",
+            policy.max_concurrent_children
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct ExtensionDelegationSpawnRequest {
     pub(crate) task_name: String,
     pub(crate) profile: Option<String>,
@@ -797,32 +823,10 @@ impl ExtensionDelegationService {
                 .collect::<String>()
         );
         let owner = self.owner_identity(&manager, resource_owner)?;
-        let rejection = {
-            let manager_state = manager
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let active_count = owner_state
-                .owned_agents
-                .iter()
-                .filter_map(|id| manager_state.records.get(id))
-                .filter(|record| record.status.is_running())
-                .count();
-            if active_count >= policy.max_concurrent_children {
-                Some(format!(
-                    "extension child concurrency limit reached ({})",
-                    policy.max_concurrent_children
-                ))
-            } else if owner_state.owned_agents.len() >= MAX_EXTENSION_OWNED_CHILDREN {
-                Some(format!(
-                    "extension child total limit reached ({MAX_EXTENSION_OWNED_CHILDREN})"
-                ))
-            } else {
-                None
-            }
-        };
-        if let Some(error) = rejection {
-            return Err(reject_spawn(error));
+        if owner_state.owned_agents.len() >= MAX_EXTENSION_OWNED_CHILDREN {
+            return Err(reject_spawn(format!(
+                "extension child total limit reached ({MAX_EXTENSION_OWNED_CHILDREN})"
+            )));
         }
         let mut result = match manager.spawn(
             &owner,

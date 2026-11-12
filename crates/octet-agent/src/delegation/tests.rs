@@ -2026,6 +2026,123 @@ async fn reattachment_enforces_the_persisted_wall_deadline_for_undelivered_work(
 }
 
 #[tokio::test(start_paused = true)]
+async fn retained_worker_continuation_obeys_the_extension_active_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let team = directory.path().join("team-activecap");
+    std::fs::create_dir(&team).unwrap();
+    let server = continuation_test_server().await;
+    for (task, delay) in [("finish first", 30), ("hold active", 3_600)] {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(wiremock::matchers::body_string_contains(task))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"finished\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    ))
+                    .set_delay(Duration::from_secs(delay)),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    let mut manager = continuation_test_manager(&team, &server);
+    // Undo the fixture's three-slot override: use the actual host pool,
+    // including its headroom beyond the extension's sixteen-worker cap.
+    let inner = Arc::get_mut(&mut manager).unwrap();
+    inner.config.limits = DelegationLimits::default();
+    *inner.permits.get_mut().unwrap() = Arc::new(Semaphore::new(
+        inner.config.limits.max_concurrent_agents - 1,
+    ));
+    let binding = manager.root_binding();
+    let service = binding
+        .extension_service("active-cap-fixture", "session", "owner")
+        .unwrap();
+    let spawn = |name: &str, task: &str| {
+        let mut request = test_extension_spawn(name, None, None, task, name);
+        request.policy.max_concurrent_children = 16;
+        request.policy.max_tokens = None;
+        request.policy.max_cost_microdollars = None;
+        request.policy.timeout_ms = None;
+        service.spawn("owner", request)
+    };
+    let completed = spawn("retained", "complete immediately").unwrap();
+    let completed_id = completed["agent_id"].as_str().unwrap();
+    let completed_status = DelegatedAgentStatus::Completed {
+        output: "continued".into(),
+    };
+    wait_for_worker_status(&manager, completed_id, completed_status.clone()).await;
+    let mut active_ids = Vec::new();
+    for index in 0..16 {
+        let child = spawn(
+            &format!("active-{index}"),
+            if index == 0 {
+                "finish first"
+            } else {
+                "hold active"
+            },
+        )
+        .unwrap();
+        let id = child["agent_id"].as_str().unwrap().to_owned();
+        wait_for_worker_status(&manager, &id, DelegatedAgentStatus::Running).await;
+        active_ids.push(id);
+    }
+    assert_eq!(manager.state.lock().unwrap().records.len(), 17);
+    assert_eq!(manager.current_permits().available_permits(), 1);
+    let spawn_error = spawn("excess", "must not run").unwrap_err();
+    assert_eq!(
+        spawn_error,
+        "extension child concurrency limit reached (16)"
+    );
+    let journal_before = std::fs::read(team.join("provenance.jsonl")).unwrap();
+    let error = service
+        .follow_up("owner", completed_id, "resume retained worker".into())
+        .await
+        .expect_err("continuing a completed worker must not admit a seventeenth active child");
+    assert_eq!(error, spawn_error);
+    assert_eq!(
+        std::fs::read(team.join("provenance.jsonl")).unwrap(),
+        journal_before
+    );
+    {
+        let state = manager.state.lock().unwrap();
+        let record = &state.records[completed_id];
+        assert_eq!(record.status, completed_status);
+        assert!(record.live_task, "exercise the retained live receiver path");
+        assert!(record.pending_follow_ups.is_empty());
+        assert_eq!(record.queued_follow_ups.messages, 0);
+    }
+
+    // Let exactly one active worker complete, leaving the other fifteen busy.
+    tokio::time::advance(Duration::from_secs(30)).await;
+    wait_for_worker_status(
+        &manager,
+        &active_ids[0],
+        DelegatedAgentStatus::Completed {
+            output: "finished".into(),
+        },
+    )
+    .await;
+    assert_eq!(manager.current_permits().available_permits(), 2);
+    let result = service
+        .follow_up("owner", completed_id, "resume retained worker".into())
+        .await
+        .unwrap();
+    assert_eq!(result["delivery"], "new_run");
+    wait_for_worker_status(&manager, completed_id, completed_status).await;
+    assert_eq!(
+        manager.current_permits().available_permits(),
+        2,
+        "continuation releases its execution permit on completion"
+    );
+    assert_eq!(manager.state.lock().unwrap().records.len(), 17);
+    binding.request_shutdown();
+}
+
+#[tokio::test(start_paused = true)]
 async fn reattached_follow_up_requires_a_free_execution_slot_before_acceptance() {
     let directory = tempfile::tempdir().unwrap();
     let manager = writable_manager(directory.path());

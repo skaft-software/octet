@@ -256,6 +256,16 @@ impl DelegationManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.ensure_owner_active_locked(&state, owner)?;
+            if let (Some(policy), Some(provenance)) =
+                (extension_policy.as_ref(), extension_provenance.as_ref())
+            {
+                ensure_extension_child_concurrency(
+                    &state,
+                    &provenance.principal,
+                    &provenance.resource_owner,
+                    policy,
+                )?;
+            }
             if state.total_agents >= self.config.limits.max_total_agents {
                 return Err(format!(
                     "delegation team agent limit reached ({})",

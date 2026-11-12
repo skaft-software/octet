@@ -84,7 +84,8 @@ generation and negotiated features. The packaged skill is opt-in too:
 ## Bound the work
 
 - At most **16 active children and 32 retained workers per parent owner**, one
-  level deep.
+  level deep. Resuming a settled worker uses the same active-cap admission as
+  spawning: if the cap is full, wait for an active worker to finish, then retry.
 - Profiles are `explore`, `review`, `test-analysis` and `research`. The
   provider, model and reasoning selection defaults to inherited. There's no
   separate `max_tokens` argument.
