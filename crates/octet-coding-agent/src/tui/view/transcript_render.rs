@@ -165,7 +165,8 @@ pub(super) fn render_tool(
         } else {
             &panel.display.success
         };
-        let tool = tool_grid_label(&tool_display_label(&panel.name));
+        let copy_label = sanitize_for_terminal(&tool_display_label(&panel.name));
+        let tool = tool_grid_label(&copy_label);
         let label = if quiet_summary {
             theme.fg("muted", &tool)
         } else {
@@ -199,7 +200,7 @@ pub(super) fn render_tool(
             .then(|| rows.pop().unwrap());
         let mut projected = ToolRows::literal(rows, source, visible_width(&continuation) as u16);
         projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
-        projected.prefix(&format!("{tool}  "));
+        projected.prefix(&format!("{copy_label}  "));
         if let Some(hint) = hint {
             projected.decoration(hint);
         }

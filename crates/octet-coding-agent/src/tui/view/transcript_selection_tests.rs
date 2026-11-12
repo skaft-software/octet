@@ -624,6 +624,71 @@ fn selection_panel(name: &str, args: serde_json::Value, output: String) -> super
 }
 
 #[test]
+fn tool_copy_whitespace_wrapped_bash_output_preserves_source() {
+    use super::super::InteractiveShell;
+    let output = format!("{}foo\nbar", " ".repeat(200));
+    for threaded in [false, true] {
+        for width in [80, 100] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, 24);
+            shell.state.borrow_mut().application_viewport_requested = true;
+            shell
+                .state
+                .borrow_mut()
+                .push_block(TranscriptBlock::Tool(Box::new(selection_panel(
+                    "bash",
+                    serde_json::json!({"command":"printf fixture"}),
+                    output.clone(),
+                ))));
+            if threaded {
+                shell.isolate_native_test_renderer();
+            }
+            let frame = selection_frame(&mut shell, threaded);
+            let foo = selection_cell(&frame, "foo");
+            let bar = selection_cell(&frame, "bar");
+            shell.begin_transcript_selection(foo.0, foo.1, false);
+            shell.extend_transcript_selection(bar.0, bar.1 + 3);
+            assert_eq!(shell.selected_plain_text().as_deref(), Some("foo\nbar"));
+            shell.select_all_transcript();
+            assert_eq!(
+                shell.selected_plain_text().as_deref(),
+                Some(format!("$ printf fixture\n{output}").as_str()),
+                "threaded={threaded}, width={width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tool_copy_long_label_contains_no_terminal_sequences() {
+    use super::super::InteractiveShell;
+    let name = "an_extremely_long_tool_name";
+    for threaded in [false, true] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.state.borrow_mut().application_viewport_requested = true;
+        let mut panel = selection_panel(name, serde_json::json!({}), String::new());
+        panel.display.value = Some("COPY-VALUE".into());
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Tool(Box::new(panel)));
+        if threaded {
+            shell.isolate_native_test_renderer();
+        }
+        let frame = selection_frame(&mut shell, threaded);
+        let value = selection_cell(&frame, "COPY-VALUE");
+        shell.begin_transcript_selection(value.0, value.1, false);
+        shell.extend_transcript_selection(value.0, value.1 + 10);
+        assert_eq!(shell.selected_plain_text().as_deref(), Some("COPY-VALUE"));
+        shell.select_all_transcript();
+        let copied = shell.selected_plain_text().unwrap();
+        assert!(!copied.contains('\x1b'), "copy contains ANSI: {copied:?}");
+        assert_eq!(copied, "An extremely long tool name  COPY-VALUE");
+    }
+}
+
+#[test]
 fn compact_tool_copy_excludes_undisclosed_rows_but_not_offscreen_rows() {
     use super::super::{InteractiveShell, TranscriptBlock};
     for threaded in [false, true] {

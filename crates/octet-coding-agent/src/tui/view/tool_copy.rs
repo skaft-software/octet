@@ -56,22 +56,30 @@ impl ToolRows {
                 let plain = strip_terminal_sequences(line);
                 let fragment =
                     slice_by_column(&plain, usize::from(left), visible_width(&plain), false);
-                let fragment = fragment.trim_end();
-                let start = if fragment.is_empty() {
-                    cursor
+                let trimmed = fragment.trim_end();
+                let (start, end) = if trimmed.is_empty() {
+                    // A whitespace-only soft wrap is not a logical blank line.
+                    // Consume only whitespace actually represented by this row,
+                    // never search ahead past unpainted source to a newline.
+                    let start = cursor;
+                    let matched = text[cursor..]
+                        .chars()
+                        .zip(fragment.chars())
+                        .take_while(|(source, shown)| *source != '\n' && source == shown)
+                        .map(|(source, _)| source.len_utf8())
+                        .sum::<usize>();
+                    let end = start + matched;
+                    cursor = end + usize::from(text[end..].starts_with('\n'));
+                    (start, end)
+                } else if let Some(offset) = text[cursor..].find(trimmed) {
+                    let start = cursor + offset;
+                    let end = start + trimmed.len();
+                    cursor = end;
+                    (start, end)
                 } else {
-                    cursor
-                        + text[cursor..]
-                            .find(fragment)
-                            .expect("literal tool row belongs to its sanitized presentation")
-                };
-                let end = start + fragment.len();
-                cursor = if fragment.is_empty() {
-                    text[end..]
-                        .find('\n')
-                        .map_or(end, |newline| end + newline + 1)
-                } else {
-                    end
+                    // Copy alignment must not take down the paint path. Leave
+                    // the cursor intact so later rows can still match.
+                    (cursor, cursor)
                 };
                 Some(ToolCopyRow {
                     source: start..end,
@@ -155,5 +163,55 @@ impl ToolRows {
         }
         self.lines.extend(other.lines);
         self.copy_rows.extend(other.copy_rows);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_whitespace_rows_preserve_offsets_and_only_consume_adjacent_newlines() {
+        for suffix in ["foo\nbar", "\nfoo\nbar"] {
+            let text = format!("{}{suffix}", " ".repeat(8));
+            let mut rows = ToolRows::literal(
+                ["    ", "    ", "foo", "bar"].map(str::to_owned).to_vec(),
+                text.clone(),
+                0,
+            );
+            let foo = text.find("foo").unwrap();
+            let bar = text.find("bar").unwrap();
+            assert_eq!(
+                rows.copy_rows
+                    .iter()
+                    .flatten()
+                    .map(|row| row.source.clone())
+                    .collect::<Vec<_>>(),
+                [0..4, 4..8, foo..foo + 3, bar..bar + 3]
+            );
+            rows.retain_rows(&[0, 1, 2, 3]);
+            assert_eq!(rows.text, text);
+        }
+    }
+
+    #[test]
+    fn literal_mismatches_map_empty_ranges_without_advancing_the_cursor() {
+        let mut rows = ToolRows::literal(
+            ["missing", "界", "mismatch", "bar", "missing"]
+                .map(str::to_owned)
+                .to_vec(),
+            "界\nbar".into(),
+            0,
+        );
+        assert_eq!(
+            rows.copy_rows
+                .iter()
+                .flatten()
+                .map(|row| row.source.clone())
+                .collect::<Vec<_>>(),
+            [0..0, 0..3, 3..3, 4..7, 7..7]
+        );
+        rows.retain_rows(&[0, 1, 2, 3, 4]);
+        assert_eq!(rows.text, "界\nbar");
     }
 }
