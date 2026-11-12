@@ -87,6 +87,15 @@ Live roster token counts use rounded `K`, `M`, `B`, and `T` suffixes (for exampl
 `284K`, `1.2M`, and `1.5B`). A `~` still marks an output estimate; compact labels
 do not change exact usage, budgets, or costs.
 
+Live text and reasoning output estimates publish at a coalesced cadence of about
+30 updates per second per worker (33 ms), including the last delta of a burst
+when the provider pauses. The bounded host watch stream replaces old snapshots;
+no `/subagents` command or keypress is needed to refresh the inline counts.
+`~` means a UTF-8-byte estimate, not provider-reported or billed usage. Reported
+totals replace estimates on settlement; retries discard their provisional counts.
+No estimate enters token/cost budgets or the exactly-once delegated ledger.
+This is a scheduling cadence, not a provider or terminal latency guarantee.
+
 The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.
 

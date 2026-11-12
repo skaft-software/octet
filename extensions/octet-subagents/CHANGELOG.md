@@ -50,6 +50,10 @@
 
 ### Changed
 
+- Host-driven live output estimates refresh at about 30 Hz per worker and flush
+  each burst without polling `/subagents`; `~` remains an estimate marker,
+  never a provider-usage or billing claim.
+
 - Raise the host-matched active-worker cap to 16, retaining 32 records per owner
   and the depth-one, tool-policy, budget and cancellation boundaries.
 

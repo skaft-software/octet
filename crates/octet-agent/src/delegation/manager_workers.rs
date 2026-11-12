@@ -1336,7 +1336,7 @@ impl DelegationManager {
             .and_then(|policy| policy.max_turns)
             .or(self.template.max_turns);
         let mut turns_completed = 0_u64;
-        let mut last_stream_update = None;
+        let mut stream_progress = manager_status::StreamedOutputProgress::default();
         let mut commands_open = true;
         enum Next {
             Event,
@@ -1344,6 +1344,7 @@ impl DelegationManager {
             Changed,
             Shutdown,
             Deadline,
+            Progress,
         }
         let outcome = loop {
             let notified = self.changed.notified();
@@ -1364,6 +1365,7 @@ impl DelegationManager {
                     }
                 }, if deadline.is_some() && !requested_timeout => Next::Deadline,
                 _ = &mut notified, if !requested_interrupt => Next::Changed,
+                _ = stream_progress.wait_for_flush() => Next::Progress,
                 event = run.next() => {
                     next_event = event;
                     Next::Event
@@ -1377,6 +1379,7 @@ impl DelegationManager {
             }
             match next {
                 Next::Changed => {}
+                Next::Progress => self.flush_agent_streamed_output(&mut stream_progress),
                 Next::Deadline => {
                     control.abort();
                     requested_timeout = true;
@@ -1500,12 +1503,12 @@ impl DelegationManager {
                         self.update_agent_streamed_output(
                             &identity.id,
                             text.len(),
-                            &mut last_stream_update,
+                            &mut stream_progress,
                         );
                     }
                     Some(AgentEvent::ProviderRetry { .. }) => {
                         self.clear_agent_streamed_output(&identity.id);
-                        last_stream_update = None;
+                        stream_progress = manager_status::StreamedOutputProgress::default();
                     }
                     Some(AgentEvent::ProviderUsageUncertain) => {
                         self.mark_agent_usage_uncertain(&identity.id);
@@ -1521,7 +1524,7 @@ impl DelegationManager {
                             session_cost_microdollars,
                             false,
                         );
-                        last_stream_update = None;
+                        stream_progress = manager_status::StreamedOutputProgress::default();
                     }
                     Some(AgentEvent::TurnFinished {
                         message,
@@ -1535,7 +1538,7 @@ impl DelegationManager {
                             session_cost_microdollars,
                             true,
                         );
-                        last_stream_update = None;
+                        stream_progress = manager_status::StreamedOutputProgress::default();
                         turns_completed = turns_completed.saturating_add(1);
                         if extension_policy.is_some_and(|policy| {
                             policy

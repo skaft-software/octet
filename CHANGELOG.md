@@ -15,6 +15,10 @@
 
 ### Changed
 
+- Live subagent output estimates now coalesce at about 30 Hz per worker,
+  with a trailing timer flush when a stream pauses. Estimates remain separate
+  from provider usage and exactly-once delegated accounting.
+
 - Subagents admit up to 16 active workers per parent (32 retained, depth one).
   The host permit pool and checked-in extension enforce the same active cap.
 

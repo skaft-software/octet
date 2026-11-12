@@ -6224,7 +6224,12 @@ fn durable_spawn_idempotency_checks_original_message_owner_and_policy_after_rest
 }
 
 #[test]
-fn streamed_output_progress_is_throttled_and_separate_from_reported_usage() {
+fn streamed_output_progress_refresh_budget_is_thirty_three_milliseconds() {
+    assert!(STREAMED_OUTPUT_UPDATE_INTERVAL <= Duration::from_millis(33));
+}
+
+#[tokio::test(start_paused = true)]
+async fn streamed_output_progress_flushes_a_burst_tail_without_another_provider_event() {
     let directory = tempfile::tempdir().unwrap();
     let manager = writable_manager(directory.path());
     let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
@@ -6239,45 +6244,97 @@ fn streamed_output_progress_is_throttled_and_separate_from_reported_usage() {
     };
     manager.update_agent_usage(&identity.id, usage, Some(7), true);
     telemetry.borrow_and_update();
+    let mut progress = manager_status::StreamedOutputProgress::default();
+    manager.update_agent_streamed_output(&identity.id, 40, &mut progress);
+    assert_eq!(
+        telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
+        Some(14)
+    );
 
-    let mut last_update = None;
-    manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+    tokio::time::advance(Duration::from_millis(5)).await;
+    manager.update_agent_streamed_output(&identity.id, 40, &mut progress);
+    assert!(
+        !telemetry.has_changed().unwrap(),
+        "burst events are coalesced"
+    );
+    tokio::time::advance(Duration::from_millis(28)).await;
+    progress.wait_for_flush().await;
+    manager.flush_agent_streamed_output(&mut progress);
     {
         let snapshot = telemetry.borrow_and_update();
         let live = &snapshot.as_ref().unwrap().children[0];
+        assert_eq!(
+            live.estimated_output_tokens,
+            Some(24),
+            "the final burst delta paints without another provider event"
+        );
         assert_eq!(live.output_tokens, 4);
-        assert_eq!(live.estimated_output_tokens, Some(14));
         assert_eq!(live.total_tokens, 39);
         assert_eq!(live.cost_microdollars, Some(7));
     }
-    manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+    manager.flush_agent_streamed_output(&mut progress);
     assert!(
         !telemetry.has_changed().unwrap(),
-        "stream updates are coalesced"
-    );
-    last_update = Some(Instant::now() - STREAMED_OUTPUT_UPDATE_INTERVAL);
-    manager.update_agent_streamed_output(&identity.id, 4, &mut last_update);
-    assert_eq!(
-        telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
-        Some(25)
+        "an empty coalescer does not publish"
     );
 
+    manager.update_agent_streamed_output(&identity.id, 20, &mut progress);
     manager.clear_agent_streamed_output(&identity.id);
+    progress = manager_status::StreamedOutputProgress::default();
     assert_eq!(
         telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
         None,
-        "a retry must discard provisional generation"
+        "a retry discards provisional generation"
     );
-    manager.update_agent_streamed_output(&identity.id, 20, &mut None);
+    manager.flush_agent_streamed_output(&mut progress);
+    assert!(!telemetry.has_changed().unwrap());
+    manager.update_agent_streamed_output(&identity.id, 20, &mut progress);
     manager.update_agent_usage(&identity.id, usage, Some(7), true);
-    let snapshot = telemetry.borrow();
-    let settled = &snapshot.as_ref().unwrap().children[0];
-    assert_eq!(settled.estimated_output_tokens, None);
-    assert_eq!(settled.output_tokens, 4);
+    progress = manager_status::StreamedOutputProgress::default();
+    {
+        let snapshot = telemetry.borrow_and_update();
+        let settled = &snapshot.as_ref().unwrap().children[0];
+        assert_eq!(settled.estimated_output_tokens, None);
+        assert_eq!(settled.output_tokens, 4);
+        assert_eq!(settled.cost_microdollars, Some(7));
+    }
+    manager.flush_agent_streamed_output(&mut progress);
+    assert!(
+        !telemetry.has_changed().unwrap(),
+        "no stale timer can republish after settlement"
+    );
     assert_eq!(
         manager.state.lock().unwrap().records[&identity.id].usage,
         usage
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn streamed_output_progress_coalesces_a_thousand_deltas_into_bounded_latest_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+    let mut telemetry = manager.attach_telemetry();
+    telemetry.borrow_and_update();
+    let mut progress = manager_status::StreamedOutputProgress::default();
+    let mut publications = 0;
+    for _ in 0..1_000 {
+        manager.update_agent_streamed_output(&identity.id, 4, &mut progress);
+        publications += u64::from(telemetry.has_changed().unwrap());
+        telemetry.borrow_and_update();
+    }
+    assert_eq!(
+        publications, 1,
+        "the whole burst has one leading publication"
+    );
+    tokio::time::advance(STREAMED_OUTPUT_UPDATE_INTERVAL).await;
+    progress.wait_for_flush().await;
+    manager.flush_agent_streamed_output(&mut progress);
+    let snapshot = telemetry.borrow_and_update();
+    let live = &snapshot.as_ref().unwrap().children[0];
+    assert_eq!(live.estimated_output_tokens, Some(1_000));
+    assert_eq!(live.output_tokens, 0);
+    assert_eq!(live.total_tokens, 0);
 }
 
 #[test]
