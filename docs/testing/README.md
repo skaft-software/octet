@@ -113,6 +113,9 @@ A maintainer must configure hosted branch protection separately; workflow files
 alone do not change it. The separate `pr-scope` workflow reports missing issue
 references on PRs, but is not included in `ci-required`; with only that status
 required, its failure is visible to reviewers rather than merge-blocking.
+Its separate, non-blocking `contribution-notes` job skips the owner and bots and
+summarizes non-empty "In your own words", "Security check" and "AI provenance"
+sections. It checks presence only, not truth or quality.
 
 `quality` is the widest gate and the one most likely to fail for a reason that
 has nothing to do with your change. It runs, in order: the offline models.dev

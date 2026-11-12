@@ -30,3 +30,32 @@ jobs:
               sys.exit("Link an issue in the PR body, for example 'Refs #' followed by its number.")
           print("PR body references an issue.")
           PY
+
+  contribution-notes:
+    if: github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.login != 'achuthanmukundan00'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 2
+    steps:
+      - name: Summarize contribution notes (advisory)
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          # Only check presence, not truth or quality. Never echo untrusted text.
+          body = re.sub(r"<!--.*?-->", "", os.environ["PR_BODY"], flags=re.DOTALL)
+          parts = re.split(r"(?m)^#{1,2}[ \t]+([^\n]+)\n", body + "\n")
+          sections = {
+              heading.strip().casefold(): content.strip()
+              for heading, content in zip(parts[1::2], parts[2::2])
+          }
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Contribution notes (advisory)\n\n")
+              for title in ("In your own words", "Security check", "AI provenance"):
+                  status = "present" if sections.get(title.casefold()) else "missing or empty"
+                  summary.write(f"- {title}: {status}\n")
+              summary.write("\nPresence only; human review is still required. This check does not block merging.\n")
+          PY
