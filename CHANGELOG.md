@@ -2,290 +2,37 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Reload acceptance tests use canonical temporary directories on macOS.
-- Native custom editors retain their initial draft and caret across the startup
-  theme handoff, including edits whose recovery checkpoint is still in flight.
-  Text typed into the native composer during startup still takes precedence.
-
 ## [0.10.4] - Release candidate
 
 ### Changed
 
-- Live subagent output estimates now coalesce at about 30 Hz per worker,
-  with a trailing timer flush when a stream pauses. Estimates remain separate
-  from provider usage and exactly-once delegated accounting.
-
-- Subagents admit up to 16 active workers per parent (32 retained, depth one).
-  The host permit pool and checked-in extension enforce the same active cap.
-
-- `octet migrate pi` is now one guided command: a short overview a newcomer can read, a note
-  on what turning the setup on does, and one question. Yes installs the Pi adapter, backs up
-  octet's config to `~/.octet/backups/` and enables the adapter; Pi's settings are never
-  written. `--dry-run` previews, `--yes` skips the question, `--undo` turns the adapter off,
-  and `--details` prints the full per-package list that used to be the default output.
-
-- pi-subagents loads through the Pi adapter like any other Pi package instead of being
-  replaced by octet-subagents, so its commands (`/subagents-doctor`, `/subagent-cost`, …) work.
-
-- With the Pi adapter on, octet says in one startup line when its model differs from your
-  Pi default model (switch with `/model`).
+- `octet migrate pi` is one guided command: one question installs and enables the Pi adapter and backs up octet's config. Pi's settings are never written.
+- pi-subagents loads through the Pi adapter like any other Pi package, so its commands work.
+- With the Pi adapter on, startup says in one line when octet's model differs from your Pi default.
+- Subagents run up to 16 active workers per parent, and live worker output refreshes smoothly.
 
 ### Fixed
 
-- An extension's custom editor, footer, header or widgets opened during startup or reload (such as a Pi extension's editor set in `session_start`) now appear only once the extension-selected theme is installed, so they no longer flash in the wrong colors. The native composer stays editable meanwhile, setup dialogs still appear immediately, and anything that never redraws appears within one second.
-
-- A retained screenshot no longer makes a session look over its context window when an
-  extension registers a context hook (for example through the Pi adapter). The hooked
-  capacity check sized a replayed Responses window by its raw bytes, so a 110 KB image
-  counted as about 37,000 tokens and failed the turn before any request was sent, even
-  right after compaction. Media from your history now gets the same per-item allowance as
-  the extension-free check; opaque provider content is still counted in full.
-
-- Launching inside a home subdirectory no longer adopts a dotfiles repository
-  at `~/.git` as its workspace, tool cwd and resume scope. Ordinary project and
-  worktree roots, explicit `--workspace` overrides and existing sessions are kept.
-
-- Typing while a large session starts no longer restarts the Pi adapter. An unanswered
-  keystroke-interception request was cancelled and, when the adapter (busy parsing the
-  history) could not acknowledge within the 2 s grace, the whole extension was killed and its
-  startup lost. Side-effect-free input queries no longer escalate; effectful requests still do.
-
-- Pi hooks on very large sessions reuse the history the adapter already prepared for that
-  exact revision (same digest) instead of reading and parsing the whole document again per
-  hook. On a 240 MB history `resources_discover` took 0.2 s instead of 3.6 s and no longer
-  timed out.
-
-- A Pi footer, header or widget set from a hook that returns before the UI mount is
-  acknowledged now paints. The mount was cancelled with its hook while the host still
-  mounted it, so on large sessions the footer stayed blank until the next keystroke.
-
-- Pi footers show branches from ancestor repositories and worktrees, including
-  `detached` HEADs, and refresh after branch changes without filesystem reads
-  during painting. Native branch snapshots stay authoritative; failing footer
-  branch listeners are isolated and named without exposing exception text.
-
-- The Pi adapter no longer copies and rescans an unfinished protocol frame on
-  every pipe read. Large fragmented session/provider frames now use bounded linear
-  intake work, with the same frame limits, strict UTF-8 validation and refusals.
-
-- A first `/reload` submitted from the slash popup while Pi extensions are
-  starting now runs once when ready and shows its completion result, rather
-  than silently requiring a second Enter. Native and Pi custom editors retain
-  the same reload and forced-restart paths; automatic startup stays quiet.
-
-- Fullscreen transcript selection keeps repeated, decorated and wrapped Unicode
-  rows attached to the text actually selected. Bash/Codemode output and edit/write
-  diffs copy their sanitized, currently disclosed content, including offscreen
-  rows, without private arguments, hidden group children, capture metadata,
-  line-number gutters or disclosure hints. Shell-copy behavior is preserved. (#683)
-
-- The Subagents panel keeps its neutral separator when Working becomes reasoning
-  or Ctrl+O changes disclosure. Filled tool bands, including the Pi theme, keep
-  one painted interior row at the top and bottom; explicit zero padding still wins.
-
-- Resuming a session with thousands of entries no longer re-encodes and
-  re-sends its whole history to every extension on each UI refresh. Unchanged
-  sessions keep their published view; any new record, label, usage, host change,
-  reopened session or failed publication still republishes in full.
-
-- A slash command entered once during startup runs when the session is ready,
-  instead of reporting `busy · draft kept` and requiring Enter again.
-
-- On Unix, `/reload --force` restarts into the installed executable and resumes
-  the same session even when the binary is unchanged, instead of retaining stale
-  extension runtime state and in-process reload limits. Updated binaries still
-  pass compatibility checks; running workers are detached with their sessions kept.
-  Forced reload no longer prints a generic interruption-risk status line.
-
-- Pi compaction callbacks can observe opaque reasoning and split-turn tool results
-  without failing history conversion. A throwing compaction or tree callback is
-  warned and skipped; explicit vetoes, cancellation and failed native writes still stop.
-
-- Pi adapter caches live outside the watched extension directory. Cache writes no
-  longer cause an automatic adapter restart, duplicate startup hooks or a footer
-  switching back to the native footer while the adapter starts again.
-
-- Pi permission hooks can inspect session history containing opaque reasoning from
-  another model without failing every tool call. Read-only history omits an
-  unrepresentable signature; provider replay and permission decisions remain guarded.
-
-- `octet update` on Windows updates a release ZIP unpacked outside the installer's default
-  folder in place, instead of refusing with "could not detect how this octet was installed".
-  Top-level errors keep their line breaks; the manual-update hint printed literal `<U+000A>`.
-
-- octet-codemode started from source never reuses a cached build made from other source. A
-  stale build in `~/.cache/octet-codemode` made codemode fail every start.
-
-- Extension startup failures read in plain words ("its process exited during startup")
-  instead of "extension runtime Launch".
-
-- Pi session browsers such as `/sessions` now say that octet keeps its own sessions and to
-  use `/resume`, instead of failing with "SessionManager.list is not a function".
-- Ctrl+C at an idle, empty prompt now closes octet, as the welcome hint says.
-  During a running response Ctrl+C still only stops the run; press it again
-  once the run has stopped to exit. Ctrl+D exits at any time (#673).
-
-- A Pi extension that mounts its footer or a widget from `session_start` without awaiting it (as Pi's own examples do) no longer has the mount cancelled when the hook replies: a still-unanswered `ui/open` now survives a successful parent reply (a failed or cancelled parent still retires it).
-
-- A Pi extension provider whose stream reports an OpenAI Responses tool call (Pi's id form is `call_id|item_id`) no longer fails the turn with "tool call id is not a native provider identifier"; the id is forwarded unchanged.
-
-- A Pi extension's provider stream (`pi.registerProvider` with `streamSimple`) no longer fails with "unsupported_feature provider stream options.<name>" when the stream, or the Pi stream helper it calls, reads an option Pi does not set (`headers`, `env`, `fetch`, `samplingParams`, ...). Unset options read as `undefined`, as in Pi.
-
-- A manual `compact` over RPC that the compaction policy refuses (for example on a new, empty session: "no safe history to compact") now answers with an error response and a closing `compaction_end` event. It used to end the RPC server after `compaction_start` without any response.
-- Pi extensions that import `StreamingJsonParser` or `ToolCallArgumentsStream` from `@earendil-works/pi-ai`
-  (Pi 1.5.0 exports both; Pi's `custom-provider-anthropic` imports the second) no longer fail to load
-  with "octet shims lack or refuse ToolCallArgumentsStream". Both bind to the installed Pi release, as the
-  other inert pi-ai helpers do.
-
-- A Pi extension whose `project_trust` handler asks the user a question (Pi's `project-trust.ts`
-  opens a select dialog) no longer holds `session_start` until the host gives up after 30 s, which
-  cascaded into "reload failed" and bridge errors. A handler still waiting after a short grace
-  stops holding the hook and its dialog opens on the live UI, as Pi's does.
-
-- Chat Completions providers that report usage on every streamed chunk (for example Gemini models through GitHub Copilot) no longer fail with 'duplicate Usage event'; the final totals are used.
-
-- Pi extensions that pass an SGR-styled string to `ctx.ui.setWorkingMessage` or
-  `setHiddenThinkingLabel` (Pi's `working-message-test.ts`) no longer fail their
-  `session_start` hook with "contains terminal controls". Pi renders those labels through its
-  themed loader; the host label is printable text, so the styling is dropped and the text kept.
-
-- Pi extensions that call `ctx.ui.setWorkingIndicator` (or another chrome setter) from
-  `session_start`, such as Pi's `working-indicator.ts`, no longer report "Pi compatibility
-  error: request cancelled". The host cancels a chrome request still pending when its parent
-  hook settles; the update is now sent once the hook has replied, as Pi's void setters outlive
-  their handler.
-
-- Pi extensions that build the bash tool with `commandPrefix` or `spawnHook` (for example Pi's
-  `bash-spawn-hook.ts`) are no longer refused at configure time with "option would not be
-  honored". The prefixed command, and the command, cwd and environment changes the hook returns,
-  are what the native shell runs (environment changes as exports in front of the command).
-
-- Pi extensions that import `renderFakeCursor` from `@earendil-works/pi-tui` (for example
-  Pi's `overlay-test.ts`) no longer fail with "renderFakeCursor is not a function".
-  The helper is provided and a frame carries the fake cursor as reverse video, as Pi draws it.
-
-- A Pi input listener (`ctx.ui.onTerminalInput`) that is briefly slow, for example
-  during a garbage collection or on a loaded machine, is no longer disabled
-  until reload. Keys wait for it in order, as in Pi; only a listener that does
-  not answer for a full second is latched off, with one warning.
-
-- The `/resume` empty states are now derived from the picker when it is drawn,
-  so they cannot go stale (transcript-search hits no longer stay hidden behind an
-  old message). Named-only (`^n`) hiding every row says to press `^n`, an
-  all-workspaces no-match no longer suggests switching scope or claims the
-  workspace is empty, a store with no sessions is not labelled "no matches",
-  and the guidance leads the filter echo so narrow terminals keep it. Follow-up
-  to #672.
-
-- A failed Codemode card no longer mounts an empty output block when its output
-  is only the failure status, and the repeated status is dropped by comparing it
-  with the status actually shown, skipping leading blank lines, so sanitized or
-  over-long statuses dedupe too, with one fewer copy of the output per render.
-  Follow-up to #678.
-
-- Tab completion of a `/command` keeps a name you typed in full (`/skill:review`
-  no longer becomes `/skill:review-pr`) until you move the highlight, completes
-  only a suggestion that is on screen (not when the popup is hidden on a short
-  terminal or an extension's autocomplete replaced it), and resets the popup
-  selection afterwards. Follow-up to #675.
-
-- A partially typed `/command` completion menu now includes commands that an
-  extension registers after the keystroke as soon as the extension finishes
-  starting, instead of waiting for the next key press.
-
-- A Pi extension that starts a new session from its own command (`ctx.newSession`,
-  and likewise fork or switch) no longer ends octet with "Error: stale resource
-  candidate". Retiring the old session's resource binding left extension resource
-  discovery permanently disabled for the replacement session, and the withdrawal
-  fallback then treated the stale binding as fatal. The replacement owner now gets a
-  live binding, and a withdrawal baseline for a binding that has since moved is
-  dropped instead of ending the application.
-
-- Tool results now record the name of the tool that produced them, including
-  when imported from a Pi session. The name is stored for the session only and
-  never sent to a provider.
-
-- Renaming a session replaces line breaks in the name with spaces and trims it,
-  as Pi does, instead of refusing the name.
-
-- Forking a session now keeps the entry labels (bookmarks) of the entries the
-  fork retains.
-
-- Resuming a session with no model change on its branch now selects the model
-  of the last assistant message, as Pi does, instead of the configured default.
-  Pi-imported assistant messages now record the `provider/model` route id.
-
-- Session listing and resume no longer fail on a session that contains a
-  branch summary record, including sessions imported from Pi.
-
-- The model now sees a compaction summary wrapped in the same text Pi uses
-  ("The conversation history before this point was compacted into the following
-  summary: ..."), so a session compacted in either tool reads the same.
-
-- An extension CLI flag may reuse the name of a subcommand option (Pi's
-  `preset.ts` registers `--preset`, which `octet setup` also has), instead of
-  failing startup with a conflict. Only top-level options reserve a name; a real
-  conflict now tells the user to rename the flag or disable the named extension.
-
-- `octet-pi-compat` configure writes a valid manifest default for a Pi flag
-  registered without one (such as `preset.ts`'s `--preset`) instead of
-  `default = undefined`.
-
-- Pi extension commands that await `ctx.ui.select(...)` and then `ctx.ui.confirm(...)`
-  or `ctx.ui.input(...)` (Pi's `commands.ts` example) no longer fail with
-  `not_foreground_owner ... requires a live request`; the later dialog opens on a
-  remote selector or input surface like Pi's.
-
-- GitHub Copilot startup registers the account's chat models again. The
-  authenticated inventory also lists legacy, embedding and partial records that
-  omit `supported_endpoints`, `capabilities` or a chat token limit; one such
-  sibling used to reject the whole inventory, so no `github-copilot/<id>` model
-  was advertised even though sign-in and token exchange succeeded. Each
-  unsupported entry is now skipped on its own, and the models the integration
-  supports are registered. A record is no longer rejected for publishing no
-  `policy`: only a `policy` naming another state withdraws a model, and the live
-  inventory omits the field on enabled picker models.
-
-- OpenCode Go startup registers its models again. Its inventory publishes a
-  model's exact effort levels as `effort` next to a structured default
-  (`{"type": "effort", "value": …}`); discovery accepted only `values` and
-  failed the whole provider, so no `opencode-go/<id>` model was advertised.
-  Both spellings now decode to the same exact contract, and a default that names
-  no published level remains malformed.
-
-- Read-only reports and document panels no longer drop scrolling keys pressed
-  just after their first frame appears, including during streaming responses.
-
-- Shift+Enter inserts a newline in fullscreen mode on terminals that report the
-  kitty keyboard protocol or `modifyOtherKeys`, including right after octet
-  enters fullscreen. Ctrl+J remains the portable newline.
-
-- The extension API 0.4 reference now documents its actual feature-negotiated
-  wire, provider/session data and service-specific errors instead of presenting
-  canonical API 0.3 models as the current contract. Public provider-registry Rust
-  types now come from the independently maintained `extension_api_v04` module;
-  the generated `extension_api_v03` surface remains live. Wire behavior and
-  version eligibility are unchanged.
-
-- Pi extension new/switch/fork session requests work with V2 delegation enabled.
-  Workers park before replacement, outgoing child sessions remain recoverable,
-  and the retained extension process receives the new session's delegation
-  service without duplicate tools or instructions. A worker-parking timeout
-  names the refusal and asks users to wait or stop the workers before retrying.
-- Pi background contexts retain session reads without gaining foreground UI or
-  write authority. Coalesced chrome updates recheck ownership and cancellation
-  before native delivery; retained same-session contexts still survive turns.
-
-### Known limitations
-
-- Windows `octet update` from an extracted release folder is fixed in source but not yet
-  re-verified on a real Windows install of 0.10.3; attended Windows desktop use remains
-  unqualified.
-- Resuming a very large Pi session still parses its whole history once in the adapter: on a
-  240 MB history that takes about 3.5 s and peaks near 1.6 GB of adapter memory.
-- Pi `models.json` HTTP providers and managed git packages remain unsupported.
+- Extension editors, footers and widgets opened at startup appear once, in the right theme; the native composer stays editable and keeps your draft.
+- A Pi footer set at startup paints without waiting for a keystroke, and shows the branch of ancestor repositories and worktrees.
+- Large resumed sessions stay responsive with the Pi adapter: typing during startup is safe, and hooks reuse the prepared history.
+- A slash command entered during startup, including `/reload`, runs once when ready.
+- On Unix, `/reload --force` restarts the installed app and resumes the same session.
+- A retained screenshot stays within the context window when an extension registers a context hook.
+- Launching inside a home subdirectory keeps a dotfiles repository at `~/.git` out of the workspace.
+- Fullscreen selection copies exactly the selected text and disclosed tool output, including offscreen rows.
+- Pi hooks read mixed-model reasoning and split-turn history; a failing compaction callback warns and the session continues.
+- More unchanged Pi examples run as in Pi: providers, dialogs, bash hooks, fake cursors, styled labels, project trust and session commands.
+- Sessions match Pi for tool-result names, renames, forked bookmarks, resumed models, branch summaries and compaction summaries.
+- Ctrl+C at an idle, empty prompt closes octet. ([#673](https://github.com/skaft-software/octet/pull/673) by [@XelHaku](https://github.com/XelHaku))
+- Tab completes the highlighted slash suggestion. ([#675](https://github.com/skaft-software/octet/pull/675) by [@XelHaku](https://github.com/XelHaku))
+- `/resume` explains each empty state with actionable guidance. ([#672](https://github.com/skaft-software/octet/pull/672) by [@rezamuliawijaya](https://github.com/rezamuliawijaya))
+- A failed Codemode card shows its status once. ([#678](https://github.com/skaft-software/octet/pull/678) by [@bfs2021](https://github.com/bfs2021))
+- GitHub Copilot keeps its usable models when the inventory has unsupported records. ([#706](https://github.com/skaft-software/octet/pull/706) by [@gafiatulin](https://github.com/gafiatulin))
+- OpenCode Go startup registers its models, and Chat streams that repeat usage on every chunk work.
+- Shift+Enter inserts a newline in fullscreen on kitty-protocol and `modifyOtherKeys` terminals.
+- `octet update` on Windows updates a release ZIP unpacked outside the default folder.
+- Extension startup errors explain what happened in plain words.
 
 ## [0.10.3] - 2026-11-06
 
