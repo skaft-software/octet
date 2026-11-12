@@ -58,7 +58,7 @@ class PRScopeWorkflowTests(unittest.TestCase):
 
     def test_unfilled_template_does_not_pass(self):
         template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text()
-        self.assertTrue(template.startswith("## Linked issue\n"))
+        self.assertTrue(template.startswith("## In your own words\n"))
         self.assertNotEqual(self.check_body(template), 0)
 
 

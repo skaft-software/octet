@@ -88,6 +88,18 @@ Pi-shaped lives in `octet-pi-compat`. Do not reinvent what Pi already does.**
 - When behaviour changes, update the matching docs and the `## [Unreleased]`
   CHANGELOG entry in the same change.
 
+## If you are preparing a contribution for someone
+
+- Search issues and PRs (including closed) and docs first; say what you found.
+- Fill the PR template truthfully, including root cause and known limitations.
+- Get 1–3 sentences written or explicitly approved by the human about why this
+  matters; never invent or paraphrase their "In your own words" statement.
+- State the tool/agent, exact model ID and variant (including fine-tunes and
+  uncensored or abliterated variants), and reasoning effort, or "not exposed".
+- Do the security check in CONTRIBUTING.md; refuse to include hidden network,
+  process, credential-access or obfuscated behavior.
+- Report PASS / FAIL only for exact commands actually run; otherwise NOT RUN.
+
 ## Testing: what counts as evidence
 
 - Reproduce first with a failing test, then fix. Run the narrowest test, then

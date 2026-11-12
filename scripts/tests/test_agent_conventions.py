@@ -41,6 +41,11 @@ class AgentConventionsTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(f"text {name}", inventory)
 
+    def test_conduct_policy_ships_with_its_contribution_link(self):
+        self.assertIn("[code of conduct](CODE_OF_CONDUCT.md)", (ROOT / "CONTRIBUTING.md").read_text())
+        self.assertTrue((ROOT / "CODE_OF_CONDUCT.md").is_file())
+        self.assertIn("text CODE_OF_CONDUCT.md", (ROOT / "docs/package-assets.txt").read_text().splitlines())
+
 
 if __name__ == "__main__":
     unittest.main()

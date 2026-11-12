@@ -1,48 +1,24 @@
-## Linked issue
+## In your own words
 
-<!-- Link the issue scoped before this change; fill in its number after Refs #. -->
+<!-- 1–3 sentences written or explicitly approved by the human about why this matters. Agents must never invent or paraphrase this as the human's words. -->
+
+## What changed and why (root cause)
+
+<!-- Link the scoped issue (Refs # followed by its number). Explain the change, impact and root cause; note compatibility effects or limitations where relevant. -->
 Refs #
 
-## Summary
+## Prior work checked
 
-<!-- What changed? Keep this factual and bounded. -->
-
-## User or developer impact
-
-<!-- What observable problem or maintenance burden does this solve? -->
-
-## Design and ownership
-
-- Owning boundary (core, extension, provider data/runtime, TUI, Serve, release/docs):
-- Why the change does not belong in a smaller or external boundary:
-- Compatibility or migration effect:
-
-## Risk
-
-- Authority/security/privacy impact:
-- Persistence/data-loss impact:
-- Cancellation/retry/ambiguous-effect impact:
-- Performance/resource impact:
-- Rollback or disable path:
+<!-- Search issues and PRs (including closed) and docs first. Link relevant work and say what you found, or state no match. -->
 
 ## Verification
 
-<!-- List only checks actually run, with observed results. -->
+<!-- PASS / FAIL / NOT RUN — exact commands and observed results, or why not run. Include relevant regression/tests, formatting and docs checks; state if the full gate was not run. Never claim unperformed work. -->
 
-- [ ] Focused regression
-- [ ] Relevant crate/package tests
-- [ ] Formatting and lint
-- [ ] Documentation/protocol fixtures updated where applicable
-- [ ] Full release gate, or an explicit reason it was not run
+## Security check
 
-## Repository hygiene
+<!-- One short paragraph, even for docs-only changes: what was checked and found for new network calls, process spawning/shell commands, file or credential access outside the change, obfuscated/encoded code, dependencies and CI/workflow/release changes. Keep private data out; suspected vulnerabilities go to SECURITY.md privately. -->
 
-- [ ] No credentials, sessions, private paths, raw benchmark homes/caches, local notes, or unrelated generated files
-- [ ] No new package/provider-name privilege in a generic core path
-- [ ] Generated/vendored output has a documented source and regeneration check
-- [ ] A touched god object became smaller or delegated to a cohesive owner, or the exception is explained
-- [ ] Security-sensitive findings use private reporting rather than this PR
+## AI provenance
 
-## AI assistance
-
-<!-- Follow CONTRIBUTING.md: disclose material AI assistance and provide inspected prompt context when useful, with private information removed. -->
+<!-- Tool/agent, exact model name or ID (including fine-tunes and uncensored or abliterated variants), reasoning effort; "not exposed" for unavailable details, or "none" for no AI assistance. Follow CONTRIBUTING.md for redacted prompt context. -->

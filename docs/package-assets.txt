@@ -53,6 +53,7 @@ text AGENTS.md
 text CHANGELOG.md
 text CLAUDE.md
 text CONTRIBUTING.md
+text CODE_OF_CONDUCT.md
 text LICENSE
 text README.md
 text SECURITY.md

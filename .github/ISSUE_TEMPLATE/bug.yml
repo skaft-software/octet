@@ -8,12 +8,29 @@ body:
     attributes:
       value: |
         Thanks for taking the time to report a problem. Never include credentials, private prompts, repository contents, or unredacted session files. If this may be a vulnerability, stop and use private security reporting instead.
+  - type: textarea
+    attributes:
+      label: In your own words
+      description: 1–3 sentences written or explicitly approved by the human about why this matters. Agents must never invent or paraphrase this as the human's words.
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Searched existing issues
+      description: Check [issues](https://github.com/skaft-software/octet/issues?q=is%3Aissue), [PRs](https://github.com/skaft-software/octet/pulls?q=is%3Apr) (including closed), and documentation first.
+      options:
+        - label: I searched open and closed issues and PRs, and documentation, for the same behavior.
+          required: true
+  - type: textarea
+    attributes:
+      label: Search results and related work
+      description: Link related issues, PRs or docs and say what you found, or state no match.
+    validations:
+      required: true
   - type: checkboxes
     attributes:
       label: Intake checks
       options:
-        - label: I searched open and closed issues for the same behavior.
-          required: true
         - label: I reproduced this on the current supported release or a named commit.
           required: true
         - label: This report does not disclose a suspected security vulnerability.
@@ -69,3 +86,9 @@ body:
     attributes:
       label: Additional context
       description: Note workarounds, frequency, regressions from a prior version, or related issues.
+  - type: textarea
+    attributes:
+      label: AI provenance
+      description: Optional — tool/agent, exact model name or ID (including fine-tunes and uncensored or abliterated variants), reasoning effort; "not exposed" for unavailable details, or "none" for no AI assistance.
+    validations:
+      required: false

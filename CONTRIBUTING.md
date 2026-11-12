@@ -4,6 +4,8 @@ Focused bug fixes, protocol and provider improvements, terminal UX work, tests
 and documentation corrections are welcome. The project is pre-1.0, so keep
 changes small and back them with evidence.
 
+Please follow the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## How changes reach main
 
 Send your change as a pull request. It is reviewed as untrusted code, and CI
@@ -154,17 +156,32 @@ third-party notices and accurate version labels on benchmark results.
 
 ## AI-assisted contributions
 
-AI-generated issues and pull requests are welcome and will be considered. If AI
-helped produce your contribution, include a brief, genuine note from you about
-what you observed, what you care about, or why the change matters. Fully
-machine-generated requests with no sign of human review or diligence may be
-treated as spam, and I may not respond to messages that look AI-generated when I
-judge them unimportant or spam.
+AI-assisted issues and pull requests are welcome. The human contributor is
+accountable for what their agent submits; requests without genuine human review
+or diligence may be treated as spam.
 
-Please also include the relevant prompts you used to reach the conclusions in an
-issue or to generate a pull request, with enough context to show what you
-verified yourself. Redact secrets and private information. Requests for the
-prompts behind a contribution are welcome too.
+- **In your own words (required):** 1–3 sentences written or explicitly approved
+  by the human about why this matters. Agents must never invent or paraphrase
+  this as the human's words.
+- **AI provenance (required):** name the tool/agent, exact model name or ID
+  (including fine-tunes and uncensored or abliterated variants), and reasoning
+  effort. Use "not exposed" for any detail the tool does not expose; human-written
+  contributions without AI assistance say "none".
+- **Prior work checked:** search existing issues and PRs, including closed ones,
+  and documentation first. Say what you found and link relevant work, or state
+  that no match was found.
+- **Verification:** report PASS / FAIL / NOT RUN with the exact commands and
+  observed results (or why not run). Never claim tests, reproduction, review or
+  measurements that did not happen.
+
+**Security check (required at any risk level):** write one short paragraph saying
+what the agent checked for and what it found: new network calls, process spawning
+or shell commands, file or credential access outside the change, obfuscated or
+encoded code, new dependencies, and CI/workflow/release changes. Use a plain
+statement, not a form; for an unassisted contribution, describe your own check.
+
+Include relevant prompts and enough context to show what you verified yourself;
+redact secrets and private information. Requests for prompt context are welcome.
 
 ## Commits and pull requests
 

@@ -9,12 +9,29 @@ body:
     attributes:
       value: |
         Use this form for a bounded proposal with evidence. Broad ideas should start in Discussions. Acceptance for discussion is not a promise to merge or schedule the work.
+  - type: textarea
+    attributes:
+      label: In your own words
+      description: 1–3 sentences written or explicitly approved by the human about why this matters. Agents must never invent or paraphrase this as the human's words.
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Searched existing issues
+      description: Check [issues](https://github.com/skaft-software/octet/issues?q=is%3Aissue), [PRs](https://github.com/skaft-software/octet/pulls?q=is%3Apr) (including closed), and documentation first.
+      options:
+        - label: I searched open and closed issues and PRs, documentation, Discussions, and ROADMAP.md.
+          required: true
+  - type: textarea
+    attributes:
+      label: Search results and related work
+      description: Link related issues, PRs, docs or discussions and say what you found, or state no match.
+    validations:
+      required: true
   - type: checkboxes
     attributes:
       label: Intake checks
       options:
-        - label: I searched existing issues, Discussions, and ROADMAP.md.
-          required: true
         - label: I can describe the user problem independently of my preferred implementation.
           required: true
         - label: I have not started a large implementation that depends on this being accepted.
@@ -80,3 +97,9 @@ body:
     attributes:
       label: Compatibility, security, and maintenance impact
       description: Note API/version effects, authority, data migration, new dependencies, generated-vs-hand-maintained surface, and expected code deletion or complexity.
+  - type: textarea
+    attributes:
+      label: AI provenance
+      description: Optional — tool/agent, exact model name or ID (including fine-tunes and uncensored or abliterated variants), reasoning effort; "not exposed" for unavailable details, or "none" for no AI assistance.
+    validations:
+      required: false
