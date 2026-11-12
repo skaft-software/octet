@@ -219,10 +219,11 @@ fn list(store: &SessionStore, query: Option<&str>) -> anyhow::Result<()> {
         return Ok(());
     }
     let terminal = crate::output::stdout_is_terminal();
-    crate::output::stdout_table_line("ID\tNAME\tTAGS\tMODIFIED");
+    let mut table = vec!["ID\tNAME\tTAGS\tMODIFIED".to_owned()];
     for session in sessions {
-        crate::output::stdout_table_line(format_list_row(&session, SystemTime::now(), terminal));
+        table.push(format_list_row(&session, SystemTime::now(), terminal));
     }
+    crate::output::stdout_table(&table, 1);
     Ok(())
 }
 
@@ -263,14 +264,14 @@ fn search(store: &SessionStore, query: &str, limit: usize) -> anyhow::Result<()>
         crate::output::stdout_line(format!("No session entries match {query:?}."));
     } else {
         let terminal = crate::output::stdout_is_terminal();
-        crate::output::stdout_table_line("SESSION\tENTRY\tROLE\tTEXT");
+        let mut table = vec!["SESSION\tENTRY\tROLE\tTEXT".to_owned()];
         for hit in &outcome.hits {
             let role = match hit.kind {
                 EntryKind::User => "user",
                 EntryKind::Assistant => "assistant",
             };
             let text = hit.text.replace('\n', " ");
-            crate::output::stdout_table_line(format!(
+            table.push(format!(
                 "{}\t{}\t{}\t{}",
                 crate::output::table_field(&hit.session_id, terminal),
                 crate::output::table_field(&hit.entry_id, terminal),
@@ -278,6 +279,7 @@ fn search(store: &SessionStore, query: &str, limit: usize) -> anyhow::Result<()>
                 crate::output::table_field(&text, terminal),
             ));
         }
+        crate::output::stdout_table(&table, 3);
     }
     if outcome.index_changed {
         crate::output::stderr_line(format!(

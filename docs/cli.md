@@ -169,6 +169,11 @@ endpoints](providers.md#local-and-custom-endpoints).
 
 ## Sessions and diagnostics
 
+`extension list`, `--list-models`, `sessions list` and `sessions search` align
+columns by display width on terminals. Descriptive text is ellipsized to fit;
+long identifiers wrap without losing their values. Redirected output keeps the
+full tab-separated rows and the same headers.
+
 ```text
 octet --continue  # -c also continues
 octet -r "prompt after choosing a session"  # boolean resume picker

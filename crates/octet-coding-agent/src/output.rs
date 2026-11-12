@@ -459,11 +459,97 @@ pub(crate) fn stdout_line(value: impl Display) {
     write_line(io::stdout().lock(), &value.to_string(), terminal);
 }
 
-pub(crate) fn stdout_table_line(value: impl Display) {
+/// Render trusted TSV separators, with every field sanitized before measuring.
+/// Only the descriptive column loses text; unusually long identifiers wrap.
+fn write_table(
+    mut writer: impl Write,
+    rows: &[String],
+    description: usize,
+    terminal: bool,
+    width: usize,
+) {
+    if !terminal {
+        for row in rows {
+            let _ = writeln!(writer, "{}", safe_table_line(row, false));
+        }
+        return;
+    }
+    let policy = sexy_tui_rs::WidthPolicy::default();
+    let rows = rows
+        .iter()
+        .map(|row| {
+            row.split('\t')
+                .map(|field| safe_line(field, true).into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut widths = vec![0; rows[0].len()];
+    for row in &rows {
+        for (column, field) in row.iter().enumerate() {
+            widths[column] = widths[column].max(policy.line_width(field));
+        }
+    }
+    let gap = 2;
+    // Very narrow terminals use stacked fields rather than dropping identifiers.
+    if width < widths.len() * 2 + (widths.len() - 1) * gap {
+        for (index, row) in rows.iter().enumerate() {
+            for (column, field) in row.iter().enumerate() {
+                let lines = if index > 0 && column == description {
+                    vec![policy.truncate(field, width, "…")]
+                } else {
+                    policy.wrap(field, width)
+                };
+                for line in lines {
+                    let _ = writeln!(writer, "{line}");
+                }
+            }
+        }
+        return;
+    }
+    let budget = width - (widths.len() - 1) * gap;
+    let fixed = widths.iter().sum::<usize>() - widths[description];
+    widths[description] = widths[description].min(
+        budget
+            .saturating_sub(fixed)
+            .max(policy.line_width(&rows[0][description]).max(2)),
+    );
+    while widths.iter().sum::<usize>() > budget {
+        let excess = widths.iter().sum::<usize>() - budget;
+        let column = (0..widths.len())
+            .max_by_key(|&column| widths[column])
+            .unwrap();
+        widths[column] -= excess.div_ceil(widths.len()).min(widths[column] - 2);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let cells = row
+            .iter()
+            .enumerate()
+            .map(|(column, field)| {
+                if index > 0 && column == description {
+                    vec![policy.truncate(field, widths[column], "…")]
+                } else {
+                    policy.wrap(field, widths[column])
+                }
+            })
+            .collect::<Vec<_>>();
+        for line in 0..cells.iter().map(Vec::len).max().unwrap_or(0) {
+            let mut output = String::new();
+            for (column, cell) in cells.iter().enumerate() {
+                let text = cell.get(line).map(String::as_str).unwrap_or("");
+                output.push_str(text);
+                if column + 1 < widths.len() {
+                    output.push_str(&" ".repeat(widths[column] - policy.line_width(text) + gap));
+                }
+            }
+            let _ = writeln!(writer, "{}", output.trim_end());
+        }
+    }
+}
+
+pub(crate) fn stdout_table(rows: &[String], description: usize) {
     let terminal = stdout_is_terminal();
-    let value = value.to_string();
-    let value = safe_table_line(&value, terminal);
-    let _ = writeln!(io::stdout().lock(), "{value}");
+    let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
+    write_table(io::stdout().lock(), rows, description, terminal, width);
 }
 
 pub(crate) fn routine_diagnostic(value: impl Display) {
@@ -647,6 +733,65 @@ mod tests {
         assert!(!rendered.contains('\t'));
         assert!(rendered.contains("^["));
         assert!(rendered.contains("<BEL>"));
+    }
+
+    #[test]
+    fn table_terminal_columns_align_by_cells_and_only_description_is_ellipsized() {
+        let rows = vec![
+            "ID\tNAME\tTEXT".into(),
+            "a\t界\tA long description with combining e\u{301} and emoji 👩‍💻".into(),
+            "long-id\te\u{301}\tshort".into(),
+        ];
+        let mut bytes = Vec::new();
+        write_table(&mut bytes, &rows, 2, true, 28);
+        let text = String::from_utf8(bytes).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert!(lines[1].contains('…'), "{text}");
+        for (line, name) in lines.iter().zip(["NAME", "界", "e\u{301}"]) {
+            let start = line.find(name).unwrap();
+            assert_eq!(unicode_width::UnicodeWidthStr::width(&line[..start]), 9);
+            assert!(unicode_width::UnicodeWidthStr::width(*line) <= 28);
+        }
+        assert!(!text.contains('\t'));
+    }
+
+    #[test]
+    fn table_pipe_keeps_exact_tsv_and_neutralizes_controls() {
+        let rows = vec!["ID\tNAME\tTEXT".into(), "a\t界\tfull description".into()];
+        let mut bytes = Vec::new();
+        write_table(&mut bytes, &rows, 2, false, 8);
+        assert_eq!(
+            bytes,
+            "ID\tNAME\tTEXT\na\t界\tfull description\n".as_bytes()
+        );
+        let mut bytes = Vec::new();
+        write_table(&mut bytes, &["id\tname\tbad\x1b\n".into()], 2, false, 80);
+        assert_eq!(bytes, b"id\tname\tbad^[<U+000A>\n");
+    }
+
+    #[test]
+    fn table_terminal_long_fixed_fields_wrap_without_losing_identifiers() {
+        let rows = vec![
+            "ID\tNAME\tTAGS\tMODIFIED".into(),
+            format!(
+                "{}\t{}\t{}\tnow",
+                "x".repeat(120),
+                "description".repeat(20),
+                "tag".repeat(30)
+            ),
+        ];
+        for width in [20, 80, 120] {
+            let mut bytes = Vec::new();
+            write_table(&mut bytes, &rows, 1, true, width);
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                text.lines()
+                    .all(|line| unicode_width::UnicodeWidthStr::width(line) <= width),
+                "{width}: {text}"
+            );
+            assert_eq!(text.matches('x').count(), 120);
+            assert_eq!(text.matches('…').count(), 1);
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@
 ### Fixed
 
 - Thinking and tool toggles stay independent. ([#724](https://github.com/skaft-software/octet/pull/724) by [@gafiatulin](https://github.com/gafiatulin))
+- List commands print aligned tables in a terminal; piped output stays tab-separated.
 - `octet migrate pi` shows styled text on terminals and plain text with `NO_COLOR`, `--color never` or pipes.
 - Extension editors, footers and widgets opened at startup appear once, in the right theme; the native composer stays editable and keeps your draft.
 - A Pi footer set at startup paints without waiting for a keystroke, and shows the branch of ancestor repositories and worktrees.
