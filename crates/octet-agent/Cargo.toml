@@ -38,7 +38,7 @@ getrandom = "0.4"
 sha2 = "0.10"
 subtle = "2"
 tempfile = "3"
-flate2 = "=1.1.10"
+flate2 = "=1.1.11"
 tar = "=0.4.46"
 base64 = "0.23"
 
