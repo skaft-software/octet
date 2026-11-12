@@ -722,8 +722,23 @@ impl RemoteUi {
         } else {
             text.len()
         };
+        let mount = &self.mounts[index];
+        let held_native_echo = mount.held.is_some()
+            && mount.view.native_editor
+            && write.text.as_deref() == Some(mirror.text.as_str())
+            && mount
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.composer_revision == mirror.revision);
         let native_changed = if write.paste {
             None
+        } else if held_native_echo {
+            // A palette fence is not a newer text decision. The synchronous
+            // native mutation may have completed before its composer/set
+            // checkpoint reaches the recovery mirror. Ask for that checkpoint
+            // without replacing the component's newer draft/caret with the
+            // mirror; a real native user edit still takes the ordinary path.
+            Some(false)
         } else {
             match self.mounts[index].editors.replace_composer(&text, cursor) {
                 Ok(changed) => changed,

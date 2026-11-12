@@ -89,10 +89,15 @@ each held mount:
 While an editor is held, its checkpoints are acknowledged and never refused. A
 programmatic draft lands in the native composer if the user has not typed since
 the editor last matched it. Otherwise the user's draft wins and is sent to the
-editor again. A component that never answers is revealed one second after
-publication, so a handoff cannot strand the custom chrome. Only the editor path
-is causally fenced. Other placements rely on frame order after the palette
-update, so a frame already in flight when the palette changed may be shown once.
+editor again. For a bound native editor, a palette-only fence requests the current
+checkpoint without replacing its model with the recovery mirror: a synchronous
+native edit may already have completed while its checkpoint is still in flight.
+The draft and caret reach the recovery mirror only through that checkpoint; a
+newer native user edit still takes precedence. A component that never answers is
+revealed one second after publication, so a handoff cannot strand the custom
+chrome. Only the editor path is causally fenced. Other placements rely on frame
+order after the palette update, so a frame already in flight when the palette
+changed may be shown once.
 The resource phase keeps pumping input and UI until the released handoff settles
 or reaches that fallback; it does not report readiness with a hidden editor.
 

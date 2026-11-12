@@ -5,6 +5,9 @@
 ### Fixed
 
 - Reload acceptance tests use canonical temporary directories on macOS.
+- Native custom editors retain their initial draft and caret across the startup
+  theme handoff, including edits whose recovery checkpoint is still in flight.
+  Text typed into the native composer during startup still takes precedence.
 
 ## [0.10.4] - Release candidate
 
