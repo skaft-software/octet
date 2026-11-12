@@ -212,7 +212,9 @@ so opting out of credential scrubbing doesn't widen that boundary. JSONL is
 Octet's whole durable graph, **not Pi output**; HTML is view-only. Import creates
 a new private session from supported Octet or Pi v3 data, refusing unsupported
 semantics and never granting imported extension/effect authority. Sharing requires
-review and explicit confirmation of an exact redacted snapshot; `--yes` authorizes
+review and explicit confirmation of an exact redacted snapshot. The review path,
+SHA-256 and redaction count each print on their own control-safe line in both
+terminals and pipes; `--yes` authorizes
 an **unlisted**, not private, GitHub gist. Anyone with its link can read it.
 No upload is attempted before approval, and cancellation cannot undo an accepted
 publication. `doctor` runs
@@ -225,6 +227,9 @@ read-mostly checks without starting an agent or an extension. See
 octet eval run SUITE [--artifact-dir DIR] [--baseline REPORT.json]
 octet eval run SUITE --model-profile /absolute/private-model.json
 ```
+
+The console report prints its summary, backend, cases and totals on separate
+lines in both terminals and pipes, with untrusted controls neutralized.
 
 The default is a harness-owned scripted fixture, **not** a model benchmark.
 `--model-profile` explicitly selects an independently running local model

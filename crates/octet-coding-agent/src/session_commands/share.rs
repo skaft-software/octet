@@ -210,12 +210,9 @@ pub(super) fn share_cli(store: &SessionStore, id: &str, yes: bool) -> anyhow::Re
     use std::io::{BufRead as _, IsTerminal as _, Read as _};
     let prepared: super::PreparedShare = super::prepare_share(store, id)?;
     crate::output::stdout_line(prepared.warning());
-    crate::output::stdout_line(format!(
-        "Review: {}\nSHA-256: {}\nRedacted values: {}",
-        prepared.package_path().display(),
-        prepared.sha256(),
-        prepared.redaction_count()
-    ));
+    crate::output::stdout_line(format!("Review: {}", prepared.package_path().display()));
+    crate::output::stdout_line(format!("SHA-256: {}", prepared.sha256()));
+    crate::output::stdout_line(format!("Redacted values: {}", prepared.redaction_count()));
     let confirmed = if yes {
         true
     } else {

@@ -657,7 +657,7 @@ fn run_suite(
         MAX_DOCUMENT_BYTES,
     )?;
 
-    crate::output::stdout_line(render_report(&report));
+    crate::output::stdout_multiline(render_report(&report));
     crate::output::stdout_line(format!("Artifacts: {}", run_dir.display()));
     // The harness is a measurement tool: a failing *case* is an observation, so
     // the command succeeds and the failure lives in the artifact. Only
