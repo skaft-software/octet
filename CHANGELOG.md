@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.10.4] - Release candidate
+## [0.10.4] - 2026-11-12
 
 ### Changed
 
