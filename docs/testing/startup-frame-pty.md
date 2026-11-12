@@ -136,10 +136,13 @@ python3 scripts/test-reload-pty.py --binary /absolute/path/to/octet
 This separate Unix harness does not build or install anything. With disposable
 HOME, workspace and session storage, it checks `/reload --force` against an
 unchanged executable, an atomic replacement, a retargeted launch symlink, and a
-retry after candidate-probe refusal. Each successful force must bootstrap a fresh
-app in the same PID, resume exactly the original session, accept editor input,
-and restore terminal modes on exit. The watcher is disabled so no automatic pass
-can substitute for the explicit command. Reports include the tested binary hash;
+retry after candidate-probe refusal, a missing binary, and an exec failure caused
+by a removed private shebang interpreter. Each successful force must bootstrap a
+fresh app in the same PID, resume exactly the original session, show its success
+notice, accept editor input, and restore terminal modes on exit. Failures must
+show a stage-specific error with a retry action, keep the editor usable, and
+allow a successful retry. Neither outcome is written to session history. The
+watcher is disabled so no automatic pass can substitute for the explicit command. Reports include the tested binary hash;
 no live provider is called. Running-worker detachment is covered independently by
 `running_host_worker_refuses_plain_reload_and_force_detaches_it` in the interactive
 resource-reload tests. To test an upgrade from an older binary into a new build,

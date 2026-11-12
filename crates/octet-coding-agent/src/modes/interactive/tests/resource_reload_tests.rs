@@ -122,6 +122,78 @@ export default pi => {
 }
 
 #[test]
+fn restart_notice_is_transient_and_bound_to_the_resumed_session() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let session = app.agent.session();
+    let id = crate::app::bootstrap::terminal_goal_session_id(session).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.hydrate(session).unwrap();
+    RestartNotice::Success("different-session".into()).show(&mut shell, session);
+    assert!(!shell.debug_snapshot().contains("reload succeeded"));
+    let mut pending = Some(RestartNotice::Success(id));
+    for _ in 0..2 {
+        if let Some(notice) = pending.take() {
+            notice.show(&mut shell, session);
+        }
+        shell.render();
+    }
+    let visible = shell.debug_snapshot();
+    assert_eq!(
+        visible
+            .matches("reload succeeded: restarted octet and resumed this session")
+            .count(),
+        1,
+        "{visible}"
+    );
+    assert!(!std::fs::read_to_string(session.path())
+        .unwrap()
+        .contains("reload succeeded"));
+    // An ordinary later resume rehydrates only durable history.
+    shell.hydrate(session).unwrap();
+    assert!(!shell.debug_snapshot().contains("reload succeeded"));
+
+    RestartNotice::Failure("reload failed: restart exec; retry /reload --force".into())
+        .show(&mut shell, session);
+    assert_eq!(shell.debug_snapshot().matches("reload failed:").count(), 1);
+    shell.hydrate(session).unwrap();
+    assert!(!shell.debug_snapshot().contains("reload failed"));
+}
+
+#[tokio::test]
+async fn forced_reload_capture_failure_survives_hydration_once() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let session = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    shell.cede_terminal_input();
+    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+    let mut reload = crate::reload::ReloadSupervisor::new(Default::default());
+    let plan = reload.force();
+    let mut pending = None;
+    let app = apply_live_reload_plan(
+        app,
+        &mut shell,
+        &mut input,
+        &mut reload,
+        plan,
+        None,
+        &mut pending,
+    )
+    .await
+    .unwrap();
+    assert!(pending.is_none());
+    assert_eq!(app.agent.session().path(), session);
+    let visible = shell.debug_snapshot();
+    assert_eq!(visible.matches("reload failed:").count(), 1, "{visible}");
+    assert!(visible.contains("executable capture"), "{visible}");
+    assert!(visible.contains("retry /reload --force"), "{visible}");
+    assert!(!visible.contains("reload succeeded"), "{visible}");
+    assert!(!visible.contains("reload pass #"), "{visible}");
+    assert!(!std::fs::read_to_string(session)
+        .unwrap()
+        .contains("reload failed"));
+}
+
+#[test]
 fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
     use crate::reload::{ReloadComponent, ReloadSettings, ReloadSupervisor};
     let mut reload = ReloadSupervisor::new(ReloadSettings::default());

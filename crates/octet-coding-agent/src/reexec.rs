@@ -155,6 +155,17 @@ const PROBE_MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 /// earlier re-exec-capable build could not replay.
 pub(crate) const SESSION_FORMAT_VERSION: u32 = 1;
 
+// One-shot UI feedback travels with the existing exec/resume handoff, never in
+// session JSONL. Set only on Command, so a failed exec cannot leave a success
+// marker in this process. Consume before startup can launch extension children.
+const RESTART_SESSION_ENV: &str = "OCTET_RELOAD_SESSION";
+
+pub(crate) fn take_restart_session() -> Option<String> {
+    let session = std::env::var(RESTART_SESSION_ENV).ok();
+    std::env::remove_var(RESTART_SESSION_ENV);
+    session
+}
+
 /// User-facing notice strings, in one place so they can be pinned by tests.
 pub(crate) mod notice {
     use super::{BlockedReason, ExecutableRedirect, RefusalReason};
@@ -1011,13 +1022,6 @@ pub(crate) enum ReexecDecision {
     /// Candidate validation or preparation failed; the current process is
     /// still fully live.
     Blocked {
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "Retain the typed blocked cause alongside its user-safe notice for diagnostic consumers."
-            )
-        )]
         reason: BlockedReason,
         notice: String,
     },
@@ -1051,13 +1055,6 @@ pub(crate) enum ReexecDecision {
     /// terminal usable.
     ExecFailed {
         notice: String,
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "Retain the original exec failure for diagnostics; the UI shows its safe notice."
-            )
-        )]
         source: std::io::Error,
     },
 }
@@ -1081,6 +1078,69 @@ impl ReexecDecision {
     pub(crate) fn exec_failed(source: std::io::Error) -> Self {
         let notice = notice::exec_failed(&source);
         Self::ExecFailed { notice, source }
+    }
+
+    /// Bounded, actionable forced-restart feedback. Diagnostic payloads can
+    /// contain private paths or callback errors; none belong in this notice.
+    pub(crate) fn restart_failure_notice(&self) -> String {
+        let (stage, action) = match self {
+            Self::Blocked { reason, .. } => match reason {
+                BlockedReason::ExecutablePathUnresolved(_)
+                | BlockedReason::ExecutableUnreadable { .. }
+                | BlockedReason::ExecutableNotExecutable { .. } => (
+                    "executable lookup",
+                    "finish or repair the octet installation, then retry /reload --force",
+                ),
+                BlockedReason::ProbeSpawnFailed(_)
+                | BlockedReason::ProbeExited { .. }
+                | BlockedReason::ProbeTimedOut { .. }
+                | BlockedReason::ProbeMalformed(_)
+                | BlockedReason::ProbeIncompatible(_) => (
+                    "compatibility probe",
+                    "install a compatible octet binary, then retry /reload --force",
+                ),
+                BlockedReason::CandidateChanged => (
+                    "executable verification",
+                    "wait for the update to finish, then retry /reload --force",
+                ),
+                BlockedReason::DurableHeadFailed(_) => (
+                    "session persistence",
+                    "check session storage permissions and free space, then retry /reload --force",
+                ),
+                BlockedReason::ExtensionShutdownFailed(_) => (
+                    "extension shutdown",
+                    "stop the extensions with /extensions, then retry /reload --force",
+                ),
+                BlockedReason::DescriptorHygieneFailed(_) => (
+                    "descriptor handoff",
+                    "exit octet and resume this session manually",
+                ),
+                BlockedReason::ResumeArgvInvariant(_) => (
+                    "resume handoff",
+                    "exit octet and resume this session manually",
+                ),
+            },
+            Self::ExecFailed { source, .. } => match source.kind() {
+                std::io::ErrorKind::Unsupported => (
+                    "platform support",
+                    "restart octet manually and resume this session; forced restart requires Unix",
+                ),
+                _ => (
+                    "exec",
+                    "check the octet installation and executable permissions, then retry /reload --force",
+                ),
+            },
+            Self::Refused { .. } => (
+                "session safety check",
+                "wait for active work to finish and ensure this session is saved, then retry /reload --force",
+            ),
+            Self::ConfirmationRequired { .. } => (
+                "executable consent",
+                "retry /reload --force to confirm the installed binary",
+            ),
+            Self::ResourcesOnly | Self::Ready(_) => unreachable!("restart has not failed"),
+        };
+        format!("reload failed: restart {stage}; {action}")
     }
 
     /// The notice to present, or `None` for `Ready` (whose notice comes from
@@ -1110,6 +1170,7 @@ pub(crate) struct ReexecPlan {
     session_id: String,
     version: String,
     probed_generation: BinaryGeneration,
+    force_restart: bool,
     /// Live workers this plan detaches, or `0` when nothing is detached.
     #[cfg(test)]
     detached_workers: usize,
@@ -1181,7 +1242,12 @@ impl ReexecPlan {
     /// `io::Error`; the caller re-enters the TUI, rebuilds extension children,
     /// and leaves the terminal usable.
     pub(crate) fn exec(self) -> ReexecDecision {
-        self.exec_with(platform_exec)
+        let restart_session = self.force_restart.then(|| self.session_id.clone());
+        self.exec_with(|exe, argv| platform_exec(exe, argv, restart_session.as_deref()))
+    }
+
+    pub(crate) fn is_forced(&self) -> bool {
+        self.force_restart
     }
 
     /// The injected-exec test seam behind [`Self::exec`].
@@ -1451,6 +1517,7 @@ impl ReexecController {
             session_id: session_id.to_owned(),
             version: payload.version,
             probed_generation: probed,
+            force_restart: options.force_restart,
             #[cfg(test)]
             detached_workers: if options.detach_background_workers {
                 safety.background_workers
@@ -1506,7 +1573,11 @@ impl ReexecController {
 /// the replacement is identical. Only stdin/stdout/stderr are intentionally
 /// inherited (see [`ensure_close_on_exec`]). Other hosts return an unsupported
 /// error, which the caller reports through `ExecFailed` and recovers from.
-pub(crate) fn platform_exec(exe: &Path, argv: &[OsString]) -> std::io::Error {
+pub(crate) fn platform_exec(
+    exe: &Path,
+    argv: &[OsString],
+    restart_session: Option<&str>,
+) -> std::io::Error {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1515,11 +1586,15 @@ pub(crate) fn platform_exec(exe: &Path, argv: &[OsString]) -> std::io::Error {
             command.arg0(arg0);
         }
         command.args(argv.iter().skip(1));
+        command.env_remove(RESTART_SESSION_ENV);
+        if let Some(session) = restart_session {
+            command.env(RESTART_SESSION_ENV, session);
+        }
         command.exec()
     }
     #[cfg(not(unix))]
     {
-        let _ = (exe, argv);
+        let _ = (exe, argv, restart_session);
         std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "hot re-exec is implemented only on Unix hosts",

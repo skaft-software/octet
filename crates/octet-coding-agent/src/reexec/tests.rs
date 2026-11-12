@@ -224,6 +224,75 @@ async fn ready_plan(
 }
 
 #[test]
+fn restart_marker_is_consumed_before_child_launch() {
+    if std::env::var_os(RESTART_SESSION_ENV).is_some() {
+        assert_eq!(take_restart_session().as_deref(), Some(SESSION));
+        assert_eq!(take_restart_session(), None);
+        assert!(std::env::var_os(RESTART_SESSION_ENV).is_none());
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "reexec::tests::restart_marker_is_consumed_before_child_launch",
+        ])
+        .env(RESTART_SESSION_ENV, SESSION)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn forced_restart_errors_name_the_stage_and_action_without_private_details() {
+    let private = "private prompt token=secret\n\u{1b}[31m";
+    for (decision, stage, action) in [
+        (
+            ReexecDecision::blocked(BlockedReason::ExecutableUnreadable {
+                path: PathBuf::from(private),
+                detail: private.into(),
+            }),
+            "executable lookup",
+            "repair the octet installation",
+        ),
+        (
+            ReexecDecision::blocked(BlockedReason::ProbeMalformed(private.into())),
+            "compatibility probe",
+            "install a compatible octet binary",
+        ),
+        (
+            ReexecDecision::blocked(BlockedReason::DurableHeadFailed(private.into())),
+            "session persistence",
+            "check session storage",
+        ),
+        (
+            ReexecDecision::exec_failed(std::io::Error::other(private)),
+            "exec",
+            "check the octet installation",
+        ),
+        (
+            ReexecDecision::exec_failed(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                private,
+            )),
+            "platform support",
+            "restart octet manually",
+        ),
+    ] {
+        let notice = decision.restart_failure_notice();
+        assert!(notice.starts_with("reload failed: restart "), "{notice}");
+        assert!(notice.contains(stage), "{notice}");
+        assert!(notice.contains(action), "{notice}");
+        assert!(!notice.contains("private"), "{notice}");
+        assert!(!notice.contains("secret"), "{notice}");
+        assert!(!notice.chars().any(char::is_control), "{notice}");
+    }
+}
+
+#[test]
 fn generation_of_an_unchanged_file_is_stable() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("octet");

@@ -4,7 +4,8 @@
 No build, installation, credentials or inference. Uses disposable HOME/workspace,
 loopback port 9, bounded PTY captures and only processes created by this script.
 Checks unchanged-image restart, atomic replacement, symlink retarget and retry
-following a failed candidate probe, preserving the exact session and terminal.
+following a failed candidate probe, a missing binary and a failed exec, preserving
+one-shot notices, the exact session and terminal.
 """
 import argparse
 import fcntl
@@ -64,6 +65,17 @@ def trial(binary, replacement_binary, case, output):
         f"exec {shlex.quote(str(replacement_binary))} \"$@\"\n"
     )
     replacement.chmod(0o755)
+    if case == "exec-failure":
+        # The candidate passes its probe without changing its own generation,
+        # but removes its private shebang interpreter. The final exec then
+        # returns ENOENT, exercising recovery rather than a pre-exec refusal.
+        interpreter = root / "probe-shell"
+        shutil.copy2("/bin/sh", interpreter)
+        replacement.write_text(
+            f"#!{interpreter}\n"
+            f"{shlex.quote(str(replacement_binary))} --internal-reexec-probe\n"
+            f"rm {shlex.quote(str(interpreter))}\n"
+        )
     env = {"HOME": str(home), "TMPDIR": str(root), "PATH": "/usr/bin:/bin",
            "TERM": "xterm-256color", "LANG": "en_US.UTF-8",
            "OCTET_COLOR_SCHEME": "dark", "OCTET_STARTUP_TRACE": "1"}
@@ -118,32 +130,59 @@ def trial(binary, replacement_binary, case, output):
             sessions = {path: path.read_bytes() for path in (root / "sessions").rglob("*.jsonl")}
             assert len(sessions) == 1, sessions
             session_path = next(iter(sessions))
-            if case == "retry":
-                invalid = root / "invalid-octet"
-                invalid.write_text("#!/bin/sh\nexit 1\n")
-                invalid.chmod(0o755)
-                os.replace(invalid, launch)
+            if case in ("retry", "missing", "exec-failure"):
+                if case == "retry":
+                    invalid = root / "invalid-octet"
+                    invalid.write_text("#!/bin/sh\nexit 1\n")
+                    invalid.chmod(0o755)
+                    os.replace(invalid, launch)
+                    stage = b"compatibility probe"
+                elif case == "missing":
+                    launch.unlink()
+                    stage = b"executable lookup"
+                else:
+                    os.replace(replacement, launch)
+                    stage = b"exec"
                 start = len(capture)
                 os.write(master, b"/reload --force\r")
-                wait_for(lambda: b"reload blocked" in capture[start:], "failed probe refusal")
-                assert boot_count() == 1, "failed probe restarted the application"
-                # A refusal notice precedes the in-process fallback. Wait for
-                # its completion frame before retrying, not while lifecycle
-                # ownership deliberately retains Enter as an editable draft.
-                def refusal_complete():
+                error = b"reload failed: restart " + stage
+                # Feedback must survive fallback/recovery hydration, not just
+                # flash before a rebuild or be printed to hidden stderr.
+                def failure_complete():
                     frame = capture[start:]
-                    position = frame.find(b"reload pass #0:")
+                    position = frame.find(error)
                     return position >= 0 and b"\x1b[?2026l" in frame[position:]
-                wait_for(refusal_complete, "refused pass completion")
+                wait_for(failure_complete, "restart failure notice")
+                assert b"retry /reload --force" in capture[start:], "missing recovery action"
+                expected_boots = 2 if case == "exec-failure" else 1
+                assert boot_count() == expected_boots, "unexpected failure restart"
+                assert b"reload succeeded" not in capture[start:], "failure reported success"
+                assert error not in (root / "stderr.log").read_bytes(), "error only on stderr"
+                os.write(master, b"FAILURE_EDITOR_MARKER")
+                wait_for(lambda: b"FAILURE_EDITOR_MARKER" in capture[start:],
+                         "editable session after failure", 5)
+                os.write(master, b"\x15")
+                assert b"reload failed" not in session_path.read_bytes(), "error persisted"
+                if case == "exec-failure":
+                    replacement.write_text(
+                        "#!/bin/sh\n"
+                        'if [ "$1" != "--internal-reexec-probe" ]; then\n'
+                        f"  printf '%s\\n' \"$@\" > {shlex.quote(str(marker))}\n"
+                        "fi\n"
+                        f"exec {shlex.quote(str(replacement_binary))} \"$@\"\n"
+                    )
+                    replacement.chmod(0o755)
             if case == "symlink":
                 link = root / "updated-link"
                 link.symlink_to(replacement)
                 os.replace(link, launch)
             elif case != "unchanged":
                 os.replace(replacement, launch)
+            boots_before = boot_count()
+            success_start = len(capture)
             os.write(master, b"/reload --force\r")
-            wait_for(lambda: boot_count() >= 2, "forced app restart")
-            assert boot_count() == 2, "forced reload booted more than once"
+            wait_for(lambda: boot_count() > boots_before, "forced app restart")
+            assert boot_count() == boots_before + 1, "forced reload booted more than once"
             if case != "unchanged":
                 assert marker.exists(), "the replacement image was not entered"
                 argv = marker.read_text().splitlines()
@@ -153,6 +192,9 @@ def trial(binary, replacement_binary, case, output):
             assert session_path.read_bytes().startswith(sessions[session_path]), "session was truncated"
             if binary == replacement_binary:
                 assert b"applying an explicit pass" not in capture, "generic forced-reload chatter"
+            wait_for(lambda: b"reload succeeded: restarted octet and resumed this session" in capture[success_start:],
+                     "restart success notice")
+            assert b"reload succeeded" not in session_path.read_bytes(), "notice persisted in session"
             start = len(capture)
             os.write(master, b"AFTER_RELOAD_MARKER")
             wait_for(lambda: b"AFTER_RELOAD_MARKER" in capture[start:], "resumed editable prompt", 5)
@@ -183,8 +225,8 @@ def main():
     parser.add_argument("--replacement-binary", type=Path,
                         help="replacement image for atomic, symlink and retry cases; defaults to --binary")
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--cases", nargs="+", choices=["unchanged", "atomic", "symlink", "retry"],
-                        default=["unchanged", "atomic", "symlink", "retry"])
+    parser.add_argument("--cases", nargs="+", choices=["unchanged", "atomic", "symlink", "retry", "missing", "exec-failure"],
+                        default=["unchanged", "atomic", "symlink", "retry", "missing", "exec-failure"])
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     replacement_binary = args.replacement_binary.resolve(strict=True) if args.replacement_binary else binary
@@ -194,13 +236,20 @@ def main():
               "replacement_binary": str(replacement_binary),
               "replacement_sha256": hashlib.sha256(replacement_binary.read_bytes()).hexdigest(),
               "cases": [], "not_qualified": ["Windows", "live providers", "attended desktop"]}
+    failures = []
     try:
         for case in args.cases:
-            result = trial(binary, replacement_binary, case, output)
+            try:
+                result = trial(binary, replacement_binary, case, output)
+            except AssertionError as error:
+                failures.append(error)
+                result = {"case": case, "passed": False, "error": str(error)}
             report["cases"].append(result)
             print(json.dumps(result), flush=True)
     finally:
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    if failures:
+        raise failures[0]
 
 
 if __name__ == "__main__":

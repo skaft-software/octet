@@ -80,6 +80,12 @@ Cancelling leaves the theme and session unchanged ([Theme discovery and
 format](themes.md)). Extensions can add commands, and each package's README
 lists its arguments.
 
+A successful `/reload --force` shows one green `reload succeeded` notice after
+restarting and resuming the same session. If it cannot restart, the session stays
+usable and one red `reload failed` notice names the stage and the next step.
+These notices are temporary: they are not saved in the session or replayed on a
+later resume.
+
 <details>
 <summary>How automatic reloads report</summary>
 

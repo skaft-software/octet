@@ -5970,19 +5970,27 @@ async fn reload_host_with_reexec<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    if host.may_prompt() && !cfg!(unix) {
+        let failure =
+            crate::reexec::ReexecDecision::exec_failed(std::io::ErrorKind::Unsupported.into());
+        return Ok((
+            app,
+            HostReloadResult::Problem(failure.restart_failure_notice()),
+        ));
+    }
     let Some(reexec) = reexec else {
         return Ok((app, HostReloadResult::Problem(
-            "reload: the current executable could not be captured; host replacement is unavailable".into(),
+            "reload failed: restart executable capture; repair the octet installation, then retry /reload --force".into(),
         )));
     };
     let session_id = match crate::app::bootstrap::terminal_goal_session_id(app.agent.session()) {
         Ok(id) => id,
-        Err(error) => {
+        Err(_) => {
             return Ok((
                 app,
-                HostReloadResult::Problem(format!(
-                    "reload: the active session cannot be resumed: {error}"
-                )),
+                HostReloadResult::Problem(
+                    "reload failed: restart session identity; save this session before retrying /reload --force".into(),
+                ),
             ));
         }
     };
@@ -6041,10 +6049,15 @@ where
     };
     match decision {
         crate::reexec::ReexecDecision::ResourcesOnly => Ok((app, HostReloadResult::Unchanged)),
-        crate::reexec::ReexecDecision::Refused { notice, .. }
-        | crate::reexec::ReexecDecision::Blocked { notice, .. }
-        | crate::reexec::ReexecDecision::ExecFailed { notice, .. }
-        | crate::reexec::ReexecDecision::ConfirmationRequired { notice, .. } => {
+        problem @ (crate::reexec::ReexecDecision::Refused { .. }
+        | crate::reexec::ReexecDecision::Blocked { .. }
+        | crate::reexec::ReexecDecision::ExecFailed { .. }
+        | crate::reexec::ReexecDecision::ConfirmationRequired { .. }) => {
+            let notice = if options.force_restart {
+                problem.restart_failure_notice()
+            } else {
+                problem.notice().unwrap().to_owned()
+            };
             Ok((app, HostReloadResult::Problem(notice)))
         }
         crate::reexec::ReexecDecision::Ready(plan) => {
@@ -6158,6 +6171,7 @@ async fn apply_live_reload_plan(
     let mut workers = busy_subagent_workers(&app);
     let mut detached_workers = false;
     let mut detach_notice = None;
+    let mut host_problem = None;
     // Only host-owned workers can be detached; a presentation-only count (no
     // delegation binding) keeps refusing.
     if workers > 0 && plan.is_forced() && app.agent.delegation_team_directory().is_some() {
@@ -6252,7 +6266,13 @@ async fn apply_live_reload_plan(
                     vec![problem],
                     plan.is_forced(),
                 ) {
-                    shell.notice(notice);
+                    if plan.is_forced() {
+                        // Resource fallback below hydrates the transcript. Hold
+                        // this outcome until that can no longer erase it.
+                        host_problem = Some(notice);
+                    } else {
+                        shell.notice(notice);
+                    }
                 }
                 plan.record(ReloadLayer::Host, LayerOutcome::Failed);
             }
@@ -6322,16 +6342,17 @@ async fn apply_live_reload_plan(
         );
         // Typed component feedback above owns automatic diagnostics. Rendering
         // the aggregate here would repeat failures and inspection warnings.
-        if report.forced {
+        // A host restart reports its outcome after startup (or after fallback
+        // hydration). Aggregate layer reports would duplicate that result and
+        // announce success before exec has actually happened.
+        if report.forced && !wants_host {
             for notice in report.notices() {
                 shell.notice(notice);
             }
-        }
-        // Background maintenance should not add success chatter to the chat.
-        // Explicit /reload --force still gets a completion report; plain
-        // /reload and --dry-run own their feedback at their command sites.
-        if report.forced {
             shell.notice(report.summary());
+        }
+        if let Some(problem) = host_problem {
+            shell.notice_error(problem);
         }
         update_status(shell, &app);
         shell.render();
@@ -13059,38 +13080,71 @@ fn startup_update_task(
     tasks
 }
 
+enum RestartNotice {
+    Success(String),
+    Failure(String),
+}
+
+impl RestartNotice {
+    fn show(self, shell: &mut InteractiveShell, session: &octet_agent::Session) {
+        match self {
+            Self::Success(expected)
+                if crate::app::bootstrap::terminal_goal_session_id(session)
+                    .ok()
+                    .as_deref()
+                    == Some(expected.as_str()) =>
+            {
+                shell.notice_success("reload succeeded: restarted octet and resumed this session");
+            }
+            Self::Success(_) => {}
+            Self::Failure(notice) => shell.notice_error(notice),
+        }
+    }
+}
+
 /// Interactive launch retaining the ordered `--models` patterns, including
 /// reasoning suffixes that cannot be recovered from a list of bare ModelIds.
 ///
-/// A `/reload` that finds a changed on-disk executable unwinds the TUI and
-/// re-execs into it. `exec` returns only on failure, so this wrapper rebuilds
-/// the TUI and extension children from the durable session head and keeps the
-/// current process usable.
+/// A host reload unwinds the TUI and re-execs into the installed executable.
+/// `exec` returns only on failure, so this wrapper rebuilds the TUI and extension
+/// children from the durable session head and reports the failure after hydration.
 pub(crate) async fn run_interactive_with_options(
     config: Config,
     mut options: crate::cli::parity::ParityOptions,
 ) -> anyhow::Result<()> {
     let mut config = config;
+    let mut restart_notice = crate::reexec::take_restart_session().map(RestartNotice::Success);
+    // Keep the running image's identity across exec-failure recovery. On Unix
+    // it may already be unlinked; recapturing it while rebuilding the TUI would
+    // disable subsequent retries even after the installation is repaired.
+    let mut reexec = crate::reexec::ReexecController::capture().ok();
     loop {
-        match run_interactive_once(config.clone(), options.clone()).await? {
+        match run_interactive_once(
+            config.clone(),
+            options.clone(),
+            restart_notice.take(),
+            &mut reexec,
+        )
+        .await?
+        {
             InteractiveExit::Finished => return Ok(()),
             InteractiveExit::Reexec(plan) => {
                 let session_id = plan.session_id().to_owned();
+                let forced = plan.is_forced();
                 // `exec` returns only when the image was not replaced: either
                 // the platform call failed or the final probe→exec re-check
                 // found the binary changed again. Both recover the same way.
-                let notice = match plan.exec() {
-                    crate::reexec::ReexecDecision::ExecFailed { notice, .. } => notice,
-                    decision => match decision.notice() {
-                        Some(notice) => notice.to_owned(),
-                        None => continue,
-                    },
+                let decision = plan.exec();
+                let notice = if forced {
+                    decision.restart_failure_notice()
+                } else {
+                    decision.notice().unwrap().to_owned()
                 };
                 // The terminal was left before `exec`. Re-entering the loop
                 // rebuilds the TUI and extension children from the durable
                 // session head and resumes the exact session, so the process
                 // stays usable.
-                crate::output::stderr_line(notice);
+                restart_notice = Some(RestartNotice::Failure(notice));
                 config.initial_prompt = None;
                 config.resume = crate::config::ResumeSelector::Resume(Some(session_id));
                 options.session_id = None;
@@ -13104,6 +13158,8 @@ pub(crate) async fn run_interactive_with_options(
 async fn run_interactive_once(
     config: Config,
     options: crate::cli::parity::ParityOptions,
+    restart_notice: Option<RestartNotice>,
+    reexec: &mut Option<crate::reexec::ReexecController>,
 ) -> anyhow::Result<InteractiveExit> {
     let model_scope_patterns = options.models.clone();
     let mut config = config;
@@ -13119,9 +13175,6 @@ async fn run_interactive_once(
         config.mouse.captures_mouse_on(crate::cli::tui_mode()),
     )?;
     shell.set_tui_fullscreen(crate::cli::tui_mode() == crate::config::TuiMode::Fullscreen)?;
-    // Best-effort re-exec support: a host that cannot report its own executable
-    // keeps the resources-only `/reload`.
-    let mut reexec = crate::reexec::ReexecController::capture().ok();
     shell.set_runtime_config(config.clone());
     let _update_task = startup_update_task(
         config.offline,
@@ -13266,6 +13319,9 @@ async fn run_interactive_once(
     // off-screen through `OCTET_STARTUP_TRACE=1`.
     crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
+    if let Some(notice) = restart_notice {
+        notice.show(&mut shell, app.agent.session());
+    }
     if let Some(notice) = commands::resumed_cache_warming_notice(&app) {
         shell.notice(notice);
     }

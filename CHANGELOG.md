@@ -19,6 +19,7 @@
 - Large resumed sessions stay responsive with the Pi adapter: typing during startup is safe, and hooks reuse the prepared history.
 - A slash command entered during startup, including `/reload`, runs once when ready.
 - On Unix, `/reload --force` restarts the installed app and resumes the same session.
+- `/reload --force` confirms the restart, or says why it could not restart.
 - A retained screenshot stays within the context window when an extension registers a context hook.
 - Launching inside a home subdirectory keeps a dotfiles repository at `~/.git` out of the workspace.
 - Fullscreen selection copies exactly the selected text and disclosed tool output, including offscreen rows.
