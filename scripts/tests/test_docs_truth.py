@@ -337,8 +337,14 @@ class DocsTruthTests(unittest.TestCase):
         self.assertRegex(section, r"Pi")
         self.assertRegex(
             shipped[f"docs/releases/v{version}.md"],
-            r"(?im)^## (known limitations|known gaps|known boundaries)",
-            "the release notes need a known-limitations section",
+            r"(?m)^### (Changed|Fixed|Added)$",
+            "generated notes must retain a Changed, Fixed or Added changelog subsection",
+        )
+
+        self.assertEqual(
+            shipped[f"docs/releases/v{version}.md"],
+            f"# octet {version}\n\n" + section.rstrip("\n") + "\n",
+            "current notes must preserve the entire changelog section verbatim",
         )
 
     def test_documented_ci_lanes_exist(self):

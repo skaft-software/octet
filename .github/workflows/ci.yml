@@ -98,6 +98,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 scripts/check-changelog.py
+          python3 scripts/release-notes.py check
           python3 -m unittest discover -s scripts/tests
           python3 scripts/test_diff_model_catalog.py
       - run: cargo fmt --all -- --check

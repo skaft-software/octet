@@ -46,6 +46,17 @@ Links inside a release body are repository-root relative.
 - a target that escapes the repository root (`../…`) is left unchanged rather
   than guessed.
 
+## Generated release text
+
+`python3 scripts/release-notes.py sync` renders only the current workspace version
+into `docs/releases/vX.Y.Z.md` and the in-agent bundled copy. Its GitHub body
+(`render`) preserves the changelog section verbatim beneath a product heading;
+it does not normalize links. `artifact --commit SHA` emits the same text and dated
+source identity as `release.json` for a separately approved website deployment.
+`check` compares the two Markdown copies without writing. CI and the full local
+gate run it. Historical notes are never regenerated, deleted or checked for drift.
+There is no generation marker for the in-agent renderer to display.
+
 ## Commands
 
 ```sh

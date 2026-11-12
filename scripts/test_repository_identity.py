@@ -314,10 +314,14 @@ class ReleaseDocumentationTests(unittest.TestCase):
         version, candidate, install_version = documented_versions(root)
         notes = (root / "docs/releases" / f"v{version}.md").read_text()
         self.assertEqual(notes.splitlines()[0], f"# octet {version}")
-        normalized = " ".join(notes.lower().split())
-        self.assertRegex(notes, r"(?m)^## (Fixed|Added|Changed|Highlights)$")
+        self.assertRegex(notes, r"(?m)^### (Fixed|Added|Changed)$")
+        changelog = (root / "CHANGELOG.md").read_text()
+        section = re.search(
+            rf"(?ms)^## \[{re.escape(version)}\][^\n]*\n.*?(?=^## |\Z)", changelog
+        ).group(0)
+        self.assertEqual(notes, f"# octet {version}\n\n" + section.rstrip("\n") + "\n")
         if candidate:
-            self.assertIn("unreleased source candidate", normalized)
+            self.assertIn(f"## [{version}] - Release candidate", notes)
         for name in ("README.md", "docs/installation.md"):
             with self.subTest(path=name):
                 guide = (root / name).read_text()
