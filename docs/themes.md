@@ -163,8 +163,14 @@ its presentation policy:
 These are not controls for every rendered pixel. The host keeps one neutral
 separator around notice, outcome, Subagent lifecycle and status events; it is
 separate from a surface's painted cushion rows and is not a theme token. `density`
-and `block_padding_x` still control ordinary transcript surfaces. Tern owns native
-widget geometry.
+and `block_padding_x` still control ordinary transcript surfaces. A filled,
+borderless **Subagents** band honors the existing tool-surface padding: nonzero
+padding gives it exactly one painted interior row above and below its content,
+separate from the neutral outer separator. The shared Pi profile supplies that
+band recipe; TOML overrides such as `[surfaces.tool] padding = 0` still win.
+This native roster is framed by the host, not by a Pi extension renderer.
+Unpainted bands and other event surfaces keep their compact spacing. Tern owns
+native widget geometry.
 A custom tool renderer may own its entire shell (`renderShell: "self"`), omitting
 native gutters/frames without changing the surrounding theme. A renderer that
 keeps the native shell retains its selected theme's decoration.

@@ -417,6 +417,12 @@ pub(super) fn compile_surface_plan_for_render<'a>(
                 && padding > 0),
     );
     let event_spacing = has_event_spacing(block, expanded_reasoning);
+    // A padded borderless roster band uses the ordinary tool recipe for its
+    // interior cushions. Probe its fill without the event painter suppressing
+    // blank rows; unpainted/zero-padding bands keep the existing event rhythm.
+    let subagent_band = matches!(block, TranscriptBlock::Subagents(_))
+        && chrome == ThemeSurfaceChrome::Band
+        && vertical_padding_rows > 0;
     // A theme that caps the reading column would otherwise paint its band/rail
     // fills inside that column only, leaving terminal-coloured bars beside
     // them on a wide screen. Borderless filled chrome extends its fill to the
@@ -463,7 +469,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         },
         padding,
         marker_enabled: resolved.marker_gutter != Some(false),
-        event_spacing,
+        event_spacing: event_spacing && !subagent_band,
         frame_left,
         frame_width,
         bleed_left,
@@ -485,12 +491,15 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         theme,
         block_prompt_color(block, theme),
     );
+    let cushioned_subagent = subagent_band && own_cushion_painted;
+    let event_spacing = event_spacing && !cushioned_subagent;
+    surface.event_spacing = event_spacing;
     // Only decorative whitespace participates in seam collapse. A border/rail
     // glyph or a media reservation is content, never a blank spacing row.
-    let previous_blank = previous.map_or(0, |previous| {
+    let (previous_blank, previous_cushioned_subagent) = previous.map_or((0, false), |previous| {
         let plan =
             compile_surface_plan_for_render(None, previous, theme, outer_width, expanded_reasoning);
-        if matches!(previous, TranscriptBlock::Reasoning(reasoning)
+        let blank = if matches!(previous, TranscriptBlock::Reasoning(reasoning)
             if !reasoning.reasoning_expanded && !expanded_reasoning
                 && super::reasoning_render::collapsed_reasoning_lines_sized(
                     theme, reasoning, 0, 0, plan.geometry.content_width,
@@ -535,7 +544,11 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             plan.geometry.trailing_rows
         } else {
             0
-        }
+        };
+        (
+            blank,
+            matches!(previous, TranscriptBlock::Subagents(_)) && !plan.event_spacing,
+        )
     });
     let leading_padding = if event_spacing {
         // A heading separates the surface seam from the event itself; leave the
@@ -576,12 +589,24 @@ pub(super) fn compile_surface_plan_for_render<'a>(
                     }
             )
     };
-    let transition_rows = if event_spacing
+    let transition_rows = if cushioned_subagent {
+        // Host separation is outside the painted band, not its interior row.
+        usize::from(previous_blank == 0)
+    } else if event_spacing
         || (previous.is_some_and(|previous| has_event_spacing(previous, expanded_reasoning))
             && previous_blank > 0)
         || (compact_activity(block) && previous.is_some_and(compact_activity))
     {
         0
+    } else if previous_cushioned_subagent {
+        // A filled bottom cushion cannot double as the host separator. An
+        // unpainted leading cushion of the next surface can still share it.
+        usize::from(
+            has_heading_row
+                || leading_padding == 0
+                || !whitespace_cushion(chrome, theme)
+                || own_cushion_painted,
+        )
     } else {
         transcript_transition_rows(previous, layout.density)
     };

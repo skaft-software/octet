@@ -2482,6 +2482,7 @@ impl ShellState {
                         | TranscriptBlock::Compaction(_)
                         | TranscriptBlock::Tool(_)
                         | TranscriptBlock::Shell(_)
+                        | TranscriptBlock::Subagents(_)
                 ) || self
                     .extension_transcript
                     .frames
@@ -2957,20 +2958,30 @@ impl ShellState {
 
     fn touch_presentation_block(&mut self, index: usize) {
         self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
-        self.render_publication.touch(index);
-        if let Some(revision) = self.block_revisions.get_mut(index) {
-            *revision = revision.saturating_add(1);
-        }
+        // The roster's separator can share its predecessor's blank status slot.
+        // Replan just that neighbour when Working becomes expanded reasoning
+        // (or its detail consumes the slot), before telemetry refreshes it.
+        let last = index
+            + usize::from(matches!(
+                self.transcript.get(index + 1),
+                Some(TranscriptBlock::Subagents(_))
+            ));
         let cache = self.transcript_cache.get_mut();
         cache.dirty = true;
-        // New blocks and invalidated widths are rendered with their latest
-        // revision without a dirty entry. Only deduplicate replacements for
-        // already cached rows, not every block in an unpainted hydration batch.
-        if cache.width.is_some()
-            && index < cache.block_revisions.len()
-            && !cache.dirty_blocks.contains(&index)
-        {
-            cache.dirty_blocks.push(index);
+        for index in index..=last {
+            self.render_publication.touch(index);
+            if let Some(revision) = self.block_revisions.get_mut(index) {
+                *revision = revision.saturating_add(1);
+            }
+            // New blocks and invalidated widths are rendered with their latest
+            // revision without a dirty entry. Only deduplicate replacements for
+            // already cached rows, not every block in an unpainted hydration batch.
+            if cache.width.is_some()
+                && index < cache.block_revisions.len()
+                && !cache.dirty_blocks.contains(&index)
+            {
+                cache.dirty_blocks.push(index);
+            }
         }
     }
 

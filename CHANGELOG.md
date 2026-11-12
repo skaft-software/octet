@@ -70,6 +70,10 @@
   rows, without private arguments, hidden group children, capture metadata,
   line-number gutters or disclosure hints. Shell-copy behavior is preserved. (#683)
 
+- The Subagents panel keeps its neutral separator when Working becomes reasoning
+  or Ctrl+O changes disclosure. Filled tool bands, including the Pi theme, keep
+  one painted interior row at the top and bottom; explicit zero padding still wins.
+
 - Resuming a session with thousands of entries no longer re-encodes and
   re-sends its whole history to every extension on each UI refresh. Unchanged
   sessions keep their published view; any new record, label, usage, host change,
