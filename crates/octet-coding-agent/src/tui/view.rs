@@ -3113,9 +3113,10 @@ impl ShellState {
     fn set_thinking_expanded(&mut self, expanded: bool) {
         self.thinking_disclosure = Some(expanded);
         let mut changed = false;
-        for block in &mut self.transcript {
+        for (block, id) in self.transcript.iter_mut().zip(&self.transcript_commit_ids) {
             if let TranscriptBlock::Reasoning(reasoning) = block {
                 changed |= reasoning.reasoning_expanded != expanded;
+                changed |= self.extension_transcript.expanded.remove(id).is_some();
                 reasoning.reasoning_expanded = expanded;
             }
         }
@@ -6535,12 +6536,18 @@ impl InteractiveShell {
     }
 
     pub fn set_verbose_tools(&mut self, verbose: bool) {
-        let mut state = self.state.borrow_mut();
+        let mut shared = self.state.borrow_mut();
+        let state = &mut *shared;
         if state.verbose_tools == verbose {
             return;
         }
         state.verbose_tools = verbose;
-        state.extension_transcript.expanded.clear();
+        // Tool disclosure must preserve per-trace thinking clicks.
+        for (block, id) in state.transcript.iter().zip(&state.transcript_commit_ids) {
+            if !matches!(block, TranscriptBlock::Reasoning(_)) {
+                state.extension_transcript.expanded.remove(id);
+            }
+        }
         // Keep the existing width/layout caches and invalidate only blocks
         // whose disclosure actually changes. The old full-layout reset made
         // Ctrl+O reparse every assistant answer in long sessions.

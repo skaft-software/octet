@@ -145,8 +145,8 @@ pub(super) struct TernSurface {
     theme_key: Option<(u64, Option<ModelLab>)>,
     collapsed: HashMap<String, bool>,
     verbose: bool,
-    /// Last observed thinking disclosure. A change drops per-node click state so
-    /// Ctrl+T stays authoritative over a section the reader clicked in Tern.
+    /// Last observed thinking disclosure. A change drops thinking click state
+    /// only, so Ctrl+T stays authoritative without changing tool disclosure.
     thinking: bool,
     last_resync: u64,
     last_editor_revision: u64,
@@ -575,12 +575,12 @@ impl TernSurface {
             .clone();
         let shell = &mut self.owner.state;
         if self.verbose != shell.verbose_tools {
-            self.collapsed.clear();
+            self.collapsed.retain(|id, _| id.ends_with(".reasoning"));
             self.verbose = shell.verbose_tools;
         }
         let thinking = shell.thinking_expanded();
         if self.thinking != thinking {
-            self.collapsed.clear();
+            self.collapsed.retain(|id, _| !id.ends_with(".reasoning"));
             self.thinking = thinking;
         }
         let theme_key = (shell.theme_epoch, shell.model_lab);

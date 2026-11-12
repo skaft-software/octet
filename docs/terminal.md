@@ -329,7 +329,8 @@ qualification](provider-thinking.md#mid-conversation-changes-unreleased).
 
 Reasoning is collapsed by default. Ctrl+T shows or hides what octet kept,
 for every trace in the transcript and for new ones. It is separate from
-Ctrl+O, which owns tool and shell output.
+Ctrl+O, which owns tool and shell output. In native Tern, each key also resets
+only its own mode's section clicks, preserving the other mode's disclosure.
 
 Each run shows a shimmering `Working` row, and a trailing
 `Working (<elapsed> • esc to interrupt)` stays until the run settles. Retry
