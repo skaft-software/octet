@@ -1540,6 +1540,12 @@ impl ProcessConnection {
             lock_std_mutex(&self.tombstones).remove(id);
         }
         let cancellation_supported = read_std_lock(&self.protocol).supports("request_cancellation");
+        // Escalation bounds a request that may still act. A side-effect-free
+        // input query only decides how one keystroke is dispatched: its late
+        // reply is discarded by the tombstone, and the frontend's own circuit
+        // handles a listener that keeps hanging. An extension briefly busy
+        // (e.g. parsing a very large session) must not be killed for a key.
+        let escalate = !cancellation_never_escalates(&request.method);
         if frame_was_admitted
             && cancellation_supported
             && !request.cancellation_sent.swap(true, Ordering::AcqRel)
@@ -1548,8 +1554,10 @@ impl ProcessConnection {
                 methods::CANCEL_REQUEST,
                 serde_json::json!({"id": id, "reason": reason}),
             );
-            self.schedule_cancellation_escalation(id);
-        } else if frame_was_admitted && !cancellation_supported {
+            if escalate {
+                self.schedule_cancellation_escalation(id);
+            }
+        } else if frame_was_admitted && !cancellation_supported && escalate {
             self.schedule_cancellation_escalation(id);
         }
     }
@@ -2153,4 +2161,11 @@ impl Drop for ProcessConnection {
         self.session_leaf.terminate_execution();
         self.settle_artifacts();
     }
+}
+
+/// Host-to-extension requests whose cancellation never escalates to process
+/// termination: they carry no authority and produce no effect, so an
+/// unacknowledged cancellation is a busy peer, not an unbounded one.
+pub(super) fn cancellation_never_escalates(method: &str) -> bool {
+    matches!(method, "ui/terminal-input/intercept")
 }

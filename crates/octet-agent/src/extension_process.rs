@@ -713,6 +713,8 @@ mod tests;
 mod ui_transport_tests;
 
 #[cfg(all(test, unix))]
+mod cancellation_escalation_tests;
+#[cfg(all(test, unix))]
 mod remote_ui_tests;
 #[cfg(all(test, unix))]
 mod resources_tests;

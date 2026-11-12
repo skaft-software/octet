@@ -20,6 +20,11 @@
 
 ### Fixed
 
+- Typing while a large session starts no longer restarts the Pi adapter. An unanswered
+  keystroke-interception request was cancelled and, when the adapter (busy parsing the
+  history) could not acknowledge within the 2 s grace, the whole extension was killed and its
+  startup lost. Side-effect-free input queries no longer escalate; effectful requests still do.
+
 - Pi hooks on very large sessions reuse the history the adapter already prepared for that
   exact revision (same digest) instead of reading and parsing the whole document again per
   hook. On a 240 MB history `resources_discover` took 0.2 s instead of 3.6 s and no longer
