@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -18,6 +19,7 @@ SHA = "a" * 40
 VERSION = "1.2.3"
 FAKE = r'''#!/usr/bin/env python3
 import hashlib, json, os, pathlib, sys
+from urllib.parse import parse_qs, urlsplit
 p = pathlib.Path(os.environ['FAKE_STATE'])
 s = json.loads(p.read_text())
 a = sys.argv[1:]
@@ -35,15 +37,6 @@ if tool == 'git':
     else: sys.exit('unexpected git: '+repr(a))
 elif tool == 'cosign':
     if s.get('bad_signature'): sys.exit(1)
-elif a[:2] == ['release', 'upload']:
-    r = s['releases'][0]
-    file = pathlib.Path(a[-1]); data = file.read_bytes()
-    if any(x['name'] == file.name for x in r['assets']): sys.exit('duplicate upload')
-    identity = s.get('next_asset',1); s['next_asset'] = identity+1
-    r['assets'].append(dict(id=identity,name=file.name,digest='sha256:'+hashlib.sha256(data).hexdigest()))
-    s.setdefault('downloads',{})[str(identity)] = data.hex()
-    finish()
-    if s.pop('fail_upload_after',False): finish(); sys.exit(1)
 elif a[:2] == ['workflow', 'run']:
     workflow = a[2]
     inputs = dict(x.split('=',1) for i,x in enumerate(a) if i and a[i-1]=='-f')
@@ -68,6 +61,20 @@ elif a[:2] == ['run','watch']:
 elif a[0]=='api':
     endpoint=a[1].removeprefix('repos/skaft-software/octet/')
     method=a[a.index('--method')+1]
+    if endpoint.startswith('https://uploads.github.com/'):
+        url=urlsplit(endpoint)
+        r=next(r for r in s['releases'] if url.path == '/repos/skaft-software/octet/releases/'+str(r['id'])+'/assets')
+        assert method=='POST' and 'Content-Type: application/octet-stream' in a
+        name=parse_qs(url.query)['name'][0]
+        data=pathlib.Path(a[a.index('--input')+1]).read_bytes()
+        if any(x['name'] == name for x in r['assets']): sys.exit('duplicate upload')
+        identity=s.get('next_asset',1); s['next_asset']=identity+1
+        asset=dict(id=identity,name=name,digest='sha256:'+hashlib.sha256(data).hexdigest())
+        r['assets'].append(asset)
+        s.setdefault('downloads',{})[str(identity)]=data.hex()
+        finish()
+        if s.pop('fail_upload_after',False): finish(); sys.exit(1)
+        out(asset); sys.exit(0)
     data=json.loads(sys.stdin.read()) if '--input' in a else {}
     if endpoint == 'user':
         assert method=='GET'
@@ -82,14 +89,23 @@ elif a[0]=='api':
         assert method=='GET'
         sys.stdout.buffer.write(bytes.fromhex(s['downloads'][endpoint.rsplit('/',1)[1]]))
     elif endpoint.split('?')[0]=='releases':
-        if method=='GET': out([s['releases']])
+        if method=='GET':
+            # Fixtures that flip draft off model a published, canonically tagged release.
+            out([[dict(r, tag_name=r['name']) if not r['draft'] and r['tag_name'].startswith('untagged-') else r
+                  for r in s['releases']]])
         elif method=='POST':
-            r=dict(data,id=1,assets=[]); s['releases'].append(r); out(r)
+            r=dict(data,id=1,assets=[],upload_url='https://uploads.github.com/repos/skaft-software/octet/releases/1/assets{?name,label}')
+            s['releases'].append(r); out(r)
+            # GitHub substitutes a placeholder until the canonical tag exists.
+            r['tag_name']='untagged-a0bb1236038698714073'
             finish()
             if s.pop('fail_create_after',False): finish(); sys.exit(1)
         else: sys.exit('unexpected releases method')
     elif endpoint=='releases/1':
-        if method=='PATCH': s['releases'][0].update(data); out(s['releases'][0])
+        if method=='PATCH':
+            if data.get('draft') is False:
+                assert data['tag_name'] == s['releases'][0]['name'] and data['tag_name'] in s['tags']
+            s['releases'][0].update(data); out(s['releases'][0])
         elif method=='DELETE': s['releases']=[]
         else: out(s['releases'][0])
     elif endpoint.startswith('git/matching-refs/tags/'):
@@ -114,6 +130,46 @@ elif a[0]=='api':
 else: sys.exit('unexpected command: '+repr(a))
 finish()
 '''
+
+
+class ReleaseIdentityTests(unittest.TestCase):
+    def test_find_requires_draft_name_or_published_tag(self):
+        for draft, name, tag, found in [
+            (True, 'v1.2.3', 'untagged-a0bb1236', True),
+            (True, 'v1.2.3', 'v1.2.3', True),
+            (True, 'v1.2.4', 'v1.2.3', False),
+            (True, 'v1.2.3', 'v1.2.4', False),
+            (False, 'v1.2.4', 'v1.2.3', True),
+            (False, 'v1.2.3', 'untagged-a0bb1236', False),
+            (False, 'v1.2.3', 'v1.2.4', False),
+        ]:
+            row = dict(draft=draft, name=name, tag_name=tag)
+            with self.subTest(row=row), mock.patch.object(release, 'releases', return_value=[row]):
+                self.assertEqual(row if found else None, release.get_release(VERSION))
+
+    def test_load_binds_receipt_identity_and_target(self):
+        state = dict(schema='octet.candidate.v1', repository=release.REPO, version=VERSION, sha=SHA)
+        data = release.encoded(state)
+        key = release.digest(data)
+        row = dict(draft=True, prerelease=False, name='v1.2.3', tag_name='untagged-a0bb1236',
+                   target_commitish=SHA, body=f'<!-- octet-candidate:{key} -->',
+                   assets=[dict(id=1, name=f'candidate-receipt-{key}.json', digest='sha256:'+key)])
+        with mock.patch.object(release, 'download', return_value=data):
+            self.assertEqual(state, release.load(row))
+            for changes in (dict(name='v1.2.4'), dict(tag_name='v1.2.4'), dict(draft=False)):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'receipt identity differs'):
+                    release.load(dict(row, **changes))
+            self.assertEqual(state, release.load(dict(row, draft=False, name='Published title', tag_name='v1.2.3')))
+            with self.assertRaisesRegex(ValueError, 'release target differs'):
+                release.load(dict(row, target_commitish='b'*40))
+        for field, value in [('schema', 'foreign'), ('repository', 'foreign/repo'), ('version', '1.2.4')]:
+            changed = release.encoded(dict(state, **{field: value}))
+            changed_key = release.digest(changed)
+            changed_row = dict(row, body=f'<!-- octet-candidate:{changed_key} -->',
+                               assets=[dict(id=1, name=f'candidate-receipt-{changed_key}.json')])
+            with self.subTest(field=field), mock.patch.object(release, 'download', return_value=changed):
+                with self.assertRaisesRegex(ValueError, 'receipt identity differs'):
+                    release.load(changed_row)
 
 
 class ReleaseCLITests(unittest.TestCase):
@@ -325,6 +381,66 @@ class ReleaseCLITests(unittest.TestCase):
         self.assertEqual({},self.data['tags']); self.assertTrue(self.data['releases'][0]['draft'])
         self.assertEqual(42,state['ci_run']); self.assertFalse(state['complete'])
         self.assertTrue(any(a['name'].startswith('candidate-receipt-') for a in self.data['releases'][0]['assets']))
+
+    def test_start_loads_untagged_draft_and_rerun_does_not_create_another(self):
+        state = self.started()
+        row = self.data['releases'][0]
+        self.assertTrue(row['tag_name'].startswith('untagged-'))
+        self.assertEqual('v'+VERSION, row['name'])
+        self.assertEqual(SHA, row['target_commitish'])
+        self.cli('start')
+        self.assertEqual(state['generation'], self.receipt()['generation'])
+        self.assertEqual(1, len(self.data['releases']))
+        self.assertEqual(1, sum(c[1:3] == ['api', 'repos/skaft-software/octet/releases']
+                                and c[c.index('--method')+1] == 'POST' for c in self.calls_json()))
+        uploads = [c for c in self.calls_json() if c[1] == 'api' and c[2].startswith('https://uploads.github.com/')]
+        self.assertTrue(uploads)
+        self.assertTrue(all('/releases/1/assets?name=' in c[2] for c in uploads))
+        self.assertFalse(any(c[1:3] == ['release', 'upload'] for c in self.calls_json()))
+
+    def test_status_pause_resume_and_abort_find_untagged_draft(self):
+        self.started()
+        self.assertEqual('building', json.loads(self.cli('status').stdout)['state'])
+        self.cli('pause')
+        self.assertEqual('paused', json.loads(self.cli('status').stdout)['state'])
+        self.cli('resume')
+        self.assertEqual('building', json.loads(self.cli('status').stdout)['state'])
+        self.cli('abort')
+        self.assertEqual([], self.data['releases'])
+        self.assertEqual({}, self.data['tags'])
+
+    def test_two_matching_drafts_fail_closed_without_writes(self):
+        state = self.started()
+        for tag in ('untagged-second', 'v'+VERSION):
+            duplicate = dict(copy.deepcopy(self.data['releases'][0]), id=2, tag_name=tag)
+            self.data['releases'] = [self.data['releases'][0], duplicate]
+            self.save()
+            before = len(self.calls_json())
+            for command in ('start', 'status', 'pause', 'resume', 'respin', 'abort', 'ship', '_resolve'):
+                with self.subTest(tag=tag, command=command):
+                    result = self.cli(command, '--candidate', state['generation'], ok=False)
+                    self.assertIn('ambiguous release', result.stderr)
+            self.assertEqual(2, len(self.data['releases']))
+            self.assertTrue(all(c[1] == 'api' and c[c.index('--method')+1] == 'GET'
+                                for c in self.calls_json()[before:]))
+
+    def test_matching_foreign_untagged_draft_is_refused(self):
+        self.data['releases'] = [dict(id=1, name='v'+VERSION, tag_name='untagged-foreign',
+                                      draft=True, prerelease=False, body='foreign', assets=[])]
+        self.save()
+        for command in ('start', 'status', 'pause', 'abort'):
+            with self.subTest(command=command):
+                self.assertIn('foreign or ambiguous draft', self.cli(command, ok=False).stderr)
+        self.assertEqual(1, len(self.data['releases']))
+        self.assertTrue(all(c[1] == 'api' and c[c.index('--method')+1] == 'GET' for c in self.calls_json()))
+
+    def test_internal_workflow_state_finds_untagged_draft(self):
+        state = self.started()
+        self.env.update(GITHUB_REF='refs/heads/main', GITHUB_SHA=SHA)
+        result = self.cli('_resolve', '--candidate', state['generation'], '--sha', SHA)
+        self.assertIn('tag=v'+VERSION, result.stdout.splitlines())
+        self.assertIn('source_commit='+SHA, result.stdout.splitlines())
+        self.assertTrue(self.data['releases'][0]['tag_name'].startswith('untagged-'))
 
     def test_dispatch_interruption_reconciles_without_duplicate(self):
         self.data['fail_dispatch_after']=True; self.save()

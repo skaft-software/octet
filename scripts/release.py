@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import uuid
+from urllib.parse import urlencode
 
 notes = import_module("release-notes")
 changelog = import_module("check-changelog")
@@ -86,7 +87,9 @@ def upload(release, name, data):
     with tempfile.TemporaryDirectory(prefix="octet-upload-") as temporary:
         path = Path(temporary) / name
         path.write_bytes(data)
-        command("gh", "release", "upload", release["tag_name"], "--repo", REPO, str(path))
+        url = release["upload_url"].split("{", 1)[0] + "?" + urlencode({"name": name})
+        command("gh", "api", url, "--method", "POST", "-H", "Content-Type: application/octet-stream",
+                "--input", str(path))
     hosted = assets(api(f"releases/{release['id']}"))
     require(name in hosted and hosted[name].get("digest") == "sha256:" + digest(data),
             f"uploaded asset digest mismatch: {name}")
@@ -96,8 +99,15 @@ def releases():
     return [r for page in api("releases?per_page=100", pages=True) for r in page]
 
 
+def matches_release(release, version):
+    tag = f"v{version}"
+    if not release["draft"]:
+        return release["tag_name"] == tag
+    return release["name"] == tag and (release["tag_name"] == tag or release["tag_name"].startswith("untagged-"))
+
+
 def get_release(version):
-    matches = [r for r in releases() if r["tag_name"] == f"v{version}"]
+    matches = [r for r in releases() if matches_release(r, version)]
     require(len(matches) <= 1, "ambiguous release")
     return matches[0] if matches else None
 
@@ -113,7 +123,7 @@ def load(release):
         require(digest(data) == pointers[0], "receipt pointer digest differs")
     state = json.loads(data)
     require(state["schema"] == "octet.candidate.v1" and state["repository"] == REPO
-            and release["tag_name"] == "v" + state["version"], "receipt identity differs")
+            and matches_release(release, state["version"]), "receipt identity differs")
     require(release["target_commitish"] == state["sha"], "release target differs from receipt")
     return state
 
@@ -485,7 +495,7 @@ def publish_native(release, state, directory):
     require(current == state, "receipt changed during signing")
     if release["draft"]:
         api(f"releases/{release['id']}", "PATCH", {"draft": False, "prerelease": False,
-            "make_latest": "false", "body": state["notes"]})
+            "tag_name": "v" + state["version"], "make_latest": "false", "body": state["notes"]})
 
 
 def provider_acceptance(sha):
