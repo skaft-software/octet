@@ -194,6 +194,7 @@ main() {
         done < <(grep -Ev '^[[:space:]]*(#|$)' extensions/release-catalog.txt)
         ci_checks quality 'Test models.dev metadata tooling (offline)'
         ci_checks quality 'Test binary release tooling'
+        # Includes check-changelog.py; extract CI's offline policy checks too.
         ci_checks quality 'Test measurement and repository-tooling contracts (no live clients)'
         step package cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
         step no-default cargo check --workspace --all-targets --no-default-features --locked

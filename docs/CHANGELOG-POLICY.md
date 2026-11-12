@@ -17,6 +17,22 @@ contract, not a style preference.
 - Each release body is the text between its heading and the next `##` heading,
   trimmed.
 
+## Current entry policy
+
+`python3 scripts/check-changelog.py` checks Unreleased and every version from
+0.10.4 onward, regardless of local tags. Earlier sections, including their
+historical heading formats, are frozen and exempt. CI quality and the full local
+`scripts/gate.sh` run this offline check.
+
+Use only Breaking Changes, Added, Changed, Fixed and Removed subsections, in that
+order, omitting empty subsections. Each bullet is one line of positive,
+present-tense, user-facing text, at most 160 characters before an optional credit:
+` ([#n](https://github.com/skaft-software/octet/pull/n) by [@user](https://github.com/user))`.
+Known limitations, engineering chores and test chatter do not belong here.
+Conservative lint catches common prose problems; human review remains necessary.
+A prepared release must have a real calendar date; an unfinished version may say
+`Release candidate` until preparation is complete.
+
 ## Links
 
 Links inside a release body are repository-root relative.

@@ -111,6 +111,15 @@ Pi-shaped lives in `octet-pi-compat`. Do not reinvent what Pi already does.**
   job in `.github/workflows/ci.yml`.
 - No live or paid provider calls in tests. Use the fake providers and fixtures.
 
+## Changelog
+
+For `## [Unreleased]` and versions from 0.10.4 onward, use only Added, Changed,
+Fixed, Removed or Breaking Changes subsections. Write positive, present-tense,
+user-facing bullets: one line, at most 160 characters excluding a trailing credit
+` ([#n](https://github.com/skaft-software/octet/pull/n) by [@user](https://github.com/user))`.
+Omit Known limitations and maintainer-only tooling. Older sections are frozen.
+Run `python3 scripts/check-changelog.py`; human prose review is still required.
+
 ## Public text
 
 - Never name or compare octet with other coding agents in commits, PRs, issues,
