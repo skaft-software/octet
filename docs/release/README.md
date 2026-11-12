@@ -21,13 +21,20 @@ python3 scripts/release.py status X.Y.Z
 # switch install commands and extension READMEs to the published version.
 ```
 
-`prepare` changes nothing and contacts no service. It checks the workspace
+`prepare` changes nothing. It checks the workspace
 version, dated/linted changelog, synchronized current notes, clean tree and
 HEAD equal to the candidate on local `origin/main`. `start` verifies the exact
 SHA has a completed successful full-tier **main push** CI run, including every
 required lane. It creates one draft (no tag) and dispatches one candidate run
 from `main` with the immutable source SHA as input. A pending/failed/missing CI
 run fails immediately. Wait locally, not on a release runner.
+
+`prepare` checks PRs referenced since the previous changelog version's tag by
+`Closes #N`, `Fixes #N`, `Resolves #N` trailers or a trailing `(#N)` subject suffix
+using read-only GitHub lookups. Issues, bot PRs and the owner's PRs are skipped;
+each outside PR needs its author's linked profile credit in the release section.
+The owner login defaults to the authenticated `gh api user` login; override it
+with `--owner-login LOGIN` or `OCTET_RELEASE_OWNER_LOGIN` (CLI takes precedence).
 
 The candidate builds Linux, Intel/Apple-silicon macOS and qualified native Windows
 archives and all six extension bundles in parallel. npm tarballs are packed,

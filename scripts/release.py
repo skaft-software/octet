@@ -46,8 +46,8 @@ def command(*args, input=None, binary=False, timeout=300):
                           text=not binary, timeout=timeout).stdout
 
 
-def api(path, method="GET", data=None, pages=False, binary=False):
-    args = ["gh", "api", f"{PREFIX}/{path}", "--method", method]
+def api(path, method="GET", data=None, pages=False, binary=False, repository=True):
+    args = ["gh", "api", f"{PREFIX}/{path}" if repository else path, "--method", method]
     if pages:
         args += ["--paginate", "--slurp"]
     if binary:
@@ -154,7 +154,55 @@ def qualify(sha):
     return run["id"]
 
 
-def prepare(version, sha=None, require_head=True):
+def check_contribution_credits(version, sha, path, owner_login):
+    """Require outside PR authors' credits in the previous-tag..candidate range."""
+    text = path.read_text(encoding="utf-8")
+    versions = [match[1] for _, lines in changelog.changelog_sections(text)
+                if (match := re.match(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", lines[0]))]
+    index = versions.index(version)
+    require(index + 1 < len(versions), "credit check needs the previous changelog version and its release tag")
+    release_range = f"v{versions[index + 1]}..{sha}"
+    body, _ = notes.section(path, version)
+    credits = {(int(match[1]), match[2].casefold()) for line in body.splitlines()
+               if line.startswith("- ") and (match := changelog.PR_LINK.search(line))}
+    messages = command("git", "log", "-z", "--format=%B", release_range).split("\0")[:-1]
+    checked = set()
+    errors = []
+    bots = owners = issues = 0
+    for message in messages:
+        subject = re.search(r"\(#([1-9][0-9]*)\)$", message.splitlines()[0])
+        numbers = ([int(subject[1])] if subject else []) + [
+            int(number) for number in re.findall(r"^(?:Closes|Fixes|Resolves):?[ \t]+#([1-9][0-9]*)\.?[ \t]*$",
+                                                 message, re.IGNORECASE | re.MULTILINE)]
+        for number in numbers:
+            if number in checked:
+                continue
+            checked.add(number)
+            try:
+                pull = api(f"pulls/{number}")
+            except subprocess.CalledProcessError as error:
+                if "(HTTP 404)" not in (error.stderr or ""):
+                    raise
+                issues += 1
+                continue
+            login = pull["user"]["login"]
+            if pull["user"]["type"] == "Bot":
+                bots += 1
+                continue
+            if login.casefold() == owner_login.casefold():
+                owners += 1
+                continue
+            if (number, login.casefold()) not in credits:
+                errors.append(f"#{number}: add credit suffix ([#{number}](https://github.com/{REPO}/pull/{number})"
+                              f" by [@{login}](https://github.com/{login}))")
+            else:
+                print(f"credits: #{number} @{login} OK")
+    print(f"credits: {len(checked) - bots - owners - issues} outside PRs, {len(errors)} missing credits;"
+          f" skipped {bots} bot PRs, {owners} owner PRs, {issues} issues")
+    require(not errors, "\n".join(errors))
+
+
+def prepare(version, sha=None, require_head=True, owner_login=None):
     root = Path.cwd()
     require(notes.workspace_version(root) == version, "workspace version differs")
     require(not command("git", "status", "--porcelain").strip(), "requires a clean tree")
@@ -167,6 +215,8 @@ def prepare(version, sha=None, require_head=True):
     require(not errors, f"check-changelog failed: {errors}")
     require(notes.section(root / "CHANGELOG.md", version)[1], "release changelog section must be dated")
     require(not notes.sync(root, root / "CHANGELOG.md", check=True), "run scripts/release-notes.py sync")
+    owner_login = owner_login or os.environ.get("OCTET_RELEASE_OWNER_LOGIN") or api("user", repository=False)["login"]
+    check_contribution_credits(version, head, root / "CHANGELOG.md", owner_login)
     return head
 
 
@@ -486,6 +536,7 @@ def main(argv=None):
                                              "_resolve", "_attach", "_download", "_signed", "_publish"))
     parser.add_argument("version")
     parser.add_argument("--sha")
+    parser.add_argument("--owner-login", help="owner login (default: OCTET_RELEASE_OWNER_LOGIN or authenticated gh user)")
     parser.add_argument("--skip-npm", action="store_true")
     parser.add_argument("--reason", default="")
     parser.add_argument("--candidate")
@@ -498,11 +549,11 @@ def main(argv=None):
         internal(args)
         return
     if args.command == "prepare":
-        print(prepare(args.version, args.sha))
+        print(prepare(args.version, args.sha, owner_login=args.owner_login))
         return
     release = get_release(args.version)
     if args.command == "start" and not release:
-        sha = prepare(args.version, args.sha)
+        sha = prepare(args.version, args.sha, owner_login=args.owner_login)
         on_main(sha)
         require(not tag_shas(args.version), "release tags already exist")
         state = new_state(args.version, sha, qualify(sha))
@@ -544,7 +595,7 @@ def main(argv=None):
     elif args.command == "respin":
         require(not tag_shas(args.version), "cannot respin tagged source")
         sha = args.sha or state["sha"]
-        prepare(args.version, sha, require_head=False)
+        prepare(args.version, sha, require_head=False, owner_login=args.owner_login)
         on_main(sha)
         ci = qualify(sha) if sha != state["sha"] else state["ci_run"]
         # Pause first. Stale uploads can never change the new generation pointer.

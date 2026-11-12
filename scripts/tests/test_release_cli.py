@@ -29,6 +29,9 @@ if tool == 'git':
     if a == ['status', '--porcelain']: print(s.get('dirty',''))
     elif a == ['rev-parse', 'HEAD']: print(s['head'])
     elif a == ['rev-parse', 'refs/remotes/origin/main']: print(s['main'])
+    elif a[:3] == ['log', '-z', '--format=%B']:
+        assert a[3] == 'v1.2.2..'+s['head']
+        sys.stdout.write(''.join(c+'\0' for c in s.get('commits',[])))
     else: sys.exit('unexpected git: '+repr(a))
 elif tool == 'cosign':
     if s.get('bad_signature'): sys.exit(1)
@@ -63,10 +66,19 @@ elif a[:2] == ['run','watch']:
     run=next(r for r in s['runs'] if str(r['id'])==a[2])
     if run['conclusion'] != 'success': sys.exit(1)
 elif a[0]=='api':
-    endpoint=a[1].split('skaft-software/octet/',1)[1]
+    endpoint=a[1].removeprefix('repos/skaft-software/octet/')
     method=a[a.index('--method')+1]
     data=json.loads(sys.stdin.read()) if '--input' in a else {}
-    if endpoint.startswith('releases/assets/'):
+    if endpoint == 'user':
+        assert method=='GET'
+        out(dict(login=s['authenticated_login']))
+    elif endpoint.startswith('pulls/'):
+        assert method=='GET'
+        number=endpoint.split('/')[1]
+        if number in s.get('issues',[]): sys.stderr.write('gh: Not Found (HTTP 404)'); sys.exit(1)
+        if s.get('pull_error'): sys.stderr.write('gh: unavailable (HTTP 503)'); sys.exit(1)
+        out(dict(user=s['pulls'][number]))
+    elif endpoint.startswith('releases/assets/'):
         assert method=='GET'
         sys.stdout.buffer.write(bytes.fromhex(s['downloads'][endpoint.rsplit('/',1)[1]]))
     elif endpoint.split('?')[0]=='releases':
@@ -118,9 +130,10 @@ class ReleaseCLITests(unittest.TestCase):
         self.data = dict(head=SHA, main=SHA, releases=[], runs=[], tags={}, jobs=[dict(name=n,conclusion="success") for n in release.LANES])
         self.save()
         self.env = dict(os.environ, PATH=str(self.root)+os.pathsep+os.defpath, HOME=str(self.root), TMPDIR=str(self.root),
-                        FAKE_STATE=str(self.path), FAKE_CALLS=str(self.calls), GITHUB_STEP_SUMMARY=str(self.root/'summary'))
+                        FAKE_STATE=str(self.path), FAKE_CALLS=str(self.calls), GITHUB_STEP_SUMMARY=str(self.root/'summary'),
+                        OCTET_RELEASE_OWNER_LOGIN='release-owner')
         (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.3"\n')
-        (self.root / "CHANGELOG.md").write_text('# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-11-12\n\n### Fixed\n\n- Editing works.\n')
+        (self.root / "CHANGELOG.md").write_text('# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-11-12\n\n### Fixed\n\n- Editing works.\n\n## [1.2.2] - 2026-11-11\n\n### Fixed\n\n- Tools work.\n')
         release.notes.sync(self.root, self.root / "CHANGELOG.md")
 
     def save(self):
@@ -165,8 +178,128 @@ class ReleaseCLITests(unittest.TestCase):
     def calls_json(self):
         return [json.loads(x) for x in self.calls.read_text().splitlines()]
 
-    def test_prepare_is_local_read_only_and_repeatable(self):
-        self.cli('prepare'); self.cli('prepare')
+    def credit(self, number=456, login='some-user'):
+        return f' ([#{number}](https://github.com/skaft-software/octet/pull/{number}) by [@{login}](https://github.com/{login}))'
+
+    def set_credits(self, *credits):
+        path = self.root / 'CHANGELOG.md'
+        path.write_text(path.read_text().replace('- Editing works.', '- Editing works.' + ''.join(credits)))
+        release.notes.sync(self.root, path)
+
+    def test_prepare_credited_outside_pr_passes_case_insensitively(self):
+        self.data.update(commits=['Sessions resume.\n\nCloses #456\n'],
+                         pulls={'456': dict(login='Some-User', type='User')})
+        self.save(); self.set_credits(self.credit())
+        result = self.cli('prepare')
+        self.assertIn('credits: #456 @Some-User OK', result.stdout)
+        self.assertTrue(all(c[0] == 'git' or c[-2:] == ['--method', 'GET'] for c in self.calls_json()))
+
+    def test_prepare_missing_credit_reports_exact_suffix_once_per_pr(self):
+        self.data.update(commits=['Sessions resume. (#456)\n\nFixes #456\n',
+                                  'Sessions resume.\n\nCloses #456\n', 'Reports scroll. (#789)'],
+                         pulls={'456': dict(login='some-user', type='User'),
+                                '789': dict(login='another-user', type='User')})
+        self.save()
+        result = self.cli('prepare', ok=False)
+        self.assertEqual(result.stderr.splitlines(), [
+            'release: #456: add credit suffix' + self.credit(),
+            '#789: add credit suffix' + self.credit(789, 'another-user')])
+        self.assertIn('credits: 2 outside PRs, 2 missing credits;', result.stdout)
+        for number in (456, 789):
+            self.assertEqual(1, sum(c[1:3] == ['api', f'repos/skaft-software/octet/pulls/{number}']
+                                    for c in self.calls_json()))
+        self.assertEqual([], self.data['releases'])
+
+    def test_prepare_wrong_login_does_not_satisfy_credit(self):
+        self.data.update(commits=['Sessions resume. (#456)'],
+                         pulls={'456': dict(login='some-user', type='User')})
+        self.save(); self.set_credits(self.credit(login='wrong-user'))
+        self.assertEqual('release: #456: add credit suffix' + self.credit() + '\n',
+                         self.cli('prepare', ok=False).stderr)
+
+    def test_prepare_bot_pr_is_ignored_by_user_type(self):
+        self.data.update(commits=['Dependencies update.\n\nCloses #456\n'],
+                         pulls={'456': dict(login='release-helper', type='Bot')})
+        self.save()
+        result = self.cli('prepare')
+        self.assertIn('0 outside PRs, 0 missing credits; skipped 1 bot PRs, 0 owner PRs, 0 issues', result.stdout)
+        self.assertNotIn('#456', result.stdout)
+
+    def test_prepare_owner_pr_is_ignored_using_environment_login(self):
+        self.data.update(commits=['Sessions resume.\n\nCloses #456\n'],
+                         pulls={'456': dict(login='Release-Owner', type='User')})
+        self.save()
+        result = self.cli('prepare')
+        self.assertIn('0 outside PRs, 0 missing credits; skipped 0 bot PRs, 1 owner PRs, 0 issues', result.stdout)
+        self.assertNotIn(['gh', 'api', 'user', '--method', 'GET'], self.calls_json())
+
+    def test_prepare_derives_owner_once_from_authenticated_user(self):
+        self.env.pop('OCTET_RELEASE_OWNER_LOGIN')
+        self.data.update(authenticated_login='release-owner',
+                         commits=['Sessions resume. (#456)', 'Reports scroll. (#789)'],
+                         pulls={str(n): dict(login='Release-Owner', type='User') for n in (456, 789)})
+        self.save()
+        result = self.cli('prepare')
+        self.assertIn('0 outside PRs, 0 missing credits; skipped 0 bot PRs, 2 owner PRs, 0 issues', result.stdout)
+        self.assertEqual(1, self.calls_json().count(['gh', 'api', 'user', '--method', 'GET']))
+
+    def test_prepare_owner_override_takes_precedence_over_environment(self):
+        self.data.update(commits=['Sessions resume. (#456)'],
+                         pulls={'456': dict(login='another-owner', type='User')})
+        self.save()
+        result = self.cli('prepare', '--owner-login', 'Another-Owner')
+        self.assertIn('skipped 0 bot PRs, 1 owner PRs, 0 issues', result.stdout)
+        self.assertNotIn(['gh', 'api', 'user', '--method', 'GET'], self.calls_json())
+
+    def test_prepare_issue_references_are_silent_and_counted_once(self):
+        self.data.update(commits=['Sessions resume. (#123)\n\nFixes #123\n',
+                                  'Reports scroll.\n\nResolves #123\n'], issues=['123'])
+        self.save()
+        result = self.cli('prepare')
+        self.assertIn('0 outside PRs, 0 missing credits; skipped 0 bot PRs, 0 owner PRs, 1 issues', result.stdout)
+        self.assertNotIn('#123', result.stdout)
+        self.assertEqual('', result.stderr)
+        self.assertEqual(1, sum(c[1:3] == ['api', 'repos/skaft-software/octet/pulls/123']
+                                for c in self.calls_json()))
+        self.assertFalse(any('/issues/' in c[2] for c in self.calls_json() if c[0] == 'gh'))
+
+    def test_prepare_detects_closing_trailers_and_subject_suffix(self):
+        for reference in ('Closes #456', 'Fixes: #456', 'Resolves #456', 'resolves: #456. '):
+            with self.subTest(reference=reference):
+                self.data.update(commits=['Sessions resume.\n\n' + reference + '\n'],
+                                 pulls={'456': dict(login='some-user', type='User')})
+                self.save()
+                self.assertEqual('release: #456: add credit suffix' + self.credit() + '\n',
+                                 self.cli('prepare', ok=False).stderr)
+        self.data['commits'] = ['Sessions resume. (#456)']
+        self.save()
+        self.assertEqual('release: #456: add credit suffix' + self.credit() + '\n',
+                         self.cli('prepare', ok=False).stderr)
+
+    def test_prepare_ignores_direct_commits_without_pr_references(self):
+        self.data['commits'] = ['Sessions resume.', 'Reports mention #456 in prose.']
+        self.save(); self.cli('prepare')
+        self.assertTrue(all(c[0] == 'git' for c in self.calls_json()))
+
+    def test_prepare_requires_credit_in_current_release_section(self):
+        self.data.update(commits=['Sessions resume. (#456)'],
+                         pulls={'456': dict(login='some-user', type='User')})
+        self.save()
+        path = self.root / 'CHANGELOG.md'
+        path.write_text(path.read_text().replace('## [Unreleased]',
+                        '## [Unreleased]\n\n### Fixed\n\n- Sessions resume.' + self.credit())
+                        .replace('- Tools work.', '- Sessions resume.' + self.credit() + '\n- Tools work.'))
+        release.notes.sync(self.root, path)
+        self.assertIn(self.credit(), self.cli('prepare', ok=False).stderr)
+        self.set_credits(self.credit()); self.cli('prepare')
+
+    def test_prepare_does_not_ignore_non_404_api_failures(self):
+        self.data.update(commits=['Sessions resume. (#456)'], pull_error=True)
+        self.save(); self.cli('prepare', ok=False)
+        self.assertEqual([], self.data['releases'])
+
+    def test_prepare_is_read_only_and_repeatable(self):
+        self.assertEqual(self.cli('prepare').stdout, self.cli('prepare').stdout)
         self.assertTrue(all(c[0]=='git' for c in self.calls_json()))
         self.assertEqual([],self.data['releases'])
 
