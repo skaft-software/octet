@@ -149,6 +149,11 @@ attended desktop.
 
 ## Isolation and safety
 
+Resource-discovery fixtures contribute canonical directories: macOS temporary
+paths can cross the `/var` symlink, which resource admission correctly rejects.
+Resolving the fixture's existing directory keeps reload assertions independent
+of that safety boundary without weakening production validation.
+
 Each real-binary run creates a disposable HOME, workspace, and session store,
 with no inherited credentials. Ordinary startup cases use an empty API key,
 `auto_discover: false`, and `http://127.0.0.1:9/v1/` as their unreachable base

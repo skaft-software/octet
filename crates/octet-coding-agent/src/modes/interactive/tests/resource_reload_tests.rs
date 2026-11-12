@@ -966,13 +966,13 @@ async fn first_typed_reload(editor: bool, during_startup: bool) {
     let factory = format!(
         r#"
 import {{ CustomEditor }} from '@earendil-works/pi-coding-agent';
-import {{ existsSync }} from 'node:fs';
+import {{ existsSync, realpathSync }} from 'node:fs';
 export default pi => {{
   pi.on('session_start', async (_, ctx) => {{
     while (!existsSync(TRACE + '.release')) await new Promise(resolve => setTimeout(resolve, 5));
     {mount}
   }});
-  pi.on('resources_discover', () => ({{skillPaths: [TRACE + '.skills']}}));
+  pi.on('resources_discover', () => ({{skillPaths: [realpathSync(TRACE + '.skills')]}}));
 }};
 "#
     );
@@ -985,6 +985,9 @@ export default pi => {{
     let release = directory.path().join("trace.jsonl.release");
     let skills = directory.path().join("trace.jsonl.skills");
     std::fs::create_dir_all(&skills).unwrap();
+    // Return the real resource root above: macOS temp paths cross /var's
+    // symlink, which resource admission correctly refuses. Keep that safety
+    // boundary out of this command-delivery/frame-reporting fixture.
     update_status(&mut shell, &app);
     shell.finish_startup();
     if during_startup {

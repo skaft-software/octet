@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reload acceptance tests use canonical temporary directories on macOS.
+
 ## [0.10.4] - Release candidate
 
 ### Changed
