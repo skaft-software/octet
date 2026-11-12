@@ -46,15 +46,21 @@ where
     if !force_metadata && content.len() <= budget {
         return content;
     }
-    let retained = content.len().min(budget.saturating_sub(1));
-    let head = retained.div_ceil(2);
-    let tail_start = content.len() - (retained - head);
-    let hidden = content.len() - retained;
+    let (head, tail_start) = head_tail_window(content.len(), budget);
+    let retained = head + content.len() - tail_start;
+    let hidden = tail_start - head;
     let mut rows = Vec::with_capacity(retained + 1);
     rows.extend(content[..head].iter().cloned());
     rows.push(metadata(hidden));
     rows.extend(content.into_iter().skip(tail_start));
     rows
+}
+
+/// Source-row boundaries shared by painting and semantic copy.
+pub(super) fn head_tail_window(rows: usize, budget: usize) -> (usize, usize) {
+    let retained = rows.min(budget.saturating_sub(1));
+    let head = retained.div_ceil(2);
+    (head, rows - (retained - head))
 }
 
 #[cfg(test)]

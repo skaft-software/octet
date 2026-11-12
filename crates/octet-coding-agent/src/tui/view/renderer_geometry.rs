@@ -296,16 +296,12 @@ impl RenderedGeometry {
                     copy_rows: state
                         .application_viewport_requested
                         .then(|| {
-                            super::transcript_selection::visible_copy_rows(
+                            super::transcript_selection::visible_block_copy_rows(
+                                state,
+                                index,
                                 &cache.lines[cache.block_starts[index]
                                     ..cache.block_starts[index] + cache.block_lengths[index]],
-                                &super::transcript_selection::block_copy_text(
-                                    &state.transcript[index],
-                                ),
                                 cache.block_geometries[index],
-                                super::transcript_selection::shell_output_copy_start(
-                                    &state.transcript[index],
-                                ),
                                 start.saturating_sub(cache.block_starts[index])
                                     ..end.saturating_sub(cache.block_starts[index]),
                                 copy_rows.block(id),

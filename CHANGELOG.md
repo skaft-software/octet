@@ -64,6 +64,12 @@
   than silently requiring a second Enter. Native and Pi custom editors retain
   the same reload and forced-restart paths; automatic startup stays quiet.
 
+- Fullscreen transcript selection keeps repeated, decorated and wrapped Unicode
+  rows attached to the text actually selected. Bash/Codemode output and edit/write
+  diffs copy their sanitized, currently disclosed content, including offscreen
+  rows, without private arguments, hidden group children, capture metadata,
+  line-number gutters or disclosure hints. Shell-copy behavior is preserved. (#683)
+
 - Resuming a session with thousands of entries no longer re-encodes and
   re-sends its whole history to every extension on each UI refresh. Unchanged
   sessions keep their published view; any new record, label, usage, host change,

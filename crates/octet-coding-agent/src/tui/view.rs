@@ -7658,7 +7658,7 @@ impl InteractiveShell {
             state.transcript_selection = None;
             return;
         };
-        let last_offset = block_copy_text(&state.transcript[last]).len();
+        let last_offset = transcript_selection::presented_block_copy_text(&state, last).len();
         state.transcript_selection = Some(TranscriptSelection {
             anchor: TranscriptPosition {
                 block: 0,

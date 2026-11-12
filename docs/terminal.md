@@ -256,6 +256,12 @@ Each wrapped output row maps only its visible fragment, including wide Unicode
 text; selecting a continuation does not jump back to the first row. Compact-tail
 selection starts at the retained source boundary, not at matching text in omitted
 output. Elision labels and empty-output placeholders are not copyable source.
+Bash and Codemode tool selections and edit/write diffs copy the sanitized text
+presented at the current disclosure level, including content scrolled out of
+view. Ctrl+O reveals omitted input/output before it can be copied; collapsed
+group children, private tool arguments, capture metadata, line-number gutters
+and disclosure hints stay out of the copy. Repeated or decorated Unicode rows
+select their own occurrence, not matching text elsewhere in the transcript.
 Shift+drag remains your terminal's native selection override
 where the terminal supports it.
 

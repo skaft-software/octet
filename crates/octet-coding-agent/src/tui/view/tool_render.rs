@@ -1,11 +1,15 @@
 //! Shared tool-output classification, alignment, and compact terminal rendering.
 
+#[path = "tool_copy.rs"]
+mod tool_copy;
+pub(super) use tool_copy::ToolRows;
+
 use sexy_tui_rs::{
     truncate_to_width, visible_width, DiffLineKind, DiffRenderOptions, RichRenderer, UnifiedDiff,
 };
 
 use super::terminal_text::sanitize_for_terminal;
-use super::{fit_line, subdued_text, wrap_hanging, ToolPanel};
+use super::{fit_line, subdued_text, ToolPanel};
 use crate::tui::theme::OctetTheme;
 
 #[cfg(test)]
@@ -199,23 +203,6 @@ pub(super) fn bounded_tool_failure_reason(panel: &ToolPanel) -> Option<String> {
         .map(|reason| crate::presentation::concise_line(&reason))
 }
 
-pub(super) fn render_tool_failure_reason(
-    panel: &ToolPanel,
-    theme: &OctetTheme,
-    width: u16,
-    output_indent: &str,
-) -> Vec<String> {
-    let Some(reason) = bounded_tool_failure_reason(panel) else {
-        return Vec::new();
-    };
-    wrap_hanging(
-        &theme.fg("error", &reason),
-        output_indent,
-        output_indent,
-        width,
-    )
-}
-
 /// Max diff lines to show in terse mode before truncating.
 const COMPACT_DIFF_LINES: usize = 10;
 
@@ -268,14 +255,14 @@ fn diff_remainder(diff: &UnifiedDiff) -> (DiffRemainder, UnifiedDiff) {
 }
 
 /// Render an edit/write diff. Long diffs are truncated in terse mode.
-pub(super) fn render_diff_only(
+pub(super) fn project_diff(
     panel: &ToolPanel,
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
     expanded: bool,
     output_indent: &str,
-) -> Vec<String> {
+) -> ToolRows {
     let output_indent_width = u16::try_from(visible_width(output_indent)).unwrap_or(u16::MAX);
     let display_line = |line: sexy_tui_rs::RenderedLine| {
         let content = if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
@@ -286,9 +273,9 @@ pub(super) fn render_diff_only(
         format!("{output_indent}{content}")
     };
     let Some(ref diff) = tool_diff(panel) else {
-        return Vec::new();
+        return ToolRows::default();
     };
-    let mut parsed = UnifiedDiff::parse(diff);
+    let mut parsed = UnifiedDiff::parse(&sanitize_for_terminal(diff));
     // The edit/write tool row already identifies this one file. Repeating two
     // absolute headers can consume the whole preview before either changed
     // line is visible. Full disclosure keeps the original headers intact.
@@ -302,13 +289,52 @@ pub(super) fn render_diff_only(
         line_numbers: width >= 70,
         wrap: true,
     };
+    let (source_remainder, retained) = diff_remainder(&parsed);
     let rendered = renderer.render_diff(&parsed, render_width, options);
-    let mut lines: Vec<String> = rendered.lines.into_iter().map(display_line).collect();
-    if !expanded && lines.len() > COMPACT_DIFF_LINES + 1 {
-        let (source_remainder, retained) = diff_remainder(&parsed);
+    let number_gutter = if options.line_numbers {
+        parsed
+            .lines
+            .iter()
+            .flat_map(|line| [line.old_number, line.new_number])
+            .flatten()
+            .max()
+            .map_or(1, |number| number.to_string().len())
+            + 3
+    } else {
+        0
+    };
+    let lines: Vec<String> = rendered.lines.into_iter().map(display_line).collect();
+    let literal_width = render_width.saturating_sub(number_gutter as u16).max(1);
+    let mut projected = ToolRows::rich_literal(
+        lines,
+        rendered.copy_text,
+        output_indent_width.saturating_add(number_gutter as u16),
+        literal_width,
+    );
+    // Capture-time omission markers are metadata, not diff source. Their
+    // physical rows still paint, but never acquire copy ranges.
+    let mut source_offset = 0;
+    for line in &parsed.lines {
+        let end = source_offset + ToolRows::rich_text(&line.text, literal_width).len();
+        let one_line = UnifiedDiff {
+            lines: vec![line.clone()],
+        };
+        if diff_remainder(&one_line).1.lines.is_empty() {
+            for row in &mut projected.copy_rows {
+                if row
+                    .as_ref()
+                    .is_some_and(|row| row.source.start >= source_offset && row.source.end <= end)
+                {
+                    *row = None;
+                }
+            }
+        }
+        source_offset = end + 1;
+    }
+    if !expanded && projected.lines.len() > COMPACT_DIFF_LINES + 1 {
         let hint = match source_remainder {
             DiffRemainder::None => {
-                let remaining = lines.len() - COMPACT_DIFF_LINES;
+                let remaining = projected.lines.len() - COMPACT_DIFF_LINES;
                 let unit = if remaining == 1 { "line" } else { "lines" };
                 format!("{remaining} {unit} hidden")
             }
@@ -326,10 +352,11 @@ pub(super) fn render_diff_only(
             }
             DiffRemainder::Unknown => "more diff content hidden".to_owned(),
         };
-        lines.truncate(COMPACT_DIFF_LINES);
-        lines.push(subdued_text(theme, &format!("{output_indent}{hint}")));
+        projected.retain_rows(&(0..COMPACT_DIFF_LINES).collect::<Vec<_>>());
+        projected.decoration(subdued_text(theme, &format!("{output_indent}{hint}")));
     }
-    lines
+    projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+    projected
 }
 
 pub(super) fn without_redundant_tool_lead(tool: &str, text: &str) -> String {
