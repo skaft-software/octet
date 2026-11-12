@@ -330,6 +330,7 @@ def ship(release, state, args):
             api("git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": state["sha"]})
     ship_run(state, "release-serve.yml", "extensions", wait=True)
     print(f"binary ship run: {ship_run(state, 'release-octet.yml', 'ship')}")
+    print(f"After ship succeeds and publication is verified, land the post-ship docs commit: switch install commands and extension READMEs to {state['version']}.")
 
 
 def valid_reason(reason):

@@ -18,7 +18,7 @@ LEGACY_REPOSITORY = "skaft-software/ygg"
 
 
 def documented_versions(root=SCRIPTS.parent):
-    """Workspace version, candidate state and the install target the docs name.
+    """Workspace version, changelog candidate state and the README install target.
 
     A candidate's checked-in installer targets its source version, while public
     download instructions retain the preceding release until explicit promotion.
@@ -30,10 +30,20 @@ def documented_versions(root=SCRIPTS.parent):
     changelog = (root / "CHANGELOG.md").read_text()
     releases = re.findall(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", changelog, re.MULTILINE)
     assert releases and releases[0] == version, f"CHANGELOG.md must open with {version}"
-    if f"## [{version}] - Release candidate" not in changelog.splitlines():
-        return version, False, version
-    assert len(releases) > 1, f"CHANGELOG.md lists no release before candidate {version}"
-    return version, True, releases[1]
+    heading = re.search(rf"(?m)^## \[{re.escape(version)}\][^\n]*$", changelog).group(0)
+    candidate = heading == f"## [{version}] - Release candidate"
+    dated = re.fullmatch(rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", heading)
+    assert candidate or dated, "the changelog heading must be candidate or dated"
+    target = re.search(r"/releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/install-octet\.sh",
+                       (root / "README.md").read_text())
+    assert target, "README.md must name a version-pinned install target"
+    install_version = target.group(1)
+    assert install_version in releases[:2], "docs must install the workspace or previous release"
+    if install_version == version:
+        assert dated, "published install target requires a dated changelog heading"
+    else:
+        assert len(releases) > 1, f"CHANGELOG.md lists no release before candidate {version}"
+    return version, candidate, install_version
 
 
 def load_script(name):
@@ -192,6 +202,42 @@ class RepositoryIdentityTests(unittest.TestCase):
             self.assertIsNone(re.fullmatch(identity, prefix + "v0.10.4"))
 
 
+class DocumentedVersionsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.4"\n')
+        self.changelog = self.root / "CHANGELOG.md"
+        self.changelog.write_text("## [1.2.4] - 2026-11-12\n\n## [1.2.3] - 2026-11-01\n")
+        self.readme = self.root / "README.md"
+        self.readme.write_text("https://github.com/skaft-software/octet/releases/download/v1.2.3/install-octet.sh\n")
+
+    def test_dated_changelog_keeps_previous_install_target(self):
+        self.assertEqual(documented_versions(self.root), ("1.2.4", False, "1.2.3"))
+
+    def test_candidate_heading_keeps_previous_install_target(self):
+        self.changelog.write_text(self.changelog.read_text().replace("2026-11-12", "Release candidate"))
+        self.assertEqual(documented_versions(self.root), ("1.2.4", True, "1.2.3"))
+
+    def test_published_install_target_requires_dated_changelog(self):
+        self.readme.write_text(self.readme.read_text().replace("v1.2.3", "v1.2.4"))
+        self.assertEqual(documented_versions(self.root), ("1.2.4", False, "1.2.4"))
+        self.changelog.write_text(self.changelog.read_text().replace("2026-11-12", "Release candidate"))
+        with self.assertRaisesRegex(AssertionError, "published install target requires a dated"):
+            documented_versions(self.root)
+
+    def test_only_workspace_or_previous_install_targets_are_allowed(self):
+        for target in ("1.2.2", "1.2.5"):
+            with self.subTest(target=target):
+                self.readme.write_text(f"/releases/download/v{target}/install-octet.sh\n")
+                with self.assertRaisesRegex(AssertionError, "workspace or previous release"):
+                    documented_versions(self.root)
+        self.readme.write_text("curl https://example.invalid/install-octet.sh\n")
+        with self.assertRaisesRegex(AssertionError, "version-pinned install target"):
+            documented_versions(self.root)
+
+
 class SourceDistributionVersionTests(unittest.TestCase):
     """Release distribution identities stay aligned; API versions are independent."""
 
@@ -322,21 +368,23 @@ class ReleaseDocumentationTests(unittest.TestCase):
         self.assertEqual(notes, f"# octet {version}\n\n" + section.rstrip("\n") + "\n")
         if candidate:
             self.assertIn(f"## [{version}] - Release candidate", notes)
-        for name in ("README.md", "docs/installation.md"):
+        for name in ("README.md", "docs/installation.md", "docs/getting-started.md"):
             with self.subTest(path=name):
                 guide = (root / name).read_text()
                 self.assertIn(f"/releases/download/v{install_version}/install-octet.sh", guide)
-                if candidate:
-                    self.assertNotIn(f"/releases/download/v{version}/install-octet.sh", guide)
-                    self.assertIn(version, guide)
-                    self.assertRegex(guide.lower(), r"release candidate|local " + re.escape(version) + r" rc")
+                if install_version != version:
+                    self.assertNotRegex(guide, rf"/releases/download/v{re.escape(version)}/|"
+                                        rf"--tag v{re.escape(version)}\b|gh release download v{re.escape(version)}\b")
+                    if name != "docs/getting-started.md":
+                        self.assertIn(version, guide)
+                        self.assertRegex(guide.lower(), r"release candidate|local " + re.escape(version) + r" rc")
 
     def test_distribution_notes_keep_candidate_and_publication_distinct(self):
         text = (SCRIPTS.parent / "docs/distribution.md").read_text()
         version, candidate, install_version = documented_versions()
         self.assertIn(f"/releases/tag/v{install_version}", text)
         self.assertIn(f"distribution target is **{version}**", text)
-        if candidate:
+        if install_version != version:
             self.assertIn("source candidate, not a published release", text)
         else:
             self.assertNotIn("source candidate, not a published release", text)

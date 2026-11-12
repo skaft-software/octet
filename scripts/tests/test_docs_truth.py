@@ -16,6 +16,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = "docs/package-assets.txt"
@@ -136,9 +137,21 @@ class DocsTruthTests(unittest.TestCase):
         shipped = _shipped_markdown()
         notes = f"docs/releases/v{version}.md"
         self.assertIn(notes, shipped, f"{notes} must ship with the candidate docs")
-        mode = ("candidate" if "Release candidate" in
-                _release_section(shipped["CHANGELOG.md"], version).splitlines()[0]
-                else "release")
+        heading = _release_section(shipped["CHANGELOG.md"], version).splitlines()[0]
+        candidate = heading == f"## [{version}] - Release candidate"
+        dated = re.fullmatch(rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", heading)
+        self.assertTrue(candidate or dated, "the changelog heading must be candidate or dated")
+        target = re.search(r"/releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/install-octet\.sh",
+                           shipped["README.md"])
+        self.assertIsNotNone(target, "README.md must name a version-pinned install target")
+        install_version = target.group(1)
+        releases = re.findall(r"(?m)^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", shipped["CHANGELOG.md"])
+        self.assertEqual(releases[0], version)
+        self.assertIn(install_version, releases[:2], "docs must install the workspace or previous release")
+        pre_publication = install_version != version
+        if not pre_publication:
+            self.assertTrue(dated, "published install target requires a dated changelog heading")
+        mode = "candidate" if pre_publication else "release"
         # A version-only badge identifies the source without claiming publication.
         self.assertRegex(
             shipped["README.md"],
@@ -156,12 +169,19 @@ class DocsTruthTests(unittest.TestCase):
             "docs/README.md must name the distribution version and state",
         )
         self.assertRegex(shipped[notes], rf"^# octet {re.escape(version)}\b")
-        if mode == "candidate":
+        if candidate:
             self.assertRegex(shipped[notes], r"unreleased|candidate")
         else:
             self.assertNotIn("unreleased source candidate", shipped[notes])
         self.assertIn(f"## [{version}]", shipped["CHANGELOG.md"])
         for name in ("README.md", "docs/installation.md", "docs/getting-started.md"):
+            if pre_publication:
+                self.assertNotRegex(
+                    shipped[name],
+                    rf"/releases/download/v{re.escape(version)}/|--tag v{re.escape(version)}\b|"
+                    rf"gh release download v{re.escape(version)}\b",
+                    f"{name} must not install unpublished {version}",
+                )
             self.assertNotRegex(
                 shipped[name],
                 rf"\bcandidate: {re.escape(version)}\b.*\bpublished\b",
@@ -376,6 +396,81 @@ class DocsTruthTests(unittest.TestCase):
         self.assertTrue(tokens)
         missing = sorted(token for token in tokens if not (ROOT / token).exists())
         self.assertFalse(missing, f"docs/testing/README.md names paths that do not exist: {missing}")
+
+
+class ReleaseIdentityStateTests(unittest.TestCase):
+    """Exercise the truth gate without changing checked-in release surfaces."""
+
+    def setUp(self):
+        self.version = "1.2.4"
+        self.section = "## [1.2.4] - 2026-11-12\n\n### Fixed\n\n- Editing works.\n"
+        self.shipped = {
+            "CHANGELOG.md": self.section + "\n## [1.2.3] - 2026-11-01\n",
+            "docs/releases/v1.2.4.md": "# octet 1.2.4\n\n" + self.section,
+            "README.md": "candidate-1.2.4 [notes](docs/releases/v1.2.4.md)\n"
+                         "1.2.4 release candidate; install the published version:\n"
+                         "https://github.com/skaft-software/octet/releases/download/v1.2.3/install-octet.sh\n",
+            "docs/README.md": "octet **1.2.4** candidate source\n",
+            "docs/installation.md": "1.2.4 release candidate\n"
+                                    "https://github.com/skaft-software/octet/releases/download/v1.2.3/install-octet.sh\n",
+            "docs/getting-started.md": "Install the published 1.2.3.\n",
+        }
+
+    def check_identity(self):
+        with mock.patch(__name__ + "._workspace_version", return_value=self.version), mock.patch(
+            __name__ + "._shipped_markdown", return_value=self.shipped
+        ):
+            DocsTruthTests("test_release_identity_is_consistent").test_release_identity_is_consistent()
+
+    def test_dated_changelog_with_pre_publication_docs_passes(self):
+        self.check_identity()
+
+    def test_pre_publication_docs_reject_every_current_install_command(self):
+        for name in ("README.md", "docs/installation.md", "docs/getting-started.md"):
+            for command in (
+                "https://github.com/skaft-software/octet/releases/download/v1.2.4/install-octet.sh",
+                "https://github.com/skaft-software/octet/releases/download/v1.2.4/install-octet.ps1",
+                "cargo install --tag v1.2.4",
+                "gh release download v1.2.4 --pattern OCTET_SHA256SUMS",
+            ):
+                with self.subTest(path=name, command=command):
+                    original = self.shipped[name]
+                    self.shipped[name] += command + "\n"
+                    with self.assertRaisesRegex(AssertionError, "must not install unpublished"):
+                        self.check_identity()
+                    self.shipped[name] = original
+
+    def test_candidate_heading_with_current_install_target_fails(self):
+        for name in ("CHANGELOG.md", "docs/releases/v1.2.4.md"):
+            self.shipped[name] = self.shipped[name].replace("2026-11-12", "Release candidate")
+        self.shipped["README.md"] = self.shipped["README.md"].replace("download/v1.2.3", "download/v1.2.4")
+        with self.assertRaisesRegex(AssertionError, "published install target requires a dated"):
+            self.check_identity()
+
+    def test_dated_pre_publication_docs_still_require_candidate_state(self):
+        self.shipped["README.md"] = self.shipped["README.md"].replace("candidate-", "release-")
+        with self.assertRaisesRegex(AssertionError, "README badge"):
+            self.check_identity()
+        self.shipped["README.md"] = self.shipped["README.md"].replace("release-", "candidate-")
+        self.shipped["docs/README.md"] = "octet **1.2.4** release\n"
+        with self.assertRaisesRegex(AssertionError, "distribution version and state"):
+            self.check_identity()
+
+    def test_candidate_notes_follow_the_changelog_not_the_install_target(self):
+        self.shipped["CHANGELOG.md"] = self.shipped["CHANGELOG.md"].replace("2026-11-12", "Release candidate")
+        with self.assertRaises(AssertionError):
+            self.check_identity()
+        self.shipped["docs/releases/v1.2.4.md"] = self.shipped["docs/releases/v1.2.4.md"].replace(
+            "2026-11-12", "Release candidate"
+        )
+        self.check_identity()
+
+    def test_published_docs_require_release_state_and_dated_notes(self):
+        for name in self.shipped:
+            self.shipped[name] = self.shipped[name].replace("download/v1.2.3", "download/v1.2.4")
+        self.shipped["README.md"] = self.shipped["README.md"].replace("candidate-", "release-")
+        self.shipped["docs/README.md"] = "octet **1.2.4** release\n"
+        self.check_identity()
 
 
 if __name__ == "__main__":

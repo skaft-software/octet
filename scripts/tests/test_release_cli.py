@@ -285,7 +285,8 @@ class ReleaseCLITests(unittest.TestCase):
 
     def test_ship_requires_reasoned_skip_and_freezes_decision(self):
         self.ready(); self.cli('ship','--skip-npm',ok=False)
-        self.cli('ship','--skip-npm','--reason','registry incident')
+        result=self.cli('ship','--skip-npm','--reason','registry incident')
+        self.assertIn('After ship succeeds and publication is verified, land the post-ship docs commit: switch install commands and extension READMEs to 1.2.3.', result.stdout.splitlines())
         state=self.receipt(); self.assertEqual('registry incident',state['skip_npm'])
         self.cli('ship','--skip-npm','--reason','changed',ok=False)
         self.assertEqual({SHA},set(self.data['tags'].values()))

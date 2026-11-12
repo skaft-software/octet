@@ -83,7 +83,13 @@ def audit(root=ROOT, fetch=get_json, github=github_latest):
             errors.append(f"{label}: {error}")
     for name in DOCS:
         try:
-            values = doc_versions((root / name).read_text(encoding="utf-8"))
+            text = (root / name).read_text(encoding="utf-8")
+            values = doc_versions(text)
+            if name == "README.md" and expected:
+                target = re.search(rf"/releases/download/v({VERSION})/install-octet\.sh", text)
+                if target and tuple(map(int, target.group(1).split("."))) < tuple(map(int, expected.split("."))):
+                    errors.append(f"GitHub latest is {expected}; docs still install {target.group(1)}; "
+                                  "land the post-ship docs commit")
             if not values:
                 raise ValueError("no published install/release version found")
             rows.append((name, ", ".join(values)))

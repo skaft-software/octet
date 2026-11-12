@@ -3,6 +3,8 @@
 Use Python 3.11+, Git and authenticated `gh` from the repository root. One owner
 at a time. Required environment reviewers stay enabled; no settings change is
 needed. Version preparation and the full local gate happen before this flow.
+The release commit only dates the changelog and regenerates the two notes copies;
+install docs keep the previous published version, even with a dated changelog.
 
 ```sh
 python3 scripts/release-notes.py sync
@@ -15,6 +17,8 @@ python3 scripts/release.py status X.Y.Z
 # After status says complete:
 python3 scripts/release.py ship X.Y.Z
 python3 scripts/release.py status X.Y.Z
+# After ship succeeds and publication is verified, land the post-ship docs commit:
+# switch install commands and extension READMEs to the published version.
 ```
 
 `prepare` changes nothing and contacts no service. It checks the workspace

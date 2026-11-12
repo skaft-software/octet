@@ -66,6 +66,19 @@ class ReleaseSurfacesTests(unittest.TestCase):
         self.assertIn("1.2.1, 1.2.3", failures[0])
         self.assertIn("1.2.2, 1.2.3", failures[1])
 
+    def test_newer_published_release_requests_post_ship_docs_commit(self):
+        path = self.root / "README.md"
+        path.write_text("Candidate 1.2.4; install "
+                        "https://github.com/skaft-software/octet/releases/download/v1.2.2/install-octet.sh\n")
+        _, failures = self.audit()
+        self.assertIn("GitHub latest is 1.2.3; docs still install 1.2.2; land the post-ship docs commit", failures)
+        # Compare numeric components, not strings, and never suggest promotion
+        # when the documented version is already ahead of Latest.
+        path.write_text(path.read_text().replace("v1.2.2", "v1.2.10"))
+        _, failures = self.audit()
+        self.assertFalse(any("post-ship docs commit" in failure for failure in failures))
+        self.assertTrue(any("expected 1.2.3, observed 1.2.10" in failure for failure in failures))
+
     def test_missing_malformed_and_unreachable_sources_fail_closed(self):
         for value in ({}, {"version": "latest"}, []):
             self.site = value
