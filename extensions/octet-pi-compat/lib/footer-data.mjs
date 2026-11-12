@@ -60,7 +60,7 @@ export function createFooterData(runtime, store, tui) {
     if (!live() || pending || authoritative()) return pending;
     pending = (async () => {
       const workspace = state.workspace;
-      if (cwd !== workspace) { paths = await findHead(workspace); cwd = workspace; }
+      if (cwd !== workspace || !paths?.head) { paths = await findHead(workspace); cwd = workspace; }
       const next = await readBranch(paths);
       if (!live() || state.workspace !== workspace || authoritative()) return;
       const previous = branch; branch = next;
@@ -91,7 +91,10 @@ export function createFooterData(runtime, store, tui) {
         if (!live()) return () => {};
         const bound = () => {
           if (!live()) return;
-          try { runtime.scope.run(store, handler); }
+          try {
+            Promise.resolve(runtime.scope.run(store, handler))
+              .catch(error => runtime.reportCallbackError('footer branch change', store.factory, error));
+          }
           catch (error) { runtime.reportCallbackError('footer branch change', store.factory, error); }
         };
         listeners.add(bound); state.branchListeners.add(bound);

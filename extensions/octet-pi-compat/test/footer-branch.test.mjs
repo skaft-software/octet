@@ -7,7 +7,7 @@ import { launch, owner } from './helper.mjs';
 
 const plain = frame => frame.params.lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 const branchFrame = frame => frame.method === 'ui/frame' && plain(frame).startsWith('branch:');
-async function fixture(t, { head = 'ref: refs/heads/main\n', nested = false, worktree = false, supplied, throwing = false } = {}) {
+async function fixture(t, { head = 'ref: refs/heads/main\n', nested = false, worktree = false, supplied, throwing = false, asyncThrowing = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'octet-footer-branch-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repo = join(directory, 'repo'), workspace = nested ? join(repo, 'src/nested') : repo;
@@ -19,7 +19,7 @@ async function fixture(t, { head = 'ref: refs/heads/main\n', nested = false, wor
   const factory = join(directory, 'footer.mjs');
   await writeFile(factory, `export default pi => { pi.on('session_start', (_, ctx) => ctx.ui.setFooter((tui, theme, data) => {
     let changes = 0;
-    ${throwing ? "data.onBranchChange(() => { throw new Error('private branch exception'); });" : ''}
+    ${throwing || asyncThrowing ? `data.onBranchChange(${asyncThrowing ? 'async ' : ''}() => { throw new Error('private branch exception'); });` : ''}
     const off = data.onBranchChange(() => { changes++; tui.requestRender(); });
     return { render: () => ['branch:' + String(data.getGitBranch()) + ' changes:' + changes], invalidate() {}, dispose: off };
   })); };`);
@@ -65,6 +65,20 @@ test('branch listener failures are isolated and sanitized by footer stage', asyn
   await peer.close();
 });
 
+
+test('async branch listener failures are reported once without stopping refreshes or transport', async t => {
+  const { peer, git } = await fixture(t, { asyncThrowing: true });
+  await peer.wait(branchFrame);
+  for (const [index, branch] of ['first', 'second'].entries()) {
+    await writeFile(join(git, 'HEAD'), `ref: refs/heads/${branch}\n`);
+    await peer.wait(frame => branchFrame(frame) && plain(frame) === `branch:${branch} changes:${index + 1}`);
+  }
+  const warning = await peer.wait(frame => frame.method === 'notification' && frame.params.title === '[Extension issues]');
+  assert.match(warning.params.message, /Footer.*footer.*branch/i);
+  await peer.close();
+  assert.equal(peer.seen.filter(frame => frame.method === 'notification' && frame.params.title === '[Extension issues]').length, 1);
+  assert.doesNotMatch(JSON.stringify(warning) + peer.stderr(), /private branch exception/);
+});
 
 test('footer branch data is null outside a repository and subscriptions end with their surface', async t => {
   const { peer, git } = await fixture(t);

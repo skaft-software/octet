@@ -363,9 +363,12 @@ without reading or refreshing credentials. Unclassified dynamic resolvers still
 refuse that query; endpoint names never establish authentication kind.
 Unavailable capabilities fail explicitly. Footer git data finds ancestor repositories
 and worktrees, reports `detached` for a detached HEAD, and refreshes its local
-cache off the paint path. An explicit native branch snapshot (including `null`)
-remains authoritative. A failing branch listener is named and skipped without
-stopping other listeners or frames. Custom editor
+cache off the paint path, including discovering a repository created after the
+footer opens. An explicit native branch snapshot (including `null`) remains
+authoritative. Branch listener throws and promise rejections are isolated and
+reported once per extension and footer stage, without exception text or stopping
+other listeners or frames. Closing a footer during discovery skips its extension
+factory so it cannot register timers after cleanup. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
 Every custom editor occupies the composer slot, leaving native transcript,
 chrome and the single slash popup visible. `Ctrl+G` rescues only explicit fullscreen

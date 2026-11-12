@@ -300,6 +300,8 @@ export function createContext(runtime, store, replaced = false) {
           const mounted = runtime.scope.getStore();
           const footer = mounted.surface.footerData = createFooterData(runtime, mounted, tui);
           await footer.ready;
+          // A closed mount still needs a Component, but must not start extension timers after cleanup.
+          if (mounted.surface.closed || !mounted.state.alive) return { render: () => [] };
           return make(tui, t, footer.data);
         } : make, { slot, ...options });
       }
