@@ -54,12 +54,15 @@ class ServeReleaseTrustTests(unittest.TestCase):
 
     def test_signing_remains_protected_and_actions_remain_pinned(self):
         self.assertIn("environment: stable-release-publish", self.jobs["publish"])
-        self.assertIn("contents: write", self.jobs["publish"])
-        self.assertIn("id-token: write", self.jobs["publish"])
+        expected = {
+            "resolve": {"actions": "read", "contents": "write"},
+            "publish": {"actions": "read", "contents": "write", "id-token": "write"},
+        }
         for name, job in self.jobs.items():
-            if name != "publish":
-                self.assertNotIn("contents: write", job)
-                self.assertNotIn("id-token: write", job)
+            with self.subTest(job=name):
+                header = job.split("    steps:\n", 1)[0]
+                permissions = dict(re.findall(r"(?m)^      ([\w-]+): (read|write|none)$", header))
+                self.assertEqual(expected.get(name, {}), permissions)
         for action in re.findall(r"^\s+- uses: (\S+)", self.workflow, re.MULTILINE):
             self.assertRegex(action, r"@[a-f0-9]{40}$")
 

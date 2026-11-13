@@ -22,6 +22,11 @@ def jobs(name):
     return text, dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', text.split('\njobs:\n', 1)[1]))
 
 
+def permissions(text, indent):
+    block = re.search(rf'(?m)^{" " * indent}permissions:\n((?:{" " * (indent + 2)}[\w-]+: \w+\n)+)', text)
+    return dict(re.findall(r'([\w-]+): (\w+)', block[1])) if block else {}
+
+
 def step(text, name):
     block = text.split('      - name: '+name+'\n',1)[1]
     return textwrap.dedent(block.split('        run: |\n',1)[1].split('\n      - ',1)[0]).rstrip()
@@ -31,11 +36,64 @@ class WorkflowContracts(unittest.TestCase):
     def test_no_push_trigger_and_no_runner_workflow_polling(self):
         for name in ('release-candidate.yml','release-octet.yml','release-serve.yml'):
             text, graph = jobs(name)
-            self.assertNotRegex(text.split('\njobs:\n',1)[0],r'(?m)^  push:')
+            header = text.split('\njobs:\n',1)[0]
+            triggers = header.split('\non:\n',1)[1].split('\nconcurrency:',1)[0]
+            self.assertEqual(['workflow_dispatch'], re.findall(r'(?m)^  ([\w-]+):', triggers))
             self.assertNotRegex(graph['resolve'],r'\bsleep\b|for attempt|while |run watch')
             self.assertNotIn('timeout-minutes: 85',text)
             self.assertNotIn('timeout-minutes: 360',text)
         self.assertNotIn('release-octet.yml/runs',jobs('release-serve.yml')[1]['resolve'])
+
+    def test_exact_least_privilege_job_permissions(self):
+        read = {'actions': 'read', 'contents': 'read'}
+        write = {'actions': 'read', 'contents': 'write'}
+        sign = {**write, 'id-token': 'write'}
+        overrides = {
+            'release-candidate.yml': {'resolve': write, 'attach': write},
+            'release-serve.yml': {'resolve': write, 'publish': sign},
+            'release-octet.yml': {
+                'resolve': write, 'publish': sign, 'promote-latest': write,
+                'package-npm': read, 'publish-npm': sign,
+                'verify-npm-published': {'contents': 'read'},
+                'publish-installer-repair': {'contents': 'write', 'id-token': 'write'},
+            },
+        }
+        for workflow, expected in overrides.items():
+            text, graph = jobs(workflow)
+            with self.subTest(workflow=workflow):
+                self.assertEqual(read, permissions(text, 0))
+                self.assertEqual(expected, {name: value for name, job in graph.items()
+                                            if (value := permissions(job, 4))})
+
+    def test_draft_reading_commands_have_write_without_widening_public_readers(self):
+        seen = set()
+        for workflow in ('release-candidate.yml', 'release-serve.yml', 'release-octet.yml'):
+            text, graph = jobs(workflow)
+            for name, job in graph.items():
+                if not re.search(r'\bscripts/release\.py\s+_(?:resolve|download|attach|signed|publish)\b', job):
+                    continue
+                seen.add((workflow, name))
+                effective = permissions(job, 4) or permissions(text, 0)
+                with self.subTest(workflow=workflow, job=name):
+                    if workflow == 'release-octet.yml' and name == 'package-npm':
+                        self.assertEqual('read', effective['contents'])
+                        self.assertIn('needs: [resolve, verify-published]', job)
+                        self.assertIn("needs['verify-published'].result == 'success'", job)
+                    else:
+                        self.assertEqual('write', effective['contents'])
+                    if workflow == 'release-octet.yml' and name == 'promote-latest':
+                        # This post-publication reader still needs write to move Latest.
+                        self.assertIn("needs.publish.result == 'success'", job)
+                        self.assertIn('gh release edit "$RELEASE_TAG" --latest', job)
+        self.assertEqual({
+            ('release-candidate.yml', 'resolve'), ('release-candidate.yml', 'attach'),
+            ('release-serve.yml', 'resolve'), ('release-serve.yml', 'publish'),
+            ('release-octet.yml', 'resolve'), ('release-octet.yml', 'publish'),
+            ('release-octet.yml', 'package-npm'), ('release-octet.yml', 'promote-latest'),
+        }, seen)
+        text, graph = jobs('release-octet.yml')
+        for name in ('verify-published', 'verify-windows-published', 'verify-installer-repair'):
+            self.assertEqual('read', (permissions(graph[name], 4) or permissions(text, 0))['contents'])
 
     def test_candidate_is_one_unsigned_source_pinned_native_and_extension_build(self):
         text, graph = jobs('release-candidate.yml')

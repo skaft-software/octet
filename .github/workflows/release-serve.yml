@@ -38,6 +38,10 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # GitHub hides draft releases from read-only tokens.
+    permissions:
+      actions: read
+      contents: write
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}

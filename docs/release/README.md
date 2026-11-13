@@ -42,6 +42,7 @@ not published. Dependency audits, reproducibility, package inclusion and Windows
 qualification are retained. No candidate job has signing permission or a
 protected environment. It uploads unsigned assets and a JSON build receipt with
 source, versions, run ids and SHA-256 digests to the same draft.
+Draft-reading jobs need job-level `contents: write` because GitHub hides draft releases from read-only tokens.
 
 ## Pause, continue, rebuild or discard
 
