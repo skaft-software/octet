@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Up and Down move between the rows of a recalled multiline prompt and change history entries only from its first or last row.
+
 ## [0.10.4] - 2026-11-12
 
 ### Changed

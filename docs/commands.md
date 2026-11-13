@@ -255,7 +255,7 @@ See [Discovery and trust](resources.md).
 | Ctrl+O | Show compaction, subagent activity, tool commands, tool evidence and shell output. It can't recover discarded output. |
 | Ctrl+T | Show or hide the retained thinking traces, independently of Ctrl+O. New traces follow the current choice. |
 | PageUp / PageDown | Scroll the transcript. PageUp pins the view, PageDown returns toward live output. |
-| Up / Down | Pick a visible suggestion first, otherwise move through multiline input. At the first/last editor row, recall sent prompts and return to the exact draft, caret and paste/attachment chips—even during active work. History never submits. |
+| Up / Down | Pick a visible suggestion first, otherwise move through multiline input. At the first/last editor row, recall sent prompts and return to the exact draft, caret and paste/attachment chips—even during active work. A recalled multiline or wrapped prompt follows the same rule: arrows move between its rows and leave it only from its first or last row. History never submits. |
 | Tab | Complete the selected slash command without running it, or insert the selected path or `@` file suggestion. Directories stay open, and spaces are backslash-escaped. |
 | `@` | Fuzzy-find workspace files, respecting `.gitignore`. With a path prefix, it completes from the filesystem. |
 
