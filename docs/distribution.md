@@ -249,7 +249,8 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 ## Read-only channel audit
 
 `release-surfaces.yml` compares GitHub Latest, all five npm `latest` dist-tags,
-current installation-document pins, bundled notes and
+the release title and redundant version headings, current installation-document
+pins, bundled notes and
 `https://skaft.org/octet/release.json`. It runs daily, on explicit dispatch and
 after a successful Latest promotion. It performs GETs only, has a five-minute job
 bound, installs no toolchains and never waits for another workflow. An unavailable

@@ -901,8 +901,8 @@ jobs:
               echo "canonical release $RELEASE_TAG no longer exists" >&2
               exit 1
             fi
-            { cat "docs/releases/$RELEASE_TAG.md"; printf '\n\n%s\n' "$marker"; } > "$RUNNER_TEMP/new-release-notes.md"
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" \
+            { python3 scripts/release-notes.py render "$VERSION" --github; printf '\n\n%s\n' "$marker"; } > "$RUNNER_TEMP/new-release-notes.md"
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "octet $VERSION" \
               --notes-file "$RUNNER_TEMP/new-release-notes.md"
             release_state=$(gh release view "$RELEASE_TAG" \
               --json tagName,isDraft,isPrerelease \
@@ -1001,7 +1001,7 @@ jobs:
             fi
             # Publish without moving the repository's Latest pointer. The
             # promote job sets it only after the published-install smoke passes.
-            gh release edit "$RELEASE_TAG" --draft=false --latest=false
+            gh release edit "$RELEASE_TAG" --draft=false --latest=false --title "octet $VERSION"
           fi
 
   verify-published:

@@ -40,7 +40,7 @@ def get_json(url):
 def github_latest():
     result = subprocess.run(["gh", "api", "--method", "GET",
                              f"repos/{REPOSITORY}/releases/latest",
-                             "--jq", "{tag_name, draft, prerelease}"], check=True,
+                             "--jq", "{tag_name, name, body, draft, prerelease}"], check=True,
                             capture_output=True, text=True, timeout=30)
     return json.loads(result.stdout)
 
@@ -72,6 +72,11 @@ def audit(root=ROOT, fetch=get_json, github=github_latest):
             raise ValueError("Latest is not a published stable release")
         expected = version(latest["tag_name"], tag=True)
         rows.append(("GitHub latest", expected))
+        if latest.get("name") != f"octet {expected}":
+            errors.append(f"GitHub latest: title must be 'octet {expected}', observed {latest.get('name')!r}")
+        if re.match(rf"^#{{1,6}}[ \t]+[^\n]*(?<![\d.])v?{re.escape(expected)}(?![\d.])",
+                    (latest.get("body") or "").lstrip()):
+            errors.append("GitHub latest: body starts with a version heading; render just the release subsections")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         errors.append(f"GitHub latest: {error}")
     for package in PACKAGES:

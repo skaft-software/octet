@@ -444,8 +444,11 @@ cosign() {
             (root / "release-assets").mkdir()
             (root / "release-assets" / "artifact").write_text("fixture")
             (root / "release-assets" / "artifact.sigstore.json").write_text("fresh signature\n")
-            (root / "docs/releases").mkdir(parents=True)
-            (root / "docs/releases/v0.10.3.md").write_text("Release notes\n")
+            (root / "scripts").mkdir()
+            for name in ("release-notes.py", "changelog.py"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.10.3"\n')
+            (root / "CHANGELOG.md").write_text('## [0.10.3] - 2026-11-11\n\n### Fixed\n\n- Editing works.\n')
             if existing:
                 (root / "existing").mkdir()
                 lines = []
@@ -461,7 +464,7 @@ cosign() {
             asset_file.write_text(assets)
             env = {"PATH": os.defpath, "GITHUB_EVENT_NAME": "push", "GITHUB_REF_TYPE": ref_type,
                    "GITHUB_REPOSITORY": "skaft-software/octet", "GITHUB_RUN_ID": "123",
-                   "RELEASE_TAG": "v0.10.3", "SOURCE_COMMIT": SOURCE,
+                   "RELEASE_TAG": "v0.10.3", "VERSION": "0.10.3", "SOURCE_COMMIT": SOURCE,
                    "WORKFLOW_COMMIT": workflow_commit or SOURCE,
                    "WORKFLOW_TAG": workflow_tag, "INPUT_FORCE_RELEASE": "", "INPUT_FORCE_REASON": "",
                    "COSIGN_IDENTITY": "https://github.com/skaft-software/octet/.github/workflows/release-octet.yml@refs/tags/v0.10.3",
@@ -472,6 +475,7 @@ cosign() {
                    "TEST_EXISTING": str(root / "existing"), "TEST_PRERELEASE": prerelease}
             result = subprocess.run(["bash", "-c", stubs + script], cwd=root, env=env,
                                     capture_output=True, text=True)
+            self.attached_body = body_file.read_text()
             return result, requests.read_text() if requests.exists() else "", state.read_text() if state.exists() else None
 
     def test_draft_is_published_only_after_upload_ref_and_digest_verification(self):
@@ -484,7 +488,11 @@ cosign() {
         self.assertLess(calls.index('release create'), calls.index('release upload'))
         self.assertLess(calls.index('release upload'), calls.rindex('--json assets'))
         self.assertLess(calls.rindex('--json assets'), calls.index('release edit'))
-        self.assertTrue(calls.rstrip().endswith('release edit v0.10.3 --draft=false --latest=false'))
+        self.assertTrue(calls.rstrip().endswith('release edit v0.10.3 --draft=false --latest=false --title octet 0.10.3'))
+        self.assertIn('--draft --title octet 0.10.3 --notes-file', calls)
+        self.assertTrue(self.attached_body.startswith('## Fixed\n\n- Editing works.\n'))
+        self.assertNotIn('# octet', self.attached_body)
+        self.assertIn('<!-- octet-binary-release-run:', self.attached_body)
 
     def test_rerun_converges_on_fresh_signature_bundles(self):
         existing = {"artifact": b"fixture", "artifact.sigstore.json": b"VALID\n"}

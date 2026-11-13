@@ -91,7 +91,7 @@ elif a[0]=='api':
     elif endpoint.split('?')[0]=='releases':
         if method=='GET':
             # Fixtures that flip draft off model a published, canonically tagged release.
-            out([[dict(r, tag_name=r['name']) if not r['draft'] and r['tag_name'].startswith('untagged-') else r
+            out([[dict(r, tag_name='v'+r['name'].removeprefix('octet ').removeprefix('v')) if not r['draft'] and r['tag_name'].startswith('untagged-') else r
                   for r in s['releases']]])
         elif method=='POST':
             r=dict(data,id=1,assets=[],upload_url='https://uploads.github.com/repos/skaft-software/octet/releases/1/assets{?name,label}')
@@ -104,7 +104,7 @@ elif a[0]=='api':
     elif endpoint=='releases/1':
         if method=='PATCH':
             if data.get('draft') is False:
-                assert data['tag_name'] == s['releases'][0]['name'] and data['tag_name'] in s['tags']
+                assert data['tag_name'] == 'v'+s['releases'][0]['name'].removeprefix('octet ').removeprefix('v') and data['tag_name'] in s['tags']
             s['releases'][0].update(data); out(s['releases'][0])
         elif method=='DELETE': s['releases']=[]
         else: out(s['releases'][0])
@@ -135,6 +135,10 @@ finish()
 class ReleaseIdentityTests(unittest.TestCase):
     def test_find_requires_draft_name_or_published_tag(self):
         for draft, name, tag, found in [
+            (True, 'octet 1.2.3', 'untagged-a0bb1236', True),
+            (True, 'octet 1.2.3', 'v1.2.3', True),
+            (True, 'octet 1.2.4', 'v1.2.3', False),
+            (True, 'octet 1.2.3', 'v1.2.4', False),
             (True, 'v1.2.3', 'untagged-a0bb1236', True),
             (True, 'v1.2.3', 'v1.2.3', True),
             (True, 'v1.2.4', 'v1.2.3', False),
@@ -386,7 +390,8 @@ class ReleaseCLITests(unittest.TestCase):
         state = self.started()
         row = self.data['releases'][0]
         self.assertTrue(row['tag_name'].startswith('untagged-'))
-        self.assertEqual('v'+VERSION, row['name'])
+        self.assertEqual('octet '+VERSION, row['name'])
+        self.assertEqual('## Fixed\n\n- Editing works.\n', row['body'].split('\n<!-- octet-candidate:', 1)[0])
         self.assertEqual(SHA, row['target_commitish'])
         self.cli('start')
         self.assertEqual(state['generation'], self.receipt()['generation'])
@@ -397,6 +402,15 @@ class ReleaseCLITests(unittest.TestCase):
         self.assertTrue(uploads)
         self.assertTrue(all('/releases/1/assets?name=' in c[2] for c in uploads))
         self.assertFalse(any(c[1:3] == ['release', 'upload'] for c in self.calls_json()))
+
+    def test_legacy_named_draft_resumes_with_same_marker_and_new_title(self):
+        state = self.started()
+        self.data['releases'][0]['name'] = 'v'+VERSION
+        self.save()
+        self.cli('resume')
+        self.assertEqual('octet '+VERSION, self.data['releases'][0]['name'])
+        self.assertEqual(state['generation'], self.receipt()['generation'])
+        self.assertEqual(1, len(release.MARKER.findall(self.data['releases'][0]['body'])))
 
     def test_status_pause_resume_and_abort_find_untagged_draft(self):
         self.started()
@@ -454,7 +468,12 @@ class ReleaseCLITests(unittest.TestCase):
 
     def test_draft_creation_interruption_recovers_seed_without_second_draft(self):
         self.data['fail_create_after']=True; self.save()
-        self.cli('start',ok=False); self.cli('start')
+        self.cli('start',ok=False)
+        row = self.data['releases'][0]
+        self.assertEqual('octet '+VERSION, row['name'])
+        self.assertTrue(row['body'].startswith('## Fixed\n'))
+        self.assertIn('<!-- octet-candidate-seed:', row['body'])
+        self.cli('start')
         self.assertEqual(1,len(self.data['releases'])); self.assertEqual(1,len(self.data['runs']))
 
     def test_ambiguous_dispatch_does_not_replay_when_actions_is_not_visible(self):
@@ -591,7 +610,10 @@ class ReleaseCLITests(unittest.TestCase):
         self.cli('_publish','--candidate',gen,'--role','ship','--assets',str(native))
         published=copy.deepcopy(self.data['releases'][0])
         self.assertFalse(published['draft']); self.assertEqual('false',published['make_latest'])
-        self.assertEqual(state['notes'],published['body'])
+        self.assertEqual(release.notes.render_github(state['notes']),published['body'])
+        self.assertTrue(published['body'].startswith('## Fixed\n'))
+        self.assertEqual('octet '+VERSION, published['name'])
+        self.assertNotIn('octet-candidate:', published['body'])
         self.cli('_publish','--candidate',gen,'--role','ship','--assets',str(native))
         self.cli('ship'); self.assertEqual(published,self.data['releases'][0])
         (native/'install-octet.sh').write_text('changed')

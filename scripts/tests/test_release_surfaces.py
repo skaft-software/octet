@@ -24,6 +24,8 @@ class ReleaseSurfacesTests(unittest.TestCase):
             path = self.root / directory / "v1.2.3.md"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("<!-- Generated from CHANGELOG.md; do not edit. -->\n## [1.2.3]\n\n- Fixed.\n")
+        self.github = dict(tag_name="v1.2.3", name="octet 1.2.3", body="## Fixed\n\n- Tools work.\n",
+                           draft=False, prerelease=False)
         self.site = dict(version="1.2.3", tag="v1.2.3")
         self.tags = {package: "1.2.3" for package in surfaces.PACKAGES}
         self.requests = []
@@ -38,7 +40,7 @@ class ReleaseSurfacesTests(unittest.TestCase):
 
     def audit(self, **kwargs):
         return surfaces.audit(self.root, fetch=self.fetch,
-                              github=lambda: dict(tag_name="v1.2.3", draft=False, prerelease=False), **kwargs)
+                              github=lambda: self.github, **kwargs)
 
     def test_agreement_covers_every_package_docs_and_bundled_notes(self):
         rows, failures = self.audit()
@@ -46,6 +48,24 @@ class ReleaseSurfacesTests(unittest.TestCase):
         self.assertEqual(len(surfaces.PACKAGES) + 1, len(self.requests))
         self.assertEqual(14, len(rows))
         self.assertTrue(all(url.startswith("https://") for url in self.requests))
+
+    def test_published_title_and_redundant_body_headings_are_reported_together(self):
+        for title in ("v1.2.3", "octet 1.2.4", None):
+            for body in ("# octet 1.2.3\n\n## [1.2.3] - 2026-11-12\n", "\n## [1.2.3] - 2026-11-12\n",
+                         "### v1.2.3\n"):
+                with self.subTest(title=title, body=body):
+                    self.github.update(name=title, body=body)
+                    rows, failures = self.audit()
+                    self.assertEqual(2, len(failures), failures)
+                    self.assertIn("title must be 'octet 1.2.3'", failures[0])
+                    self.assertIn("body starts with a version heading", failures[1])
+                    self.assertEqual(14, len(rows))
+
+    def test_body_version_in_prose_or_later_content_is_not_a_repeated_heading(self):
+        for body in ("## Changed\n\n- Reads 1.2.3 files.\n", "## Fixed\n\n### Migration from 1.2.3\n",
+                     "## Fixed 1.2.30 issues\n"):
+            self.github['body'] = body
+            self.assertEqual([], self.audit()[1])
 
     def test_all_mismatches_reported_in_one_pass(self):
         for package in surfaces.PACKAGES:
@@ -100,7 +120,7 @@ class ReleaseSurfacesTests(unittest.TestCase):
         import json
         path = self.root / "evidence.json"
         path.write_text(json.dumps({
-            "github": dict(tag_name="v1.2.3", draft=False, prerelease=False),
+            "github": self.github,
             "npm": {p: {"latest": v} for p, v in self.tags.items()},
             "website": self.site,
         }))
@@ -135,7 +155,7 @@ class ReleaseSurfacesTests(unittest.TestCase):
                 raise OSError("HTTP 401")
             return fetch(url)
         rows, failures = surfaces.audit(self.root, fetch=failing,
-                                         github=lambda: dict(tag_name="v1.2.3", draft=False, prerelease=False))
+                                         github=lambda: self.github)
         self.assertEqual(len(failures), 1)
         self.assertIn("win32-x64 latest: HTTP 401", failures[0])
         self.assertTrue(any("website" in label for label, _ in rows))
@@ -145,7 +165,7 @@ class ReleaseSurfacesTests(unittest.TestCase):
             self.assertEqual("v1.2.3", surfaces.github_latest()["tag_name"])
         args, kwargs = run.call_args
         self.assertEqual(["gh", "api", "--method", "GET", "repos/skaft-software/octet/releases/latest",
-                          "--jq", "{tag_name, draft, prerelease}"], args[0])
+                          "--jq", "{tag_name, name, body, draft, prerelease}"], args[0])
         self.assertEqual(30, kwargs["timeout"])
 
     def test_http_client_only_gets_json_with_timeout_and_size_limit(self):

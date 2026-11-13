@@ -157,6 +157,10 @@ Credited contributions lead each subsection in Unreleased and releases from 0.10
 
 Only edit the dated current-version section in `CHANGELOG.md`. `release-notes.py
 sync` updates only that version's public and bundled notes; historical notes are
-frozen. The GitHub body and attached `release.json` use the same generated text.
+frozen and keep their title, version and date headings. GitHub releases are titled
+`octet X.Y.Z`; `python3 scripts/release-notes.py render --github` omits those
+headings and promotes `### Changed` / `### Fixed` / other subsections to level two.
+The draft and published body and attached `release.json`'s `notes_markdown` use
+that one renderer. Candidate receipt markers remain on drafts only.
 Do not write separate release prose. `release-surfaces.yml` audits Latest, npm,
 documentation and the separately deployed website after ship and daily.

@@ -39,6 +39,19 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn("blob/v", actual)
         self.assertEqual(self.cli("render").stdout, actual)
 
+    def test_github_body_starts_at_promoted_sections_and_preserves_content(self):
+        content = BODY.lstrip("\n").replace("### Fixed", "## Fixed")
+        self.assertEqual(notes.render_github(notes.render(self.changelog, "0.10.4")), content)
+        result = self.cli("render", "0.10.4", "--github")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, content)
+        self.assertNotIn("0.10.4", result.stdout)
+        self.assertNotIn("2026-11-12", result.stdout)
+        self.changelog.write_text(CHANGELOG.replace("### Fixed", "### Changed\n\n- A change.\n\n### Fixed"))
+        self.assertEqual(self.cli("render", "--github").stdout,
+                         "## Changed\n\n- A change.\n\n" + content)
+        self.assertFalse((self.root / "docs/releases/v0.10.4.md").exists())
+
     def test_sync_and_check_are_current_version_only_even_for_old_generated_pages(self):
         old = []
         for directory in (Path("docs/releases"), notes.BUNDLED):
@@ -75,11 +88,11 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertIn("historical notes are frozen", result.stderr)
         self.assertEqual(result.stdout, "")
 
-    def test_artifact_uses_exact_same_body_and_records_date_sha(self):
+    def test_artifact_uses_github_body_and_records_date_sha(self):
         result = self.cli("artifact", "--commit", "a" * 40)
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
-        self.assertEqual(data["notes_markdown"], self.cli("render").stdout)
+        self.assertEqual(data["notes_markdown"], self.cli("render", "--github").stdout)
         self.assertEqual((data["tag"], data["commit"], data["date"]),
                          ("v0.10.4", "a" * 40, "2026-11-12"))
         self.assertEqual(self.cli("artifact", "--commit", "main").returncode, 1)

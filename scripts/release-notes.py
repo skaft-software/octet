@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Render only the workspace version's release text from CHANGELOG.md.
 
-sync writes the docs and bundled copies; check never writes. render prints the
-same GitHub body. artifact --commit SHA prints release.json for a separate website
-deploy. Historical notes are frozen: no command scans, rewrites or deletes them.
+sync writes the docs and bundled copies; check never writes. render --github
+prints just the promoted subsections. artifact --commit SHA prints release.json
+for a separate website deploy. Historical notes are frozen: no command scans, rewrites or deletes them.
 """
 from __future__ import annotations
 
@@ -51,6 +51,14 @@ def render(changelog: Path, version: str) -> str:
     return f"# octet {version}\n\n" + content
 
 
+def render_github(markdown: str) -> str:
+    """Render generated notes for GitHub, which already displays title and date."""
+    # render() always prefixes the verbatim section with an H1 and a blank line.
+    # Drop those and the section's version/date heading, not any release content.
+    body = markdown.split("\n", 3)[3].lstrip("\n")
+    return re.sub(r"(?m)^### ", "## ", body)
+
+
 def artifact(changelog: Path, version: str, commit: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("commit must be a full lowercase SHA")
@@ -59,7 +67,7 @@ def artifact(changelog: Path, version: str, commit: str) -> dict:
         raise ValueError("release.json requires a dated changelog section")
     return dict(schema="octet.release.v1", generated_from="CHANGELOG.md",
                 version=version, tag=f"v{version}", commit=commit, date=released,
-                notes_markdown=render(changelog, version))
+                notes_markdown=render_github(render(changelog, version)))
 
 
 def sync(root: Path, changelog: Path, check: bool = False) -> list[Path]:
@@ -87,6 +95,8 @@ def main(argv=None) -> int:
         command = sub.add_parser(name)
         if name in ("render", "artifact"):
             command.add_argument("version", nargs="?")
+        if name == "render":
+            command.add_argument("--github", action="store_true", help="omit title/date and promote subsections")
         if name == "artifact":
             command.add_argument("--commit", required=True)
     args = parser.parse_args(argv)
@@ -96,7 +106,8 @@ def main(argv=None) -> int:
             raise ValueError("only the current workspace version may be generated; historical notes are frozen")
         changelog = args.changelog or args.root / "CHANGELOG.md"
         if args.command == "render":
-            print(render(changelog, version), end="")
+            markdown = render(changelog, version)
+            print(render_github(markdown) if args.github else markdown, end="")
         elif args.command == "artifact":
             print(json.dumps(artifact(changelog, version, args.commit), ensure_ascii=False, indent=2))
         elif args.command in ("sync", "check") or args.check:

@@ -103,7 +103,7 @@ def matches_release(release, version):
     tag = f"v{version}"
     if not release["draft"]:
         return release["tag_name"] == tag
-    return release["name"] == tag and (release["tag_name"] == tag or release["tag_name"].startswith("untagged-"))
+    return release["name"] in (f"octet {version}", tag) and (release["tag_name"] == tag or release["tag_name"].startswith("untagged-"))
 
 
 def get_release(version):
@@ -135,8 +135,8 @@ def save(release, state):
     upload(release, f"candidate-receipt-{key}.json", data)
     # One atomic pointer change; previous complete generations remain intact.
     return api(f"releases/{release['id']}", "PATCH", {
-        "body": state["notes"] + f"\n<!-- octet-candidate:{key} -->\n",
-        "target_commitish": state["sha"], "name": "v" + state["version"],
+        "body": notes.render_github(state["notes"]) + f"\n<!-- octet-candidate:{key} -->\n",
+        "target_commitish": state["sha"], "name": "octet " + state["version"],
     })
 
 
@@ -495,7 +495,8 @@ def publish_native(release, state, directory):
     require(current == state, "receipt changed during signing")
     if release["draft"]:
         api(f"releases/{release['id']}", "PATCH", {"draft": False, "prerelease": False,
-            "tag_name": "v" + state["version"], "make_latest": "false", "body": state["notes"]})
+            "tag_name": "v" + state["version"], "name": "octet " + state["version"],
+            "make_latest": "false", "body": notes.render_github(state["notes"])})
 
 
 def provider_acceptance(sha):
@@ -570,8 +571,8 @@ def main(argv=None):
         # Seed the receipt in the body until its asset/pointer is installed.
         # This recovers a crash between draft creation and first receipt upload.
         release = api("releases", "POST", dict(tag_name="v" + args.version, target_commitish=sha,
-                      name="v" + args.version, draft=True, prerelease=False,
-                      body=state["notes"] + "\n<!-- octet-candidate-seed:" + encoded(state).hex() + " -->"))
+                      name="octet " + args.version, draft=True, prerelease=False,
+                      body=notes.render_github(state["notes"]) + "\n<!-- octet-candidate-seed:" + encoded(state).hex() + " -->"))
         release = save(release, state)
     elif release and args.command == "start" and "octet-candidate-seed:" in (release["body"] or ""):
         seed = re.search(r"<!-- octet-candidate-seed:([0-9a-f]+) -->", release["body"])

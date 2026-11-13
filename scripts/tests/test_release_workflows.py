@@ -146,6 +146,14 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn('Install exact release and smoke native Windows binaries',graph['verify-windows-published'])
         self.assertIn('Verify official extension installation and update',graph['verify-published'])
 
+    def test_manual_release_uses_shared_github_renderer_and_title(self):
+        publish = jobs('release-octet.yml')[1]['publish']
+        self.assertIn('python3 scripts/release-notes.py render "$VERSION" --github', publish)
+        self.assertIn('--draft --title "octet $VERSION"', publish)
+        self.assertIn('--draft=false --latest=false --title "octet $VERSION"', publish)
+        self.assertNotIn('cat "docs/releases/$RELEASE_TAG.md"', publish)
+        self.assertIn('octet-binary-release-run:', publish)
+
     def test_ship_jobs_downstream_of_skipped_builds_still_run(self):
         # Ship mode skips build jobs; GitHub then skips every dependent job that
         # lacks always(), which would silently block Latest promotion.
