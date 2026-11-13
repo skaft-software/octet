@@ -534,6 +534,10 @@ jobs:
     if: needs.resolve.outputs.mode == 'binaries'
     runs-on: windows-2022
     steps:
+      # The runner's Git converts checkouts to CRLF; release archives must carry
+      # the repository's LF bytes, identical to every other platform.
+      - name: Check out with repository line endings
+        run: git config --global core.autocrlf false
       - name: Check out immutable release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

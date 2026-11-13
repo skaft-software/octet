@@ -161,6 +161,18 @@ class WorkflowContracts(unittest.TestCase):
         for name, need in (('verify-windows-published', 'publish'), ('smoke-npm-windows', 'verify-npm-published')):
             self.assertIn("needs['%s'].result == 'success'" % need if '-' in need else "needs.%s.result == 'success'" % need, graph[name])
 
+    def test_windows_release_checkouts_keep_repository_line_endings(self):
+        # npm packages every platform's LICENSE and docs byte-for-byte; a CRLF
+        # Windows checkout would make the archives differ.
+        for workflow in ('release-candidate.yml', 'release-octet.yml', 'release-serve.yml'):
+            text, graph = jobs(workflow)
+            for name, job in graph.items():
+                if 'runs-on: windows' not in job or 'actions/checkout@' not in job:
+                    continue
+                with self.subTest(workflow=workflow, job=name):
+                    self.assertIn('git config --global core.autocrlf false', job)
+                    self.assertLess(job.index('core.autocrlf false'), job.index('actions/checkout@'))
+
     def test_trusted_publishing_job_uses_a_supported_node(self):
         text, graph = jobs('release-octet.yml')
         version = re.search(r'node-version: "(\d+)\.(\d+)\.(\d+)"', graph['publish-npm'])
