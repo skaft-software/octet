@@ -146,6 +146,26 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn('Install exact release and smoke native Windows binaries',graph['verify-windows-published'])
         self.assertIn('Verify official extension installation and update',graph['verify-published'])
 
+    def test_ship_jobs_downstream_of_skipped_builds_still_run(self):
+        # Ship mode skips build jobs; GitHub then skips every dependent job that
+        # lacks always(), which would silently block Latest promotion.
+        text, graph = jobs('release-octet.yml')
+        for name, job in graph.items():
+            needs = re.search(r"^    needs: \[?([^\]\n]+)\]?$", job, re.M)
+            condition = re.search(r"^    if: (.+)$", job, re.M)
+            direct = [n.strip() for n in needs.group(1).split(',')] if needs else []
+            if not condition or "'ship'" not in condition.group(1) or direct == ['resolve']:
+                continue
+            with self.subTest(job=name):
+                self.assertTrue(condition.group(1).startswith("always() && needs.resolve.result == 'success'"), name)
+        for name, need in (('verify-windows-published', 'publish'), ('smoke-npm-windows', 'verify-npm-published')):
+            self.assertIn("needs['%s'].result == 'success'" % need if '-' in need else "needs.%s.result == 'success'" % need, graph[name])
+
+    def test_trusted_publishing_job_uses_a_supported_node(self):
+        text, graph = jobs('release-octet.yml')
+        version = re.search(r'node-version: "(\d+)\.(\d+)\.(\d+)"', graph['publish-npm'])
+        self.assertGreaterEqual(tuple(map(int, version.groups())), (22, 14, 0))
+
     def test_actual_new_installer_regex_accepts_ship_identity_without_loosening(self):
         text=(ROOT/'scripts/install.sh').read_text()
         block='signing_repository="$repository"'+text.split('    signing_repository="$repository"',1)[1].split('    python3 - \\\n',1)[0]
