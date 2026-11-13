@@ -4,6 +4,7 @@ from importlib import import_module
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -203,6 +204,18 @@ class WorkflowContracts(unittest.TestCase):
             root=Path(temporary); (root/'release-assets').mkdir()
             archive=root/'release-assets/bundle.tar.gz'; archive.write_bytes(b'fixture')
             (root/'release-assets/SHA256SUMS').write_text(hashlib.sha256(b'fixture').hexdigest()+'  ./bundle.tar.gz\n')
+            if shutil.which('sha256sum', path=os.defpath) is None:
+                # The workflow runs on Linux; only the local test needs a shim.
+                checksum = root/'sha256sum'
+                checksum.write_text('''#!/usr/bin/env python3
+import hashlib, pathlib, sys
+assert sys.argv[1:] == ['--check', 'SHA256SUMS']
+for line in pathlib.Path('SHA256SUMS').read_text().splitlines():
+    expected, name = line.split('  ', 1)
+    if hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() != expected:
+        sys.exit('checksum mismatch: '+name)
+''')
+                checksum.chmod(0o755)
             tool=root/'cosign'
             tool.write_text('''#!/usr/bin/env python3
 import json, os, sys
@@ -221,11 +234,24 @@ with open(os.environ['CALLS'],'a') as stream: stream.write(json.dumps(sys.argv[1
                 args=json.loads(line)
                 for flag,value in zip(release.verify_args(state,'extensions')[::2],release.verify_args(state,'extensions')[1::2]):
                     self.assertEqual(value,args[args.index(flag)+1])
+            calls = (root/'calls').read_bytes()
+            archive.write_bytes(b'tampered')
+            result=subprocess.run(['bash','-eu','-c',script],cwd=root,env=env,text=True,capture_output=True)
+            self.assertNotEqual(0,result.returncode)
+            self.assertEqual(calls, (root/'calls').read_bytes(), 'bad checksums must stop before signature checks')
         # The extension client has no certificate regex. Don't invent one or
         # weaken its separate HTTPS/checksum/trust boundary to satisfy a test.
         client=(ROOT/'crates/octet-coding-agent/src/extension_bundle.rs').read_text()
         self.assertIn('checksum_for_asset(&checksums, &asset)?',client)
         self.assertIn('if actual != expected',client)
+
+    def test_extension_workflow_verifier_without_system_sha256sum(self):
+        # Exercise the macOS boundary even on a host with GNU coreutils.
+        with tempfile.TemporaryDirectory() as temporary:
+            for name in ('bash', 'python3'):
+                (Path(temporary)/name).symlink_to(shutil.which(name))
+            with mock.patch.object(os, 'defpath', temporary):
+                self.test_actual_extension_workflow_verifier_accepts_ship_identity_and_sha()
 
     def test_opt_in_provider_gate_still_needs_exact_sha_success_and_approval(self):
         run=dict(id=91,head_sha='a'*40,event='workflow_dispatch',status='completed',conclusion='success')
