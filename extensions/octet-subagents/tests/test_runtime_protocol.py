@@ -236,7 +236,7 @@ class RuntimeProtocolTests(unittest.TestCase):
             {
                 "tools": ["read", "edit", "write", "bash"],
                 "max_depth": 1,
-                "max_concurrent_children": 8,
+                "max_concurrent_children": 16,
                 "max_turns": None,
                 "max_tokens": None,
                 "max_cost_microdollars": None,

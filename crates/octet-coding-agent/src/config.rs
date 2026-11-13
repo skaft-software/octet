@@ -12,21 +12,36 @@ use octet_agent::{
 pub use crate::tui::terminal::ColorMode;
 use octet_ai::{CacheRetention, ModelId, ReasoningConfig, ReasoningEffort, ReasoningMode};
 
-/// Resolve the workspace root: an explicit path, the nearest `.git` ancestor,
-/// or the current directory. The returned path is canonicalized.
+/// Resolve the workspace root: an explicit path, the nearest `.git` ancestor
+/// (stopping before home), or the current directory. The result is canonical.
+/// Home is an implicit discovery boundary, not a project root for its children.
 pub fn resolve_workspace(explicit: Option<&Path>, cwd: &Path) -> std::io::Result<PathBuf> {
+    resolve_workspace_with_home(explicit, cwd, dirs::home_dir().as_deref())
+}
+
+fn resolve_workspace_with_home(
+    explicit: Option<&Path>,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> std::io::Result<PathBuf> {
     if let Some(path) = explicit {
         return path.canonicalize();
     }
 
-    let mut current = Some(cwd);
-    while let Some(directory) = current {
-        if directory.join(".git").exists() {
-            return directory.canonicalize();
+    let cwd = cwd.canonicalize()?;
+    let home = home.and_then(|path| path.canonicalize().ok());
+    for directory in cwd.ancestors() {
+        // A dotfiles repository at HOME must not merge unrelated projects'
+        // tool roots, trust boundaries and session identities. Explicit HOME
+        // still wins above, and launching at HOME still falls back to HOME.
+        if home.as_deref() == Some(directory) {
+            break;
         }
-        current = directory.parent();
+        if directory.join(".git").exists() {
+            return Ok(directory.to_path_buf());
+        }
     }
-    cwd.canonicalize()
+    Ok(cwd)
 }
 
 /// Mouse ownership policy. `Auto` (the default) captures on the fullscreen
@@ -920,6 +935,129 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = resolve_workspace(None, directory.path()).unwrap();
         assert_eq!(workspace, directory.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn home_git_discovery_stops_before_home_and_its_ancestors() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let cwd = home.join("project/nested");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        for home_git in [false, true] {
+            if home_git {
+                fs::create_dir(home.join(".git")).unwrap();
+            }
+            assert_eq!(
+                resolve_workspace_with_home(None, &cwd, Some(&home)).unwrap(),
+                cwd
+            );
+            assert_eq!(
+                resolve_workspace_with_home(None, &home, Some(&home)).unwrap(),
+                home
+            );
+            assert_eq!(
+                resolve_workspace_with_home(Some(&home), &cwd, Some(&home)).unwrap(),
+                home
+            );
+        }
+    }
+
+    #[test]
+    fn home_git_preserves_nearest_project_and_worktree_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap();
+        fs::create_dir(home.join(".git")).unwrap();
+        for worktree in [false, true] {
+            let project = home.join(if worktree { "worktree" } else { "project" });
+            let nested_project = project.join("nested");
+            let cwd = nested_project.join("src/deep");
+            fs::create_dir_all(&cwd).unwrap();
+            if worktree {
+                fs::write(
+                    project.join(".git"),
+                    "gitdir: /fixture/common/worktrees/project\n",
+                )
+                .unwrap();
+            } else {
+                fs::create_dir(project.join(".git")).unwrap();
+            }
+            assert_eq!(
+                resolve_workspace_with_home(None, &cwd, Some(&home)).unwrap(),
+                project
+            );
+            fs::create_dir(nested_project.join(".git")).unwrap();
+            assert_eq!(
+                resolve_workspace_with_home(None, &cwd, Some(&home)).unwrap(),
+                nested_project
+            );
+        }
+    }
+
+    #[test]
+    fn home_boundary_does_not_match_a_path_prefix_or_outside_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let outside = root.join("home-other/src");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(
+            resolve_workspace_with_home(None, &outside, Some(&home)).unwrap(),
+            root
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_and_cwd_symlinks_use_canonical_discovery_boundaries() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let cwd = home.join("project/src");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir(home.join(".git")).unwrap();
+        let home_link = root.join("home-link");
+        symlink(&home, &home_link).unwrap();
+        let cwd_link = root.join("cwd-link");
+        symlink(&cwd, &cwd_link).unwrap();
+        assert_eq!(
+            resolve_workspace_with_home(None, &cwd_link, Some(&home_link)).unwrap(),
+            cwd
+        );
+        assert_eq!(
+            resolve_workspace_with_home(Some(&home_link), &cwd_link, Some(&home_link)).unwrap(),
+            home
+        );
+        fs::create_dir(home.join("project/.git")).unwrap();
+        assert_eq!(
+            resolve_workspace_with_home(None, &cwd_link, Some(&home_link)).unwrap(),
+            home.join("project")
+        );
+    }
+
+    #[test]
+    fn workspace_resolution_errors_never_fall_back_to_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let missing = home.join("missing");
+        fs::create_dir(home.join(".git")).unwrap();
+        assert!(resolve_workspace_with_home(None, &missing, Some(home)).is_err());
+        assert!(resolve_workspace_with_home(Some(&missing), home, Some(home)).is_err());
+        // An unavailable HOME does not replace a valid cwd or prevent normal
+        // repository discovery outside a known home boundary.
+        assert_eq!(
+            resolve_workspace_with_home(None, home, Some(&missing)).unwrap(),
+            home.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_workspace_with_home(None, home, None).unwrap(),
+            home.canonicalize().unwrap()
+        );
     }
 
     #[test]

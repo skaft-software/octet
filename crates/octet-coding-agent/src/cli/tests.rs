@@ -644,6 +644,126 @@ mod pi_codemode_tests {
     }
 }
 
+// HOME is process-global, so exercise the real resolver in a fresh test
+// process rather than racing other tests or consulting the real user profile.
+#[cfg(unix)]
+#[test]
+fn home_git_keeps_effective_config_and_resume_workspace_local() {
+    const CHILD: &str = "OCTET_TEST_HOME_WORKSPACE";
+    if let Some(root) = std::env::var_os(CHILD) {
+        use crate::session_store::SessionStore;
+        use octet_agent::{EntryValue, Session};
+        use octet_ai::{Message, UserMessage, UserPart};
+
+        let root = PathBuf::from(root);
+        let home = root.join("home");
+        let projects = [home.join("alpha"), home.join("beta")];
+        assert_eq!(std::env::current_dir().unwrap(), projects[0]);
+        let home_store = SessionStore::new(&root.join("sessions"), &home);
+        home_store.write_workspace_marker().unwrap();
+        let old_path = home_store.new_path("prior-home-session");
+        let mut old = Session::create(&old_path).unwrap();
+        old.append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Text("prior home history".into())],
+        })))
+        .unwrap();
+        drop(old);
+        let old_bytes = std::fs::read(&old_path).unwrap();
+        let mut stores = Vec::new();
+        for project in &projects {
+            let mut cli = base();
+            cli.workspace_trusted = true;
+            let config = config_with_empty_global(cli, project).unwrap();
+            assert_eq!(config.workspace, *project, "effective Config.workspace");
+            assert_eq!(config.invocation_cwd, *project);
+            assert_eq!(
+                config
+                    .sandbox
+                    .to_sandbox_config(&config.workspace)
+                    .workspace,
+                *project
+            );
+            assert_eq!(
+                config.max_turns,
+                Some(7),
+                "only this project's trusted config"
+            );
+            let store = SessionStore::new(&root.join("sessions"), &config.workspace);
+            store.write_workspace_marker().unwrap();
+            let path = store.new_path(project.file_name().unwrap().to_str().unwrap());
+            let mut session = Session::create(&path).unwrap();
+            session
+                .append(EntryValue::Message(Message::User(UserMessage {
+                    content: vec![UserPart::Text(project.display().to_string())],
+                })))
+                .unwrap();
+            stores.push(store);
+        }
+        assert_ne!(stores[0].dir(), stores[1].dir(), "distinct workspace keys");
+        for (store, project) in stores.iter().zip(&projects) {
+            let rows = store.list(); // The default resume picker uses this list.
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].workspace.as_deref(), Some(project.as_path()));
+            assert_eq!(store.latest().unwrap().path, rows[0].path);
+            assert_eq!(store.path_by_id(&rows[0].id).unwrap(), rows[0].path);
+            // All-workspace browsing is still available, without relabelling.
+            let all = store.list_all();
+            assert_eq!(all.len(), 3);
+            assert_eq!(
+                all.iter()
+                    .filter(|row| row.workspace.as_deref() == Some(&home))
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(home_store.list().len(), 1);
+        assert_eq!(std::fs::read(&old_path).unwrap(), old_bytes);
+        let other = stores[1].latest().unwrap();
+        assert!(stores[0].path_by_id(&other.id).is_err());
+        let mut cli = base();
+        cli.workspace = Some(home.clone());
+        assert_eq!(
+            config_with_empty_global(cli, &projects[0])
+                .unwrap()
+                .workspace,
+            home
+        );
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".git")).unwrap();
+    std::fs::create_dir_all(home.join(".octet")).unwrap();
+    std::fs::write(home.join(".octet/config.toml"), "max_turns = 99\n").unwrap();
+    for name in ["alpha", "beta"] {
+        let config = home.join(name).join(".octet/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(config, "max_turns = 7\n").unwrap();
+    }
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cli::tests::home_git_keeps_effective_config_and_resume_workspace_local",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .current_dir(home.join("alpha"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PWD", &home) // A stale shell PWD must not replace the process cwd.
+        .env("TMPDIR", &root)
+        .env(CHILD, &root)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "isolated workspace test failed:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 #[test]
 fn gpt_6_astra_uses_the_generic_cli_model_path() {
     let directory = cwd();
@@ -3439,4 +3559,25 @@ fn saved_defaults_are_distinguished_from_cli_and_absent_ones() {
     let config = config_with_empty_global(cli, directory.path()).unwrap();
     assert!(!config.model_saved && !config.reasoning_saved);
     assert!(!config.accepts_extension_model() && !config.accepts_extension_reasoning());
+}
+
+#[test]
+fn pi_model_notice_names_both_models_only_when_they_differ() {
+    use super::pi_model_notice_for;
+    let pi = serde_json::json!({"defaultProvider": "openai-codex", "defaultModel": "gpt-6-luna"});
+    assert_eq!(
+        pi_model_notice_for(Some("custom/custom-openai/qwen38"), Some(&pi)).as_deref(),
+        Some("using octet's model custom/custom-openai/qwen38 (your Pi default is openai-codex/gpt-6-luna); switch with /model")
+    );
+    assert_eq!(
+        pi_model_notice_for(Some("openai-codex/gpt-6-luna"), Some(&pi)),
+        None
+    );
+    assert_eq!(pi_model_notice_for(Some("gpt-6-luna"), Some(&pi)), None);
+    assert_eq!(pi_model_notice_for(None, Some(&pi)), None);
+    assert_eq!(pi_model_notice_for(Some("x/y"), None), None);
+    assert_eq!(
+        pi_model_notice_for(Some("x/y"), Some(&serde_json::json!({}))),
+        None
+    );
 }

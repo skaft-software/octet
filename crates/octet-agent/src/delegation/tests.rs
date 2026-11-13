@@ -2026,6 +2026,123 @@ async fn reattachment_enforces_the_persisted_wall_deadline_for_undelivered_work(
 }
 
 #[tokio::test(start_paused = true)]
+async fn retained_worker_continuation_obeys_the_extension_active_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let team = directory.path().join("team-activecap");
+    std::fs::create_dir(&team).unwrap();
+    let server = continuation_test_server().await;
+    for (task, delay) in [("finish first", 30), ("hold active", 3_600)] {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(wiremock::matchers::body_string_contains(task))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"finished\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n",
+                    ))
+                    .set_delay(Duration::from_secs(delay)),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    let mut manager = continuation_test_manager(&team, &server);
+    // Undo the fixture's three-slot override: use the actual host pool,
+    // including its headroom beyond the extension's sixteen-worker cap.
+    let inner = Arc::get_mut(&mut manager).unwrap();
+    inner.config.limits = DelegationLimits::default();
+    *inner.permits.get_mut().unwrap() = Arc::new(Semaphore::new(
+        inner.config.limits.max_concurrent_agents - 1,
+    ));
+    let binding = manager.root_binding();
+    let service = binding
+        .extension_service("active-cap-fixture", "session", "owner")
+        .unwrap();
+    let spawn = |name: &str, task: &str| {
+        let mut request = test_extension_spawn(name, None, None, task, name);
+        request.policy.max_concurrent_children = 16;
+        request.policy.max_tokens = None;
+        request.policy.max_cost_microdollars = None;
+        request.policy.timeout_ms = None;
+        service.spawn("owner", request)
+    };
+    let completed = spawn("retained", "complete immediately").unwrap();
+    let completed_id = completed["agent_id"].as_str().unwrap();
+    let completed_status = DelegatedAgentStatus::Completed {
+        output: "continued".into(),
+    };
+    wait_for_worker_status(&manager, completed_id, completed_status.clone()).await;
+    let mut active_ids = Vec::new();
+    for index in 0..16 {
+        let child = spawn(
+            &format!("active-{index}"),
+            if index == 0 {
+                "finish first"
+            } else {
+                "hold active"
+            },
+        )
+        .unwrap();
+        let id = child["agent_id"].as_str().unwrap().to_owned();
+        wait_for_worker_status(&manager, &id, DelegatedAgentStatus::Running).await;
+        active_ids.push(id);
+    }
+    assert_eq!(manager.state.lock().unwrap().records.len(), 17);
+    assert_eq!(manager.current_permits().available_permits(), 1);
+    let spawn_error = spawn("excess", "must not run").unwrap_err();
+    assert_eq!(
+        spawn_error,
+        "extension child concurrency limit reached (16)"
+    );
+    let journal_before = std::fs::read(team.join("provenance.jsonl")).unwrap();
+    let error = service
+        .follow_up("owner", completed_id, "resume retained worker".into())
+        .await
+        .expect_err("continuing a completed worker must not admit a seventeenth active child");
+    assert_eq!(error, spawn_error);
+    assert_eq!(
+        std::fs::read(team.join("provenance.jsonl")).unwrap(),
+        journal_before
+    );
+    {
+        let state = manager.state.lock().unwrap();
+        let record = &state.records[completed_id];
+        assert_eq!(record.status, completed_status);
+        assert!(record.live_task, "exercise the retained live receiver path");
+        assert!(record.pending_follow_ups.is_empty());
+        assert_eq!(record.queued_follow_ups.messages, 0);
+    }
+
+    // Let exactly one active worker complete, leaving the other fifteen busy.
+    tokio::time::advance(Duration::from_secs(30)).await;
+    wait_for_worker_status(
+        &manager,
+        &active_ids[0],
+        DelegatedAgentStatus::Completed {
+            output: "finished".into(),
+        },
+    )
+    .await;
+    assert_eq!(manager.current_permits().available_permits(), 2);
+    let result = service
+        .follow_up("owner", completed_id, "resume retained worker".into())
+        .await
+        .unwrap();
+    assert_eq!(result["delivery"], "new_run");
+    wait_for_worker_status(&manager, completed_id, completed_status).await;
+    assert_eq!(
+        manager.current_permits().available_permits(),
+        2,
+        "continuation releases its execution permit on completion"
+    );
+    assert_eq!(manager.state.lock().unwrap().records.len(), 17);
+    binding.request_shutdown();
+}
+
+#[tokio::test(start_paused = true)]
 async fn reattached_follow_up_requires_a_free_execution_slot_before_acceptance() {
     let directory = tempfile::tempdir().unwrap();
     let manager = writable_manager(directory.path());
@@ -3428,6 +3545,41 @@ fn config_requires_real_bounded_child_capacity() {
     config.limits.max_concurrent_agents = 4;
     config.limits.max_total_agents = 3;
     assert!(config.validate().is_err());
+}
+
+#[test]
+fn extension_child_capacity_admits_sixteen_and_rejects_seventeen() {
+    let mut policy = test_extension_policy();
+    for count in [1, 8, 9, 16] {
+        policy.max_concurrent_children = count;
+        assert!(
+            policy.validate().is_ok(),
+            "{count} active children must be valid"
+        );
+    }
+    for count in [0, 17] {
+        policy.max_concurrent_children = count;
+        assert!(policy.validate().is_err(), "invalid active cap {count}");
+    }
+    assert_eq!(MAX_EXTENSION_OWNED_CHILDREN, 32);
+    policy.max_concurrent_children = 16;
+    policy.max_depth = 2;
+    assert!(policy.validate().is_err(), "depth one remains mandatory");
+
+    // Exercise the real default permit capacity without starting worker/model
+    // tasks. A valid extension policy must not be rejected by a smaller host pool.
+    let permits = Arc::new(Semaphore::new(
+        DelegationLimits::default().max_concurrent_agents - 1,
+    ));
+    let held: Vec<_> = (0..16)
+        .map(|_| {
+            permits
+                .clone()
+                .try_acquire_owned()
+                .expect("sixteenth child slot")
+        })
+        .collect();
+    assert_eq!(held.len(), 16);
 }
 
 #[test]
@@ -6189,7 +6341,12 @@ fn durable_spawn_idempotency_checks_original_message_owner_and_policy_after_rest
 }
 
 #[test]
-fn streamed_output_progress_is_throttled_and_separate_from_reported_usage() {
+fn streamed_output_progress_refresh_budget_is_thirty_three_milliseconds() {
+    assert!(STREAMED_OUTPUT_UPDATE_INTERVAL <= Duration::from_millis(33));
+}
+
+#[tokio::test(start_paused = true)]
+async fn streamed_output_progress_flushes_a_burst_tail_without_another_provider_event() {
     let directory = tempfile::tempdir().unwrap();
     let manager = writable_manager(directory.path());
     let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
@@ -6204,45 +6361,97 @@ fn streamed_output_progress_is_throttled_and_separate_from_reported_usage() {
     };
     manager.update_agent_usage(&identity.id, usage, Some(7), true);
     telemetry.borrow_and_update();
+    let mut progress = manager_status::StreamedOutputProgress::default();
+    manager.update_agent_streamed_output(&identity.id, 40, &mut progress);
+    assert_eq!(
+        telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
+        Some(14)
+    );
 
-    let mut last_update = None;
-    manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+    tokio::time::advance(Duration::from_millis(5)).await;
+    manager.update_agent_streamed_output(&identity.id, 40, &mut progress);
+    assert!(
+        !telemetry.has_changed().unwrap(),
+        "burst events are coalesced"
+    );
+    tokio::time::advance(Duration::from_millis(28)).await;
+    progress.wait_for_flush().await;
+    manager.flush_agent_streamed_output(&mut progress);
     {
         let snapshot = telemetry.borrow_and_update();
         let live = &snapshot.as_ref().unwrap().children[0];
+        assert_eq!(
+            live.estimated_output_tokens,
+            Some(24),
+            "the final burst delta paints without another provider event"
+        );
         assert_eq!(live.output_tokens, 4);
-        assert_eq!(live.estimated_output_tokens, Some(14));
         assert_eq!(live.total_tokens, 39);
         assert_eq!(live.cost_microdollars, Some(7));
     }
-    manager.update_agent_streamed_output(&identity.id, 40, &mut last_update);
+    manager.flush_agent_streamed_output(&mut progress);
     assert!(
         !telemetry.has_changed().unwrap(),
-        "stream updates are coalesced"
-    );
-    last_update = Some(Instant::now() - STREAMED_OUTPUT_UPDATE_INTERVAL);
-    manager.update_agent_streamed_output(&identity.id, 4, &mut last_update);
-    assert_eq!(
-        telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
-        Some(25)
+        "an empty coalescer does not publish"
     );
 
+    manager.update_agent_streamed_output(&identity.id, 20, &mut progress);
     manager.clear_agent_streamed_output(&identity.id);
+    progress = manager_status::StreamedOutputProgress::default();
     assert_eq!(
         telemetry.borrow_and_update().as_ref().unwrap().children[0].estimated_output_tokens,
         None,
-        "a retry must discard provisional generation"
+        "a retry discards provisional generation"
     );
-    manager.update_agent_streamed_output(&identity.id, 20, &mut None);
+    manager.flush_agent_streamed_output(&mut progress);
+    assert!(!telemetry.has_changed().unwrap());
+    manager.update_agent_streamed_output(&identity.id, 20, &mut progress);
     manager.update_agent_usage(&identity.id, usage, Some(7), true);
-    let snapshot = telemetry.borrow();
-    let settled = &snapshot.as_ref().unwrap().children[0];
-    assert_eq!(settled.estimated_output_tokens, None);
-    assert_eq!(settled.output_tokens, 4);
+    progress = manager_status::StreamedOutputProgress::default();
+    {
+        let snapshot = telemetry.borrow_and_update();
+        let settled = &snapshot.as_ref().unwrap().children[0];
+        assert_eq!(settled.estimated_output_tokens, None);
+        assert_eq!(settled.output_tokens, 4);
+        assert_eq!(settled.cost_microdollars, Some(7));
+    }
+    manager.flush_agent_streamed_output(&mut progress);
+    assert!(
+        !telemetry.has_changed().unwrap(),
+        "no stale timer can republish after settlement"
+    );
     assert_eq!(
         manager.state.lock().unwrap().records[&identity.id].usage,
         usage
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn streamed_output_progress_coalesces_a_thousand_deltas_into_bounded_latest_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let (identity, _commands) = insert_test_record(&manager, DelegatedAgentStatus::Running);
+    let mut telemetry = manager.attach_telemetry();
+    telemetry.borrow_and_update();
+    let mut progress = manager_status::StreamedOutputProgress::default();
+    let mut publications = 0;
+    for _ in 0..1_000 {
+        manager.update_agent_streamed_output(&identity.id, 4, &mut progress);
+        publications += u64::from(telemetry.has_changed().unwrap());
+        telemetry.borrow_and_update();
+    }
+    assert_eq!(
+        publications, 1,
+        "the whole burst has one leading publication"
+    );
+    tokio::time::advance(STREAMED_OUTPUT_UPDATE_INTERVAL).await;
+    progress.wait_for_flush().await;
+    manager.flush_agent_streamed_output(&mut progress);
+    let snapshot = telemetry.borrow_and_update();
+    let live = &snapshot.as_ref().unwrap().children[0];
+    assert_eq!(live.estimated_output_tokens, Some(1_000));
+    assert_eq!(live.output_tokens, 0);
+    assert_eq!(live.total_tokens, 0);
 }
 
 #[test]

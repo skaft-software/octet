@@ -5,6 +5,25 @@ purpose: each one exists because an agent broke it. A nested `AGENTS.md` may add
 rules for its subtree but must not contradict this file. Human setup is in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Main is always releasable
+
+The owner may release from `main` at any time. Every commit on `main` must be
+stable and gated. These rules do not grant agents permission to commit or push.
+
+- Maintainer and agent work needs no PRs: it lands as linear fast-forward
+  commits on `main`. Outside contributions still arrive as PRs and are reviewed
+  as untrusted code before anything lands.
+- Before any push to `main`, fetch `origin/main`, check commit author identities,
+  and run the full `scripts/gate.sh` on the exact commit being pushed. A remote
+  build host is fine. Push only if it passes and the push is a fast-forward;
+  never force-push. If the commit changes, run the full gate again.
+- One concern per commit, with matching docs and a CHANGELOG `## [Unreleased]`
+  entry in the same change.
+- Unfinished or experimental work stays off `main`: keep it in an agent branch
+  or a patch, or behind a default-off flag.
+- Fix or revert a red `main` before anything else lands.
+- Tags, releases, installs and publishing remain explicit owner actions.
+
 ## What octet is, and the one architecture rule
 
 octet is a small, fast Rust coding agent. Users bring their existing Pi setups
@@ -92,6 +111,19 @@ Pi-shaped lives in `octet-pi-compat`. Do not reinvent what Pi already does.**
   job in `.github/workflows/ci.yml`.
 - No live or paid provider calls in tests. Use the fake providers and fixtures.
 
+## Changelog
+
+For `## [Unreleased]` and versions from 0.10.4 onward, use only Added, Changed,
+Fixed, Removed or Breaking Changes subsections. Write positive, present-tense,
+user-facing bullets: one line, at most 160 characters excluding a trailing credit
+` ([#n](https://github.com/skaft-software/octet/pull/n) by [@user](https://github.com/user))`.
+Omit Known limitations and maintainer-only tooling. Older sections are frozen.
+In each subsection of Unreleased and releases from 0.10.4 onward, credited outside
+contributions lead uncredited bullets, preserving order within each group (`--fix`
+repairs ordering). When landing an outside PR, add its credited bullet at the top
+of the subsection.
+Run `python3 scripts/check-changelog.py`; human prose review is still required.
+
 ## Public text
 
 - Never name or compare octet with other coding agents in commits, PRs, issues,
@@ -102,9 +134,10 @@ Pi-shaped lives in `octet-pi-compat`. Do not reinvent what Pi already does.**
 
 ## Things agents must not do
 
-- Do not push, open or comment on PRs and issues, or post anything to GitHub
-  or anywhere else, unless the person running you asked for that specific
-  action. Never speak to other people on the maintainer's behalf.
+- Do not open PRs. Do not push, open or comment on issues, comment on existing
+  PRs, or post anything to GitHub or anywhere else unless the person running you
+  asked for that specific action. Never speak to other people on the
+  maintainer's behalf.
 - Do not tag, publish, dispatch release workflows, use `force_release`, or
   change repository settings.
 - Do not commit, branch, reset, rebase, stash or check out in a shared checkout

@@ -1333,3 +1333,53 @@ fn queued_and_running_subagents_have_distinct_counts_and_shared_overflow() {
     assert!(transcript_text(&shell).contains("6 completed"));
     assert!(!shell.state.borrow().has_active_event_dot());
 }
+
+#[test]
+fn subagent_estimate_snapshots_repaint_without_commands_and_remain_unbilled() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(100, 30);
+    shell.notice("EARLIER-HISTORY");
+    let mut worker = child();
+    for estimate in [230, 240, 250] {
+        worker.estimated_output_tokens = Some(estimate);
+        worker.elapsed_ms += 33;
+        publish(&mut shell, &worker);
+        let frame = frame_text(&shell, 100);
+        assert!(frame.contains(&format!("↓~{estimate}")), "{frame}");
+        assert!(frame.contains("EARLIER-HISTORY"), "{frame}");
+        let state = shell.state.borrow();
+        let reported = &state.subagent_activity.as_ref().unwrap().telemetry[0];
+        assert_eq!(reported.output_tokens, 220);
+        assert_eq!(reported.total_tokens, 13_020);
+        assert_eq!(state.displayed_session_cost_microdollars(), Some(7_200));
+    }
+    worker.estimated_output_tokens = None;
+    worker.output_tokens = 247;
+    worker.total_tokens = 13_047;
+    worker.elapsed_ms += 33;
+    publish(&mut shell, &worker);
+    let reported_frame = frame_text(&shell, 100);
+    assert!(reported_frame.contains("↓247"), "{reported_frame}");
+    assert!(!reported_frame.contains("↓~"), "{reported_frame}");
+
+    // Repeated settlement and a continued run retain cumulative worker spend;
+    // the preview cannot add estimated tokens or bill the same total twice.
+    for state in ["completed", "completed", "running", "running"] {
+        worker.state = state.into();
+        worker.elapsed_ms += 33;
+        worker.estimated_output_tokens = (state == "running").then_some(260);
+        publish(&mut shell, &worker);
+        assert_eq!(
+            shell.state.borrow().displayed_session_cost_microdollars(),
+            Some(7_200)
+        );
+    }
+    worker.cost_microdollars = Some(8_200);
+    worker.elapsed_ms += 33;
+    publish(&mut shell, &worker);
+    assert_eq!(
+        shell.state.borrow().displayed_session_cost_microdollars(),
+        Some(8_200)
+    );
+    assert!(frame_text(&shell, 100).contains("↓~260"));
+}

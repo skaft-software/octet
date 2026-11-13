@@ -684,10 +684,10 @@ pub(crate) fn list_models(config: &Config, search: &str) -> anyhow::Result<()> {
         crate::output::stdout_line("No matching available models.");
         return Ok(());
     }
-    crate::output::stdout_table_line("PROVIDER\tMODEL\tCONTEXT\tMAX-OUT\tTHINKING\tIMAGES");
+    let mut table = vec!["PROVIDER\tMODEL\tCONTEXT\tMAX-OUT\tTHINKING\tIMAGES".to_owned()];
     for model in models {
         let terminal = crate::output::stdout_is_terminal();
-        crate::output::stdout_table_line(format!(
+        table.push(format!(
             "{}\t{}\t{}\t{}\t{}\t{}",
             crate::output::table_field(&model.endpoint.0, terminal),
             crate::output::table_field(&model.id.0, terminal),
@@ -700,6 +700,7 @@ pub(crate) fn list_models(config: &Config, search: &str) -> anyhow::Result<()> {
                 .contains(Modality::Image)
         ));
     }
+    crate::output::stdout_table(&table, 1);
     Ok(())
 }
 

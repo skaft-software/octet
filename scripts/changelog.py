@@ -144,6 +144,17 @@ def normalize_changelog_links(markdown: str, version: str | ChangelogEntry) -> s
     )
 
 
+def changelog_sections(text: str) -> list[tuple[int, list[str]]]:
+    """Split level-two sections with headings and 1-based source line numbers."""
+    sections: list[tuple[int, list[str]]] = []
+    for number, line in enumerate(text.split("\n"), 1):
+        if re.match(r"^##(?:\s|$)", line):
+            sections.append((number, [line]))
+        elif sections:
+            sections[-1][1].append(line)
+    return sections
+
+
 def parse_changelog(changelog_path: Path) -> list[ChangelogEntry]:
     """Parse `## [x.y.z]` sections, preserving their original body text."""
     path = Path(changelog_path)

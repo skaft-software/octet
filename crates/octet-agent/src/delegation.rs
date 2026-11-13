@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use octet_ai::{AssistantPart, Cost, ToolDef, Usage, PICODOLLARS_PER_MICRODOLLAR};
 use serde::{Deserialize, Serialize};
@@ -79,8 +79,9 @@ const ROOT_AGENT_ID: &str = "root";
 const ROOT_AGENT_PATH: &str = "/root";
 const COMMAND_CHANNEL_CAPACITY: usize = 32;
 const MAX_TELEMETRY_FAILURE_BYTES: usize = 4 * 1024;
-/// Coalesce streaming progress so a chatty provider cannot flood the root UI.
-const STREAMED_OUTPUT_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+/// Coalesce streaming progress (including its trailing edge) to about 30 Hz
+/// per worker. The watch channel retains only the latest fleet snapshot.
+const STREAMED_OUTPUT_UPDATE_INTERVAL: Duration = Duration::from_millis(33);
 /// Rolling per-child tool-activity entries retained for owner inspection.
 const MAX_CHILD_TOOL_ACTIVITY: usize = 6;
 /// Bounded single-line summary of one child tool call's arguments.
@@ -101,9 +102,9 @@ const MAX_QUEUED_FOLLOW_UP_BYTES: usize =
 /// persistence remains the authority for whether an input was accepted.
 const MAX_UNDELIVERED_TASK_ATTEMPTS: u8 = 3;
 const MAX_TOOL_TIMEOUT_MS: u64 = 3_600_000;
-/// Extension children share one host permit pool; eight active workers leave
+/// Extension children share one host permit pool; sixteen active workers leave
 /// headroom for root-side native children as well.
-const MAX_EXTENSION_ACTIVE_CHILDREN: usize = 8;
+const MAX_EXTENSION_ACTIVE_CHILDREN: usize = 16;
 /// Bounded history retained per extension resource owner.
 const MAX_EXTENSION_OWNED_CHILDREN: usize = 32;
 /// Per-run turn budgets may be set up to 256 turns; `None` inherits the
@@ -244,7 +245,7 @@ pub struct DelegationLimits {
 impl Default for DelegationLimits {
     fn default() -> Self {
         Self {
-            max_concurrent_agents: 10,
+            max_concurrent_agents: MAX_EXTENSION_ACTIVE_CHILDREN + 2,
             max_depth: 2,
             max_total_agents: 32,
         }

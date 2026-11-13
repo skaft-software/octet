@@ -17,6 +17,16 @@ pub(super) struct InputDispatch {
     thinking_cycle: Option<ThinkingCycle>,
     thinking_wait: bool,
     thinking_submission: Option<ThinkingSubmission>,
+    wait_command: Option<WaitCommand>,
+}
+
+/// One typed slash command captured during a cancellable wait (startup
+/// resource discovery, extension attach, a hook). It is run once, through the
+/// ordinary idle command path, when the wait ends and only for the same
+/// session/route; it is never delayed model input.
+struct WaitCommand {
+    owner: String,
+    text: String,
 }
 
 /// One explicit Enter, bound to the session/route and thinking seen at capture.
@@ -47,6 +57,7 @@ impl InputDispatch {
             thinking_cycle: None,
             thinking_wait: false,
             thinking_submission: None,
+            wait_command: None,
         }
     }
 }
@@ -63,8 +74,56 @@ impl InteractiveShell {
         }
     }
 
+    /// Whether a prompt or a command is already latched for the end of a wait.
     pub(crate) fn thinking_submission_pending(&self) -> bool {
         self.input_dispatch.thinking_submission.is_some()
+            || self.input_dispatch.wait_command.is_some()
+    }
+
+    /// Capture at most one typed slash command during a cancellable wait, so a
+    /// command sent while startup still owns the session runs once when it is
+    /// ready instead of asking for Enter again. Keybinding-generated commands,
+    /// a second Enter and a wait with another latched submission are refused.
+    pub(crate) fn queue_wait_command(&mut self, text: String) -> bool {
+        if self.thinking_submission_pending() || self.input_dispatch.generated_command {
+            return false;
+        }
+        let Some(owner) = self
+            .input_dispatch
+            .thinking_cycle
+            .as_ref()
+            .map(|cycle| cycle.owner.clone())
+        else {
+            return false;
+        };
+        let text = self.consume_command_text(text);
+        if text.trim().is_empty() {
+            return false;
+        }
+        self.input_dispatch.wait_command = Some(WaitCommand { owner, text });
+        self.notice("queued · runs when ready");
+        true
+    }
+
+    /// Called only by the idle owner. A changed session/route restores the
+    /// command as a draft rather than running it against another session.
+    pub(crate) fn take_wait_command(&mut self, owner: &str) -> Option<String> {
+        let pending = self.input_dispatch.wait_command.take()?;
+        if pending.owner == owner {
+            return Some(pending.text);
+        }
+        self.restore_composed(ComposedInput::from_text(pending.text));
+        self.error("session changed · command not run; draft restored".into());
+        None
+    }
+
+    /// Abort/close during a wait releases every latched submission as a draft.
+    pub(crate) fn cancel_wait_submissions(&mut self, reason: &str) {
+        self.cancel_thinking_submission(reason);
+        if let Some(pending) = self.input_dispatch.wait_command.take() {
+            self.restore_composed(ComposedInput::from_text(pending.text));
+            self.error(format!("{reason} · command not run; draft restored"));
+        }
     }
 
     /// Capture at most one ordinary submission during any cancellable wait, so
@@ -72,8 +131,7 @@ impl InteractiveShell {
     /// session, route and reasoning still match. Later typing stays a new draft;
     /// duplicate Enter cannot create a second request or grow an unbounded queue.
     pub(crate) fn queue_thinking_submission(&mut self) -> bool {
-        if self.input_dispatch.thinking_submission.is_some()
-            || self.pending().trim_start().starts_with(['/', '!'])
+        if self.thinking_submission_pending() || self.pending().trim_start().starts_with(['/', '!'])
         {
             return false;
         }

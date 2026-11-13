@@ -56,6 +56,50 @@ test('tool_call: block stops later handlers and denies', async t => {
   assert.equal(reply.result.arguments, undefined);
 });
 
+test('tool_call guard can inspect session history with opaque reasoning without bypassing a denial', async t => {
+  const peer = launch(t, [await fixture(t, `export default pi => pi.on('tool_call', (event, ctx) => {
+    try {
+      const manager = ctx.sessionManager;
+      const views = [manager.getEntries(), manager.getBranch(), [manager.getEntry('assistant')],
+        manager.buildSessionContext().messages.map(message => ({ type: 'message', message }))];
+      for (const view of views) {
+        const assistant = view.find(entry => entry.message?.role === 'assistant');
+        if (!assistant || assistant.message.content[0].thinking !== event.input.thinking ||
+            Object.hasOwn(assistant.message.content[0], 'thinkingSignature') !== event.input.signed)
+          throw new Error('unexpected history');
+      }
+      if (event.input.deny) return { block: true, reason: 'policy denied' };
+    } catch (error) { return { block: true, reason: 'gate failed: ' + error.message }; }
+  });`)]);
+  await peer.init(['session_entries']);
+  const cases = [
+    { protocol: 'open_ai_responses', state: { protocol: 'open_ai_responses', model: 'model', kind: { OpenAiReasoning: { item_id: 'rs_1', encrypted_content: 'opaque' } } }, text: null, thinking: '', signed: true },
+    { protocol: 'open_ai_responses', state: { protocol: 'open_ai_responses', model: 'foreign', kind: { OpenAiReasoning: { item_id: 'rs_1', encrypted_content: 'opaque' } } }, text: 'visible', thinking: 'visible', signed: false },
+    { protocol: 'anthropic_messages', state: { protocol: 'anthropic_messages', model: 'foreign', kind: { AnthropicSignature: { signature: 'opaque' } } }, text: 'visible', thinking: 'visible', signed: false },
+    { protocol: 'anthropic_messages', state: { protocol: 'anthropic_messages', model: 'model', kind: { AnthropicRedacted: { data: 'opaque' } } }, text: null, thinking: '[Reasoning redacted]', signed: true },
+    { protocol: 'anthropic_messages', state: { protocol: 'anthropic_messages', model: 'foreign', kind: { AnthropicRedacted: { data: 'opaque' } } }, text: null, thinking: '', signed: false },
+  ];
+  for (const sample of cases) {
+    const entries = [{ id: 'assistant', parent: null, timestamp_unix_ms: 1234, value: { type: 'message', Assistant: {
+      model: 'model', protocol: sample.protocol, content: [{ Reasoning: { text: sample.text, state: sample.state } }],
+    } } }];
+    const snapshot = { session_entries: entries, session_branch: entries, session_leaf_id: 'assistant' };
+    for (const deny of [false, true]) {
+      const reply = await peer.request('hook/run', { hook: 'before_tool_call', context: peer.context(snapshot),
+        payload: { name: 'read', arguments: { thinking: sample.thinking, signed: sample.signed, deny }, tool_call_id: 'call' } }).response;
+      assert.ok(reply.result, JSON.stringify(reply));
+      assert.deepEqual(reply.result.disposition, deny ? { action: 'deny', reason: 'policy denied' } : { action: 'continue' });
+    }
+  }
+  const malformed = [{ id: 'assistant', parent: null, value: { type: 'message', Assistant: { model: 'model', protocol: 'open_ai_responses',
+    content: [{ Reasoning: { text: null, state: { protocol: 'open_ai_responses', model: 'model', kind: 'invalid' } } }] } } }];
+  const reply = await peer.request('hook/run', { hook: 'before_tool_call', context: peer.context({ session_entries: malformed, session_branch: malformed, session_leaf_id: 'assistant' }),
+    payload: { name: 'read', arguments: { thinking: '', signed: false }, tool_call_id: 'call' } }).response;
+  assert.equal(reply.result.disposition.action, 'deny');
+  assert.match(reply.result.disposition.reason, /^gate failed:/);
+  await peer.close();
+});
+
 async function afterToolCall(t, source, payload, data = {}) {
   const peer = launch(t, [await fixture(t, source, data)]);
   await peer.init();

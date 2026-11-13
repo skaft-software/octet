@@ -694,3 +694,456 @@ fn notice_after_completed_bash_output_keeps_a_breathing_row() {
         }
     }
 }
+
+fn live_subagent_spacing_after_reasoning_promotion(isolated: bool) {
+    use super::super::{InteractiveShell, OutputChannel};
+
+    let theme = test_theme_from_source("[metadata]\nprofile = \"pi\"\n");
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(80, 24);
+    if isolated {
+        shell.isolate_native_test_renderer();
+    }
+    let run = shell.begin_run("fixture");
+    shell.state.borrow_mut().push_block(subagents_with_worker());
+    let assert_gap = |shell: &mut InteractiveShell| {
+        shell.render_written_test_frame();
+        let frame = shell.tui.as_ref().unwrap().rendered_frame();
+        let at = visible_position(frame, "Subagents").expect("painted subagents heading");
+        assert_eq!(
+            neutral_runs(frame, "Subagents").0,
+            1,
+            "isolated={isolated}: {frame:?}"
+        );
+        let terminal = super::super::surface_frame::emulate_row_for_test(&frame[at - 1], 80);
+        for column in 0..80 {
+            let cell = terminal.screen().cell(0, column).unwrap();
+            assert!(cell.contents().trim().is_empty());
+            assert_eq!(cell.bgcolor(), vt100::Color::Default);
+            assert!(!cell.inverse());
+        }
+    };
+    // Working already owns a blank promotion slot: do not add a second gap.
+    assert_gap(&mut shell);
+    shell.on_run_event(
+        run,
+        &octet_agent::AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "*Resolving prefetch hook timing*\n".into(),
+        },
+    );
+    // Expanded reasoning consumes the old status slot. The cached neighbour
+    // must acquire its separator before the next telemetry refresh.
+    assert_gap(&mut shell);
+}
+
+#[test]
+fn subagent_spacing_tracks_reasoning_promotion_in_shared_renderer() {
+    live_subagent_spacing_after_reasoning_promotion(false);
+}
+
+#[test]
+fn subagent_spacing_tracks_reasoning_promotion_in_isolated_renderer() {
+    live_subagent_spacing_after_reasoning_promotion(true);
+}
+
+fn subagents_with_worker() -> TranscriptBlock {
+    TranscriptBlock::Subagents(SubagentTranscript {
+        queued: 0,
+        running: 1,
+        succeeded: 0,
+        failed: 0,
+        stopped: 0,
+        live_workers: vec![super::super::SubagentWorkerLine {
+            name: "spacing-worker".into(),
+            input_tokens: 100,
+            output_tokens: 10,
+            output_estimated: false,
+        }],
+        hydrated: false,
+        worker_ids: vec!["spacing-worker".into()],
+    })
+}
+
+fn subagent_band_themes() -> Vec<(String, OctetTheme)> {
+    let mut themes = Vec::new();
+    for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+        let capabilities = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+        themes.push((
+            format!("pi/{background:?}"),
+            compiled_theme_for_selector("pi", capabilities, background)
+                .unwrap()
+                .unwrap(),
+        ));
+        for (name, source) in [
+            ("pi-toml", "[metadata]\nprofile = \"pi\"\n[roles.\"surface.tool\"]\nbackground = \"#303030\"\n"),
+            ("custom-band", "[roles.\"surface.tool\"]\nbackground = \"#303030\"\n[surfaces.tool]\nchrome = \"band\"\nnarrow_chrome = \"band\"\npadding = 2\nnarrow_padding = 2\n"),
+        ] {
+            themes.push((
+                format!("{name}/{background:?}"),
+                test_theme_source_with(source, capabilities, background),
+            ));
+        }
+    }
+    themes
+}
+
+fn assert_blank_cells(row: &str, width: u16, painted: bool, columns: std::ops::Range<u16>) {
+    let terminal = super::super::surface_frame::emulate_row_for_test(row, width);
+    for column in columns {
+        let cell = terminal.screen().cell(0, column).unwrap();
+        assert!(
+            cell.contents().trim().is_empty(),
+            "column {column}: {row:?}"
+        );
+        assert_eq!(
+            cell.bgcolor() != vt100::Color::Default,
+            painted,
+            "column {column}: {row:?}"
+        );
+        assert!(
+            !cell.inverse(),
+            "column {column}: padding must not be highlighted"
+        );
+    }
+}
+
+#[test]
+fn subagent_spacing_filled_band_cushions_are_inside_the_neutral_separator() {
+    let prose =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+    let subagents = subagents_with_worker();
+    for (name, theme) in subagent_band_themes() {
+        let renderer = theme.rich_renderer();
+        let reasoning = theme.reasoning_renderer();
+        for width in [20, 46, 80, 120] {
+            let rendered = render_block_planned(
+                Some(&prose),
+                &subagents,
+                &theme,
+                &renderer,
+                &reasoning,
+                width,
+                false,
+                0,
+                0,
+            );
+            let plan = compile_surface_plan(Some(&prose), &subagents, &theme, width);
+            assert_eq!(
+                (
+                    rendered.geometry.transition_rows,
+                    rendered.geometry.leading_rows,
+                    rendered.geometry.trailing_rows
+                ),
+                (1, 1, 1),
+                "{name}/{width}: {:?}",
+                rendered.lines
+            );
+            assert_blank_cells(&rendered.lines[0], width, false, 0..width);
+            let frame = plan.frame_left..plan.frame_left + plan.frame_width;
+            assert_blank_cells(&rendered.lines[1], width, true, frame.clone());
+            assert_blank_cells(rendered.lines.last().unwrap(), width, true, frame);
+            // These are real decorated rows but not semantic source rows.
+            for row in [0, 1, rendered.lines.len() - 1] {
+                assert_eq!(
+                    rendered.geometry.content_row(row, rendered.lines.len()),
+                    None
+                );
+            }
+            let rows = raw_rows(&[&prose, &subagents, &prose], &theme, width);
+            let at = visible_position(&rows, "/subagents").unwrap();
+            assert_blank_cells(
+                &rows[at - 1],
+                width,
+                true,
+                plan.frame_left..plan.frame_left + plan.frame_width,
+            );
+            assert!(neutral_blank_row(&rows[at - 2]), "{name}/{width}: {rows:?}");
+            assert_eq!(
+                rows[..at - 1]
+                    .iter()
+                    .rev()
+                    .take_while(|row| neutral_blank_row(row))
+                    .count(),
+                1,
+                "{name}/{width}: {rows:?}"
+            );
+            let next = rows
+                .iter()
+                .rposition(|row| strip_terminal_sequences(row).contains("Answer marker"))
+                .unwrap();
+            assert!(
+                neutral_blank_row(&rows[next - 1]),
+                "{name}/{width}: {rows:?}"
+            );
+            assert!(painted_row(&rows[next - 2]), "{name}/{width}: {rows:?}");
+        }
+    }
+}
+
+#[test]
+fn subagent_spacing_respects_zero_padding_and_unpainted_band_overrides() {
+    let subagents = subagents_with_worker();
+    for source in [
+        "[metadata]\nprofile = \"pi\"\n[surfaces.tool]\npadding = 0\n[roles.\"surface.tool\"]\nbackground = \"#303030\"\n",
+        "[metadata]\nprofile = \"pi\"\n[roles.\"surface.tool\"]\nbackground = \"default\"\n",
+    ] {
+        for color in [ColorDepth::TrueColor, ColorDepth::None] {
+            let theme = test_theme_source_with(source, TerminalCapabilities::test(true, true, color), TerminalBackground::Dark);
+            for width in [20, 46, 80] {
+                let rendered = render_block_planned(None, &subagents, &theme, &theme.rich_renderer(), &theme.reasoning_renderer(), width, false, 0, 0);
+                assert_eq!((rendered.geometry.transition_rows, rendered.geometry.leading_rows, rendered.geometry.trailing_rows), (0, 1, 1));
+                assert_blank_cells(&rendered.lines[0], width, false, 0..width);
+                assert_blank_cells(rendered.lines.last().unwrap(), width, false, 0..width);
+            }
+        }
+    }
+}
+
+#[test]
+fn subagent_spacing_shares_only_neutral_neighbor_rows_at_every_density() {
+    let subagents = subagents_with_worker();
+    let prose =
+        TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+    let expanded = TranscriptBlock::Reasoning(Box::new(
+        AssistantBlock::streaming_reasoning("*Reasoning marker*").with_reasoning_expanded(true),
+    ));
+    let hidden = TranscriptBlock::Reasoning(Box::new(AssistantBlock::finalized(
+        "Hidden reasoning".into(),
+    )));
+    let working = working();
+    let thinking = thinking();
+    let notice = TranscriptBlock::Notice("Notice marker".into());
+    let tool = tool();
+    for density in ["compact", "comfortable", "airy"] {
+        let source = format!("[metadata]\nprofile = \"pi\"\n[layout]\ndensity = \"{density}\"\n[roles.\"surface.tool\"]\nbackground = \"#303030\"\n");
+        let theme = test_theme_source_with(
+            &source,
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let render = |previous, block| {
+            render_block_planned(
+                previous,
+                block,
+                &theme,
+                &theme.rich_renderer(),
+                &theme.reasoning_renderer(),
+                80,
+                false,
+                0,
+                0,
+            )
+        };
+        for previous in [
+            &prose, &expanded, &hidden, &working, &thinking, &notice, &tool, &subagents,
+        ] {
+            for next in [&prose, &notice, &tool, &subagents] {
+                let before = render(None, previous);
+                let center = render(Some(previous), &subagents);
+                let after = render(Some(&subagents), next);
+                let top = before.lines.len() + center.geometry.transition_rows;
+                let bottom = before.lines.len() + center.lines.len() - 1;
+                let mut rows = before.lines;
+                rows.extend(center.lines);
+                rows.extend(after.lines);
+                assert!(painted_row(&rows[top]), "{density}: {rows:?}");
+                assert_eq!(
+                    rows[..top]
+                        .iter()
+                        .rev()
+                        .take_while(|row| neutral_blank_row(row))
+                        .count(),
+                    1,
+                    "{density}: {rows:?}"
+                );
+                assert!(painted_row(&rows[bottom]), "{density}: {rows:?}");
+                assert_eq!(
+                    rows[bottom + 1..]
+                        .iter()
+                        .take_while(|row| neutral_blank_row(row))
+                        .count(),
+                    1,
+                    "{density}: {rows:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn subagent_spacing_live_band_disclosure_and_metrics_keep_canonical_frame_rows() {
+    use super::super::{InteractiveShell, OutputChannel};
+    for isolated in [false, true] {
+        for (width, height) in [(20, 8), (46, 12), (80, 24)] {
+            let theme = test_theme_source_with("[metadata]\nprofile = \"pi\"\n[colors]\nthinking_expanded = false\n[roles.\"surface.tool\"]\nbackground = \"#303030\"\n", TerminalCapabilities::test(true, true, ColorDepth::TrueColor), TerminalBackground::Dark);
+            let mut shell = InteractiveShell::test_shell_with_theme(theme);
+            shell.set_size(width, height);
+            if isolated {
+                shell.isolate_native_test_renderer();
+            }
+            let run = shell.begin_run("fixture");
+            let roster = shell.state.borrow_mut().push_block(subagents_with_worker());
+            let check_frame = |shell: &mut InteractiveShell| {
+                shell.render_written_test_frame();
+                let frame = shell.tui.as_ref().unwrap().rendered_frame().to_vec();
+                let at = visible_position(&frame, "/subagents").unwrap();
+                assert_blank_cells(&frame[at - 1], width, true, 0..width);
+                assert_eq!(
+                    frame[..at - 1]
+                        .iter()
+                        .rev()
+                        .take_while(|row| neutral_blank_row(row))
+                        .count(),
+                    1,
+                    "isolated={isolated}/{width}: {frame:?}"
+                );
+                assert_blank_cells(&frame[at + 2], width, true, 0..width);
+                assert!(frame
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                let state = shell.state.borrow();
+                let mut expected = Vec::new();
+                for (index, block) in state.transcript.iter().enumerate() {
+                    expected.extend(
+                        render_block_planned(
+                            index.checked_sub(1).map(|index| &state.transcript[index]),
+                            block,
+                            &state.theme,
+                            &state.theme.rich_renderer(),
+                            &state.theme.reasoning_renderer(),
+                            width,
+                            state.verbose_tools,
+                            state.event_spinner_frame,
+                            state.status_shimmer_frame,
+                        )
+                        .lines,
+                    );
+                }
+                assert_eq!(
+                    *state.rendered_transcript(width),
+                    expected,
+                    "cached seam differs from fresh layout"
+                );
+                let bounded = super::super::render_shell_viewport_at(
+                    &state,
+                    width,
+                    std::time::Instant::now(),
+                );
+                assert!(bounded.len() <= usize::from(height));
+                (at, frame.len())
+            };
+            check_frame(&mut shell);
+            shell.on_run_event(
+                run,
+                &octet_agent::AgentEvent::OutputDelta {
+                    channel: OutputChannel::Reasoning,
+                    text: "*Resolving prefetch hook timing*\n".into(),
+                },
+            );
+            check_frame(&mut shell);
+            for _ in 0..2 {
+                shell.toggle_verbose_tools();
+                let geometry = check_frame(&mut shell);
+                for tokens in [999, 1_000, 10_000] {
+                    let mut state = shell.state.borrow_mut();
+                    let TranscriptBlock::Subagents(summary) = &mut state.transcript[roster] else {
+                        unreachable!()
+                    };
+                    summary.live_workers[0].output_tokens = tokens;
+                    state.touch_block(roster);
+                    drop(state);
+                    assert_eq!(
+                        check_frame(&mut shell),
+                        geometry,
+                        "token refresh moved the panel"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn subagent_spacing_blank_rows_have_no_copy_or_selection_highlight_hits() {
+    use super::super::InteractiveShell;
+    for isolated in [false, true] {
+        let theme = subagent_band_themes().remove(0).1;
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(80, 24);
+        shell.state.borrow_mut().application_viewport_requested = true;
+        let prose =
+            TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized("Answer marker".into())));
+        let roster = subagents_with_worker();
+        let expected = format!(
+            "{}\n\n{}",
+            block_copy_text(&prose),
+            block_copy_text(&roster)
+        );
+        shell.state.borrow_mut().push_block(prose);
+        shell.state.borrow_mut().push_block(roster);
+        if isolated {
+            shell.isolate_native_test_renderer();
+        }
+        shell.render_written_test_frame();
+        let frame = shell.tui.as_ref().unwrap().rendered_frame();
+        let at = visible_position(frame, "/subagents").unwrap();
+        let blanks = [at - 2, at - 1, at + 2];
+        for row in blanks {
+            assert_eq!(
+                InteractiveShell::transcript_position_at_screen_cell(
+                    &shell.state.borrow(),
+                    row as u16,
+                    5
+                ),
+                None,
+                "isolated={isolated}, row={row}"
+            );
+        }
+        shell.select_all_transcript();
+        assert_eq!(
+            shell.selected_plain_text().as_deref(),
+            Some(expected.as_str())
+        );
+        shell.render_written_test_frame();
+        let frame = shell.tui.as_ref().unwrap().rendered_frame();
+        let prose_at = visible_position(frame, "Answer marker").unwrap();
+        let terminal = super::super::surface_frame::emulate_row_for_test(&frame[prose_at], 80);
+        assert!(
+            (0..80).any(|column| terminal.screen().cell(0, column).unwrap().inverse()),
+            "selection is painted on content"
+        );
+        for (row, painted) in [(at - 2, false), (at - 1, true), (at + 2, true)] {
+            assert_blank_cells(&frame[row], 80, painted, 0..80);
+        }
+    }
+}
+
+#[test]
+fn subagent_spacing_neighbor_invalidation_stays_local() {
+    use super::super::InteractiveShell;
+    let shell = InteractiveShell::test_shell_with_theme(test_theme_from_source(""));
+    let mut state = shell.state.borrow_mut();
+    state.push_block(TranscriptBlock::Assistant(Box::new(
+        AssistantBlock::finalized("Earlier history".into()),
+    )));
+    let changed = state.push_block(working());
+    let neighbor = state.push_block(subagents_with_worker());
+    state.push_block(subagents_with_worker());
+    state.push_block(TranscriptBlock::Notice("Later history".into()));
+    state.rendered_transcript(80);
+    let before = state.block_revisions.clone();
+    state.touch_presentation_block(changed);
+    let changed_revisions: Vec<_> = state
+        .block_revisions
+        .iter()
+        .zip(before)
+        .enumerate()
+        .filter_map(|(index, (after, before))| (*after != before).then_some(index))
+        .collect();
+    assert_eq!(changed_revisions, [changed, neighbor]);
+    assert_eq!(
+        state.transcript_cache.borrow().dirty_blocks,
+        [changed, neighbor]
+    );
+}

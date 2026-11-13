@@ -831,6 +831,10 @@ where
                         shell.toggle_disclosure();
                         shell.render();
                     }
+                    InputAction::ToggleThinking => {
+                        shell.toggle_thinking();
+                        shell.render();
+                    }
                     InputAction::CycleThinking => return Ok(Idle::CycleThinking),
                     InputAction::EditQueued => {
                         shell.edit_queued_message();
@@ -1362,7 +1366,7 @@ where
 
 fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> bool {
     if matches!(&event, Event::Key(key) if keymap::is_close_key(key)) {
-        shell.cancel_thinking_submission("interrupted");
+        shell.cancel_wait_submissions("interrupted");
         shell.request_close();
         return true;
     }
@@ -1386,36 +1390,55 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     }
     match shell.translate_input(Some(event), true) {
         InputAction::Abort | InputAction::DispatchQueued => {
-            shell.cancel_thinking_submission("interrupted");
+            shell.cancel_wait_submissions("interrupted");
             return true;
         }
         InputAction::Closed => {
-            shell.cancel_thinking_submission("interrupted");
+            shell.cancel_wait_submissions("interrupted");
             shell.request_close();
             return true;
         }
         InputAction::ClearEditor => shell.clear_editor(),
         InputAction::Edit(action) => shell.apply_edit(action),
         InputAction::ToggleDisclosure => shell.toggle_disclosure(),
+        InputAction::ToggleThinking => {
+            shell.toggle_thinking();
+        }
         InputAction::ShowCompactionSummary => shell.show_compaction_summary(),
         InputAction::Scroll(direction) => shell.scroll(direction),
         InputAction::ScrollLines(direction) => shell.scroll_lines(direction),
         InputAction::JumpToTail => shell.jump_to_tail(),
         InputAction::SlashMenu(action) => {
-            shell.slash_menu(action);
+            if shell.slash_menu(action) {
+                // The native popup owns Enter before a Pi editor sees it. Its
+                // accepted command needs the same wait latch as Command below;
+                // otherwise the first /reload during session_start disappears.
+                // Pi 9c9ce854 packages/coding-agent/src/modes/interactive/
+                // interactive-mode.ts:3376-3379 routes /reload before model input.
+                let text = shell.pending().to_owned();
+                if !shell.queue_wait_command(text) && !shell.thinking_submission_pending() {
+                    shell.notice("busy · draft kept");
+                }
+            }
         }
         InputAction::CompleteSlashCommand => shell.complete_slash_command(),
         InputAction::CompletePath => shell.complete_path(),
         InputAction::CycleThinking => shell.cycle_thinking_during_wait(),
         InputAction::Queue(_) | InputAction::Steer(_) | InputAction::Submit(_) => {
             // An ordinary prompt is latched once and sent when the wait ends,
-            // so Enter never has to be repeated. Commands and shell escapes are
-            // never admitted as delayed model input; a repeat Enter stays silent.
+            // so Enter never has to be repeated. Shell escapes are never
+            // admitted as delayed model input; a repeat Enter stays silent.
             if !shell.queue_thinking_submission() && !shell.thinking_submission_pending() {
                 shell.notice("busy · draft kept");
             }
         }
-        InputAction::Command(_) => shell.notice("busy · draft kept"),
+        // A typed command is latched once and run by the idle command path
+        // when the wait ends (same session/route), never as model input.
+        InputAction::Command(text) => {
+            if !shell.queue_wait_command(text) && !shell.thinking_submission_pending() {
+                shell.notice("busy · draft kept");
+            }
+        }
         InputAction::Close => shell.clear_error(),
         _ => return false,
     }
@@ -3090,6 +3113,9 @@ where
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
             shell.set_verbose_tools(enabled);
+            // `/verbose` remains the one command for the whole transcript, so it
+            // steers thinking too. Ctrl+O and Ctrl+T stay independent.
+            shell.set_thinking_expanded(enabled);
             shell.notice(format!(
                 "verbose transcript {}",
                 if enabled { "enabled" } else { "disabled" }
@@ -4950,6 +4976,10 @@ where
                         shell.toggle_disclosure();
                         shell.render();
                     }
+                    InputAction::ToggleThinking => {
+                        shell.toggle_thinking();
+                        shell.render();
+                    }
                     InputAction::CycleThinking => {
                         let levels = supported_levels_with_subagents(&inspection.model, inspection.subagents_available);
                         let requested = next_thinking_level(&levels, Some(&selected_reasoning), &inspection.model)
@@ -5278,6 +5308,10 @@ fn request_extension_ui(shell: &mut InteractiveShell, app: &mut App) {
     // Owning &mut App proves no Run can have an in-flight request. Startup and
     // other idle hook pumps need the same consumer as an idle command; never
     // leave a synchronous setter waiting behind the hook which called it.
+    // Persistent chrome an extension opens before the palette owner has
+    // published is held; the native composer keeps the slot until then.
+    app.executable_extensions
+        .set_chrome_handoff_pending(app.resource_paths_pending(), shell);
     let model_control = app
         .executable_extensions
         .next_model_control_request()
@@ -5936,19 +5970,27 @@ async fn reload_host_with_reexec<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    if host.may_prompt() && !cfg!(unix) {
+        let failure =
+            crate::reexec::ReexecDecision::exec_failed(std::io::ErrorKind::Unsupported.into());
+        return Ok((
+            app,
+            HostReloadResult::Problem(failure.restart_failure_notice()),
+        ));
+    }
     let Some(reexec) = reexec else {
         return Ok((app, HostReloadResult::Problem(
-            "reload: the current executable could not be captured; host replacement is unavailable".into(),
+            "reload failed: restart executable capture; repair the octet installation, then retry /reload --force".into(),
         )));
     };
     let session_id = match crate::app::bootstrap::terminal_goal_session_id(app.agent.session()) {
         Ok(id) => id,
-        Err(error) => {
+        Err(_) => {
             return Ok((
                 app,
-                HostReloadResult::Problem(format!(
-                    "reload: the active session cannot be resumed: {error}"
-                )),
+                HostReloadResult::Problem(
+                    "reload failed: restart session identity; save this session before retrying /reload --force".into(),
+                ),
             ));
         }
     };
@@ -5961,9 +6003,9 @@ where
     // own blocked notice instead of an opaque error.
     let observed = reexec.observe_generation();
     let safety = live_reexec_inputs(busy_subagent_workers(&app));
-    // A typed `/reload --force` already carries the retarget consent;
-    // every other host pass must ask before a
-    // retargeted image is probed.
+    // A typed `/reload --force` confirms the installed image and requests an
+    // actual restart, including when its generation has not changed. Automatic
+    // passes still require a changed image and consent before a retarget probe.
     let mut options = crate::reexec::ReexecOptions::refusing_workers();
     if matches!(
         host,
@@ -5971,7 +6013,7 @@ where
             redirect_confirmed: true
         }
     ) {
-        options = options.confirming_redirect();
+        options = options.forcing_restart();
     }
     // Running execution cannot move into a replacement image. Busy workers
     // were refused here or detached by `/reload --force` before this point;
@@ -6007,10 +6049,15 @@ where
     };
     match decision {
         crate::reexec::ReexecDecision::ResourcesOnly => Ok((app, HostReloadResult::Unchanged)),
-        crate::reexec::ReexecDecision::Refused { notice, .. }
-        | crate::reexec::ReexecDecision::Blocked { notice, .. }
-        | crate::reexec::ReexecDecision::ExecFailed { notice, .. }
-        | crate::reexec::ReexecDecision::ConfirmationRequired { notice, .. } => {
+        problem @ (crate::reexec::ReexecDecision::Refused { .. }
+        | crate::reexec::ReexecDecision::Blocked { .. }
+        | crate::reexec::ReexecDecision::ExecFailed { .. }
+        | crate::reexec::ReexecDecision::ConfirmationRequired { .. }) => {
+            let notice = if options.force_restart {
+                problem.restart_failure_notice()
+            } else {
+                problem.notice().unwrap().to_owned()
+            };
             Ok((app, HostReloadResult::Problem(notice)))
         }
         crate::reexec::ReexecDecision::Ready(plan) => {
@@ -6124,6 +6171,7 @@ async fn apply_live_reload_plan(
     let mut workers = busy_subagent_workers(&app);
     let mut detached_workers = false;
     let mut detach_notice = None;
+    let mut host_problem = None;
     // Only host-owned workers can be detached; a presentation-only count (no
     // delegation binding) keeps refusing.
     if workers > 0 && plan.is_forced() && app.agent.delegation_team_directory().is_some() {
@@ -6218,7 +6266,13 @@ async fn apply_live_reload_plan(
                     vec![problem],
                     plan.is_forced(),
                 ) {
-                    shell.notice(notice);
+                    if plan.is_forced() {
+                        // Resource fallback below hydrates the transcript. Hold
+                        // this outcome until that can no longer erase it.
+                        host_problem = Some(notice);
+                    } else {
+                        shell.notice(notice);
+                    }
                 }
                 plan.record(ReloadLayer::Host, LayerOutcome::Failed);
             }
@@ -6288,16 +6342,17 @@ async fn apply_live_reload_plan(
         );
         // Typed component feedback above owns automatic diagnostics. Rendering
         // the aggregate here would repeat failures and inspection warnings.
-        if report.forced {
+        // A host restart reports its outcome after startup (or after fallback
+        // hydration). Aggregate layer reports would duplicate that result and
+        // announce success before exec has actually happened.
+        if report.forced && !wants_host {
             for notice in report.notices() {
                 shell.notice(notice);
             }
-        }
-        // Background maintenance should not add success chatter to the chat.
-        // Explicit /reload --force still gets a completion report; plain
-        // /reload and --dry-run own their feedback at their command sites.
-        if report.forced {
             shell.notice(report.summary());
+        }
+        if let Some(problem) = host_problem {
+            shell.notice_error(problem);
         }
         update_status(shell, &app);
         shell.render();
@@ -11021,6 +11076,9 @@ async fn run_idle_command_inner(
         Command::Verbose(value) => {
             let enabled = value.unwrap_or(!shell.verbose_tools());
             shell.set_verbose_tools(enabled);
+            // `/verbose` remains the one command for the whole transcript, so it
+            // steers thinking too. Ctrl+O and Ctrl+T stay independent.
+            shell.set_thinking_expanded(enabled);
             shell.notice(format!(
                 "verbose transcript {}",
                 if enabled { "enabled" } else { "disabled" }
@@ -13022,38 +13080,71 @@ fn startup_update_task(
     tasks
 }
 
+enum RestartNotice {
+    Success(String),
+    Failure(String),
+}
+
+impl RestartNotice {
+    fn show(self, shell: &mut InteractiveShell, session: &octet_agent::Session) {
+        match self {
+            Self::Success(expected)
+                if crate::app::bootstrap::terminal_goal_session_id(session)
+                    .ok()
+                    .as_deref()
+                    == Some(expected.as_str()) =>
+            {
+                shell.notice_success("reload succeeded: restarted octet and resumed this session");
+            }
+            Self::Success(_) => {}
+            Self::Failure(notice) => shell.notice_error(notice),
+        }
+    }
+}
+
 /// Interactive launch retaining the ordered `--models` patterns, including
 /// reasoning suffixes that cannot be recovered from a list of bare ModelIds.
 ///
-/// A `/reload` that finds a changed on-disk executable unwinds the TUI and
-/// re-execs into it. `exec` returns only on failure, so this wrapper rebuilds
-/// the TUI and extension children from the durable session head and keeps the
-/// current process usable.
+/// A host reload unwinds the TUI and re-execs into the installed executable.
+/// `exec` returns only on failure, so this wrapper rebuilds the TUI and extension
+/// children from the durable session head and reports the failure after hydration.
 pub(crate) async fn run_interactive_with_options(
     config: Config,
     mut options: crate::cli::parity::ParityOptions,
 ) -> anyhow::Result<()> {
     let mut config = config;
+    let mut restart_notice = crate::reexec::take_restart_session().map(RestartNotice::Success);
+    // Keep the running image's identity across exec-failure recovery. On Unix
+    // it may already be unlinked; recapturing it while rebuilding the TUI would
+    // disable subsequent retries even after the installation is repaired.
+    let mut reexec = crate::reexec::ReexecController::capture().ok();
     loop {
-        match run_interactive_once(config.clone(), options.clone()).await? {
+        match run_interactive_once(
+            config.clone(),
+            options.clone(),
+            restart_notice.take(),
+            &mut reexec,
+        )
+        .await?
+        {
             InteractiveExit::Finished => return Ok(()),
             InteractiveExit::Reexec(plan) => {
                 let session_id = plan.session_id().to_owned();
+                let forced = plan.is_forced();
                 // `exec` returns only when the image was not replaced: either
                 // the platform call failed or the final probe→exec re-check
                 // found the binary changed again. Both recover the same way.
-                let notice = match plan.exec() {
-                    crate::reexec::ReexecDecision::ExecFailed { notice, .. } => notice,
-                    decision => match decision.notice() {
-                        Some(notice) => notice.to_owned(),
-                        None => continue,
-                    },
+                let decision = plan.exec();
+                let notice = if forced {
+                    decision.restart_failure_notice()
+                } else {
+                    decision.notice().unwrap().to_owned()
                 };
                 // The terminal was left before `exec`. Re-entering the loop
                 // rebuilds the TUI and extension children from the durable
                 // session head and resumes the exact session, so the process
                 // stays usable.
-                crate::output::stderr_line(notice);
+                restart_notice = Some(RestartNotice::Failure(notice));
                 config.initial_prompt = None;
                 config.resume = crate::config::ResumeSelector::Resume(Some(session_id));
                 options.session_id = None;
@@ -13067,6 +13158,8 @@ pub(crate) async fn run_interactive_with_options(
 async fn run_interactive_once(
     config: Config,
     options: crate::cli::parity::ParityOptions,
+    restart_notice: Option<RestartNotice>,
+    reexec: &mut Option<crate::reexec::ReexecController>,
 ) -> anyhow::Result<InteractiveExit> {
     let model_scope_patterns = options.models.clone();
     let mut config = config;
@@ -13082,9 +13175,6 @@ async fn run_interactive_once(
         config.mouse.captures_mouse_on(crate::cli::tui_mode()),
     )?;
     shell.set_tui_fullscreen(crate::cli::tui_mode() == crate::config::TuiMode::Fullscreen)?;
-    // Best-effort re-exec support: a host that cannot report its own executable
-    // keeps the resources-only `/reload`.
-    let mut reexec = crate::reexec::ReexecController::capture().ok();
     shell.set_runtime_config(config.clone());
     let _update_task = startup_update_task(
         config.offline,
@@ -13229,6 +13319,9 @@ async fn run_interactive_once(
     // off-screen through `OCTET_STARTUP_TRACE=1`.
     crate::app::bootstrap::startup_phase("history.hydrate");
     shell.hydrate(app.agent.session())?;
+    if let Some(notice) = restart_notice {
+        notice.show(&mut shell, app.agent.session());
+    }
     if let Some(notice) = commands::resumed_cache_warming_notice(&app) {
         shell.notice(notice);
     }
@@ -13336,17 +13429,29 @@ async fn run_interactive_once(
         let thinking_fence = thinking_input
             .as_ref()
             .map(|_| (thinking_selection_owner(&app), app.reasoning.clone()));
-        let queued_input = if startup_input.is_none() && thinking_input.is_none() {
-            shell.take_ready_follow_up(
-                crate::cli::queue_mode(crate::cli::QueueKind::FollowUp)
-                    == octet_agent::QueueDeliveryMode::All,
-            )
+        // A command typed once while a wait owned the session runs here, at the
+        // same idle boundary and through the same path as a freshly typed one.
+        let wait_command = if startup_input.is_none() && thinking_input.is_none() {
+            shell.take_wait_command(&thinking_selection_owner(&app))
         } else {
             None
         };
+        let queued_input =
+            if startup_input.is_none() && thinking_input.is_none() && wait_command.is_none() {
+                shell.take_ready_follow_up(
+                    crate::cli::queue_mode(crate::cli::QueueKind::FollowUp)
+                        == octet_agent::QueueDeliveryMode::All,
+                )
+            } else {
+                None
+            };
         let queued_submission = queued_input.is_some();
-        let idle = match startup_input.take().or(thinking_input).or(queued_input) {
-            Some(input) if !input.is_empty() => Idle::Submit(input),
+        let idle = match (
+            startup_input.take().or(thinking_input).or(queued_input),
+            wait_command,
+        ) {
+            (Some(input), _) if !input.is_empty() => Idle::Submit(input),
+            (_, Some(command)) => Idle::Command(command),
             _ => {
                 wait_for_prompt(
                     &mut shell,

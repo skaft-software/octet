@@ -158,7 +158,7 @@ class FakeHostState:
         owner: str = "owner-a",
         principal: str = "octet-subagents@test",
         owner_path: str = "/root",
-        max_active: int = 8,
+        max_active: int = 16,
     ) -> "FakeAgentSessions":
         return FakeAgentSessions(
             self,

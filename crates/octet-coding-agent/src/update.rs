@@ -527,6 +527,9 @@ pub(crate) fn detect_install_method_in(exe: &Path, env: &InstallEnvironment) -> 
     if let Some(package_root) = validated_npm_local_package(&bin_dir) {
         return InstallMethod::NpmLocal { package_root };
     }
+    if windows_release_layout(&bin_dir, env) {
+        return InstallMethod::WindowsInstaller { bin_dir };
+    }
     InstallMethod::Unknown
 }
 
@@ -956,6 +959,17 @@ fn windows_installer_target_matches(bin_dir: &Path, env: &InstallEnvironment) ->
     env.windows_install_dir
         .as_ref()
         .is_some_and(|target| same_directory(bin_dir, target))
+}
+
+/// A Windows release ZIP unpacked outside the default target: the folder holds
+/// the installer's exact binary pair, so the version-pinned installer can
+/// replace them in place through `-InstallDirectory`. Only on Windows, which
+/// the presence of a default installer target in the environment signals.
+fn windows_release_layout(bin_dir: &Path, env: &InstallEnvironment) -> bool {
+    env.windows_install_dir.is_some()
+        && WINDOWS_BINARIES
+            .iter()
+            .all(|name| bin_dir.join(name).is_file())
 }
 
 /// Treats two directories as equal via canonicalized paths when both exist,

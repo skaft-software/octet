@@ -73,10 +73,21 @@ history, so it stays fast on long resumed sessions.
 
 Startup keeps routine session lookup, replay and extension-loading progress off
 screen. You can type while startup work finishes, and the welcome card and saved
-conversation appear when octet is ready. Setup prompts, errors, and cancel or
+conversation appear when octet is ready. Pressing Enter once on a prompt or a
+slash command while startup (or an extension hook) still owns the session queues
+it; it runs once when the session is ready, never as model input. A second Enter
+keeps the draft, Esc or Ctrl+C restores it, and it is restored instead of run if
+the session or model changed meanwhile. Setup prompts, errors, and cancel or
 shutdown diagnostics stay visible. Fresh sessions skip the replay worker
 entirely, and resumed sessions still restore their history. `--models` inventory
 discovery also runs after the shell owns input, not before the first paint.
+
+An extension's custom editor, footer, header, or widgets that appear during
+startup (for example a Pi extension's `setEditorComponent` in `session_start`)
+take over only after the theme its extensions select (such as your Pi theme) is
+installed. Until then the native composer stays in place and editable, and what
+you typed carries over into the custom editor. Setup dialogs still appear
+immediately. See [remote UI](extensions/remote-ui.md#palette-handoff-for-persistent-chrome).
 
 Fresh-start composer rows are reserved before the welcome, without provisional
 model branding. The welcome is static and fits the pane height. Typing and late
@@ -252,6 +263,12 @@ Each wrapped output row maps only its visible fragment, including wide Unicode
 text; selecting a continuation does not jump back to the first row. Compact-tail
 selection starts at the retained source boundary, not at matching text in omitted
 output. Elision labels and empty-output placeholders are not copyable source.
+Bash and Codemode tool selections and edit/write diffs copy the sanitized text
+presented at the current disclosure level, including content scrolled out of
+view. Ctrl+O reveals omitted input/output before it can be copied; collapsed
+group children, private tool arguments, capture metadata, line-number gutters
+and disclosure hints stay out of the copy. Repeated or decorated Unicode rows
+select their own occurrence, not matching text elsewhere in the transcript.
 Shift+drag remains your terminal's native selection override
 where the terminal supports it.
 
@@ -310,7 +327,10 @@ provider acknowledgement. Other routes still change at an idle boundary. See the
 [control
 qualification](provider-thinking.md#mid-conversation-changes-unreleased).
 
-Reasoning is collapsed by default. Ctrl+O expands what octet kept.
+Reasoning is collapsed by default. Ctrl+T shows or hides what octet kept,
+for every trace in the transcript and for new ones. It is separate from
+Ctrl+O, which owns tool and shell output. In native Tern, each key also resets
+only its own mode's section clicks, preserving the other mode's disclosure.
 
 Each run shows a shimmering `Working` row, and a trailing
 `Working (<elapsed> • esc to interrupt)` stays until the run settles. Retry
@@ -324,7 +344,7 @@ shows.
 
 ```text
 • Thinking
-  └ Verifying the implementation (ctrl+o to expand)
+  └ Verifying the implementation (ctrl+t to expand)
 ```
 
 Reasoning and activity dots keep a solid, fixed-size glyph. The `Working` dot
@@ -367,8 +387,11 @@ above the viewport. Only the visible image rows are placed, leaving the composer
 and footer outside the placement. Terminal-specific pixels still require separate
 qualification; protocol and retained-row tests are not Rex or Ghostty verification.
 
-Ctrl+O and `/verbose [on|off]` reveal reasoning, compaction, subagent activity,
-bounded search and shell output, and edit and write diffs. They can't recover
+Ctrl+O reveals compaction, subagent activity, bounded search, tool and shell
+output, and edit and write diffs; Ctrl+T reveals the reasoning traces.
+`/verbose [on|off]` steers both. Reasoning display is a per-session choice
+that survives new traces, and a theme's `thinking_expanded` decides the
+starting state. They can't recover
 output that was discarded when it was captured. Raw arguments, unsanitized
 failures and extension-rendered payloads stay out of the transcript and out of
 copy. A failed run keeps `failed · <duration>` and a short reason with

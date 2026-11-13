@@ -133,13 +133,21 @@ def check_links(files):
 def check_sdk_versions(files):
     """Each SDK README states the version in its package metadata.
 
-    The SDKs are independent distributions: a README that restates a stale
-    distribution version sends authors to the wrong release notes and pins.
+    Python and TypeScript source packages track the workspace version; the Rust
+    SDK has an independent distribution version. Each README must match its
+    manifest so local package commands and pins cannot silently become stale.
     """
+    workspace = manifest_version((ROOT / "Cargo.toml").read_text(), "Cargo.toml")
+    manifests = {name for name in files if name.startswith("sdk/") and name.endswith("/package.json")}
+    manifests.add("sdk/python/pyproject.toml")
+    for manifest in sorted(manifests):
+        actual = manifest_version((ROOT / manifest).read_text(), manifest)
+        assert actual == workspace, (manifest, actual, workspace)
     for readme, manifest in (
         ("sdk/python/README.md", "sdk/python/pyproject.toml"),
         ("sdk/rust/README.md", "sdk/rust/Cargo.toml"),
         ("sdk/typescript/README.md", "sdk/typescript/package.json"),
+        ("sdk/typescript/process/README.md", "sdk/typescript/process/package.json"),
     ):
         assert readme in files and manifest in files, (readme, manifest)
         stated = re.findall(r"\*\*(\d+\.\d+\.\d+)", intro_paragraph((ROOT / readme).read_text()))

@@ -89,10 +89,27 @@ impl ShellState {
             &self.theme,
             outer,
         );
-        Key { epoch: self.transcript_epoch, id: self.transcript_commit_ids[index],
-            revision: self.extension_transcript.source_revisions.get(&self.transcript_commit_ids[index]).copied().unwrap_or(0), width: plan.geometry.content_width.max(1),
-            expanded: self.extension_transcript.expanded.get(&self.transcript_commit_ids[index]).copied().unwrap_or(self.verbose_tools || matches!(block, TranscriptBlock::Reasoning(block) if block.reasoning_expanded)),
-            theme: self.theme_epoch }
+        Key {
+            epoch: self.transcript_epoch,
+            id: self.transcript_commit_ids[index],
+            revision: self
+                .extension_transcript
+                .source_revisions
+                .get(&self.transcript_commit_ids[index])
+                .copied()
+                .unwrap_or(0),
+            width: plan.geometry.content_width.max(1),
+            expanded: self
+                .extension_transcript
+                .expanded
+                .get(&self.transcript_commit_ids[index])
+                .copied()
+                .unwrap_or(match block {
+                    TranscriptBlock::Reasoning(block) => block.reasoning_expanded,
+                    _ => self.verbose_tools,
+                }),
+            theme: self.theme_epoch,
+        }
     }
 
     fn matching_frame(&self, index: usize) -> Option<&Frame> {

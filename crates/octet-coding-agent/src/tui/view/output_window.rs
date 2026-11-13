@@ -30,31 +30,11 @@ where
     rows
 }
 
-/// Preserve both ends of wrapped output, with omission metadata in the middle.
-pub(super) fn bounded_head_tail_rows<F>(
-    content: Vec<String>,
-    budget: usize,
-    force_metadata: bool,
-    metadata: F,
-) -> Vec<String>
-where
-    F: FnOnce(usize) -> String,
-{
-    if budget == 0 {
-        return Vec::new();
-    }
-    if !force_metadata && content.len() <= budget {
-        return content;
-    }
-    let retained = content.len().min(budget.saturating_sub(1));
+/// Source-row boundaries shared by painting and semantic copy.
+pub(super) fn head_tail_window(rows: usize, budget: usize) -> (usize, usize) {
+    let retained = rows.min(budget.saturating_sub(1));
     let head = retained.div_ceil(2);
-    let tail_start = content.len() - (retained - head);
-    let hidden = content.len() - retained;
-    let mut rows = Vec::with_capacity(retained + 1);
-    rows.extend(content[..head].iter().cloned());
-    rows.push(metadata(hidden));
-    rows.extend(content.into_iter().skip(tail_start));
-    rows
+    (head, rows - (retained - head))
 }
 
 #[cfg(test)]
@@ -62,24 +42,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compact_middle_preserves_both_ends_with_exact_omission_count() {
-        let rows = (1..=8).map(|row| format!("row {row}")).collect();
-        let rendered = bounded_head_tail_rows(rows, 5, false, |hidden| format!("{hidden} hidden"));
-        assert_eq!(rendered, ["row 1", "row 2", "4 hidden", "row 7", "row 8"]);
+    fn head_tail_window_preserves_both_ends_and_reserves_one_metadata_row() {
+        // Eight rows in a five-row budget: two head, four hidden, two tail.
+        assert_eq!(head_tail_window(8, 5), (2, 6));
         for budget in 0..=8 {
-            let rows = (1..=8).map(|row| row.to_string()).collect();
-            assert!(bounded_head_tail_rows(rows, budget, false, |n| n.to_string()).len() <= budget);
+            let (head, tail_start) = head_tail_window(8, budget);
+            let retained = head + 8 - tail_start;
+            assert!(retained <= budget.saturating_sub(1), "budget {budget}");
+            assert!(head <= tail_start);
         }
-        assert_eq!(
-            bounded_head_tail_rows(vec!["one".into()], 5, false, |_| unreachable!()),
-            ["one"]
-        );
-        assert_eq!(
-            bounded_head_tail_rows(vec!["one".into(), "two".into()], 5, true, |n| format!(
-                "loss; {n} hidden"
-            )),
-            ["one", "loss; 0 hidden", "two"]
-        );
+        // Short output keeps every row.
+        assert_eq!(head_tail_window(1, 5), (1, 1));
     }
 
     #[test]

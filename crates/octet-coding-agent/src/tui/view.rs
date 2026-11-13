@@ -115,6 +115,9 @@ use self::viewport::{
 
 use crate::presentation::tool_display::is_subagent_tool;
 
+#[cfg(test)]
+mod fullscreen_work_tests;
+
 /// Maximum physical rows retained in a collapsed command-output tail.
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
@@ -1996,6 +1999,10 @@ pub(crate) struct ShellState {
     pub(crate) run_label: String,
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
+    /// Thinking disclosure chosen with Ctrl+T or `/verbose`. `None` follows the
+    /// theme's `thinking_expanded`, so a theme keeps deciding until the user
+    /// says otherwise, and the choice survives new reasoning blocks.
+    pub(crate) thinking_disclosure: Option<bool>,
     pub(crate) size: (u16, u16),
     /// A resize away and back still invalidates the physical grid, even when
     /// coalescing observes the same final dimensions as the previous frame.
@@ -2342,6 +2349,7 @@ impl ShellState {
             session_name: Default::default(),
             run_label: Default::default(),
             verbose_tools: Default::default(),
+            thinking_disclosure: Default::default(),
             size: Default::default(),
             resize_epoch: Default::default(),
             startup_pending: Default::default(),
@@ -2482,6 +2490,7 @@ impl ShellState {
                         | TranscriptBlock::Compaction(_)
                         | TranscriptBlock::Tool(_)
                         | TranscriptBlock::Shell(_)
+                        | TranscriptBlock::Subagents(_)
                 ) || self
                     .extension_transcript
                     .frames
@@ -2957,20 +2966,30 @@ impl ShellState {
 
     fn touch_presentation_block(&mut self, index: usize) {
         self.transcript_semantic_revision = self.transcript_semantic_revision.wrapping_add(1);
-        self.render_publication.touch(index);
-        if let Some(revision) = self.block_revisions.get_mut(index) {
-            *revision = revision.saturating_add(1);
-        }
+        // The roster's separator can share its predecessor's blank status slot.
+        // Replan just that neighbour when Working becomes expanded reasoning
+        // (or its detail consumes the slot), before telemetry refreshes it.
+        let last = index
+            + usize::from(matches!(
+                self.transcript.get(index + 1),
+                Some(TranscriptBlock::Subagents(_))
+            ));
         let cache = self.transcript_cache.get_mut();
         cache.dirty = true;
-        // New blocks and invalidated widths are rendered with their latest
-        // revision without a dirty entry. Only deduplicate replacements for
-        // already cached rows, not every block in an unpainted hydration batch.
-        if cache.width.is_some()
-            && index < cache.block_revisions.len()
-            && !cache.dirty_blocks.contains(&index)
-        {
-            cache.dirty_blocks.push(index);
+        for index in index..=last {
+            self.render_publication.touch(index);
+            if let Some(revision) = self.block_revisions.get_mut(index) {
+                *revision = revision.saturating_add(1);
+            }
+            // New blocks and invalidated widths are rendered with their latest
+            // revision without a dirty entry. Only deduplicate replacements for
+            // already cached rows, not every block in an unpainted hydration batch.
+            if cache.width.is_some()
+                && index < cache.block_revisions.len()
+                && !cache.dirty_blocks.contains(&index)
+            {
+                cache.dirty_blocks.push(index);
+            }
         }
     }
 
@@ -3079,13 +3098,34 @@ impl ShellState {
             .unwrap_or(false)
     }
 
-    /// Whether a new thinking trace starts expanded. Themes choose their own
-    /// verbosity: the compiled default collapses to a `Thinking` line, Pi
-    /// themes show the trace as it streams. Ctrl+O still expands a collapsed one.
-    fn thinking_expanded_by_default(&self) -> bool {
-        self.theme
-            .resolve::<bool>("thinking_expanded")
-            .unwrap_or(false)
+    /// Whether thinking renders expanded. An explicit Ctrl+T or `/verbose`
+    /// choice wins; otherwise themes choose their own verbosity: the compiled
+    /// default collapses to a `Thinking` line, Pi themes show the trace as it
+    /// streams.
+    fn thinking_expanded(&self) -> bool {
+        self.thinking_disclosure.unwrap_or_else(|| {
+            self.theme
+                .resolve::<bool>("thinking_expanded")
+                .unwrap_or(false)
+        })
+    }
+
+    /// Ctrl+T: show or hide every thinking trace, including the live one, and
+    /// keep that choice for blocks created later. Tool output keeps its own
+    /// Ctrl+O; neither toggle changes the other.
+    fn set_thinking_expanded(&mut self, expanded: bool) {
+        self.thinking_disclosure = Some(expanded);
+        let mut changed = false;
+        for (block, id) in self.transcript.iter_mut().zip(&self.transcript_commit_ids) {
+            if let TranscriptBlock::Reasoning(reasoning) = block {
+                changed |= reasoning.reasoning_expanded != expanded;
+                changed |= self.extension_transcript.expanded.remove(id).is_some();
+                reasoning.reasoning_expanded = expanded;
+            }
+        }
+        if changed {
+            self.invalidate_disclosure();
+        }
     }
 
     fn seal_activity_group(&mut self) {
@@ -3298,7 +3338,7 @@ impl ShellState {
             OutputChannel::Reasoning => self.active_reasoning,
         };
         if let Some(index) = active_index {
-            let expand_thinking = self.thinking_expanded_by_default();
+            let expand_thinking = self.thinking_expanded();
             let updated = match self.transcript.get_mut(index) {
                 Some(TranscriptBlock::Assistant(existing)) if channel == OutputChannel::Text => {
                     existing.append(text);
@@ -3374,7 +3414,7 @@ impl ShellState {
             )),
             OutputChannel::Reasoning => TranscriptBlock::Reasoning(Box::new(
                 AssistantBlock::streaming_reasoning(text)
-                    .with_reasoning_expanded(self.thinking_expanded_by_default())
+                    .with_reasoning_expanded(self.thinking_expanded())
                     .with_model_lab(model_lab)
                     .with_activity_started_at(activity_started_at),
             )),
@@ -3496,10 +3536,7 @@ impl ShellState {
     fn animation_block_is_addressable(&self, index: usize) -> bool {
         let spaced_activity = matches!(self.transcript.get(index),
             Some(TranscriptBlock::Reasoning(reasoning))
-                if !reasoning.finished
-                    && !reasoning.reasoning_expanded
-                    && (!self.verbose_tools
-                        || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
+                if !reasoning.finished && !reasoning.reasoning_expanded
         );
         if self.render_threaded && !self.application_viewport_requested {
             if spaced_activity {
@@ -3677,7 +3714,6 @@ impl ShellState {
             .resolve::<bool>("thinking_spinner")
             .unwrap_or(false);
         thinking_spinner
-            && !self.verbose_tools
             && self
                 .active_event_blocks
                 .iter()
@@ -6487,13 +6523,34 @@ impl InteractiveShell {
         }
     }
 
+    pub fn set_thinking_expanded(&mut self, expanded: bool) {
+        self.state.borrow_mut().set_thinking_expanded(expanded);
+    }
+
+    pub fn thinking_expanded(&self) -> bool {
+        self.state.borrow().thinking_expanded()
+    }
+
+    /// Show or hide the thinking traces. Returns the new shape of the transcript.
+    pub fn toggle_thinking(&mut self) -> bool {
+        let next = !self.thinking_expanded();
+        self.set_thinking_expanded(next);
+        next
+    }
+
     pub fn set_verbose_tools(&mut self, verbose: bool) {
-        let mut state = self.state.borrow_mut();
+        let mut shared = self.state.borrow_mut();
+        let state = &mut *shared;
         if state.verbose_tools == verbose {
             return;
         }
         state.verbose_tools = verbose;
-        state.extension_transcript.expanded.clear();
+        // Tool disclosure must preserve per-trace thinking clicks.
+        for (block, id) in state.transcript.iter().zip(&state.transcript_commit_ids) {
+            if !matches!(block, TranscriptBlock::Reasoning(_)) {
+                state.extension_transcript.expanded.remove(id);
+            }
+        }
         // Keep the existing width/layout caches and invalidate only blocks
         // whose disclosure actually changes. The old full-layout reset made
         // Ctrl+O reparse every assistant answer in long sessions.
@@ -7658,7 +7715,7 @@ impl InteractiveShell {
             state.transcript_selection = None;
             return;
         };
-        let last_offset = block_copy_text(&state.transcript[last]).len();
+        let last_offset = transcript_selection::presented_block_copy_text(&state, last).len();
         state.transcript_selection = Some(TranscriptSelection {
             anchor: TranscriptPosition {
                 block: 0,

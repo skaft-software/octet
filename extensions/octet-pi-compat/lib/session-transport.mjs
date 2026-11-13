@@ -136,12 +136,34 @@ export class SessionTransport {
     for (const surface of this.runtime.ui.surfaces.values()) if (surface.store.state === store.state) surface.requestRender();
     return { accepted: true, transfer_id: d.transfer_id, view_revision: d.view_revision, head: d.head, sha256: d.sha256 };
   }
+  // A hook's history descriptor that names the owner's current prepared view
+  // (same revision AND same SHA-256, bytes, head and counts) is that document:
+  // reuse its parsed view instead of reading and parsing the whole history
+  // again for every hook. A preparation for that revision still in flight is
+  // awaited, not duplicated. Invocation-bound (prepared) views never reuse.
+  async reuse(d, store) {
+    if (d.preparation !== null) return undefined;
+    const key = ownerKey(d.owner), current = this.current.get(key);
+    if (!current || current.revision !== d.view_revision) return undefined;
+    if (!current.view && current.promise) await current.promise;
+    const view = current.view, c = view?.descriptor;
+    if (!view || view.document === undefined || this.current.get(key) !== current || c.preparation !== null
+        || c.view_revision !== d.view_revision || c.sha256 !== d.sha256 || c.bytes !== d.bytes || c.head !== d.head
+        || c.entry_count !== d.entry_count || c.branch_count !== d.branch_count) return undefined;
+    this.retain(view);
+    try {
+      const result = await this.call(store, 'session/snapshot/release', { transfer_id: d.transfer_id });
+      exact(result, ['released'], 'session release'); if (result.released !== true) invalid('session release');
+    } catch (error) { this.drop(view); throw error; }
+    return view;
+  }
   async hydrate(params, store) {
     if (params.session_snapshot === undefined) return;
     const owner = params.context?.resource_owner, d = descriptor(params.session_snapshot, owner, 'history');
-    const view = await this.read(d, store);
+    const reused = await this.reuse(d, store);
+    const view = reused ?? await this.read(d, store);
     store.sessionView = view;
-    this.history(view);
+    if (!reused) this.history(view);
     if (params.session_payload !== undefined) {
       if (Object.hasOwn(params, 'payload')) invalid('inline and transferred invocation payload');
       const payload = descriptor(params.session_payload, owner, 'invocation');

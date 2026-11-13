@@ -104,28 +104,28 @@ gh() {
         self.assertNotIn('.event == "merge_group"', requests)
         self.assertNotIn('.event == "workflow_dispatch"', requests)
 
-    def test_waits_for_run_and_completion_then_qualifies_latest(self):
+    def test_pending_ci_fails_once_without_consuming_a_waiting_runner(self):
         result, requests = self.run_gate(run="", runs=["", "41", "42"],
                                          statuses=["queued", "in_progress", "completed"])
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(3, requests.count("/ci.yml/runs"))
-        self.assertIn("/actions/runs/42/jobs", requests)
-        self.assertIn("waiting for", result.stdout)
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(1, requests.count("/ci.yml/runs"))
+        self.assertNotIn("/jobs?", requests)
+        self.assertNotIn("waiting for", result.stdout)
 
-    def test_missing_or_running_ci_times_out_with_clear_message(self):
+    def test_missing_or_running_ci_refuses_immediately_with_clear_message(self):
         for overrides in ({"run": ""}, {"status": "in_progress"}):
             with self.subTest(overrides=overrides):
                 result, requests = self.run_gate(**overrides)
                 self.assertNotEqual(0, result.returncode)
-                self.assertIn("timed out after 75 minutes", result.stderr)
-                self.assertEqual(151, requests.count("/ci.yml/runs"))
+                self.assertRegex(result.stderr, "source CI is not ready|did not qualify")
+                self.assertEqual(1, requests.count("/ci.yml/runs"))
 
     def test_tag_push_without_main_push_ci_names_the_recovery(self):
         # GitHub runs push CI only for the pushed head, so a tag on an older
         # main commit has no push run. The timeout must say how to recover.
         result, _ = self.run_gate(event="push", run="")
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("timed out after 75 minutes", result.stderr)
+        self.assertIn("source CI is not ready", result.stderr)
         for phrase in (
             "main push CI", "Dispatch ci.yml", "release-octet.yml",
             "release_tag=v0.10.0", "unchanged",
@@ -271,6 +271,12 @@ PY
         self.assertIn(f"workflow_commit={'b' * 40}\n", output)
         self.assertIn("mode=binaries\n", output)
 
+    def test_same_commit_tooling_tag_needs_no_workflow_diff(self):
+        result, output = self.run_forced_resolve(GITHUB_SHA=SOURCE, TEST_PATHS="", TEST_WORKFLOW_CHANGED="false")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(f"source_commit={SOURCE}\n", output)
+        self.assertIn(f"workflow_commit={SOURCE}\n", output)
+
     def test_canonical_push_can_start_before_github_release_exists(self):
         result, output = self.run_forced_resolve(
             GITHUB_EVENT_NAME="push", GITHUB_REF_NAME="v0.10.0", GITHUB_REF="refs/tags/v0.10.0",
@@ -325,6 +331,12 @@ PY
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertIn(f"core_workflow_tag={tag}\n", output)
         self.assertIn("needs.resolve.outputs.core_workflow_tag", self.workflow)
+
+    def test_installer_repair_can_be_dispatched_with_required_release_tag(self):
+        result, output = self.run_forced_resolve(
+            GITHUB_REF_NAME="octet-installer-v0.10.0", GITHUB_REF="refs/tags/octet-installer-v0.10.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("mode=installer\n", output)
 
     def test_source_must_be_on_main_even_when_force_is_set(self):
         result, output = self.run_forced_resolve(TEST_ANCESTOR="false")
@@ -644,7 +656,7 @@ cosign() {
         self.assertIn('--draft=false --latest=false', attach)
         self.assertNotIn('--draft=false --latest\n', attach)
         promote = self.workflow.split('\n  promote-latest:\n', 1)[1].split('\n  package-npm:', 1)[0]
-        self.assertIn("needs: [resolve, publish, verify-published]", promote)
+        self.assertIn("needs: [resolve, publish, verify-published, verify-windows-published, verify-npm-published, smoke-npm-published, smoke-npm-windows]", promote)
         self.assertIn("needs['verify-published'].result == 'success'", promote)
         self.assertIn('gh release edit "$RELEASE_TAG" --latest', promote)
         self.assertIn('commits/$RELEASE_TAG', promote)

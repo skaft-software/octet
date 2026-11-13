@@ -9,6 +9,12 @@ for octet: prompt templates, `release`, `add-provider`, and
 conventions, available in every clone and worktree. `CLAUDE.md` imports it;
 [`conventions.md`](conventions.md) points to it rather than duplicating the rules.
 
+Main is always releasable. Maintainer work skips PRs; only gated, linear
+fast-forward commits land on `main`. Outside contributions arrive as PRs. Follow [AGENTS.md](../../AGENTS.md) and run the full
+`scripts/gate.sh` on the exact commit before any push.
+Quick mode is for iteration only. Tags, releases, installs and publishing remain
+explicit owner actions.
+
 `.octet/` is gitignored (it is local agent state), so these files are the source
 of truth. Activate a copy for your checkout:
 

@@ -297,6 +297,30 @@ impl SessionLeafMailbox {
         publication_id
     }
 
+    /// Whether `revision` is the newest publication for `owner` and has been
+    /// acknowledged or is still in flight. A failed, superseded or foreign
+    /// publication never qualifies.
+    pub(super) fn snapshot_publication_is_live(
+        &self,
+        owner: &ExtensionResourceOwner,
+        revision: u64,
+    ) -> bool {
+        let publication = lock_std_mutex(&self.snapshot_publication);
+        let Some((current_owner, sender)) = publication.as_ref() else {
+            return false;
+        };
+        if current_owner != owner {
+            return false;
+        }
+        let state = sender.borrow().clone();
+        matches!(
+            state,
+            SnapshotPublicationState::Prepared { revision: current }
+                | SnapshotPublicationState::Pending { revision: Some(current), .. }
+                if current == revision
+        )
+    }
+
     pub(super) fn set_snapshot_publication_revision(
         &self,
         owner: &ExtensionResourceOwner,
@@ -1523,7 +1547,7 @@ mod tests {
                 reader_binding(&binding, producer, consumer.revoker(), &grant);
             handle_protocol_line(&wire_request(&grant, 100), &state).unwrap();
             if parent {
-                cancel_children_from_reader(&state, 1, "parent cancelled");
+                cancel_children_from_reader(&state, 1, "parent cancelled", false);
             } else {
                 handle_protocol_line(
                     br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":100}}"#,
@@ -1562,7 +1586,7 @@ mod tests {
                             &state,
                         )
                         .unwrap(),
-                        1 => cancel_children_from_reader(&state, 1, "parent cancelled"),
+                        1 => cancel_children_from_reader(&state, 1, "parent cancelled", false),
                         _ => state.session_leaf.clear(),
                     }
                     assert!(frames.try_recv().is_err());

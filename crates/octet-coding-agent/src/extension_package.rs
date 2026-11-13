@@ -170,7 +170,7 @@ fn print_bundle_installed(
     );
 }
 
-pub(super) fn extensions_root() -> anyhow::Result<PathBuf> {
+pub(crate) fn extensions_root() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir()
         .filter(|path| path.is_absolute())
         .ok_or_else(|| anyhow::anyhow!("cannot manage extensions: user home is unavailable"))?;
@@ -371,12 +371,14 @@ fn list_installed_bundles(root: &Path) -> anyhow::Result<()> {
         crate::output::stdout_line("No extension bundles installed.");
         return Ok(());
     }
-    crate::output::stdout_table_line("ID\tVERSION\tKIND\tAPI\tOCTET\tTARGET");
-    for (id, version, kind, api, octet, target) in rows {
-        crate::output::stdout_table_line(format!(
-            "{id}\t{version}\t{kind}\t{api}\t{octet}\t{target}"
-        ));
-    }
+    let mut table = vec!["ID\tVERSION\tKIND\tAPI\tOCTET\tTARGET".to_owned()];
+    table.extend(
+        rows.into_iter()
+            .map(|(id, version, kind, api, octet, target)| {
+                format!("{id}\t{version}\t{kind}\t{api}\t{octet}\t{target}")
+            }),
+    );
+    crate::output::stdout_table(&table, 5);
     Ok(())
 }
 

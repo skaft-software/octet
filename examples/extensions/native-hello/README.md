@@ -1,6 +1,6 @@
 # One-source native hello tools (Rust / C / C++)
 
-Local **octet 0.9.6 / feature-negotiated API 0.4** recipes. Three small author
+Local **feature-negotiated API 0.4** recipes for the workspace host. Three small author
 sources, one transport/lifecycle implementation in [`sdk/rust`](../../../sdk/rust/README.md).
 The [C ABI](../../../sdk/c/README.md) and [C++17 wrapper](../../../sdk/cpp/README.md)
 use that runtime, not C plugins loaded into octet. This is **static-tool authoring**,
@@ -17,7 +17,7 @@ rollback or unsafe replay is implied.
 ## Build and exercise locally
 
 Prerequisites: Rust/Cargo (declared MSRV 1.88), platform C11/C++17 compiler/linker,
-Bash and Python 3; pinned ecosystem dependencies cached for the offline recipe.
+Bash and Python 3.11+; pinned ecosystem dependencies cached for the offline recipe.
 No global install or configuration change is performed. A Rust toolchain is
 required even for the C/C++ runtime build. Source SDK registry/publication and
 precompiled archive availability are not claimed.
@@ -34,14 +34,15 @@ probes and **runnable local manifests** under
 `build/extensions/native-hello-{rust,c,cpp}/extension.toml`. Absolute native
 entrypoint paths are generated, because the child cwd is the workspace, not its
 package. Moving a built checkout requires rebuilding/regenerating those manifests.
-Each declares API 0.4, its own version 0.1.0 and exact host pin `=0.9.6`; the pin
-is local compatibility metadata, not evidence of release publication or a wire
-translation. It is deliberately not changed to match a different host silently.
+Each declares API 0.4, its own version 0.1.0 and the exact workspace host version
+read from the root `Cargo.toml`. Rebuild for a changed workspace version and use
+that matching source-built host. The pin is local compatibility metadata, not
+evidence of release publication or a wire translation.
 
-The checked-in root `extension.toml` is also runnable after the default build:
-it selects the Rust executable via `build/hello-rust`, resolved beside this
-manifest. For C/C++ choose the corresponding generated manifest, rather than
-renaming that root source directory or silently editing its entrypoint.
+The checked-in root `extension.toml` retains its historical `=0.9.6` pin and
+selects the Rust executable via `build/hello-rust`, resolved beside that manifest.
+For the current workspace host, choose a generated Rust/C/C++ manifest instead
+of renaming the root source directory or silently editing its pin or entrypoint.
 
 Reusable build templates:
 

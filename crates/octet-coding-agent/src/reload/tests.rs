@@ -591,7 +591,10 @@ fn force_supersedes_a_queued_pass_without_inventing_losses() {
         assert!(losses_of(&report, layer).is_empty());
     }
     assert_eq!(report.layers[0].outcome, LayerOutcome::Reloaded);
-    assert!(report.notices()[0].contains("reload (forced)"));
+    assert!(!report
+        .notices()
+        .iter()
+        .any(|notice| notice.contains("explicit pass") || notice.contains("interruption risks")));
     assert!(!summary_mentions(&report, "named loss"));
 }
 
@@ -1207,7 +1210,6 @@ fn compact_reload_diagnostics_preserve_failures_limits_losses_and_caller_notes()
     let notices = report.diagnostics();
     let text = notices.join("\n");
     for detail in [
-        "reload (forced)",
         "resources reload failed",
         "fixture warning",
         "skipped at least 2",

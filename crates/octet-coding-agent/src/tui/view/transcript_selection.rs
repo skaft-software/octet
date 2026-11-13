@@ -120,6 +120,78 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
     }
 }
 
+/// A tool's copy projection uses exactly the sanitized fields and disclosure
+/// window used by the presenter, not the complete retained tool result.
+fn presented_tool(
+    state: &ShellState,
+    index: usize,
+    content_width: Option<u16>,
+) -> super::tool_render::ToolRows {
+    let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
+        unreachable!()
+    };
+    if panel.grouped_child
+        && !state.verbose_tools
+        && state
+            .theme
+            .resolve::<bool>("quiet_tool_summaries")
+            .unwrap_or(false)
+    {
+        return Default::default();
+    }
+    let plan = super::surface_layout::compile_surface_plan_for_render(
+        index
+            .checked_sub(1)
+            .and_then(|previous| state.transcript.get(previous)),
+        &state.transcript[index],
+        &state.theme,
+        state.transcript_content_width(state.size.0),
+        state.verbose_tools,
+    );
+    super::transcript_render::render_tool(
+        panel,
+        &state.theme,
+        &state.theme.rich_renderer(),
+        content_width.unwrap_or(plan.geometry.content_width),
+        state.verbose_tools,
+        plan.content_role,
+    )
+}
+
+pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> String {
+    let block = &state.transcript[index];
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
+    let text = match block {
+        TranscriptBlock::Tool(_) => presented_tool(state, index, None).text,
+        TranscriptBlock::Reasoning(reasoning)
+            if !reasoning.reasoning_expanded && !state.verbose_tools =>
+        {
+            String::new()
+        }
+        TranscriptBlock::Compaction(compaction) if !compaction.expanded && !state.verbose_tools => {
+            sanitize_for_terminal(&compaction.label)
+        }
+        TranscriptBlock::NoticeStatus {
+            tone:
+                super::NoticeTone::ToolActive
+                | super::NoticeTone::ToolSuccess
+                | super::NoticeTone::ToolError,
+            ..
+        } if !state
+            .theme
+            .resolve::<bool>("quiet_tool_summaries")
+            .unwrap_or(false) =>
+        {
+            String::new()
+        }
+        _ => block_copy_text(block),
+    };
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| work.copy_text_bytes += text.len());
+    text
+}
+
 /// Side-effect-free semantic selection projection. Prompt expansion can read
 /// this without mutating the retained copy buffer or touching the clipboard.
 pub(super) fn semantic_selected_text(state: &ShellState) -> Option<String> {
@@ -133,7 +205,11 @@ pub(super) fn semantic_selected_text(state: &ShellState) -> Option<String> {
     };
     let mut blocks = Vec::new();
     for index in start.block..=end.block {
-        let text = block_copy_text(state.transcript.get(index)?);
+        state.transcript.get(index)?;
+        let text = presented_block_copy_text(state, index);
+        if text.is_empty() {
+            continue;
+        }
         let from = if index == start.block {
             clamp_copy_offset(&text, start.offset)
         } else {
@@ -167,7 +243,20 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
         (selection.focus, selection.anchor)
     };
     let cache = state.transcript_cache.borrow();
-    for index in start.block..=end.block {
+    // Intersect the selection with the painted window before visiting blocks.
+    // An offscreen anchor can otherwise make every drag scan settled history.
+    let first = cache
+        .block_starts
+        .partition_point(|row| *row <= start_row)
+        .saturating_sub(1)
+        .max(start.block);
+    let after = cache
+        .block_starts
+        .partition_point(|row| *row < start_row + lines.len())
+        .min(end.block.saturating_add(1));
+    for index in first..after {
+        #[cfg(test)]
+        super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
         let Some(&block_start) = cache.block_starts.get(index) else {
             continue;
         };
@@ -175,7 +264,7 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
         if block_end <= start_row || block_start >= start_row + lines.len() {
             continue;
         }
-        let text = block_copy_text(&state.transcript[index]);
+        let text = presented_block_copy_text(state, index);
         let from = if index == start.block {
             start.offset
         } else {
@@ -187,14 +276,17 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
             text.len()
         };
         let geometry = cache.block_geometries[index];
-        let rows = CopyRows::build_visible(
+        let Some(rows) = visible_block_copy_rows(
+            state,
+            index,
             &cache.lines[block_start..block_end],
-            &text,
             geometry,
-            shell_output_copy_start(&state.transcript[index]),
             start_row.saturating_sub(block_start)
                 ..(start_row + lines.len()).saturating_sub(block_start),
-        );
+            &mut BlockCopyMemo::default(),
+        ) else {
+            continue;
+        };
         let first = block_start + geometry.transition_rows + geometry.leading_rows + rows.first_row;
         for (row_index, row) in rows.rows.iter().enumerate() {
             let Some(line) = (first + row_index)
@@ -392,6 +484,8 @@ fn align_copy_row(
     content_left: u16,
     literal: bool,
 ) -> AlignedCopyRow {
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| work.rows_mapped += 1);
     let plain = strip_terminal_sequences(line);
     let mut aligned = AlignedCopyRow {
         painted: line.to_owned(),
@@ -406,48 +500,45 @@ fn align_copy_row(
         missed: Vec::new(),
         to_text_end: false,
     };
-    for candidate in copy_candidates(&plain) {
+    // Try every spelling before choosing an occurrence. A painted bullet or
+    // heading can also occur literally later in the answer; prioritizing that
+    // spelling would jump past the actual, decorated source row.
+    let mut best = None;
+    // The event margin is outside the content surface. Its marker must not
+    // consume the one Markdown marker the content row can carry.
+    let content_start = visual_col_to_offset(&plain, usize::from(content_left));
+    for mut candidate in copy_candidates(&plain[content_start..]) {
+        candidate.painted_cells = candidate.painted_cells.saturating_add(content_left);
         let Some(relative) = copy_text[cursor..].find(candidate.text) else {
             aligned.missed.push(candidate.text.to_owned());
             continue;
         };
         let matched = cursor + relative;
-        if candidate.line && !literal {
-            // The copy text spells its own marker for this row (`-`,
-            // `1.`, `#`), so the row names that complete copy line. The
-            // copy line starts where its own marker starts, one painted
-            // cell earlier per marker cell.
-            let line_start = copy_text[..matched]
-                .rfind('\n')
-                .map_or(0, |newline| newline + 1);
-            let line_end = match copy_text[matched..].find('\n') {
-                Some(newline) => {
-                    aligned.examined_end = matched + newline + 1;
-                    matched + newline
-                }
-                None => {
-                    aligned.to_text_end = true;
-                    copy_text.len()
-                }
-            };
-            let prefix_cells = visible_width(&copy_text[line_start..matched]) as u16;
-            let painted_cells = candidate.painted_cells.saturating_sub(prefix_cells);
-            aligned.cursor_after = line_end;
-            aligned.row = CopyRow {
-                text: copy_text[line_start..line_end].to_owned(),
-                offset: line_start,
-                painted_cells,
-            };
-        } else {
-            aligned.cursor_after = matched + candidate.text.len();
-            aligned.examined_end = aligned.cursor_after;
-            aligned.row = CopyRow {
-                text: candidate.text.to_owned(),
-                offset: matched,
-                painted_cells: candidate.painted_cells,
-            };
+        if best.as_ref().is_none_or(|(offset, _)| matched < *offset) {
+            best = Some((matched, candidate));
         }
-        break;
+    }
+    if let Some((matched, candidate)) = best {
+        let end = matched + candidate.text.len();
+        let mut start = matched;
+        let mut painted_cells = candidate.painted_cells;
+        if candidate.line && !literal {
+            // A list/quote marker has a semantic spelling of its own. Include
+            // that prefix, not the unpainted rest of a wrapped logical line.
+            start = copy_text[..matched]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1)
+                .max(cursor);
+            painted_cells =
+                painted_cells.saturating_sub(visible_width(&copy_text[start..matched]) as u16);
+        }
+        aligned.cursor_after = end;
+        aligned.examined_end = end;
+        aligned.row = CopyRow {
+            text: copy_text[start..end].to_owned(),
+            offset: start,
+            painted_cells,
+        };
     }
     aligned
 }
@@ -484,6 +575,7 @@ pub(super) struct CopyRows {
 }
 
 impl CopyRows {
+    #[cfg(test)]
     fn build(
         painted: &[String],
         copy_text: &str,
@@ -493,6 +585,7 @@ impl CopyRows {
         Self::build_visible(painted, copy_text, geometry, output_start, 0..painted.len())
     }
 
+    #[cfg(test)]
     fn build_visible(
         painted: &[String],
         copy_text: &str,
@@ -590,6 +683,49 @@ impl CopyRows {
                 .iter()
                 .map(|aligned| aligned.row.clone())
                 .collect(),
+        }
+    }
+
+    fn tool(
+        projected: &super::tool_render::ToolRows,
+        geometry: SurfaceGeometry,
+        total_rows: usize,
+        visible: std::ops::Range<usize>,
+    ) -> Self {
+        let first = geometry.transition_rows + geometry.leading_rows;
+        let count = total_rows
+            .saturating_sub(first + geometry.trailing_rows)
+            .min(projected.copy_rows.len());
+        let from = visible.start.saturating_sub(first).min(count);
+        let to = visible.end.saturating_sub(first).min(count);
+        let mut cursor = 0;
+        let rows = projected
+            .copy_rows
+            .iter()
+            .take(to)
+            .enumerate()
+            .filter_map(|(index, source)| {
+                let row = if let Some(source) = source {
+                    cursor = source.source.end;
+                    CopyRow {
+                        text: projected.text[source.source.clone()].to_owned(),
+                        offset: source.source.start,
+                        painted_cells: geometry.content_left.saturating_add(source.left),
+                    }
+                } else {
+                    CopyRow {
+                        text: String::new(),
+                        offset: cursor,
+                        painted_cells: geometry.content_left,
+                    }
+                };
+                (index >= from).then_some(row)
+            })
+            .collect();
+        Self {
+            first_row: from,
+            content_left: geometry.content_left,
+            rows,
         }
     }
 
@@ -722,6 +858,8 @@ fn rendered_marker(trimmed: &str) -> Option<usize> {
                 | '»'
                 | '→'
                 | '-'
+                | '—'
+                | '–'
                 | '*'
                 | '+'
                 | '>'
@@ -775,12 +913,37 @@ pub(super) fn visible_copy_rows(
     (!rows.is_empty()).then_some(rows)
 }
 
+/// The renderer and the synchronous frontend share this projection. Only the
+/// visible row ranges enter the completed-frame pointer receipt.
+pub(super) fn visible_block_copy_rows(
+    state: &ShellState,
+    index: usize,
+    painted: &[String],
+    geometry: SurfaceGeometry,
+    visible: std::ops::Range<usize>,
+    memo: &mut BlockCopyMemo,
+) -> Option<CopyRows> {
+    if matches!(state.transcript[index], TranscriptBlock::Tool(_)) {
+        let projected = presented_tool(state, index, Some(geometry.content_width));
+        let rows = CopyRows::tool(&projected, geometry, painted.len(), visible);
+        return (!rows.is_empty()).then_some(rows);
+    }
+    visible_copy_rows(
+        painted,
+        &presented_block_copy_text(state, index),
+        geometry,
+        shell_output_copy_start(&state.transcript[index]),
+        visible,
+        memo,
+    )
+}
+
 /// The painted content rows of one block, aligned with its copy text.
 fn painted_copy_rows(
     state: &ShellState,
     retained: Option<&super::renderer_geometry::RenderedGeometry>,
     block: usize,
-    copy_text: &str,
+    _copy_text: &str,
     geometry: SurfaceGeometry,
 ) -> Option<CopyRows> {
     if state.render_threaded {
@@ -800,15 +963,21 @@ fn painted_copy_rows(
     };
     let painted = {
         let cache = state.transcript_cache.borrow();
-        cache.lines.get(start..start.checked_add(length)?)?.to_vec()
+        let rows = cache.lines.get(start..start.checked_add(length)?)?;
+        #[cfg(test)]
+        super::fullscreen_work_tests::record(|work| {
+            work.bytes_cloned += rows.iter().map(String::len).sum::<usize>();
+        });
+        rows.to_vec()
     };
-    let rows = CopyRows::build(
+    visible_block_copy_rows(
+        state,
+        block,
         &painted,
-        copy_text,
         geometry,
-        shell_output_copy_start(&state.transcript[block]),
-    );
-    (!rows.is_empty()).then_some(rows)
+        0..painted.len(),
+        &mut BlockCopyMemo::default(),
+    )
 }
 
 fn visual_cell_to_copy_offset(
@@ -950,7 +1119,7 @@ pub(super) fn visual_line_for_transcript_position(
         return None;
     }
     let block = state.transcript.get(position.block)?;
-    let copy_text = block_copy_text(block);
+    let copy_text = presented_block_copy_text(state, position.block);
     let rows = painted_copy_rows(
         state,
         state.retained_render_geometry(),
@@ -1014,7 +1183,7 @@ pub(super) fn selection_position_for_visual_cell(
     let content_row = geometry.content_row(local_row, total_rows)?;
     let content_col = geometry.content_col(col);
     let transcript_block = state.transcript.get(block)?;
-    let text = block_copy_text(transcript_block);
+    let text = presented_block_copy_text(state, block);
     let rows = painted_copy_rows(
         state,
         state.pointer_render_geometry(),

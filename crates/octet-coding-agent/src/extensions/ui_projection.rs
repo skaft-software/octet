@@ -345,14 +345,69 @@ impl ExecutableExtensions {
     /// Project validated semantic extension UI into the host-owned interactive
     /// shell. Any stale process generation is discarded before rendering.
     pub fn sync_semantic_ui(&mut self, shell: &mut InteractiveShell) -> bool {
-        self.refresh_frontend_theme(shell);
+        self.publish_frontend_palette(shell);
         shell.set_extension_ui(self.semantic_ui_projection())
+    }
+
+    /// Publish the palette, then treat every frame held chrome cached before
+    /// that publication as rendered with the replaced palette.
+    pub(crate) fn publish_frontend_palette(&mut self, shell: &InteractiveShell) {
+        if !self.refresh_frontend_theme(shell) || !self.remote_ui.has_held() {
+            return;
+        }
+        for process in &self.processes {
+            for frame in process.take_remote_ui_frames() {
+                self.remote_ui.accept_frame(process, frame);
+            }
+        }
+        self.remote_ui.palette_published();
+    }
+
+    /// Record whether the resource generation that can replace the palette is
+    /// still pending. Persistent extension chrome opened while it is pending
+    /// is held off screen and owns no input, so the native composer stays
+    /// editable; once the generation is published, the published palette
+    /// reaches extensions first and held chrome is handed over by
+    /// `RemoteUi::settle_held`. Dialogs (fullscreen surfaces) are never held.
+    pub(crate) fn set_chrome_handoff_pending(
+        &mut self,
+        pending: bool,
+        shell: &mut InteractiveShell,
+    ) {
+        if pending == self.remote_ui.handoff_pending() {
+            return;
+        }
+        if !pending {
+            self.publish_frontend_palette(shell);
+        }
+        self.remote_ui.set_handoff_pending(pending);
+        if !pending {
+            self.sync_remote_ui(shell);
+        }
+    }
+
+    /// A released handoff is still part of frontend resource readiness. The
+    /// existing pump services its frames/checkpoints and its bounded fallback.
+    pub(crate) fn chrome_handoff_settling(&self) -> bool {
+        !self.remote_ui.handoff_pending() && self.remote_ui.has_held()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chrome_handoff_pending(&self) -> bool {
+        self.remote_ui.handoff_pending()
+    }
+
+    /// Begin holding persistent chrome without a frontend at hand. Only
+    /// `set_chrome_handoff_pending` releases the hold.
+    pub(crate) fn hold_chrome_handoff(&mut self) {
+        self.remote_ui.set_handoff_pending(true);
     }
 
     /// Publish an already-resolved foreground palette, never render-time I/O or
     /// a callback into the component factory. Existing process publication sends
     /// owner-fenced context updates to every admitted remote mount.
-    pub(crate) fn refresh_frontend_theme(&self, shell: &InteractiveShell) {
+    /// Returns whether the palette published to extensions changed.
+    pub(crate) fn refresh_frontend_theme(&self, shell: &InteractiveShell) -> bool {
         // This runs for every UI sync (every streamed delta), and building the
         // palette serializes the whole theme. Rebuild only when its inputs move.
         let key = shell.extension_palette_key();
@@ -368,7 +423,7 @@ impl ExecutableExtensions {
                 .theme
                 .is_some()
         {
-            return;
+            return false;
         }
         let theme = shell.extension_theme_get(None);
         *published = Some(key);
@@ -379,7 +434,7 @@ impl ExecutableExtensions {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.theme == theme {
-                return;
+                return false;
             }
             state.theme = theme;
             state.clone()
@@ -391,6 +446,7 @@ impl ExecutableExtensions {
                 process.set_host_state(state.clone());
             }
         }
+        true
     }
 
     /// Notify negotiated editor-handoff extensions whenever the host-owned

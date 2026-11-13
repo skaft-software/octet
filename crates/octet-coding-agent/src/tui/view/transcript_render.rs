@@ -3,7 +3,7 @@
 use sexy_tui_rs::{visible_width, Color, RichRenderer};
 
 use super::assistant_block::AssistantBlock;
-use super::bash_render::{render_bash_row, render_compact_bash_output};
+use super::bash_render::{project_bash_row, project_compact_bash_output};
 use super::outcome_render::render_outcome;
 use super::reasoning_render::render_reasoning_on_surface_with_rainbow;
 use super::surface_frame::{
@@ -12,8 +12,8 @@ use super::surface_frame::{
 use super::surface_layout::{block_prompt_color, compile_surface_plan_for_render};
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{
-    render_diff_only, render_tool_failure_reason, shell_row_label, tool_diff, tool_display_label,
-    tool_grid_label, tool_value_indent, tool_value_indent_width, without_redundant_tool_lead,
+    project_diff, shell_row_label, tool_diff, tool_display_label, tool_grid_label,
+    tool_value_indent, tool_value_indent_width, without_redundant_tool_lead, ToolRows,
 };
 use super::transcript_cache::{RenderedTranscriptBlock, SurfaceGeometry};
 use super::{
@@ -120,6 +120,192 @@ fn append_nested_tool_output(
     header.extend(nest_tool_output(rows, theme, width));
 }
 
+/// One shared presentation supplies painted tool rows and their copy positions.
+/// It never reads a terminal, provider, or extension renderer.
+pub(super) fn render_tool(
+    panel: &super::ToolPanel,
+    theme: &OctetTheme,
+    rich_renderer: &RichRenderer,
+    width: u16,
+    verbose_tools: bool,
+    content_role: &'static str,
+) -> ToolRows {
+    let quiet_summary = theme
+        .resolve::<bool>("quiet_tool_summaries")
+        .unwrap_or(false)
+        && !verbose_tools;
+    let compact_bash = is_shell_tool(panel.name.as_str()) && panel.display.shell_command.is_some();
+    let mut lines = if let Some(source) = super::codemode_render::source(panel) {
+        super::codemode_render::project_source(&source, rich_renderer, theme, width, verbose_tools)
+    } else if let Some(command) = panel.display.shell_command.as_deref() {
+        project_bash_row(
+            command,
+            shell_row_label(&panel.name),
+            rich_renderer,
+            theme,
+            width,
+            verbose_tools,
+        )
+    } else {
+        let compact = width < 60 || quiet_summary;
+        let summary = if !panel.finished {
+            if compact {
+                &panel.display.compact_active
+            } else {
+                &panel.display.active
+            }
+        } else if panel.is_error {
+            if compact {
+                &panel.display.compact_failure
+            } else {
+                &panel.display.failure
+            }
+        } else if compact {
+            &panel.display.compact_success
+        } else {
+            &panel.display.success
+        };
+        let copy_label = sanitize_for_terminal(&tool_display_label(&panel.name));
+        let tool = tool_grid_label(&copy_label);
+        let label = if quiet_summary {
+            theme.fg("muted", &tool)
+        } else {
+            theme.apply_transcript_role_on_surface("tool_header", content_role, &tool)
+        };
+        let label_width = visible_width(&tool);
+        let text = match panel.display.value.as_deref() {
+            Some(value) => sanitize_for_terminal(value),
+            None => without_redundant_tool_lead(&panel.name, &sanitize_for_terminal(summary)),
+        };
+        let source = text;
+        let text = theme.fg("muted", &source);
+        let gap = tool_value_indent_width(&tool).saturating_sub(label_width);
+        let label_prefix = format!("{label}{}", " ".repeat(gap));
+        let continuation = tool_value_indent(&tool);
+        let rows = wrap_hanging(&text, &label_prefix, &continuation, width);
+        let source_rows = rows.len();
+        let mut rows = if panel.display.value.is_some() {
+            super::tool_render::tool_input_preview(
+                rows,
+                "input",
+                &continuation,
+                theme,
+                width,
+                verbose_tools,
+            )
+        } else {
+            rows
+        };
+        let hint = (panel.display.value.is_some() && !verbose_tools && source_rows > 12)
+            .then(|| rows.pop().unwrap());
+        let mut projected = ToolRows::literal(rows, source, visible_width(&continuation) as u16);
+        projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+        projected.prefix(&format!("{copy_label}  "));
+        if let Some(hint) = hint {
+            projected.decoration(hint);
+        }
+        projected
+    };
+    let nested_width = width
+        .saturating_sub(tool_output_indent(theme, width))
+        .max(1);
+    if quiet_summary
+        && panel.display.shell_command.is_none()
+        && (panel.display.value.is_none() || panel.name == "codemode")
+    {
+        lines.retain_rows(&[0]);
+    }
+    if panel.grouped_child
+        && verbose_tools
+        && theme
+            .resolve::<bool>("quiet_tool_summaries")
+            .unwrap_or(false)
+        && is_shell_tool(panel.name.as_str())
+    {
+        if let Some(first) = lines.lines.first_mut() {
+            *first = fit_line(&format!("-> {first}"), width);
+            if let Some(row) = lines.copy_rows.first_mut().and_then(Option::as_mut) {
+                row.left = row.left.saturating_add(3);
+                let (shown, _) = sexy_tui_rs::WidthPolicy::default().prefix(
+                    &lines.text[row.source.clone()],
+                    usize::from(width.saturating_sub(row.left)),
+                );
+                row.source.end = row.source.start + shown.trim_end().len();
+            }
+            lines.retain_rows(&(0..lines.lines.len()).collect::<Vec<_>>());
+        }
+    }
+    let mut output_lines = ToolRows::default();
+
+    if !quiet_summary && !panel.finished {
+        if let Some(decoration) = panel.progress_decoration.as_ref() {
+            for row in render_progress_decoration(decoration, theme, nested_width) {
+                output_lines.decoration(row);
+            }
+        }
+    }
+    if panel.finished && panel.is_error {
+        let mut reason = super::tool_render::bounded_tool_failure_reason(panel);
+        if quiet_summary {
+            if let (Some(reason), Some(path)) =
+                (reason.as_mut(), panel.display.changed_path.as_deref())
+            {
+                *reason = reason.replace(path, &compact_path(path));
+            }
+        }
+        if let Some(reason) = reason {
+            let rows = wrap_hanging(&theme.fg("error", &reason), "", "", nested_width);
+            let mut reason = ToolRows::literal(rows, reason, 0);
+            reason.retain_rows(&(0..reason.lines.len()).collect::<Vec<_>>());
+            output_lines.append(reason);
+        }
+    }
+
+    if !quiet_summary || panel.is_error {
+        match panel.name.as_str() {
+            "codemode" => output_lines.append(super::codemode_render::project_output(
+                panel,
+                theme,
+                nested_width,
+                verbose_tools,
+            )),
+            name if is_shell_tool(name) && compact_bash => output_lines.append(
+                project_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
+            ),
+            "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
+                output_lines.append(project_diff(
+                    panel,
+                    rich_renderer,
+                    theme,
+                    nested_width,
+                    verbose_tools,
+                    "",
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Image reservations are visual-only and deliberately remain out
+    // of `panel.output`, selection, and plain/print projections.
+    for row in panel.image_rows(nested_width) {
+        output_lines.decoration(row);
+    }
+    let indent = tool_output_indent(theme, width);
+    for row in output_lines.copy_rows.iter_mut().flatten() {
+        row.left = row.left.saturating_add(indent);
+    }
+    let mut painted = std::mem::take(&mut lines.lines);
+    append_nested_tool_output(
+        &mut painted,
+        std::mem::take(&mut output_lines.lines),
+        theme,
+        width,
+    );
+    lines.append(output_lines);
+    lines.lines = painted;
+    lines
+}
+
 pub(super) struct RenderedTranscriptBlockUpdate {
     pub(super) stable_rows: usize,
     pub(super) replacement: Vec<String>,
@@ -136,19 +322,19 @@ pub(super) fn render_assistant_update_planned(
     rich_renderer: &RichRenderer,
     reasoning_renderer: &RichRenderer,
     outer_width: u16,
-    show_reasoning: bool,
+    verbose_tools: bool,
 ) -> Option<RenderedTranscriptBlockUpdate> {
     let (assistant, renderer) = match block {
         TranscriptBlock::Assistant(assistant) => (assistant, rich_renderer),
         TranscriptBlock::Reasoning(reasoning)
-            if (reasoning.reasoning_expanded || show_reasoning)
+            if reasoning.reasoning_expanded
                 && (!reasoning.text.is_empty() || reasoning.show_reasoning_hint) =>
         {
             (reasoning, reasoning_renderer)
         }
         _ => return None,
     };
-    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, show_reasoning);
+    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, verbose_tools);
     let update = assistant.render_update(renderer, theme, plan.geometry.content_width)?;
     if update.stable_prefix == 0 {
         return None;
@@ -242,8 +428,7 @@ pub(super) fn render_block_planned_with_rainbow(
     .filter(|background| *background != Color::Default);
     let collapsed_reasoning = matches!(
         block,
-        TranscriptBlock::Reasoning(reasoning)
-            if !reasoning.reasoning_expanded && !verbose_tools
+        TranscriptBlock::Reasoning(reasoning) if !reasoning.reasoning_expanded
     );
     let mut geometry = plan.geometry;
     let mut lines = match block {
@@ -338,167 +523,21 @@ pub(super) fn render_block_planned_with_rainbow(
             reasoning_renderer,
             theme,
             width,
-            verbose_tools,
             content_background,
             status_shimmer_frame,
             rainbow_strength,
         ),
-        TranscriptBlock::Tool(panel) => {
-            let quiet_summary = theme
-                .resolve::<bool>("quiet_tool_summaries")
-                .unwrap_or(false)
-                && !verbose_tools;
-            let compact_bash =
-                is_shell_tool(panel.name.as_str()) && panel.display.shell_command.is_some();
-            let mut lines = if let Some(source) = super::codemode_render::source(panel) {
-                super::codemode_render::render_source(
-                    &source,
-                    rich_renderer,
-                    theme,
-                    width,
-                    verbose_tools,
-                )
-            } else if let Some(command) = panel.display.shell_command.as_deref() {
-                render_bash_row(
-                    command,
-                    shell_row_label(&panel.name),
-                    rich_renderer,
-                    theme,
-                    width,
-                    verbose_tools,
-                )
-            } else {
-                let compact = width < 60 || quiet_summary;
-                let summary = if !panel.finished {
-                    if compact {
-                        &panel.display.compact_active
-                    } else {
-                        &panel.display.active
-                    }
-                } else if panel.is_error {
-                    if compact {
-                        &panel.display.compact_failure
-                    } else {
-                        &panel.display.failure
-                    }
-                } else if compact {
-                    &panel.display.compact_success
-                } else {
-                    &panel.display.success
-                };
-                let tool = tool_grid_label(&tool_display_label(&panel.name));
-                let label = if quiet_summary {
-                    theme.fg("muted", &tool)
-                } else {
-                    theme.apply_transcript_role_on_surface("tool_header", plan.content_role, &tool)
-                };
-                let label_width = visible_width(&tool);
-                let text = match panel.display.value.as_deref() {
-                    Some(value) => sanitize_for_terminal(value),
-                    None => {
-                        without_redundant_tool_lead(&panel.name, &sanitize_for_terminal(summary))
-                    }
-                };
-                let text = theme.fg("muted", &text);
-                let gap = tool_value_indent_width(&tool).saturating_sub(label_width);
-                let label_prefix = format!("{label}{}", " ".repeat(gap));
-                let continuation = tool_value_indent(&tool);
-                let rows = wrap_hanging(&text, &label_prefix, &continuation, width);
-                if panel.display.value.is_some() {
-                    super::tool_render::tool_input_preview(
-                        rows,
-                        "input",
-                        &continuation,
-                        theme,
-                        width,
-                        verbose_tools,
-                    )
-                } else {
-                    rows
-                }
-            };
-            let nested_width = width
-                .saturating_sub(tool_output_indent(theme, width))
-                .max(1);
-            if quiet_summary
-                && panel.display.shell_command.is_none()
-                && (panel.display.value.is_none() || panel.name == "codemode")
-            {
-                lines.truncate(1);
-            }
-            if panel.grouped_child
-                && verbose_tools
-                && theme
-                    .resolve::<bool>("quiet_tool_summaries")
-                    .unwrap_or(false)
-                && is_shell_tool(panel.name.as_str())
-            {
-                if let Some(first) = lines.first_mut() {
-                    *first = fit_line(&format!("-> {first}"), width);
-                }
-            }
-            let mut output_lines = Vec::new();
-
-            if !quiet_summary && !panel.finished {
-                if let Some(decoration) = panel.progress_decoration.as_ref() {
-                    output_lines.extend(render_progress_decoration(
-                        decoration,
-                        theme,
-                        nested_width,
-                    ));
-                }
-            }
-            if panel.finished && panel.is_error {
-                if quiet_summary {
-                    let mut reason = super::tool_render::bounded_tool_failure_reason(panel);
-                    if let (Some(reason), Some(path)) =
-                        (reason.as_mut(), panel.display.changed_path.as_deref())
-                    {
-                        *reason = reason.replace(path, &compact_path(path));
-                    }
-                    if let Some(reason) = reason {
-                        output_lines.extend(wrap_hanging(
-                            &theme.fg("error", &reason),
-                            "",
-                            "",
-                            nested_width,
-                        ));
-                    }
-                } else {
-                    output_lines.extend(render_tool_failure_reason(panel, theme, nested_width, ""));
-                }
-            }
-
-            if !quiet_summary || panel.is_error {
-                match panel.name.as_str() {
-                    "codemode" => output_lines.extend(super::codemode_render::render_output(
-                        panel,
-                        theme,
-                        nested_width,
-                        verbose_tools,
-                    )),
-                    name if is_shell_tool(name) && compact_bash => output_lines.extend(
-                        render_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
-                    ),
-                    "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
-                        output_lines.extend(render_diff_only(
-                            panel,
-                            rich_renderer,
-                            theme,
-                            nested_width,
-                            verbose_tools,
-                            "",
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            // Image reservations are visual-only and deliberately remain out
-            // of `panel.output`, selection, and plain/print projections.
-            output_lines.extend(panel.image_rows(nested_width));
-            append_nested_tool_output(&mut lines, output_lines, theme, width);
-            finish_transcript_block(lines)
-        }
+        TranscriptBlock::Tool(panel) => finish_transcript_block(
+            render_tool(
+                panel,
+                theme,
+                rich_renderer,
+                width,
+                verbose_tools,
+                plan.content_role,
+            )
+            .lines,
+        ),
         TranscriptBlock::Outcome(outcome) => {
             render_outcome(outcome, theme, width, subagents_running)
         }

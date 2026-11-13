@@ -879,6 +879,53 @@ fn pi_default_tools(
     entries
 }
 
+/// One line saying octet's own model is in use when the Pi adapter is on and
+/// Pi's default differs, so a Pi user is never surprised by the model shown.
+pub(crate) fn pi_model_notice(config: &Config) -> Option<String> {
+    if !config
+        .enabled_extensions
+        .iter()
+        .any(|name| name == "octet-pi-compat")
+    {
+        return None;
+    }
+    let global =
+        pi_agent_dir().and_then(|agent_dir| read_pi_settings(&agent_dir.join("settings.json")));
+    pi_model_notice_for(
+        config.model.as_ref().map(|model| model.0.as_str()),
+        global.as_ref(),
+    )
+}
+
+pub(crate) fn pi_model_notice_for(
+    octet_model: Option<&str>,
+    pi_settings: Option<&serde_json::Value>,
+) -> Option<String> {
+    let octet_model = octet_model?;
+    let settings = pi_settings?;
+    let model = settings.get("defaultModel")?.as_str()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let pi_default = match settings
+        .get("defaultProvider")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    {
+        Some(provider) => format!("{provider}/{model}"),
+        None => model.to_owned(),
+    };
+    let same = octet_model == pi_default
+        || octet_model.rsplit('/').next() == Some(model)
+        || octet_model.ends_with(&format!("/{pi_default}"));
+    (!same).then(|| {
+        format!(
+            "using octet's model {octet_model} (your Pi default is {pi_default}); switch with /model"
+        )
+    })
+}
+
 /// Apply Pi codemode preferences to an existing, host-admitted native bundle.
 /// Activation is session-only; settings never install code or create trust grants.
 pub(crate) fn apply_pi_codemode_settings(
@@ -1302,7 +1349,7 @@ pub fn extension_activation_menu_authoritative(config: &Config) -> anyhow::Resul
     Ok(project.values.enabled_extensions.is_none())
 }
 
-fn persist_extension_enabled_to_path(
+pub(crate) fn persist_extension_enabled_to_path(
     name: &str,
     enabled: bool,
     path: &std::path::Path,

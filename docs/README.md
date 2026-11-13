@@ -1,6 +1,6 @@
 # octet documentation
 
-These docs describe the octet **0.10.3** release source, octet's first
+These docs describe the octet **0.10.4** candidate source, after 0.10.3, octet's first
 Pi-compatible release. The optional [Pi adapter](pi-compatibility.md) targets
 Pi's public extension API, not its private internals or complete CLI.
 

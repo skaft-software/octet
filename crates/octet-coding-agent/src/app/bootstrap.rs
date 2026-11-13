@@ -8727,17 +8727,18 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
             crate::provider_setup::HttpSetupProbe,
         >::readiness(&catalog, None)
         {
-            crate::provider_setup::ProviderSetupState::NoProvider => {
-                "no provider is configured; run `octet setup --yes` for an explicitly selected OpenAI-compatible endpoint".to_owned()
-            }
             crate::provider_setup::ProviderSetupState::Ready => {
-                "no model configured; run `octet setup --yes` for an explicitly selected OpenAI-compatible endpoint".to_owned()
+                "no model configured; see `octet setup --help` for explicit endpoint setup".to_owned()
             }
             state => state.to_string(),
         };
+        let available = if models.is_empty() {
+            String::new()
+        } else {
+            format!(" (available: {})", models.join(", "))
+        };
         anyhow::anyhow!(
-            "{diagnosis}, pass --model <id>, resume a session with model provenance, or set model in .octet/config.toml (available: {})",
-            models.join(", ")
+            "{diagnosis}; pass --model <id>, resume a session with model provenance, or set model in .octet/config.toml{available}"
         )
     })?;
     if catalog.resolve(&model).is_err() {
@@ -8749,9 +8750,13 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
         let diagnosis = crate::provider_setup::ProviderSetupService::<
             crate::provider_setup::HttpSetupProbe,
         >::readiness(&catalog, Some(&model));
+        let available = if available.is_empty() {
+            String::new()
+        } else {
+            format!(" (available: {})", available.join(", "))
+        };
         anyhow::bail!(
-            "{diagnosis}; run `octet setup --yes` or choose an available model (available: {})",
-            available.join(", ")
+            "{diagnosis}; see `octet setup --help` or choose an available model{available}"
         );
     }
 
@@ -9259,6 +9264,16 @@ fn build_app_with_consumer(
         true,
     );
     config.model = Some(model.spec.id.clone());
+    crate::output::checked_diagnostics(
+        crate::output::DiagnosticComponent::Bootstrap("pi-model".into()),
+        crate::output::tui_diagnostics_active()
+            .then(|| crate::cli::pi_model_notice(&config))
+            .flatten()
+            .into_iter()
+            .map(|notice| format!("note: {notice}"))
+            .collect(),
+        true,
+    );
     config.reasoning = Some(reasoning.clone());
     config.reasoning_mode = reasoning_mode;
     let cached_config = prepared_config

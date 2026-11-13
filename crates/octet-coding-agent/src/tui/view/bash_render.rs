@@ -2,9 +2,9 @@
 
 use sexy_tui_rs::{visible_width, RichRenderer};
 
-use super::output_window::bounded_head_tail_rows;
+use super::output_window::head_tail_window;
 use super::terminal_text::{normalize_carriage_return_progress, sanitize_for_terminal};
-use super::tool_render::{tool_input_preview, tool_value_indent_width};
+use super::tool_render::{tool_input_preview, tool_value_indent_width, ToolRows};
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS};
 use crate::tui::theme::OctetTheme;
 
@@ -228,6 +228,99 @@ fn capture_loss_details(compact: &CompactBashOutput) -> Vec<String> {
     details
 }
 
+pub(super) fn project_compact_bash_output(
+    panel: &ToolPanel,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+    output_indent: &str,
+) -> ToolRows {
+    let compact = compact_bash_output(panel);
+    let ellipsis = if theme.unicode() { "…" } else { "..." };
+    let loss_details = capture_loss_details(&compact);
+    let mut output_rows = Vec::new();
+    for output_line in &compact.lines {
+        let text = if theme.is_compiled_default() {
+            theme.fg("tool_output", output_line)
+        } else {
+            subdued_text(theme, output_line)
+        };
+        output_rows.extend(wrap_hanging(&text, output_indent, output_indent, width));
+    }
+    let mut projected = if output_rows.is_empty() {
+        let placeholder = if panel.finished {
+            "(no output)"
+        } else {
+            "(waiting for output)"
+        };
+        let placeholder_rows = wrap_hanging(
+            &subdued_text(theme, placeholder),
+            output_indent,
+            output_indent,
+            width,
+        );
+        let mut rows = ToolRows::default();
+        for row in placeholder_rows {
+            rows.decoration(row);
+        }
+        rows
+    } else {
+        ToolRows::literal(
+            output_rows,
+            compact.lines.join("\n"),
+            visible_width(output_indent) as u16,
+        )
+    };
+
+    projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+
+    if expanded {
+        let mut rows = ToolRows::default();
+        for detail in loss_details {
+            for row in wrap_hanging(
+                &subdued_text(theme, &format!("{ellipsis} ({detail})")),
+                output_indent,
+                output_indent,
+                width,
+            ) {
+                rows.decoration(row);
+            }
+        }
+        rows.append(projected);
+        return rows;
+    }
+
+    if loss_details.is_empty() && projected.lines.len() <= COMPACT_EXEC_OUTPUT_ROWS {
+        return projected;
+    }
+    let (head, tail_start) = head_tail_window(projected.lines.len(), COMPACT_EXEC_OUTPUT_ROWS);
+    let hidden_rows = tail_start - head;
+    let retained = (0..head)
+        .chain(tail_start..projected.lines.len())
+        .collect::<Vec<_>>();
+    projected.retain_rows(&retained);
+    let mut details = loss_details;
+    if hidden_rows > 0 {
+        let unit = if hidden_rows == 1 { "row" } else { "rows" };
+        details.push(if theme.is_compiled_default() {
+            format!("{hidden_rows} output {unit} collapsed")
+        } else {
+            format!("{hidden_rows} middle visual {unit} hidden")
+        });
+    }
+    let detail = format!("{ellipsis} {}", details.join(" · "));
+    projected.lines.insert(
+        head,
+        fit_line(
+            &format!("{output_indent}{}", subdued_text(theme, &detail)),
+            width,
+        ),
+    );
+    projected.copy_rows.insert(head, None);
+    projected
+}
+
+#[cfg(test)]
 pub(super) fn render_compact_bash_output(
     panel: &ToolPanel,
     theme: &OctetTheme,
@@ -235,78 +328,17 @@ pub(super) fn render_compact_bash_output(
     expanded: bool,
     output_indent: &str,
 ) -> Vec<String> {
-    let compact = compact_bash_output(panel);
-    let ellipsis = if theme.unicode() { "…" } else { "..." };
-    let loss_details = capture_loss_details(&compact);
-    let mut output_rows = Vec::new();
-    for output_line in compact.lines {
-        let text = if theme.is_compiled_default() {
-            theme.fg("tool_output", &output_line)
-        } else {
-            subdued_text(theme, &output_line)
-        };
-        output_rows.extend(wrap_hanging(&text, output_indent, output_indent, width));
-    }
-    if output_rows.is_empty() {
-        let placeholder = if panel.finished {
-            "(no output)"
-        } else {
-            "(waiting for output)"
-        };
-        output_rows.extend(wrap_hanging(
-            &subdued_text(theme, placeholder),
-            output_indent,
-            output_indent,
-            width,
-        ));
-    }
-
-    if expanded {
-        let mut rows = Vec::new();
-        for detail in loss_details {
-            rows.extend(wrap_hanging(
-                &subdued_text(theme, &format!("{ellipsis} ({detail})")),
-                output_indent,
-                output_indent,
-                width,
-            ));
-        }
-        rows.extend(output_rows);
-        return rows;
-    }
-
-    let force_metadata = !loss_details.is_empty();
-    bounded_head_tail_rows(
-        output_rows,
-        COMPACT_EXEC_OUTPUT_ROWS,
-        force_metadata,
-        move |hidden_rows| {
-            let mut details = loss_details;
-            if hidden_rows > 0 {
-                let unit = if hidden_rows == 1 { "row" } else { "rows" };
-                details.push(if theme.is_compiled_default() {
-                    format!("{hidden_rows} output {unit} collapsed")
-                } else {
-                    format!("{hidden_rows} middle visual {unit} hidden")
-                });
-            }
-            let detail = format!("{ellipsis} {}", details.join(" · "));
-            fit_line(
-                &format!("{output_indent}{}", subdued_text(theme, &detail)),
-                width,
-            )
-        },
-    )
+    project_compact_bash_output(panel, theme, width, expanded, output_indent).lines
 }
 
-pub(super) fn render_bash_row(
+pub(super) fn project_bash_row(
     command: &str,
     action: &str,
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
     expanded: bool,
-) -> Vec<String> {
+) -> ToolRows {
     let action_gap = tool_value_indent_width(action).saturating_sub(visible_width(action));
     let prefix = format!(
         "{}{}",
@@ -318,9 +350,11 @@ pub(super) fn render_bash_row(
         .saturating_sub(u16::try_from(visible_width(&prefix)).unwrap_or(u16::MAX))
         .max(1);
     // Commands have their own visual-row budget, independent of output.
-    // Keep the full sanitized command available through disclosure and copy.
+    // Disclosure reveals the rest; copy follows the presented command window.
     let command = renderer.render_inline_syntax_wrapped(command, "bash", content_width);
     let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
+    let source_text = command.copy_text;
+    let source_rows = command.lines.len();
     let rows = command
         .lines
         .into_iter()
@@ -331,7 +365,32 @@ pub(super) fn render_bash_row(
             fit_line(&format!("{prefix}{content}"), width)
         })
         .collect();
-    tool_input_preview(rows, "command", &continuation, theme, width, expanded)
+    let mut lines = tool_input_preview(rows, "command", &continuation, theme, width, expanded);
+    let hint = (!expanded && source_rows > 12).then(|| lines.pop().unwrap());
+    let mut projected = ToolRows::rich_literal(
+        lines,
+        source_text,
+        visible_width(&prefix) as u16,
+        content_width,
+    );
+    projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+    projected.prefix("$ ");
+    if let Some(hint) = hint {
+        projected.decoration(hint);
+    }
+    projected
+}
+
+#[cfg(test)]
+fn render_bash_row(
+    command: &str,
+    action: &str,
+    renderer: &RichRenderer,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+) -> Vec<String> {
+    project_bash_row(command, action, renderer, theme, width, expanded).lines
 }
 
 #[cfg(test)]

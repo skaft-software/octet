@@ -122,6 +122,78 @@ export default pi => {
 }
 
 #[test]
+fn restart_notice_is_transient_and_bound_to_the_resumed_session() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let session = app.agent.session();
+    let id = crate::app::bootstrap::terminal_goal_session_id(session).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.hydrate(session).unwrap();
+    RestartNotice::Success("different-session".into()).show(&mut shell, session);
+    assert!(!shell.debug_snapshot().contains("reload succeeded"));
+    let mut pending = Some(RestartNotice::Success(id));
+    for _ in 0..2 {
+        if let Some(notice) = pending.take() {
+            notice.show(&mut shell, session);
+        }
+        shell.render();
+    }
+    let visible = shell.debug_snapshot();
+    assert_eq!(
+        visible
+            .matches("reload succeeded: restarted octet and resumed this session")
+            .count(),
+        1,
+        "{visible}"
+    );
+    assert!(!std::fs::read_to_string(session.path())
+        .unwrap()
+        .contains("reload succeeded"));
+    // An ordinary later resume rehydrates only durable history.
+    shell.hydrate(session).unwrap();
+    assert!(!shell.debug_snapshot().contains("reload succeeded"));
+
+    RestartNotice::Failure("reload failed: restart exec; retry /reload --force".into())
+        .show(&mut shell, session);
+    assert_eq!(shell.debug_snapshot().matches("reload failed:").count(), 1);
+    shell.hydrate(session).unwrap();
+    assert!(!shell.debug_snapshot().contains("reload failed"));
+}
+
+#[tokio::test]
+async fn forced_reload_capture_failure_survives_hydration_once() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let session = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    shell.cede_terminal_input();
+    let mut input = EventStream::new().with_cede_flag(shell.terminal_input_parking());
+    let mut reload = crate::reload::ReloadSupervisor::new(Default::default());
+    let plan = reload.force();
+    let mut pending = None;
+    let app = apply_live_reload_plan(
+        app,
+        &mut shell,
+        &mut input,
+        &mut reload,
+        plan,
+        None,
+        &mut pending,
+    )
+    .await
+    .unwrap();
+    assert!(pending.is_none());
+    assert_eq!(app.agent.session().path(), session);
+    let visible = shell.debug_snapshot();
+    assert_eq!(visible.matches("reload failed:").count(), 1, "{visible}");
+    assert!(visible.contains("executable capture"), "{visible}");
+    assert!(visible.contains("retry /reload --force"), "{visible}");
+    assert!(!visible.contains("reload succeeded"), "{visible}");
+    assert!(!visible.contains("reload pass #"), "{visible}");
+    assert!(!std::fs::read_to_string(session)
+        .unwrap()
+        .contains("reload failed"));
+}
+
+#[test]
 fn explicit_resource_reload_clears_only_reinitialized_extension_problems() {
     use crate::reload::{ReloadComponent, ReloadSettings, ReloadSupervisor};
     let mut reload = ReloadSupervisor::new(ReloadSettings::default());
@@ -949,4 +1021,205 @@ hooks = ["session_start", "session_end"]
         ]
     );
     assert_eq!(hooks[1]["payload"]["outcome"], "interrupted");
+}
+
+/// Use the real foreground decoder, native slash popup and Pi editor service.
+/// Keep the writer alive while lifecycle work pumps the same input stream.
+#[cfg(unix)]
+async fn first_typed_reload(editor: bool, during_startup: bool) {
+    use std::io::Write as _;
+    use std::os::fd::OwnedFd;
+    use std::task::Poll;
+    let mount = if editor {
+        "ctx.ui.setEditorComponent((t, theme, keys) => new CustomEditor(t, theme, keys));"
+    } else {
+        ""
+    };
+    let factory = format!(
+        r#"
+import {{ CustomEditor }} from '@earendil-works/pi-coding-agent';
+import {{ existsSync, realpathSync }} from 'node:fs';
+export default pi => {{
+  pi.on('session_start', async (_, ctx) => {{
+    while (!existsSync(TRACE + '.release')) await new Promise(resolve => setTimeout(resolve, 5));
+    {mount}
+  }});
+  pi.on('resources_discover', () => ({{skillPaths: [realpathSync(TRACE + '.skills')]}}));
+}};
+"#
+    );
+    let (directory, mut app, mut shell) = super::pi_contract_support::pi_ui_app(&factory);
+    shell.set_size(120, 30);
+    let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    reader.set_nonblocking(true).unwrap();
+    let mut input = EventStream::from_terminal_file(std::fs::File::from(OwnedFd::from(reader)))
+        .with_interceptors(shell.terminal_input_interceptors());
+    let release = directory.path().join("trace.jsonl.release");
+    let skills = directory.path().join("trace.jsonl.skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    // Return the real resource root above: macOS temp paths cross /var's
+    // symlink, which resource admission correctly refuses. Keep that safety
+    // boundary out of this command-delivery/frame-reporting fixture.
+    update_status(&mut shell, &app);
+    shell.finish_startup();
+    if during_startup {
+        writer.write_all(b"/reload\r").unwrap();
+    } else {
+        std::fs::write(&release, "ready").unwrap();
+    }
+    // Release session_start only on the poll AFTER native Enter was handled.
+    // This proves the command crossed the real startup input path, without a
+    // timing assumption or a synthetic call to the command/report function.
+    let mut submitted = false;
+    let mut startup_input = futures_util::stream::poll_fn(|cx| {
+        if submitted {
+            std::fs::write(&release, "ready").unwrap();
+            submitted = false;
+        }
+        let event = std::pin::Pin::new(&mut input).poll_next(cx);
+        if matches!(&event, Poll::Ready(Some(Ok(Event::Key(key)))) if key.code == KeyCode::Enter) {
+            submitted = true;
+        }
+        event
+    });
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        refresh_resource_paths(&mut app, &mut shell, &mut startup_input),
+    )
+    .await
+    .expect("Pi session_start did not finish")
+    .unwrap();
+    update_status(&mut shell, &app);
+    request_extension_ui(&mut shell, &mut app);
+    assert!(!shell.debug_snapshot().contains("reload succeeded"));
+    let session = app.agent.session().path().to_owned();
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
+    let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
+    for (attempt, text) in ["/reload", "/verbose on", "/reload", "/reload"]
+        .into_iter()
+        .enumerate()
+    {
+        if attempt == 3 {
+            let broken = skills.join("broken");
+            std::fs::create_dir_all(&broken).unwrap();
+            std::fs::write(
+                broken.join("SKILL.md"),
+                "---\nname: broken\ndescription: [\n---\n",
+            )
+            .unwrap();
+        }
+        let idle = if during_startup && attempt == 0 {
+            Idle::Command(
+                shell
+                    .take_wait_command(&thinking_selection_owner(&app))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "first typed startup reload was swallowed: {}",
+                            shell.debug_snapshot()
+                        )
+                    }),
+            )
+        } else {
+            writer.write_all(format!("{text}\r").as_bytes()).unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                wait_for_prompt(
+                    &mut shell,
+                    &mut input,
+                    &mut scroll_tick,
+                    &mut extension_tick,
+                    &mut app.executable_extensions,
+                    None,
+                    &mut reload_tick,
+                    &watcher,
+                    &mut reload,
+                    Some(&mut app.agent),
+                ),
+            )
+            .await
+            .expect("typed command did not leave the editor")
+            .unwrap()
+        };
+        let Idle::Command(raw) = idle else {
+            panic!("command became model input or was swallowed")
+        };
+        assert_eq!(raw.trim(), text);
+        let command = app.executable_extensions.parse_command(&raw);
+        if text == "/reload" {
+            assert!(
+                matches!(command, Command::Reload),
+                "reload lost native precedence"
+            );
+        }
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_idle_command(
+                app,
+                &mut shell,
+                &mut input,
+                command,
+                &mut None,
+                None,
+                &mut reload,
+            ),
+        )
+        .await
+        .expect("typed command did not complete")
+        .unwrap();
+        app = match outcome {
+            IdleCommandOutcome::Continue(app) => *app,
+            _ => panic!("plain reload must remain resources-only"),
+        };
+        // The next idle boundary must not erase or repeat the explicit result.
+        refresh_resource_paths(&mut app, &mut shell, &mut input)
+            .await
+            .unwrap();
+        request_extension_ui(&mut shell, &mut app);
+        shell.render();
+        let frame = sexy_tui_rs::strip_terminal_sequences(
+            &shell.dump_rendered_frame().await.unwrap().join("\n"),
+        );
+        assert_eq!(
+            frame.matches("reload succeeded").count(),
+            usize::from(attempt != 3),
+            "editor={editor}, attempt={attempt}: {frame}\n{}",
+            shell.debug_snapshot()
+        );
+        assert_eq!(
+            frame.matches("reload failed").count(),
+            usize::from(attempt == 3),
+            "{frame}"
+        );
+        if text == "/verbose on" {
+            assert!(frame.contains("verbose transcript enabled"), "{frame}");
+        }
+        assert_eq!(app.agent.session().path(), session);
+        assert!(app.agent.session().usage_records().is_empty());
+    }
+    app.executable_extensions.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_typed_reload_native_editor_reports_once() {
+    first_typed_reload(false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_typed_reload_pi_editor_reports_once() {
+    first_typed_reload(true, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_typed_reload_during_native_startup_is_not_swallowed() {
+    first_typed_reload(false, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_typed_reload_during_pi_startup_is_not_swallowed() {
+    first_typed_reload(true, true).await;
 }

@@ -147,6 +147,9 @@ impl App {
                 .provider_context_hook(self.resource_paths.guard.clone());
             self.resource_paths.enabled = true;
         }
+        if self.resource_paths_pending() {
+            self.executable_extensions.hold_chrome_handoff();
+        }
     }
 
     pub(crate) fn resource_paths_pending(&self) -> bool {
@@ -290,6 +293,9 @@ impl App {
     pub(crate) fn mark_resource_paths_reload(&mut self) {
         self.resource_paths.pending = Some(Reason::Reload);
         self.resource_paths.guard.clear();
+        if self.resource_paths_pending() {
+            self.executable_extensions.hold_chrome_handoff();
+        }
     }
     pub(crate) fn original_resource_config(&self) -> Config {
         let mut config = self.config.clone();

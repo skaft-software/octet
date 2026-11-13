@@ -129,6 +129,12 @@ room for base64 and the rest of the request. octet does not automatically
 transcode or upload oversized files; large-file API support is tracked in
 [#593](https://github.com/skaft-software/octet/issues/593).
 
+Context capacity checks are estimates, not provider tokenization. Inline media
+you attached counts as a fixed allowance per image, audio clip or document page,
+not as base64 text. This holds when an extension context hook is active and the
+request replays a Responses window: only payloads identical to media in your
+history get the allowance, and opaque provider content counts at full size.
+
 <details>
 <summary>Image size limits and resizing</summary>
 

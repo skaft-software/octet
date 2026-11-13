@@ -466,10 +466,18 @@ pub(super) fn upgrade_viewport_anchor(state: &ShellState) {
     let row = if anchor.block_hint == usize::MAX {
         anchor.fallback_visual_row
     } else {
-        let block = state
-            .transcript_commit_ids
-            .iter()
-            .position(|id| *id == anchor.commit_id);
+        // Ordinary navigation retains an exact block hint. Search only after
+        // structural history changes have moved that identity.
+        let block = if state.transcript_commit_ids.get(anchor.block_hint) == Some(&anchor.commit_id)
+        {
+            Some(anchor.block_hint)
+        } else {
+            state.transcript_commit_ids.iter().position(|id| {
+                #[cfg(test)]
+                super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
+                *id == anchor.commit_id
+            })
+        };
         let Some(start) = block.and_then(|block| cache.block_starts.get(block)) else {
             return;
         };
@@ -589,6 +597,13 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
     // visible rows. Kitty-protocol terminals (Ghostty, Kitty, WezTerm) draw a
     // placement over text at full height, so an uncropped one covered the
     // scroll notice, composer and status bar below the transcript.
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| {
+        work.bytes_cloned += transcript[start..end]
+            .iter()
+            .map(String::len)
+            .sum::<usize>();
+    });
     let mut lines = sexy_tui_rs::images::crop_anchors_to_window(&transcript, start, end);
     state.decorate_transcript_search(&mut lines, start);
     super::transcript_selection::decorate_selection(state, &mut lines, start);
@@ -641,6 +656,13 @@ pub(super) fn render_shell_viewport_at(
         transcript_viewport_lines(state, width, chrome.transcript_rows)
     };
     state.decorate_transcript_navigation(&mut lines, width, &chrome, now);
+    #[cfg(test)]
+    super::fullscreen_work_tests::record(|work| {
+        work.cells_rendered += lines
+            .iter()
+            .map(|line| sexy_tui_rs::visible_width(line))
+            .sum::<usize>();
+    });
     append_viewport_chrome(&mut lines, chrome);
     lines
 }

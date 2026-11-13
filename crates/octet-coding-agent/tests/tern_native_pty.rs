@@ -2437,7 +2437,16 @@ fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_
     pty.send("unsent draft 🦀".as_bytes());
     pty.wait(|pty| pty.draft() == "unsent draft 🦀");
     let caret = pty.cursor();
+    // Ctrl+O owns tool and shell output; thinking has its own key.
     pty.send(&[15]);
+    pty.settle();
+    assert!(pty
+        .nodes
+        .values()
+        .any(|node| node["p"]["role"] == "omp.thinking" && node["p"]["collapsed"] == true));
+    pty.send(&[15]);
+    pty.settle();
+    pty.send(&[20]);
     pty.settle();
     assert!(pty
         .nodes

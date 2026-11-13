@@ -541,6 +541,20 @@ impl DelegationManager {
                 let suspended =
                     !record.live_task && (record.detached || record.detached_commands.is_some());
                 let running_now = !suspended && record.status.is_running();
+                if !running_now {
+                    if let (Some(policy), Some(principal), Some(resource_owner)) = (
+                        record.extension_policy.as_ref(),
+                        record.extension_principal.as_deref(),
+                        record.extension_resource_owner.as_deref(),
+                    ) {
+                        ensure_extension_child_concurrency(
+                            &state,
+                            principal,
+                            resource_owner,
+                            policy,
+                        )?;
+                    }
+                }
                 let target_path = record.identity.path.clone();
                 let session_path = record.session_path.clone();
                 let extension_policy = record.extension_policy.clone();

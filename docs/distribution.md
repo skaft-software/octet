@@ -6,7 +6,7 @@ qualification. The [0.10.0 release notes](releases/v0.10.0.md) describe octet's
 first Pi-compatible launch. Native binaries and the six optional extension
 bundles are separate downloads; installation never enables an extension.
 
-The planned npm channel is `@skaft/octet@0.10.3` (launcher plus four signed platform
+The planned npm channel is `@skaft/octet@0.10.4` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
 separate, unpublished channels. Native publication does not publish them.
 
@@ -17,7 +17,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-The distribution target is **0.10.3**. The distribution version does not change independent API and schema versions. The [0.7.6
+The distribution target is **0.10.4**, a source candidate, not a published release. The distribution version does not change independent API and schema versions. The [0.7.6
 release](releases/v0.7.6.md) keeps its historical version-matched assets and
 channel evidence.
 
@@ -30,7 +30,7 @@ channel evidence.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.3`; installed compatibility `requires_octet = "=0.10.3"`; independent Rust SDK remains `0.8.2` |
+| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.4`; installed compatibility `requires_octet = "=0.10.4"`; independent Rust SDK remains `0.8.2` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |
@@ -58,25 +58,25 @@ The release workflows don't publish every source package automatically:
 | --- | --- | --- |
 | Native archives and shell installer | `release-octet.yml` | Signed, version-pinned GitHub release assets. Verify public installation after upload. |
 | Six executable bundles | `release-serve.yml` | Separate exact-version `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents` and `octet-web-search` archives. Install and update never enable them or persist trust grants. |
-| npm CLI | `release-octet.yml` with `publish_npm=true` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Disabled by default. |
+| npm CLI | `release.py ship` → `release-octet.yml` | Five `@skaft/octet*` packages, platform-first. Needs verified registry ownership and trusted publishers for all five. Mandatory unless explicitly skipped with a recorded reason. |
 | Cargo installation | Build the canonical Git tag | No crates.io publication needed. The public tag and its complete source must exist. |
 | crates.io | Not provided by the current workflows | Don't advertise registry installation. Publishing the CLI and dependency graph and verifying registry ownership is separate work. |
 | Homebrew | `homebrew-formula.yml` | A separate signed-asset handoff and protected tap pull request. Not automatic with the binary release. |
 | Python and TypeScript SDK registries | Not provided by the CLI release workflow | The five-package CLI job doesn't publish the source SDKs or generated bindings to PyPI or npm. |
 
-Normal native and extension publication starts with the single canonical
-`vX.Y.Z` tag on a commit on `main`. The binary workflow waits for exact-source CI,
-creates a draft GitHub Release from the checked-in notes, verifies the uploaded
-signed native assets' GitHub digests, then publishes the native release; a
-separate job marks it Latest only after the published-install smoke passes, so
-`octet update` never advertises an asset set that failed public installation.
-The extension workflow waits for that binary run before publishing its bundles.
-The protected environment must admit the canonical tag without removing required
-reviewers. Dedicated binary and extension tooling tags remain available for
-workflow-only repairs. See the
-[release runbook](maintainers/skills/release/SKILL.md). The currently observed
-protected-environment policy does not yet allow `v*` tags; an authorized
-administrator must update it separately before the one-tag flow can publish.
+The owner starts an unsigned candidate from a qualified main push with
+`scripts/release.py`. One draft holds the native matrix (including Windows), six
+extension bundles, prepacked npm tarballs and digest receipts. Pause, resume and
+respin do not tag or publish anything. See the [owner runbook](release/README.md).
+
+Only `ship` creates the canonical and two tooling tags, all at the candidate SHA.
+Protected jobs sign on the two dedicated tooling-tag refs described in the
+runbook, preserving the accepted tag-scoped identities. The existing `stable-release-publish` policy
+already admits those refs; keep its reviewers and settings unchanged. All release
+workflows are dispatch-only: pushing canonical or tooling tags starts no release.
+Native public-install smokes on Linux, macOS and Windows, npm provenance and npm
+install verification precede Latest promotion. `--skip-npm --reason '…'` is the
+only lifecycle npm exemption; the receipt and summary retain the reason.
 
 The npm, Homebrew and installer-repair handoffs accept native signatures from
 either the canonical tag (with workflow commit equal to the source commit) or
@@ -85,12 +85,10 @@ the legacy binary tooling tag. They remain separate publication channels.
 The maintainer pushes directly to `main`; contributors use squash PRs gated by
 `ci-required`, not a merge queue. PRs run the fast CI tier (or the full tier with
 `ci:full`); main pushes and manual `ci.yml` dispatches run the full matrix.
-Tag a main commit with a completed, successful full-tier **main push** run. GitHub
-runs push CI only for the pushed head, not intermediate commits. If the desired
-commit has no such run, dispatch `ci.yml` on that exact ref, verify its full-tier
-success, then manually dispatch the release workflows from the unchanged
-canonical tag (or the dedicated workflow-only repair tags). A canonical tag-push
-run deliberately waits only for main push CI and cannot use that dispatch.
+`start` requires a completed successful full-tier **main push** CI run for the
+exact candidate SHA and every release-required lane. No runner waits for CI or
+another workflow. GitHub tests only the pushed main head, so prefer that head.
+Manual repair retains its exact-source qualification and explicit waiver below.
 
 The binary workflow normally requires successful CI for the exact canonical
 source. An authorized maintainer can explicitly waive **only that CI gate** with
@@ -126,10 +124,10 @@ aren't the supported Cargo path.
 
 The planned npm channel has five `@skaft/octet*` packages (launcher plus four
 platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.10.3 is not published to npm.** No
+and registry provenance verification. **0.10.4 is not published to npm.** No
 0.10.x package exists yet, so this page gives no npm install command: use the
 version-pinned native release that [installation](installation.md) describes.
-Only after verified publication does the pinned `@skaft/octet@0.10.3` reproduce
+Only after verified publication does the pinned `@skaft/octet@0.10.4` reproduce
 exactly one release; the `latest` dist-tag would track whichever version npm
 publishes as current, which is not an installation of an exact version.
 Published versions are immutable, so a pinned install can't be silently
@@ -249,11 +247,32 @@ from a newly reviewed metadata record. Never use a mutable release alias.
 
 </details>
 
+## Read-only channel audit
+
+`release-surfaces.yml` compares GitHub Latest, all five npm `latest` dist-tags,
+current installation-document pins, bundled notes and
+`https://skaft.org/octet/release.json`. It runs daily, on explicit dispatch and
+after a successful Latest promotion. It performs GETs only, has a five-minute job
+bound, installs no toolchains and never waits for another workflow. An unavailable
+surface (including a registry HTTP 401) is a failure, not an omitted package.
+
+Network audit mode is restricted to that workflow. Offline evidence can be
+replayed with:
+
+```sh
+python3 scripts/check-release-surfaces.py --fixtures /path/to/evidence.json
+```
+
+The fixture object has `github` (the Latest API object), `npm` (package names
+mapped to dist-tag objects) and `website` (the release JSON object). The audit
+never changes releases, registry tags, docs or the separately deployed website.
+A disagreement needs owner reconciliation, not automatic publication.
+
 ## Other channels
 
-The version-pinned v0.10.3 shell installer targets macOS arm64 and x64 and
+The version-pinned v0.10.4 shell installer targets macOS arm64 and x64 and
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
-Windows x86-64 and would publish as `@skaft/octet@0.10.3`. See the [npm release
+Windows x86-64 and would publish as `@skaft/octet@0.10.4`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

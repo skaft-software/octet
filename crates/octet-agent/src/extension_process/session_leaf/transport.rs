@@ -79,6 +79,10 @@ pub(in crate::extension_process) struct View {
     // Declaration order is intentional: bytes are dropped before the quota.
     bytes: Vec<u8>,
     pub(in crate::extension_process) descriptor: Descriptor,
+    /// Native content identity a history view was encoded from. `None` for
+    /// invocation payloads and copied replacement views, which never satisfy
+    /// an unchanged-publication check.
+    pub(in crate::extension_process) source: Option<crate::session::SessionViewIdentity>,
     _reservation: Reservation,
 }
 struct Transfer {
@@ -292,6 +296,7 @@ impl Store {
                 Some(Arc::new(View {
                     bytes: view.bytes.clone(),
                     descriptor,
+                    source: None,
                     _reservation: reservation,
                 })),
             );
@@ -322,6 +327,7 @@ impl Store {
         Ok(Arc::new(View {
             bytes: encoded,
             descriptor,
+            source: None,
             _reservation: reservation,
         }))
     }

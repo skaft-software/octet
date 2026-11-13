@@ -256,6 +256,8 @@ text docs/providers.md
 text docs/qualification/v0.8.0-reduction-rc.md
 text docs/qualification/v0.8.2-windows-rc.md
 text docs/reference/historical-installation.md
+text docs/release/README.md
+text docs/release/legacy-identity-boundary.md
 text docs/release/npm-trusted-publishing.md
 text docs/releases/v0.1.0-alpha.md
 text docs/releases/v0.1.1-alpha.md
@@ -293,6 +295,7 @@ text docs/releases/v0.9.5.md
 text docs/releases/v0.9.6.md
 text docs/releases/v0.10.0.md
 text docs/releases/v0.10.3.md
+text docs/releases/v0.10.4.md
 text docs/releases/v0.10.2.md
 text docs/releases/v0.10.1.md
 text docs/resources.md

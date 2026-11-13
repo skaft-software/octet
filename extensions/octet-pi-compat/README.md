@@ -63,7 +63,12 @@ does not qualify commands, hooks or UI behavior.
 Runner and configure enable the best-effort private Node compile cache before
 loading the adapter graph. Existing `NODE_COMPILE_CACHE` overrides remain authoritative;
 unavailable caches do not block startup. Review capture and live factory execution
-remain separate and unchanged.
+remain separate and share a persistent transform cache. The default cache lives at
+`$XDG_CACHE_HOME/octet-pi-compat` or `~/.cache/octet-pi-compat`, not inside the
+extension directory: cache writes must not trigger native live reload and repeat
+startup hooks. `OCTET_PI_COMPAT_CACHE` explicitly overrides the location; keep it
+outside watched extension/resource trees. Generated manifests pin capture's cache
+location for runtime reuse.
 
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
 with safe `pi-*` native selectors. Enabling this reviewed bridge contributes these
@@ -565,7 +570,11 @@ transport loss means unknown outcome, terminal connection and no replay. Existin
 16 KiB/depth16/nodes256 private-entry bounds remain; large CLM checkpoints can be
 explicitly refused. Native entry mirrors translate lazily, preserve actual IDs,
 parents and available timestamps, and expose only the initialized namespace's
-private custom state. Unrepresentable mixed-message entries refuse; other native
+private custom state. Session-manager history is a read-only observation: it shows
+visible reasoning but omits an opaque signature whose model or protocol does not
+match the assistant. This does not authorize replay or change native session data;
+permission hooks still make their own allow/deny decision and malformed history can
+still be refused. Unrepresentable mixed-message entries refuse; other native
 markers retain their identities as `octet_native`, not fabricated Pi entries.
 
 Negotiated API 0.4 `session_append_receipts_v1` requires `session_entries` and
@@ -697,6 +706,12 @@ Cancellation/veto is not an advisory notification. The bounded replacement profi
 supports summary + firstKeptEntryId; unsupported counts/details/usage fail explicitly.
 Native missing Pi preparation fields (`willRetry`, tokensBefore, settings/fileOps,
 full tree-summary preparation) remain explicit refusals, not fabricated values.
+Compaction preparation is observational: foreign opaque signatures may be omitted,
+while tool-call identities span the summary/prefix boundary. Provider replay stays
+strict. Like Pi's session-event runner, a throwing compaction/tree handler is
+reported by extension and stage and skipped, including unavailable-field reads.
+Explicit cancellation/veto, owner refusals and failed native writes still stop the
+operation; malformed native history is not accepted.
 `ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
 awaits the actual same-session idle receipt. No hook can wait for its own run to end.
 

@@ -1,8 +1,8 @@
 //! Safe hot re-exec for `/reload`.
 //!
-//! `/reload` keeps its existing transactional resource reload. Only when the
-//! executable on disk is no longer the image this process started from does the
-//! interactive caller consult this module. The decision core is deliberately
+//! `/reload` keeps its existing transactional resource reload. Explicit force
+//! and the opt-in `reload_host` watcher consult this module for a host restart.
+//! The decision core is deliberately
 //! self-contained: it never reaches into `App`, the TUI shell, the extension
 //! manager, or the session store. Live facts arrive as [`LiveSafetyInputs`], and
 //! the two operations this module must not own (a durable session head and a
@@ -14,8 +14,9 @@
 //!    [`ReexecController::observe_generation`] and hands the observed generation
 //!    to [`ReexecController::reexec_if_changed`].
 //! 2. An unchanged generation returns [`ReexecDecision::ResourcesOnly`] with the
-//!    notice `resources reloaded · binary unchanged`.
-//! 3. A changed generation is validated before anything is torn down. A
+//!    notice `resources reloaded · binary unchanged`, unless the caller explicitly
+//!    requested `/reload --force` on Unix, which restarts even the unchanged image.
+//! 3. A changed or explicitly forced image is validated before any teardown. A
 //!    **retargeted** image — one that no longer shares the startup image's file
 //!    identity (a moved path or a replaced inode) — first returns
 //!    [`ReexecDecision::ConfirmationRequired`] without spawning anything; only
@@ -153,6 +154,17 @@ const PROBE_MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 /// live session. Bump it whenever this build can write a session record that an
 /// earlier re-exec-capable build could not replay.
 pub(crate) const SESSION_FORMAT_VERSION: u32 = 1;
+
+// One-shot UI feedback travels with the existing exec/resume handoff, never in
+// session JSONL. Set only on Command, so a failed exec cannot leave a success
+// marker in this process. Consume before startup can launch extension children.
+const RESTART_SESSION_ENV: &str = "OCTET_RELOAD_SESSION";
+
+pub(crate) fn take_restart_session() -> Option<String> {
+    let session = std::env::var(RESTART_SESSION_ENV).ok();
+    std::env::remove_var(RESTART_SESSION_ENV);
+    session
+}
 
 /// User-facing notice strings, in one place so they can be pinned by tests.
 pub(crate) mod notice {
@@ -861,6 +873,9 @@ pub(crate) struct ReexecOptions {
     /// the confirmation; an explicit `/reload --force` is that user decision,
     /// while the automatic `reload_host = true` path asks first.
     pub(crate) redirect_confirmed: bool,
+    /// Explicit `/reload --force` restarts even an unchanged image, instead of
+    /// retaining process-local extension state and reload budgets.
+    pub(crate) force_restart: bool,
 }
 
 impl ReexecOptions {
@@ -876,6 +891,18 @@ impl ReexecOptions {
         Self {
             detach_background_workers: true,
             ..Self::default()
+        }
+    }
+
+    /// An explicit force reload both confirms the installed image and requests
+    /// a fresh process. Validation, persistence and live-work checks still apply.
+    pub(crate) fn forcing_restart(self) -> Self {
+        Self {
+            // Other hosts retain their existing in-process reload until
+            // platform_exec supports replacing their process image.
+            force_restart: cfg!(unix),
+            redirect_confirmed: true,
+            ..self
         }
     }
 
@@ -995,13 +1022,6 @@ pub(crate) enum ReexecDecision {
     /// Candidate validation or preparation failed; the current process is
     /// still fully live.
     Blocked {
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "Retain the typed blocked cause alongside its user-safe notice for diagnostic consumers."
-            )
-        )]
         reason: BlockedReason,
         notice: String,
     },
@@ -1035,13 +1055,6 @@ pub(crate) enum ReexecDecision {
     /// terminal usable.
     ExecFailed {
         notice: String,
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "Retain the original exec failure for diagnostics; the UI shows its safe notice."
-            )
-        )]
         source: std::io::Error,
     },
 }
@@ -1065,6 +1078,69 @@ impl ReexecDecision {
     pub(crate) fn exec_failed(source: std::io::Error) -> Self {
         let notice = notice::exec_failed(&source);
         Self::ExecFailed { notice, source }
+    }
+
+    /// Bounded, actionable forced-restart feedback. Diagnostic payloads can
+    /// contain private paths or callback errors; none belong in this notice.
+    pub(crate) fn restart_failure_notice(&self) -> String {
+        let (stage, action) = match self {
+            Self::Blocked { reason, .. } => match reason {
+                BlockedReason::ExecutablePathUnresolved(_)
+                | BlockedReason::ExecutableUnreadable { .. }
+                | BlockedReason::ExecutableNotExecutable { .. } => (
+                    "executable lookup",
+                    "finish or repair the octet installation, then retry /reload --force",
+                ),
+                BlockedReason::ProbeSpawnFailed(_)
+                | BlockedReason::ProbeExited { .. }
+                | BlockedReason::ProbeTimedOut { .. }
+                | BlockedReason::ProbeMalformed(_)
+                | BlockedReason::ProbeIncompatible(_) => (
+                    "compatibility probe",
+                    "install a compatible octet binary, then retry /reload --force",
+                ),
+                BlockedReason::CandidateChanged => (
+                    "executable verification",
+                    "wait for the update to finish, then retry /reload --force",
+                ),
+                BlockedReason::DurableHeadFailed(_) => (
+                    "session persistence",
+                    "check session storage permissions and free space, then retry /reload --force",
+                ),
+                BlockedReason::ExtensionShutdownFailed(_) => (
+                    "extension shutdown",
+                    "stop the extensions with /extensions, then retry /reload --force",
+                ),
+                BlockedReason::DescriptorHygieneFailed(_) => (
+                    "descriptor handoff",
+                    "exit octet and resume this session manually",
+                ),
+                BlockedReason::ResumeArgvInvariant(_) => (
+                    "resume handoff",
+                    "exit octet and resume this session manually",
+                ),
+            },
+            Self::ExecFailed { source, .. } => match source.kind() {
+                std::io::ErrorKind::Unsupported => (
+                    "platform support",
+                    "restart octet manually and resume this session; forced restart requires Unix",
+                ),
+                _ => (
+                    "exec",
+                    "check the octet installation and executable permissions, then retry /reload --force",
+                ),
+            },
+            Self::Refused { .. } => (
+                "session safety check",
+                "wait for active work to finish and ensure this session is saved, then retry /reload --force",
+            ),
+            Self::ConfirmationRequired { .. } => (
+                "executable consent",
+                "retry /reload --force to confirm the installed binary",
+            ),
+            Self::ResourcesOnly | Self::Ready(_) => unreachable!("restart has not failed"),
+        };
+        format!("reload failed: restart {stage}; {action}")
     }
 
     /// The notice to present, or `None` for `Ready` (whose notice comes from
@@ -1094,6 +1170,7 @@ pub(crate) struct ReexecPlan {
     session_id: String,
     version: String,
     probed_generation: BinaryGeneration,
+    force_restart: bool,
     /// Live workers this plan detaches, or `0` when nothing is detached.
     #[cfg(test)]
     detached_workers: usize,
@@ -1165,7 +1242,12 @@ impl ReexecPlan {
     /// `io::Error`; the caller re-enters the TUI, rebuilds extension children,
     /// and leaves the terminal usable.
     pub(crate) fn exec(self) -> ReexecDecision {
-        self.exec_with(platform_exec)
+        let restart_session = self.force_restart.then(|| self.session_id.clone());
+        self.exec_with(|exe, argv| platform_exec(exe, argv, restart_session.as_deref()))
+    }
+
+    pub(crate) fn is_forced(&self) -> bool {
+        self.force_restart
     }
 
     /// The injected-exec test seam behind [`Self::exec`].
@@ -1332,7 +1414,8 @@ impl ReexecController {
     ///
     /// `observed` is what the caller resolved after its resource reload. An
     /// unchanged image at the startup path returns
-    /// [`ReexecDecision::ResourcesOnly`]. Anything else re-pins the observed
+    /// [`ReexecDecision::ResourcesOnly`] unless `options.force_restart` was
+    /// explicitly selected. A forced or changed image re-pins the observed
     /// candidate, runs candidate validation, live-state refusal under
     /// `options`, the redirect confirmation gate, the durable-head hook, the
     /// bounded extension-shutdown hook, and the canonical argv build, in that
@@ -1349,11 +1432,15 @@ impl ReexecController {
         hooks: &mut dyn ReexecHooks,
     ) -> ReexecDecision {
         // The caller's observation is the trigger: the startup path with the
-        // startup identity needs no re-exec. A path that differs is already a
+        // startup identity needs no automatic re-exec. Explicit force must not
+        // retain the runtime state that an in-process reload could not replace.
+        // A path that differs is already a
         // change (the same file reached through a new path is a new image to
         // enter), and the partial observations are the update-in-progress cases
         // below.
-        if observed.is_startup_image(&self.startup_exe, &self.startup_generation) {
+        if !options.force_restart
+            && observed.is_startup_image(&self.startup_exe, &self.startup_generation)
+        {
             return ReexecDecision::ResourcesOnly;
         }
         let candidate = match observed.candidate() {
@@ -1362,12 +1449,16 @@ impl ReexecController {
         };
         // The caller's read is only a trigger. Re-pin the generation that is
         // about to be probed, so the probe is validated against the state at
-        // spawn time; a disk that reverted to the running image is unchanged.
+        // spawn time; a disk that reverted to the running image is unchanged
+        // only for a non-forced pass.
         let probed = match capture_executable_image(&candidate) {
             Ok(generation) => generation,
             Err(defect) => return ReexecDecision::blocked(defect.into_blocked(&candidate)),
         };
-        if candidate == self.startup_exe && probed == self.startup_generation {
+        if !options.force_restart
+            && candidate == self.startup_exe
+            && probed == self.startup_generation
+        {
             return ReexecDecision::ResourcesOnly;
         }
         // Refuse before spawning anything: the cheapest actionable notice wins
@@ -1426,6 +1517,7 @@ impl ReexecController {
             session_id: session_id.to_owned(),
             version: payload.version,
             probed_generation: probed,
+            force_restart: options.force_restart,
             #[cfg(test)]
             detached_workers: if options.detach_background_workers {
                 safety.background_workers
@@ -1481,7 +1573,11 @@ impl ReexecController {
 /// the replacement is identical. Only stdin/stdout/stderr are intentionally
 /// inherited (see [`ensure_close_on_exec`]). Other hosts return an unsupported
 /// error, which the caller reports through `ExecFailed` and recovers from.
-pub(crate) fn platform_exec(exe: &Path, argv: &[OsString]) -> std::io::Error {
+pub(crate) fn platform_exec(
+    exe: &Path,
+    argv: &[OsString],
+    restart_session: Option<&str>,
+) -> std::io::Error {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1490,11 +1586,15 @@ pub(crate) fn platform_exec(exe: &Path, argv: &[OsString]) -> std::io::Error {
             command.arg0(arg0);
         }
         command.args(argv.iter().skip(1));
+        command.env_remove(RESTART_SESSION_ENV);
+        if let Some(session) = restart_session {
+            command.env(RESTART_SESSION_ENV, session);
+        }
         command.exec()
     }
     #[cfg(not(unix))]
     {
-        let _ = (exe, argv);
+        let _ = (exe, argv, restart_session);
         std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "hot re-exec is implemented only on Unix hosts",

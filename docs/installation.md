@@ -6,6 +6,8 @@
 
 ## octet 0.10.3
 
+The source tree is the octet **0.10.4 release candidate**, an unreleased source candidate: v0.10.4 is not yet published, and v0.10.4 is not yet published to npm. The commands below install the published 0.10.3 release.
+
 A Pi-compatibility fix release. Install the native agent below, then
 [enable the optional Pi adapter](pi-compatibility.md). The
 [release notes](releases/v0.10.3.md) describe changes and known boundaries.
@@ -93,7 +95,8 @@ archive, path and trust checks are still required.
 Run `octet update` to update through the channel that installed the binary, then
 restart octet. On Windows, an `install-octet.ps1` installation in its default
 `%LOCALAPPDATA%\Programs\octet\bin` directory is updated by re-running the
-version-pinned PowerShell installer. `octet update --check` checks without installing. Starting an
+version-pinned PowerShell installer; a release ZIP unpacked into another folder is updated in
+that folder the same way. `octet update --check` checks without installing. Starting an
 interactive session also makes one quiet, bounded release check unless
 `--offline` is set. A newer stable release adds an `octet update` hint to the
 splash, or a single notice at the live tail if the splash is already in history.

@@ -180,9 +180,10 @@ make -C sdk/cpp OCTET_ROOT="$PWD"
 ```
 
 Generated manifests live in `examples/extensions/native-hello/build/extensions/`
-and pin `requires_octet = "=0.10.3"`. Choose one language to avoid duplicate
-`hello` tools. Rebuild/regenerate after moving the checkout. Native helpers
-support static tools and one text result/error only: no hooks, commands, UI,
+and pin `requires_octet` to the workspace host version read from `Cargo.toml`.
+Choose one language to avoid duplicate `hello` tools. Rebuild/regenerate after
+moving the checkout. Native helpers support static tools and one text
+result/error only: no hooks, commands, UI,
 flags, dynamic catalogs, media, reverse host services, secrets, approvals,
 composition or sessions. Unsupported contributions/features fail explicitly.
 

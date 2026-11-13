@@ -158,6 +158,66 @@ fn thinking_cycle_stays_instant_during_lifecycle_waits_including_ultra() {
     );
 }
 
+/// A command typed once while startup (or another wait) owns the session is
+/// latched and handed to the idle command path, not dropped with
+/// `busy · draft kept`. One latch at a time; interrupts and a changed
+/// session/route restore it as a draft instead of running it elsewhere.
+#[test]
+fn one_enter_on_a_command_during_a_wait_runs_it_once_at_the_idle_boundary() {
+    use crossterm::event::KeyEvent;
+    let enter = || Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_thinking_cycle(
+        "session:model".into(),
+        vec![ReasoningConfig::Off],
+        &ReasoningConfig::Off,
+    );
+    shell.prefill_editor("/session info".into());
+    assert!(!handle_cancellable_wait_input(&mut shell, enter()));
+    assert_eq!(
+        shell.pending(),
+        "",
+        "the latched command leaves the composer"
+    );
+    assert!(shell.thinking_submission_pending());
+
+    // A second Enter cannot latch another submission; it stays a draft.
+    shell.prefill_editor("/session info".into());
+    assert!(!handle_cancellable_wait_input(&mut shell, enter()));
+    assert_eq!(shell.pending(), "/session info");
+    // Nor can an ordinary prompt latch beside it.
+    shell.clear_editor();
+    shell.prefill_editor("an ordinary prompt".into());
+    assert!(!shell.queue_thinking_submission());
+    assert_eq!(shell.pending(), "an ordinary prompt");
+    shell.clear_editor();
+
+    assert_eq!(
+        shell.take_wait_command("session:model").as_deref(),
+        Some("/session info")
+    );
+    assert!(shell.take_wait_command("session:model").is_none());
+    assert!(!shell.thinking_submission_pending());
+
+    // A replaced session/route restores the command rather than running it.
+    shell.prefill_editor("/session info".into());
+    handle_cancellable_wait_input(&mut shell, enter());
+    assert!(shell.take_wait_command("other-session:model").is_none());
+    assert_eq!(shell.pending(), "/session info");
+    assert!(shell
+        .debug_error()
+        .unwrap()
+        .contains("session changed · command not run; draft restored"));
+
+    // An interrupt during the wait restores it too.
+    shell.clear_editor();
+    shell.prefill_editor("/session info".into());
+    handle_cancellable_wait_input(&mut shell, enter());
+    shell.cancel_wait_submissions("interrupted");
+    assert_eq!(shell.pending(), "/session info");
+    assert!(shell.take_wait_command("session:model").is_none());
+}
+
 #[test]
 fn idle_thinking_selections_coalesce_without_crossing_ordering_barriers() {
     let low = ThinkingLevel::Low;

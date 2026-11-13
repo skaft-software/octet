@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -18,7 +19,7 @@ LEGACY_REPOSITORY = "skaft-software/ygg"
 
 
 def documented_versions(root=SCRIPTS.parent):
-    """Workspace version, candidate state and the install target the docs name.
+    """Workspace version, changelog candidate state and the README install target.
 
     A candidate's checked-in installer targets its source version, while public
     download instructions retain the preceding release until explicit promotion.
@@ -30,10 +31,20 @@ def documented_versions(root=SCRIPTS.parent):
     changelog = (root / "CHANGELOG.md").read_text()
     releases = re.findall(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", changelog, re.MULTILINE)
     assert releases and releases[0] == version, f"CHANGELOG.md must open with {version}"
-    if f"## [{version}] - Release candidate" not in changelog.splitlines():
-        return version, False, version
-    assert len(releases) > 1, f"CHANGELOG.md lists no release before candidate {version}"
-    return version, True, releases[1]
+    heading = re.search(rf"(?m)^## \[{re.escape(version)}\][^\n]*$", changelog).group(0)
+    candidate = heading == f"## [{version}] - Release candidate"
+    dated = re.fullmatch(rf"## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}", heading)
+    assert candidate or dated, "the changelog heading must be candidate or dated"
+    target = re.search(r"/releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/install-octet\.sh",
+                       (root / "README.md").read_text())
+    assert target, "README.md must name a version-pinned install target"
+    install_version = target.group(1)
+    assert install_version in releases[:2], "docs must install the workspace or previous release"
+    if install_version == version:
+        assert dated, "published install target requires a dated changelog heading"
+    else:
+        assert len(releases) > 1, f"CHANGELOG.md lists no release before candidate {version}"
+    return version, candidate, install_version
 
 
 def load_script(name):
@@ -192,6 +203,42 @@ class RepositoryIdentityTests(unittest.TestCase):
             self.assertIsNone(re.fullmatch(identity, prefix + "v0.10.4"))
 
 
+class DocumentedVersionsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.2.4"\n')
+        self.changelog = self.root / "CHANGELOG.md"
+        self.changelog.write_text("## [1.2.4] - 2026-11-12\n\n## [1.2.3] - 2026-11-01\n")
+        self.readme = self.root / "README.md"
+        self.readme.write_text("https://github.com/skaft-software/octet/releases/download/v1.2.3/install-octet.sh\n")
+
+    def test_dated_changelog_keeps_previous_install_target(self):
+        self.assertEqual(documented_versions(self.root), ("1.2.4", False, "1.2.3"))
+
+    def test_candidate_heading_keeps_previous_install_target(self):
+        self.changelog.write_text(self.changelog.read_text().replace("2026-11-12", "Release candidate"))
+        self.assertEqual(documented_versions(self.root), ("1.2.4", True, "1.2.3"))
+
+    def test_published_install_target_requires_dated_changelog(self):
+        self.readme.write_text(self.readme.read_text().replace("v1.2.3", "v1.2.4"))
+        self.assertEqual(documented_versions(self.root), ("1.2.4", False, "1.2.4"))
+        self.changelog.write_text(self.changelog.read_text().replace("2026-11-12", "Release candidate"))
+        with self.assertRaisesRegex(AssertionError, "published install target requires a dated"):
+            documented_versions(self.root)
+
+    def test_only_workspace_or_previous_install_targets_are_allowed(self):
+        for target in ("1.2.2", "1.2.5"):
+            with self.subTest(target=target):
+                self.readme.write_text(f"/releases/download/v{target}/install-octet.sh\n")
+                with self.assertRaisesRegex(AssertionError, "workspace or previous release"):
+                    documented_versions(self.root)
+        self.readme.write_text("curl https://example.invalid/install-octet.sh\n")
+        with self.assertRaisesRegex(AssertionError, "version-pinned install target"):
+            documented_versions(self.root)
+
+
 class SourceDistributionVersionTests(unittest.TestCase):
     """Release distribution identities stay aligned; API versions are independent."""
 
@@ -231,6 +278,21 @@ class SourceDistributionVersionTests(unittest.TestCase):
                 self.assertIn(f'\nrequires_octet = "={self.version}"\n', manifest)
                 self.assertIn('\napi_version = "0.4"\n', manifest)
 
+    def test_native_hello_build_pins_the_workspace_host_without_a_literal_version(self):
+        recipe = (self.root / "examples/extensions/native-hello/build.sh").read_text()
+        self.assertNotRegex(recipe, r'requires_octet\s*=\s*[\"\']=?[0-9]+\.[0-9]+\.[0-9]+')
+        generator = recipe.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "build"
+            for version in ("7.8.9", "7.8.10"):
+                (root / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+                subprocess.run([sys.executable, "-c", generator, str(out), str(root)],
+                               check=True, capture_output=True, text=True)
+                for language in ("rust", "c", "cpp"):
+                    manifest = out / f"extensions/native-hello-{language}/extension.toml"
+                    self.assertIn(f'requires_octet = "={version}"\n', manifest.read_text())
+
     def test_current_notes_are_identical_and_in_the_finite_documentation_inventory(self):
         name = f"docs/releases/v{self.version}.md"
         canonical = (self.root / name).read_bytes()
@@ -250,10 +312,10 @@ class ReleaseToolchainTests(unittest.TestCase):
         self.assertIn(execute, job)
         self.assertLess(job.index(build), job.index(execute))
         # Cold compilation must not consume the existing test execution budget.
-        for name, run in (("Build workspace test binaries", build),
-                          ("Run workspace tests", execute)):
+        for name, minutes, run in (("Build workspace test binaries", 30, build),
+                                   ("Run workspace tests", 25, execute)):
             self.assertIn("      - name: " + name + "\n"
-                          "        timeout-minutes: 15" + run, job)
+                          f"        timeout-minutes: {minutes}" + run, job)
         self.assertIn('          OCTET_PTY_TRACE: "1"', job)
 
     def test_node_adapter_tests_reuse_the_prepared_pi_reference(self):
@@ -314,25 +376,31 @@ class ReleaseDocumentationTests(unittest.TestCase):
         version, candidate, install_version = documented_versions(root)
         notes = (root / "docs/releases" / f"v{version}.md").read_text()
         self.assertEqual(notes.splitlines()[0], f"# octet {version}")
-        normalized = " ".join(notes.lower().split())
-        self.assertRegex(notes, r"(?m)^## (Fixed|Added|Changed|Highlights)$")
+        self.assertRegex(notes, r"(?m)^### (Fixed|Added|Changed)$")
+        changelog = (root / "CHANGELOG.md").read_text()
+        section = re.search(
+            rf"(?ms)^## \[{re.escape(version)}\][^\n]*\n.*?(?=^## |\Z)", changelog
+        ).group(0)
+        self.assertEqual(notes, f"# octet {version}\n\n" + section.rstrip("\n") + "\n")
         if candidate:
-            self.assertIn("unreleased source candidate", normalized)
-        for name in ("README.md", "docs/installation.md"):
+            self.assertIn(f"## [{version}] - Release candidate", notes)
+        for name in ("README.md", "docs/installation.md", "docs/getting-started.md"):
             with self.subTest(path=name):
                 guide = (root / name).read_text()
                 self.assertIn(f"/releases/download/v{install_version}/install-octet.sh", guide)
-                if candidate:
-                    self.assertNotIn(f"/releases/download/v{version}/install-octet.sh", guide)
-                    self.assertIn(version, guide)
-                    self.assertRegex(guide.lower(), r"release candidate|local " + re.escape(version) + r" rc")
+                if install_version != version:
+                    self.assertNotRegex(guide, rf"/releases/download/v{re.escape(version)}/|"
+                                        rf"--tag v{re.escape(version)}\b|gh release download v{re.escape(version)}\b")
+                    if name != "docs/getting-started.md":
+                        self.assertIn(version, guide)
+                        self.assertRegex(guide.lower(), r"release candidate|local " + re.escape(version) + r" rc")
 
     def test_distribution_notes_keep_candidate_and_publication_distinct(self):
         text = (SCRIPTS.parent / "docs/distribution.md").read_text()
         version, candidate, install_version = documented_versions()
         self.assertIn(f"/releases/tag/v{install_version}", text)
         self.assertIn(f"distribution target is **{version}**", text)
-        if candidate:
+        if install_version != version:
             self.assertIn("source candidate, not a published release", text)
         else:
             self.assertNotIn("source candidate, not a published release", text)

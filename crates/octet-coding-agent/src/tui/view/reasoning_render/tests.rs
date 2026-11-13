@@ -33,9 +33,8 @@ fn render_reasoning(
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
-    show_reasoning: bool,
 ) -> Vec<String> {
-    render_reasoning_on_surface(reasoning, renderer, theme, width, show_reasoning, None, 0)
+    render_reasoning_on_surface(reasoning, renderer, theme, width, None, 0)
 }
 
 fn rendered_foregrounds(rendered: &str) -> Vec<Rgb> {
@@ -128,7 +127,7 @@ fn verbose_reasoning_deltas_keep_complete_incremental_state() {
         "ordinary deltas must extend one incremental Markdown stream"
     );
     reasoning.reasoning_expanded = true;
-    let live = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 80, true)
+    let live = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 80)
         .into_iter()
         .map(|line| strip_terminal_sequences(&line))
         .collect::<Vec<_>>()
@@ -138,7 +137,7 @@ fn verbose_reasoning_deltas_keep_complete_incremental_state() {
     assert!(live.contains("Thought 255 stays visible."), "{live}");
 
     reasoning.finish_reasoning();
-    let finished = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 80, true)
+    let finished = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 80)
         .into_iter()
         .map(|line| strip_terminal_sequences(&line))
         .collect::<Vec<_>>()
@@ -158,7 +157,7 @@ fn expanded_reasoning_has_no_first_line_bullet() {
         AssistantBlock::streaming_reasoning("First private thought.\n\nSecond private thought.");
     reasoning.reasoning_expanded = true;
 
-    let lines = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 80, true)
+    let lines = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 80)
         .into_iter()
         .map(|line| strip_terminal_sequences(&line))
         .filter(|line| !line.is_empty())
@@ -185,7 +184,7 @@ fn collapsed_reasoning_shimmers_thinking_and_moves_heading_to_detail() {
     assert_eq!(strip_terminal_sequences(&first[0]), "Thinking");
     assert_eq!(
         strip_terminal_sequences(&first[1]),
-        "└ Verifying implementation (ctrl+o to expand)"
+        "└ Verifying implementation (ctrl+t to expand)"
     );
     assert!(first[0].contains("\x1b[1m"), "{first:?}");
     assert!(!first[1].contains("\x1b[3m"), "{first:?}");
@@ -1800,22 +1799,22 @@ fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_the
     let renderer = theme.reasoning_renderer();
     let mut reasoning =
         AssistantBlock::streaming_reasoning("private").with_model_lab(Some(ModelLab::Alibaba));
-    let live = render_reasoning(&reasoning, &renderer, &theme, 80, false);
+    let live = render_reasoning(&reasoning, &renderer, &theme, 80);
     assert_eq!(live.len(), 1, "{live:?}");
     assert_eq!(
         strip_terminal_sequences(&live[0]),
-        "Thinking · Ctrl+O expand"
+        "Thinking · Ctrl+T expand"
     );
     assert!(live[0].contains("\x1b[1m"), "{live:?}");
 
     let custom = theme::test_theme_from_source("");
-    let legacy = render_reasoning(&reasoning, &custom.reasoning_renderer(), &custom, 80, false);
+    let legacy = render_reasoning(&reasoning, &custom.reasoning_renderer(), &custom, 80);
     assert_eq!(legacy.len(), 2, "{legacy:?}");
-    assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (ctrl+o to expand)");
+    assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (ctrl+t to expand)");
 
     reasoning.reasoning_elapsed = Some(Duration::from_millis(13_700));
     reasoning.finish_reasoning();
-    let settled = render_reasoning(&reasoning, &renderer, &theme, 80, false);
+    let settled = render_reasoning(&reasoning, &renderer, &theme, 80);
     assert!(
         settled.is_empty(),
         "finished reasoning leaves no trace when collapsed"
@@ -1828,7 +1827,7 @@ fn collapsed_reasoning_has_ascii_fallback_and_width_bounded_rows() {
     let reasoning = AssistantBlock::streaming_reasoning(
         "## A heading that is intentionally much wider than the viewport\n",
     );
-    let lines = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 16, false);
+    let lines = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 16);
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(lines[0], "Thinking", "{lines:?}");
     assert!(lines[1].starts_with("`- A heading"), "{lines:?}");
@@ -1844,8 +1843,7 @@ fn two_line_thinking_reserves_its_detail_row_while_working() {
     activity.reasoning_heading = Some("Working".into());
     activity.show_reasoning_hint = false;
     for width in [48, 160] {
-        let working =
-            render_reasoning(&activity, &still.reasoning_renderer(), &still, width, false);
+        let working = render_reasoning(&activity, &still.reasoning_renderer(), &still, width);
         assert_eq!(working.len(), 2, "{width}: {working:?}");
         assert!(strip_terminal_sequences(&working[0]).starts_with("Working"));
         assert!(
@@ -1856,15 +1854,14 @@ fn two_line_thinking_reserves_its_detail_row_while_working() {
         activity.reasoning_heading = None;
         activity.show_reasoning_hint = true;
         activity.append_reasoning("private detail");
-        let thinking =
-            render_reasoning(&activity, &still.reasoning_renderer(), &still, width, false);
+        let thinking = render_reasoning(&activity, &still.reasoning_renderer(), &still, width);
         assert_eq!(
             thinking.len(),
             working.len(),
             "composer would shift at {width}"
         );
         assert!(strip_terminal_sequences(&thinking[0]).starts_with("Thinking"));
-        assert!(strip_terminal_sequences(&thinking[1]).contains("ctrl+o to expand"));
+        assert!(strip_terminal_sequences(&thinking[1]).contains("ctrl+t to expand"));
         activity = AssistantBlock::streaming_reasoning("");
         activity.reasoning_heading = Some("Working".into());
         activity.show_reasoning_hint = false;
@@ -1878,12 +1875,12 @@ fn non_expandable_activity_is_one_truthful_row() {
     activity.reasoning_heading = Some("Working".into());
     activity.show_reasoning_hint = false;
 
-    let lines = render_reasoning(&activity, &theme.reasoning_renderer(), &theme, 80, false);
+    let lines = render_reasoning(&activity, &theme.reasoning_renderer(), &theme, 80);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(strip_terminal_sequences(&lines[0]), "Working");
     assert!(lines[0].contains("\x1b[1m"), "{lines:?}");
 
-    let verbose = render_reasoning(&activity, &theme.reasoning_renderer(), &theme, 80, true);
+    let verbose = render_reasoning(&activity, &theme.reasoning_renderer(), &theme, 80);
     assert_eq!(verbose.len(), 1, "{verbose:?}");
     assert_eq!(strip_terminal_sequences(&verbose[0]), "Working");
 }

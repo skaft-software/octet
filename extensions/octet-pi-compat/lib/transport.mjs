@@ -99,7 +99,7 @@ export class Transport {
     this.onMessage = onMessage; this.onLost = onLost;
     this.queue = []; this.bytes = 0; this.writing = false; this.closed = false;
     this.children = new Map(); this.childId = 0; this.syncIds = new Set();
-    this.buffer = Buffer.alloc(0);
+    this.buffer = Buffer.alloc(0); this.bufferBytes = 0;
     this.idleWaiters = [];
     this.transfers = new Map(); this.transferId = 0; this.transferBytes = 0;
   }
@@ -116,17 +116,32 @@ export class Transport {
     input.on('end', () => this.fail(rpcError(-32002, 'transport EOF'), true));
     input.on('data', chunk => {
       try {
-        this.buffer = Buffer.concat([this.buffer, chunk]);
-        let at;
-        while ((at = this.buffer.indexOf(10)) !== -1) {
-          const line = this.buffer.subarray(0, at); this.buffer = this.buffer.subarray(at + 1);
-          if (line.length > this.maxFrame) throw rpcError(-32602, 'bounds_exceeded input frame');
+        // Scan only new bytes. Repeated concat/indexOf on the accumulated
+        // prefix makes fragmented session/provider frames quadratic. Complete
+        // frames borrow the chunk; partial frames grow geometrically within the
+        // negotiated bound and release their backing buffer after decoding.
+        let offset = 0;
+        while (offset < chunk.length) {
+          const at = chunk.indexOf(10, offset), end = at < 0 ? chunk.length : at;
+          const length = this.bufferBytes + end - offset;
+          if (length > this.maxFrame) throw rpcError(-32602, `bounds_exceeded ${at < 0 ? 'partial ' : ''}input frame`);
+          let line;
+          if (this.bufferBytes || at < 0) {
+            if (length > this.buffer.length) {
+              const grown = Buffer.allocUnsafe(Math.min(this.maxFrame, Math.max(length, this.buffer.length * 2)));
+              this.buffer.copy(grown, 0, 0, this.bufferBytes); this.buffer = grown;
+            }
+            chunk.copy(this.buffer, this.bufferBytes, offset, end); this.bufferBytes = length;
+            if (at < 0) break;
+            line = this.buffer.subarray(0, length);
+            this.buffer = Buffer.alloc(0); this.bufferBytes = 0;
+          } else line = chunk.subarray(offset, end);
+          offset = at + 1;
           const message = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line));
           this.validate(message);
           if (!message.method) this.response(message);
           else Promise.resolve(this.receive(message)).catch(error => this.fail(error));
         }
-        if (this.buffer.length > this.maxFrame) throw rpcError(-32602, 'bounds_exceeded partial input frame');
       } catch (error) { this.fail(error); }
     });
   }

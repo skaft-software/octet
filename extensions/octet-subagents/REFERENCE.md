@@ -18,7 +18,7 @@ swarm, hosted-agent scheduler, or second Agent loop.
 
 V1 is deliberately bounded, with the parent's full standard tool scope as the default grant:
 
-- at most **eight active children** and thirty-two retained workers per parent owner;
+- at most **sixteen active children** and thirty-two retained workers per parent owner;
 - depth one; a recursively admitted descendant is immediately interrupted when its host path/depth is observed;
 - four predefined profiles (`explore`, `review`, `test-analysis`, `research`);
 - per-worker `provider`/`model`/`reasoning` selection, defaulting to `inherit`, with host-resolved configured routes and reasoning;
@@ -46,7 +46,7 @@ tokens/cost, caps UTF-8 summary bytes, and owns the absolute wall deadline.
 Each child starts a fresh context; its usage is mirrored into the root ledger
 for accounting only, never inserted into the parent's model context, and never
 charged to the parent's own-context token ceiling. The
-eight-active/depth-one/thirty-two-retained limits are also checked by the
+sixteen-active/depth-one/thirty-two-retained limits are also checked by the
 real host service. Extension restart or absence of polling cannot relax those
 limits. A shared cwd/filesystem is **not isolation**.
 
@@ -276,7 +276,7 @@ A real host-owned exclusive claim/settlement primitive is required first. There
 are no fabricated leases or new ownership APIs in this extension.
 
 - Missing `tmux`/`herdr` or `octet` refuses without downloading/installing.
-- At most eight candidate workers plus the blocked parent are planned. Detached,
+- At most sixteen candidate workers plus the blocked parent are planned. Detached,
   parked and other unlaunchable retained workers are named in skipped rows.
 - Session IDs/references remain strict allowlisted separate argv elements. No
   transcript path, credential or token is used. Duplicate worker handles in one

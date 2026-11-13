@@ -13,7 +13,7 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
 
 - **Depth one.** A worker cannot spawn another worker; a descendant observed at
   depth two is interrupted immediately.
-- **Bounded.** At most eight active children and thirty-two retained workers per
+- **Bounded.** At most sixteen active children and thirty-two retained workers per
   parent owner. Wall-time, turn, cost, and output ceilings are optional per spawn
   and default to the parent session's settings (an unlimited parent stays
   unlimited).
@@ -87,6 +87,15 @@ Live roster token counts use rounded `K`, `M`, `B`, and `T` suffixes (for exampl
 `284K`, `1.2M`, and `1.5B`). A `~` still marks an output estimate; compact labels
 do not change exact usage, budgets, or costs.
 
+Live text and reasoning output estimates publish at a coalesced cadence of about
+30 updates per second per worker (33 ms), including the last delta of a burst
+when the provider pauses. The bounded host watch stream replaces old snapshots;
+no `/subagents` command or keypress is needed to refresh the inline counts.
+`~` means a UTF-8-byte estimate, not provider-reported or billed usage. Reported
+totals replace estimates on settlement; retries discard their provisional counts.
+No estimate enters token/cost budgets or the exactly-once delegated ledger.
+This is a scheduling cadence, not a provider or terminal latency guarantee.
+
 The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.
 
@@ -113,7 +122,7 @@ independently of the parent.
   in the report** with the approve/reattach step: a detached worker is alive and
   reattachable, so dropping its row silently would be wrong, and opening a stale
   pane for it would target the wrong session.
-- **Bounded.** At most nine panes (the eight-worker fleet cap plus the parent);
+- **Bounded.** At most seventeen panes (the sixteen-worker fleet cap plus the parent);
   above that the whole request is refused before anything is created.
 - **Shell-safe.** Every session id, path, and flag is a separate `argv` element,
   the multiplexer is always invoked with an argv list and never through a shell,

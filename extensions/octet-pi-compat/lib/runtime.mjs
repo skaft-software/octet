@@ -287,7 +287,14 @@ export class Runtime {
     // replacement surface (for example after a loading screen) before the
     // response is written. Keep the origin and abort signal so explicit
     // cancellation still retires that UI; omit only the settlement parent.
-    const detachedUi = store.detached && (method === 'ui/open' || method === 'ui/close');
+    // A persistent slot (footer, header, widget, statuses) set from a hook is
+    // Pi chrome that outlives the handler: Pi's setFooter is synchronous. Its
+    // open/close is likewise never cancelled by the hook's settlement, or a
+    // host busy for longer than the presentation join (e.g. a very large
+    // session) mounts a surface the adapter has already abandoned and the
+    // footer never paints until unrelated input.
+    const slotUi = store.surface?.slotKey !== undefined;
+    const detachedUi = (store.detached || slotUi) && (method === 'ui/open' || method === 'ui/close');
     const response = this.transport.request(method, {
       parent_request_id: store.id, ...(retained ? { resource_owner: store.state.owner } : {}), ...params,
     }, { parent: live && !detachedUi && !independentCheckpoint ? store.id : undefined,
@@ -1027,7 +1034,16 @@ export class Runtime {
         // resources load; this is the matching point, and the earliest one where
         // a real foreground owner and UI exist. The event notifies only: native
         // trust is already decided and no handler result can change admission.
-        await projectTrustEvent(this, store);
+        // Pi awaits project_trust handlers before the UI starts, so a handler may ask the user (examples/extensions/
+        // project-trust.ts opens a select dialog; pi dist/core/project-trust.js emitProjectTrustEvent). Octet's
+        // startup holds session_start behind a 30 s deadline, so a handler still waiting (for the user) after a short
+        // grace stops holding it: its dialog is a detached surface request (no settlement parent, as a detached
+        // command's) and the handler finishes in the background.
+        const trust = projectTrustEvent(this, { ...store, detached: true });
+        let released = false;
+        trust.catch(error => { if (released && !this.stopping) this.backgroundError(error); });
+        await Promise.race([trust, new Promise(resolve => setTimeout(resolve, 250).unref())]);
+        released = true;
       }
       if (p.hook === 'after_tool_call') {
         const toolResult = await this.runToolResult(payload, store);

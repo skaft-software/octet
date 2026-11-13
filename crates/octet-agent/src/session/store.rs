@@ -89,6 +89,7 @@ impl Session {
             tool_inference_attempts: BTreeMap::new(),
             entry_labels: BTreeMap::new(),
             context_failure_notices: BTreeSet::new(),
+            view_identity: SessionViewIdentity::fresh(),
         })
     }
 
@@ -727,6 +728,7 @@ impl Session {
             tool_inference_attempts,
             entry_labels,
             context_failure_notices: BTreeSet::new(),
+            view_identity: SessionViewIdentity::fresh(),
         })
     }
 
@@ -825,7 +827,22 @@ impl Session {
     /// listing can still open active sessions, while a second writer fails
     /// before it can reuse stale entry IDs.
     pub(super) fn persist(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
+        // Before the write, and even if it fails: a partially applied or
+        // refused record must never leave an earlier published view current.
+        self.note_view_mutation();
         self.writer.persist(bytes)
+    }
+
+    /// Advances [`SessionViewIdentity::mutation`]; called before any durable
+    /// record that may change the extension-visible history.
+    pub(super) fn note_view_mutation(&mut self) {
+        self.view_identity.mutation = self.view_identity.mutation.wrapping_add(1);
+    }
+
+    /// Identity of this handle's extension-visible content. Equal values from
+    /// the same process imply the same entries, head, header, labels and usage.
+    pub fn view_identity(&self) -> SessionViewIdentity {
+        self.view_identity
     }
 
     /// Serializes the durable head record naming `id` into `buf`.

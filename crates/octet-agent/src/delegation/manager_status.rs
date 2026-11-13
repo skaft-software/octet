@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// Per-run, display-only coalescer. A suppressed burst tail owns a deadline,
+/// rather than depending on the provider to send another event before it paints.
+#[derive(Default)]
+pub(super) struct StreamedOutputProgress {
+    last_update: Option<tokio::time::Instant>,
+    pending: bool,
+}
+
+impl StreamedOutputProgress {
+    pub(super) async fn wait_for_flush(&self) {
+        match self.last_update.filter(|_| self.pending) {
+            Some(last) => tokio::time::sleep_until(last + STREAMED_OUTPUT_UPDATE_INTERVAL).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
 impl DelegationManager {
     pub(super) fn update_agent_tool_started(
         &self,
@@ -78,7 +95,7 @@ impl DelegationManager {
         &self,
         id: &str,
         bytes: usize,
-        last_update: &mut Option<Instant>,
+        progress: &mut StreamedOutputProgress,
     ) {
         let mut state = self
             .state
@@ -91,12 +108,23 @@ impl DelegationManager {
         record.streamed_output_bytes = record.streamed_output_bytes.saturating_add(bytes as u64);
         let changed = record.streamed_output_bytes.div_ceil(4) != previous;
         drop(state);
-        let now = Instant::now();
-        if changed
-            && last_update
-                .is_none_or(|last| now.duration_since(last) >= STREAMED_OUTPUT_UPDATE_INTERVAL)
+        if !changed {
+            return;
+        }
+        progress.pending = true;
+        let now = tokio::time::Instant::now();
+        if progress
+            .last_update
+            .is_none_or(|last| now.duration_since(last) >= STREAMED_OUTPUT_UPDATE_INTERVAL)
         {
-            *last_update = Some(now);
+            self.flush_agent_streamed_output(progress);
+        }
+    }
+
+    pub(super) fn flush_agent_streamed_output(&self, progress: &mut StreamedOutputProgress) {
+        if progress.pending {
+            progress.pending = false;
+            progress.last_update = Some(tokio::time::Instant::now());
             self.publish_telemetry(None, None);
         }
     }

@@ -20,7 +20,8 @@ diagnosed and reuses the nearest older one; a release below 1.0.2, a pre-release
 or another major series is refused. Nothing silently downgrades Pi.
 
 See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
-Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
+Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter. The
+source tree is the unreleased v0.10.4 candidate.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
@@ -32,7 +33,14 @@ Compatibility concerns public extensions, not Pi's private internals or complete
 
 ## Use your Pi setup
 
-With octet **0.10.3+**, Node **22.19+** and your existing Pi setup:
+With Node **22.19+** and your existing Pi setup, the easiest way is:
+
+```bash
+octet migrate pi
+```
+
+It shows what it found and asks once before installing and turning on the
+adapter (see [Migrating from Pi](pi-migration.md)). The manual equivalent is:
 
 ```bash
 octet extension install octet-pi-compat
@@ -48,7 +56,9 @@ To install a downloaded bundle explicitly, use
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for
 that session: your enabled Pi extensions, skills, prompt templates, themes,
-`keybindings.json`, the global context file and the selected model. A Pi footer
+`keybindings.json` and the global context file. The model and thinking level come
+from octet's own config; when Pi's default model differs, octet says so in one
+line at startup (switch with `/model`). A Pi footer
 extension such as `powerline-footer` draws the footer, so it matches the one in
 Pi. Nothing is written to your Pi directory or to octet's saved settings, and
 turning the adapter off returns octet to its own setup. Enabling is the review:
@@ -125,7 +135,6 @@ own version and does not load the Pi package, printing one line at startup:
 
 | Pi package | octet uses instead | Startup line |
 |---|---|---|
-| `pi-subagents` | the `octet-subagents` bundle | `pi-subagents: replaced by octet-subagents` |
 | `@narumitw/pi-goal` | built-in `/goal` | `pi-goal: octet uses its built-in /goal` |
 | Pi codemode (`"defaultTools": ["+codemode"]`) | the `octet-codemode` bundle, when installed and admitted | — |
 
@@ -352,7 +361,14 @@ usage or OAuth data. The host publishes secret-free OAuth provenance from its
 actual authentication resolver (including Codex and subscription resolvers),
 without reading or refreshing credentials. Unclassified dynamic resolvers still
 refuse that query; endpoint names never establish authentication kind.
-Unavailable capabilities fail explicitly. Custom editor
+Unavailable capabilities fail explicitly. Footer git data finds ancestor repositories
+and worktrees, reports `detached` for a detached HEAD, and refreshes its local
+cache off the paint path, including discovering a repository created after the
+footer opens. An explicit native branch snapshot (including `null`) remains
+authoritative. Branch listener throws and promise rejections are isolated and
+reported once per extension and footer stage, without exception text or stopping
+other listeners or frames. Closing a footer during discovery skips its extension
+factory so it cannot register timers after cleanup. Custom editor
 state uses the host composer handoff rather than a separate agent input loop.
 Every custom editor occupies the composer slot, leaving native transcript,
 chrome and the single slash popup visible. `Ctrl+G` rescues only explicit fullscreen

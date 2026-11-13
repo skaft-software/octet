@@ -355,7 +355,7 @@ fn semantic_scroll_keeps_reasoning_anchor_when_first_roster_appears() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(WIDTH, HEIGHT);
     let run = shell.begin_run("openai");
-    shell.toggle_disclosure();
+    shell.toggle_thinking();
     shell.on_run_event(
         run,
         &AgentEvent::OutputDelta {

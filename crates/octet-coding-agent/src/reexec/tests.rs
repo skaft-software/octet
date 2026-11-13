@@ -224,6 +224,75 @@ async fn ready_plan(
 }
 
 #[test]
+fn restart_marker_is_consumed_before_child_launch() {
+    if std::env::var_os(RESTART_SESSION_ENV).is_some() {
+        assert_eq!(take_restart_session().as_deref(), Some(SESSION));
+        assert_eq!(take_restart_session(), None);
+        assert!(std::env::var_os(RESTART_SESSION_ENV).is_none());
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "reexec::tests::restart_marker_is_consumed_before_child_launch",
+        ])
+        .env(RESTART_SESSION_ENV, SESSION)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn forced_restart_errors_name_the_stage_and_action_without_private_details() {
+    let private = "private prompt token=secret\n\u{1b}[31m";
+    for (decision, stage, action) in [
+        (
+            ReexecDecision::blocked(BlockedReason::ExecutableUnreadable {
+                path: PathBuf::from(private),
+                detail: private.into(),
+            }),
+            "executable lookup",
+            "repair the octet installation",
+        ),
+        (
+            ReexecDecision::blocked(BlockedReason::ProbeMalformed(private.into())),
+            "compatibility probe",
+            "install a compatible octet binary",
+        ),
+        (
+            ReexecDecision::blocked(BlockedReason::DurableHeadFailed(private.into())),
+            "session persistence",
+            "check session storage",
+        ),
+        (
+            ReexecDecision::exec_failed(std::io::Error::other(private)),
+            "exec",
+            "check the octet installation",
+        ),
+        (
+            ReexecDecision::exec_failed(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                private,
+            )),
+            "platform support",
+            "restart octet manually",
+        ),
+    ] {
+        let notice = decision.restart_failure_notice();
+        assert!(notice.starts_with("reload failed: restart "), "{notice}");
+        assert!(notice.contains(stage), "{notice}");
+        assert!(notice.contains(action), "{notice}");
+        assert!(!notice.contains("private"), "{notice}");
+        assert!(!notice.contains("secret"), "{notice}");
+        assert!(!notice.chars().any(char::is_control), "{notice}");
+    }
+}
+
+#[test]
 fn generation_of_an_unchanged_file_is_stable() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("octet");
@@ -554,6 +623,89 @@ async fn unchanged_binary_is_resources_only() {
     );
     assert_eq!(hooks.counters.durable.load(Ordering::SeqCst), 0);
     assert_eq!(hooks.counters.shutdown.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn forced_unchanged_binary_restarts_and_retains_validation_and_durability() {
+    let directory = tempfile::tempdir().unwrap();
+    let exe = directory.path().join("octet");
+    write_binary(&exe, b"unchanged binary");
+    let (probe, seen) = recording_probe(valid_output());
+    let controller = ReexecController {
+        startup_exe: exe.clone(),
+        original_argv: vec![OsString::from("octet"), OsString::from("--offline")],
+        startup_generation: BinaryGeneration::capture(&exe).unwrap(),
+        session_id: Some(SESSION.to_owned()),
+        probe,
+        probe_timeout: Duration::from_millis(50),
+        resolver: resolving(&exe),
+    };
+    let observed = controller.observe_generation();
+    let options = ReexecOptions::default().forcing_restart();
+    let mut hooks = TestHooks::default();
+    for safety in [
+        LiveSafetyInputs {
+            model_turn_active: true,
+            ..Default::default()
+        },
+        LiveSafetyInputs {
+            tool_call_active: true,
+            ..Default::default()
+        },
+        LiveSafetyInputs {
+            session_persistence_in_flight: true,
+            ..Default::default()
+        },
+    ] {
+        let decision = controller
+            .reexec_if_changed(&observed, &safety, options, &mut hooks)
+            .await;
+        assert!(
+            matches!(decision, ReexecDecision::Refused { .. }),
+            "{decision:?}"
+        );
+    }
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(hook_order(&hooks).is_empty());
+
+    hooks.durable_failure = Some("fixture persistence failure".into());
+    let decision = controller
+        .reexec_if_changed(&observed, &LiveSafetyInputs::default(), options, &mut hooks)
+        .await;
+    assert!(matches!(
+        decision,
+        ReexecDecision::Blocked {
+            reason: BlockedReason::DurableHeadFailed(_),
+            ..
+        }
+    ));
+    assert_eq!(hooks.counters.shutdown.load(Ordering::SeqCst), 0);
+
+    // A previous refusal or failure must not suppress an explicit retry.
+    hooks.durable_failure = None;
+    let decision = controller
+        .reexec_if_changed(&observed, &LiveSafetyInputs::default(), options, &mut hooks)
+        .await;
+    let ReexecDecision::Ready(plan) = decision else {
+        panic!("forced unchanged image must restart: {decision:?}");
+    };
+    assert_eq!(plan.executable(), exe);
+    assert_eq!(plan.session_id(), SESSION);
+    assert_eq!(
+        plan.argv(),
+        [
+            OsString::from("octet"),
+            OsString::from("--offline"),
+            OsString::from("--resume"),
+            OsString::from(SESSION)
+        ]
+    );
+    assert_eq!(seen.lock().unwrap().as_slice(), [exe.clone(), exe]);
+    assert_eq!(
+        hook_order(&hooks),
+        ["durable-head", "durable-head", "extension-shutdown"]
+    );
 }
 
 #[tokio::test]

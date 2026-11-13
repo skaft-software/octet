@@ -26,7 +26,6 @@ const RESOURCE_KINDS = ['extensions', 'skills', 'prompts', 'themes'];
 // source, or the `name` in a resolved package.json), never as a substring.
 // `line` is the one short line printed for a skipped package.
 export const UNSUPPORTED_PACKAGES = Object.freeze([
-  Object.freeze({ match: 'pi-subagents', line: 'pi-subagents: replaced by octet-subagents' }),
   Object.freeze({ match: '@narumitw/pi-goal', line: 'pi-goal: octet uses its built-in /goal' }),
 ]);
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);

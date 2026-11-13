@@ -79,6 +79,30 @@ struct Mount {
     revision: Option<u64>,
     editor: Option<EditorRecovery>,
     editors: crate::native_editor::EditorService,
+    /// Persistent chrome opened while the palette owner was still pending. It
+    /// is neither painted nor given input until it has a frame rendered with
+    /// the published palette; the native chrome keeps its slot until then.
+    held: Option<HeldChrome>,
+}
+
+/// How long published, held chrome may wait for a frame rendered with the
+/// published palette. Only a component that never answers a palette or draft
+/// handoff reaches it; it bounds the handoff, it does not pace it.
+const HELD_CHROME_FRAME_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Handoff state of one held persistent-chrome mount.
+struct HeldChrome {
+    /// The cached frame was accepted under the current published palette and
+    /// after the latest draft fence.
+    fresh: bool,
+    /// The editor must be sent the native draft before a frame can reveal
+    /// it: the palette changed, or its last checkpoint showed another draft.
+    needs_fence: bool,
+    /// A native draft was delivered and its answering checkpoint is pending.
+    /// Frames accepted before that acknowledgement predate the handoff.
+    awaiting_checkpoint: bool,
+    /// Native composer revision the editor component is known to show.
+    synced_revision: Option<u64>,
 }
 
 /// The hidden native composer is the recovery point, not the last painted frame.
@@ -113,6 +137,11 @@ pub(super) struct RemoteUi {
     // Terminal input waiting for a completed editor checkpoint. These remain
     // events for the ordinary native dispatcher, never a second submit path.
     pending_input: VecDeque<(String, Event)>,
+    // The resource generation that can replace the palette has not been
+    // published. Persistent chrome opened now is held, not painted.
+    handoff_pending: bool,
+    // When the pending generation was published; bounds a held mount's wait.
+    handoff_released: Option<std::time::Instant>,
     replaying_input: bool,
 }
 
@@ -172,7 +201,10 @@ impl RemoteUi {
     pub(super) fn composer_editor_identity(
         &self,
     ) -> Option<(String, crate::native_editor::ComposerEditorIdentity)> {
-        let mount = self.mounts.iter().find(|mount| mount.editor.is_some())?;
+        let mount = self
+            .mounts
+            .iter()
+            .find(|mount| mount.editor.is_some() && mount.held.is_none())?;
         Some((mount.view.id.clone(), mount.editors.composer_identity()?))
     }
 
@@ -180,7 +212,11 @@ impl RemoteUi {
         &self,
         snapshot: &crate::tui::view::ShellEditorSnapshot,
     ) -> bool {
-        let Some(mount) = self.mounts.iter().find(|mount| mount.editor.is_some()) else {
+        let Some(mount) = self
+            .mounts
+            .iter()
+            .find(|mount| mount.editor.is_some() && mount.held.is_none())
+        else {
             return true;
         };
         mount
@@ -196,7 +232,15 @@ impl RemoteUi {
     pub(super) fn projection(&self) -> Projection {
         Projection {
             components: self.components.clone(),
-            mounts: self.mounts.iter().map(|mount| mount.view.clone()).collect(),
+            // Held chrome is not painted and owns no input: the native chrome
+            // keeps its slot until the component has a frame in the published
+            // palette.
+            mounts: self
+                .mounts
+                .iter()
+                .filter(|mount| mount.held.is_none())
+                .map(|mount| mount.view.clone())
+                .collect(),
             chrome: self.chrome.as_ref().map(|lease| lease.state.clone()),
         }
     }
@@ -448,6 +492,14 @@ impl RemoteUi {
                         mouse_capture,
                     },
                     revision: None,
+                    held: (self.handoff_pending
+                        && placement != ExtensionRemoteUiPlacement::Fullscreen)
+                        .then(|| HeldChrome {
+                            fresh: false,
+                            needs_fence: false,
+                            awaiting_checkpoint: false,
+                            synced_revision: editor.as_ref().map(|editor| editor.composer_revision),
+                        }),
                     editor,
                 });
                 Ok(result)
@@ -542,6 +594,88 @@ impl RemoteUi {
         notices
     }
 
+    pub(super) fn handoff_pending(&self) -> bool {
+        self.handoff_pending
+    }
+
+    pub(super) fn has_held(&self) -> bool {
+        self.mounts.iter().any(|mount| mount.held.is_some())
+    }
+
+    /// Track the resource generation that owns the palette. Persistent chrome
+    /// opened while it is pending is held; publication starts the bounded
+    /// handoff of everything that was held.
+    pub(super) fn set_handoff_pending(&mut self, pending: bool) {
+        if pending == self.handoff_pending {
+            return;
+        }
+        self.handoff_pending = pending;
+        self.handoff_released = (!pending).then(std::time::Instant::now);
+    }
+
+    /// The palette published to extensions changed: every held frame was
+    /// rendered with the replaced one.
+    pub(super) fn palette_published(&mut self) {
+        for mount in &mut self.mounts {
+            if let Some(held) = mount.held.as_mut() {
+                held.fresh = false;
+                held.needs_fence = mount.editor.is_some();
+            }
+        }
+    }
+
+    /// Hand held chrome over once its palette owner has published. A component
+    /// is revealed by a frame rendered with the published palette. An editor
+    /// is first given the native draft, after the palette, and is revealed by
+    /// the frame that follows its acknowledgement of that draft; the draft the
+    /// user typed while it was held is therefore what it shows. A component
+    /// that never answers is revealed at the bounded deadline.
+    pub(super) fn settle_held(&mut self, shell: &mut InteractiveShell) {
+        if self.handoff_pending || !self.has_held() {
+            return;
+        }
+        let expired = self
+            .handoff_released
+            .is_none_or(|released| released.elapsed() >= HELD_CHROME_FRAME_DEADLINE);
+        let native = shell.extension_editor_snapshot();
+        let mut deliveries = Vec::new();
+        for mount in &mut self.mounts {
+            let Some(held) = mount.held.as_mut() else {
+                continue;
+            };
+            let synced = mount.editor.is_none() || held.synced_revision == Some(native.revision);
+            let fence = mount.editor.is_some()
+                && !held.awaiting_checkpoint
+                && (held.needs_fence || !synced);
+            if expired || (held.fresh && !held.awaiting_checkpoint && !fence) {
+                mount.held = None;
+                if let Some(editor) = mount.editor.as_mut() {
+                    // Ownership starts from the native draft it now shows.
+                    editor.composer_revision = native.revision;
+                    if !synced {
+                        deliveries.push(mount.view.clone());
+                    }
+                }
+            } else if fence {
+                held.needs_fence = false;
+                held.awaiting_checkpoint = true;
+                held.fresh = false;
+                deliveries.push(mount.view.clone());
+            }
+        }
+        for view in deliveries {
+            self.deliver_editor_text(
+                &crate::tui::view::ComposerSlotWrite {
+                    surface_id: view.surface_id,
+                    mount_id: view.id,
+                    text: Some(native.text.clone()),
+                    paste: false,
+                },
+                shell,
+            );
+        }
+    }
+
     pub(super) fn editor_owns_composer(&self) -> bool {
         self.editor_mount().is_some()
     }
@@ -588,8 +722,23 @@ impl RemoteUi {
         } else {
             text.len()
         };
+        let mount = &self.mounts[index];
+        let held_native_echo = mount.held.is_some()
+            && mount.view.native_editor
+            && write.text.as_deref() == Some(mirror.text.as_str())
+            && mount
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.composer_revision == mirror.revision);
         let native_changed = if write.paste {
             None
+        } else if held_native_echo {
+            // A palette fence is not a newer text decision. The synchronous
+            // native mutation may have completed before its composer/set
+            // checkpoint reaches the recovery mirror. Ask for that checkpoint
+            // without replacing the component's newer draft/caret with the
+            // mirror; a real native user edit still takes the ordinary path.
+            Some(false)
         } else {
             match self.mounts[index].editors.replace_composer(&text, cursor) {
                 Ok(changed) => changed,
@@ -644,7 +793,7 @@ impl RemoteUi {
     pub(super) fn editor_mount(&self) -> Option<&MountView> {
         self.mounts
             .iter()
-            .find(|mount| mount.editor.is_some())
+            .find(|mount| mount.editor.is_some() && mount.held.is_none())
             .map(|mount| &mount.view)
     }
 
@@ -678,6 +827,33 @@ impl RemoteUi {
             ));
         }
         let snapshot = shell.extension_editor_snapshot();
+        if let Some(held) = mount.held.as_mut() {
+            // Held chrome owns no input, so the user may have typed into the
+            // native composer. The component's own draft (a programmatic
+            // `setText`) still lands when the native draft has not moved since
+            // the component last matched it; otherwise the user's draft wins.
+            // Either way the checkpoint is acknowledged, never refused: the
+            // component is not at fault, and a component that does not show
+            // the native draft is simply sent it again before it is revealed.
+            let committed = if snapshot.revision == editor.composer_revision {
+                let cursor = mount
+                    .editors
+                    .composer_snapshot()
+                    .filter(|native| native.text == text)
+                    .map(|native| native.cursor);
+                let committed = shell.extension_set_editor_at(text.clone(), cursor);
+                editor.composer_revision = committed.revision;
+                committed
+            } else {
+                snapshot
+            };
+            held.awaiting_checkpoint = false;
+            held.synced_revision = (committed.text == text).then_some(committed.revision);
+            editor.acknowledged_input_revision = checkpoint.input_revision;
+            editor.checkpoint_revision = checkpoint.checkpoint_revision;
+            editor.expected_clear = false;
+            return Ok(());
+        }
         // The host cleared the slot and the component answers that exact clear.
         // A native command can move focus into a panel before the answer
         // arrives, so only this acknowledged empty replacement is admitted
@@ -804,6 +980,9 @@ impl RemoteUi {
             return false;
         }
         mount.revision = Some(frame.revision);
+        if let Some(held) = mount.held.as_mut() {
+            held.fresh = !held.awaiting_checkpoint;
+        }
         true
     }
 
@@ -893,9 +1072,10 @@ impl RemoteUi {
             .iter()
             .position(|mount| mount.view.placement == ExtensionRemoteUiPlacement::Fullscreen)
             .or_else(|| {
-                self.mounts
-                    .iter()
-                    .position(|mount| mount.view.placement == ExtensionRemoteUiPlacement::Editor)
+                self.mounts.iter().position(|mount| {
+                    mount.view.placement == ExtensionRemoteUiPlacement::Editor
+                        && mount.held.is_none()
+                })
             })
         else {
             return false;

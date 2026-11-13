@@ -672,3 +672,99 @@ commands = ["probe"]
         assert!(process.shutdown().await);
     }
 }
+
+/// A Pi extension mounts its footer from `session_start` without awaiting the
+/// open (Pi's `setFooter` is synchronous). The host must not cancel that
+/// still-unanswered `ui/open` when the hook reply is read: the open settles
+/// normally and the surface is mounted.
+#[cfg(unix)]
+const UNAWAITED_MOUNT_SCRIPT: &str = r#"#!/usr/bin/env python3
+import json, sys
+
+def receive():
+    return json.loads(sys.stdin.readline())
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+def notice(message):
+    send({"jsonrpc":"2.0","method":"notification","params":{"message":message}})
+init = receive()
+protocol = init["params"]["protocol"]
+send({"jsonrpc":"2.0","id":init["id"],"result":{
+    "api_version":"0.4","tools":[],"commands":[{"name":"mount","description":"mount"}],
+    "protocol":{"version":"0.4","features":protocol["required_features"] + ["remote_ui"],"limits":{"max_concurrent_requests":4}}}})
+while True:
+    message = receive()
+    method = message.get("method")
+    params = message.get("params", {})
+    if method == "command/execute":
+        send({"jsonrpc":"2.0","id":"open-1","method":"ui/open","params":{
+            "parent_request_id":message["id"],"surface_id":"footer","title":"Footer"}})
+        # Reply to the parent without waiting for the open's answer.
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"text":"mounted"}})
+    elif method == "$/cancelRequest":
+        notice("open-cancelled")
+    elif message.get("id") == "open-1":
+        notice("open-answered" if "result" in message else "open-failed")
+    elif method == "shutdown":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{}})
+        break
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unawaited_ui_open_survives_the_parent_reply() {
+    let temp = TempDir::new().unwrap();
+    write_executable_script(&temp.path().join("extension.py"), UNAWAITED_MOUNT_SCRIPT);
+    let manifest = ExtensionManifest::parse(
+        r#"name = "unawaited-mount"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "extension.py"
+[contributes]
+commands = ["mount"]
+notifications = true
+"#,
+    )
+    .unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.remote_ui = Some(Arc::new(Notify::new()));
+    config.supervise = false;
+    let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config)
+        .await
+        .unwrap();
+    let mut events = process.subscribe();
+    let context = process.current_context_for_resource_owner("session-owner");
+    let output = process
+        .execute_command("mount", vec![], context)
+        .await
+        .unwrap();
+    assert_eq!(output.text, "mounted");
+    // The frontend answers the open after the parent has already settled.
+    let (request_id, generation, owner, operation) = remote_ui_next_operation(&mut events).await;
+    assert!(matches!(operation, ExtensionRemoteUiOperation::Open { .. }));
+    let answered = process
+        .respond_to_extension_request(
+            request_id,
+            generation,
+            ExtensionRequestOutcome::Ok(serde_json::json!({"columns":80,"rows":24})),
+        )
+        .await;
+    let verdict = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ExtensionEvent::Notification { notification } = events.recv().await.unwrap() {
+                if notification.message.starts_with("open-") {
+                    return notification.message;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the extension never learned the outcome of its ui/open");
+    assert_eq!(
+        verdict, "open-answered",
+        "the host must not cancel an unawaited ui/open when the parent replies (answer: {answered:?})"
+    );
+    assert!(process.remote_ui_surface_is_current(&owner, "footer"));
+    assert!(process.shutdown().await);
+}

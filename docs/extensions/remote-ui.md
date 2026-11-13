@@ -63,6 +63,44 @@ placements omit it. Treat this identity as opaque: it remains stable across
 resize but changes when an editor is closed and reopened, even with the same
 `surface_id` and owner. It authorizes no access without the matching live owner.
 
+#### Palette handoff for persistent chrome
+
+A resource generation that can still select the palette (for example a Pi
+theme contributed through `resources_discover` at startup or reload) is pending
+until the host publishes it. A `header`, `footer`, `above_editor`,
+`below_editor`, or `editor` mount opened while that generation is pending is
+admitted normally: it gets geometry and its frames are cached. The host does not
+paint it or route input to it yet. The native composer and footer keep their
+slots and stay editable, so the open still settles promptly. `fullscreen`
+dialogs are never held.
+
+When the generation is published (including a failed or withdrawn one), the
+published palette is sent in `context/updated` first. The host then hands over
+each held mount:
+
+- A held mount whose palette did not change is shown with its cached frame.
+- A widget, header, or footer is shown with its first frame accepted after the
+  palette changed.
+- A held `editor` first receives the native draft as `ui/editor-text`. It is
+  shown with the first frame that follows the host's acknowledgement of the
+  answering `composer/set` checkpoint. Draft text typed while the editor was held
+  is therefore what it shows.
+
+While an editor is held, its checkpoints are acknowledged and never refused. A
+programmatic draft lands in the native composer if the user has not typed since
+the editor last matched it. Otherwise the user's draft wins and is sent to the
+editor again. For a bound native editor, a palette-only fence requests the current
+checkpoint without replacing its model with the recovery mirror: a synchronous
+native edit may already have completed while its checkpoint is still in flight.
+The draft and caret reach the recovery mirror only through that checkpoint; a
+newer native user edit still takes precedence. A component that never answers is
+revealed one second after publication, so a handoff cannot strand the custom
+chrome. Only the editor path is causally fenced. Other placements rely on frame
+order after the palette update, so a frame already in flight when the palette
+changed may be shown once.
+The resource phase keeps pumping input and UI until the released handoff settles
+or reaches that fallback; it does not report readiness with a hidden editor.
+
 `mouse_capture` defaults to false and requests host-owned mouse capture for a
 focused fullscreen surface. Close, crash, rescue, and owner replacement restore
 the configured host mouse mode. Raw terminal mode writes are not frame content.

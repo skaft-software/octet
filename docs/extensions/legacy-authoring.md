@@ -473,7 +473,7 @@ fingerprint?, message, idempotency_key, policy}`. Mandatory `policy` contains
 `max_tokens`, `max_cost_microdollars`, `max_output_bytes`, and `timeout_ms`.
 The tools are a non-empty subset of `read`, `edit`, `write`, and `bash`,
 the parent's full standard scope by default, narrowable per spawn. Depth is one;
-there are at most eight active children and thirty-two retained records. The
+there are at most sixteen active children and thirty-two retained records. The
 host freezes detached tool snapshots, applies lower parent turn/cost ceilings,
 inherits resolved model context/output limits, caps UTF-8 returned output, and
 owns the absolute wall timer. There is no separate fixed aggregate extension

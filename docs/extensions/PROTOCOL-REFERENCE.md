@@ -1666,7 +1666,7 @@ model session:
     "policy": {
       "tools": ["read"],
       "max_depth": 1,
-      "max_concurrent_children": 8,
+      "max_concurrent_children": 16,
       "max_turns": null,
       "max_tokens": null,
       "max_cost_microdollars": null,
@@ -1683,7 +1683,7 @@ original host-issued owner as described below. `policy` is mandatory. Its tools 
 duplicate-free subset of `read`, `edit`, `write`, and `bash`
 (the first-party extension defaults to all four; explicitly select
 `read` for hard read-only work; content search uses `bash`, which can mutate); depth is exactly one;
-concurrency is 1..=8; returned UTF-8 bytes are 512..=16,384. The turn, cost,
+concurrency is 1..=16; returned UTF-8 bytes are 512..=16,384. The turn, cost,
 and wall-time ceilings are optional per child: `max_turns: null`,
 `max_cost_microdollars: null`, and `timeout_ms: null` inherit the parent
 session's ceilings (an unlimited parent produces an unlimited child);
@@ -1896,7 +1896,7 @@ Request `{ "parent_request_id": 2, "target": "agent-1" }`. Success returns
 cancels the owned descendant tree when an active interrupt is requested.
 
 All `agent/*` methods share the child-request bounds; child creation retains
-the eight-worker bound. After a parseable request ID, malformed parameters
+the sixteen-worker bound. After a parseable request ID, malformed parameters
 return `-32602`. Unavailable
 service/owner, invalid ownership, exhausted delegation limits, persistence
 failure, or an invalid operation return `-32002`. The extension's stable

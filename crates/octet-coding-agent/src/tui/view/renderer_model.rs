@@ -586,6 +586,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         reasoning,
         run_label,
         verbose_tools,
+        thinking_disclosure,
         size,
         resize_epoch,
         startup_pending,
@@ -614,6 +615,20 @@ mod tests {
             size: (80, 24),
             follow_tail: true,
             ..ShellState::with_theme(crate::tui::theme::test_theme())
+        }
+    }
+
+    #[test]
+    fn thinking_disclosure_survives_both_publication_boundaries() {
+        let mut semantic = state();
+        let mut renderer = RenderOwner::new(semantic.theme.clone());
+        for expanded in [true, false] {
+            semantic.set_thinking_expanded(expanded);
+            let model = RenderModel::capture(&mut semantic);
+            assert_eq!(model.chrome.thinking_disclosure, Some(expanded));
+            renderer.accept(model);
+            assert_eq!(renderer.state.thinking_disclosure, Some(expanded));
+            assert_eq!(renderer.state.thinking_expanded(), expanded);
         }
     }
 

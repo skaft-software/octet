@@ -272,6 +272,8 @@ impl ShellState {
                     });
                     let start = cache.lines.len();
                     let length = rendered.lines.len();
+                    #[cfg(test)]
+                    super::fullscreen_work_tests::record(|work| work.rows_laid_out += length);
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
@@ -312,6 +314,8 @@ impl ShellState {
                     let start = cache.lines.len();
                     first_changed = first_changed.min(start);
                     let length = rendered.lines.len();
+                    #[cfg(test)]
+                    super::fullscreen_work_tests::record(|work| work.rows_laid_out += length);
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
@@ -353,6 +357,10 @@ impl ShellState {
                             && update.stable_rows <= old_length
                             && update.geometry == cache.block_geometries[index]
                     }) {
+                        #[cfg(test)]
+                        super::fullscreen_work_tests::record(|work| {
+                            work.rows_laid_out += update.replacement.len()
+                        });
                         let replacement_start = start.saturating_add(update.stable_rows);
                         first_changed = first_changed.min(replacement_start);
                         let new_length =
@@ -394,6 +402,8 @@ impl ShellState {
                         )
                     });
                     let new_length = rendered.lines.len();
+                    #[cfg(test)]
+                    super::fullscreen_work_tests::record(|work| work.rows_laid_out += new_length);
                     cache
                         .lines
                         .splice(start..start + old_length, rendered.lines);
@@ -674,10 +684,11 @@ mod tests {
         use super::super::AssistantBlock;
 
         let mut shell = InteractiveShell::test_shell();
-        shell.set_verbose_tools(true);
+        shell.set_thinking_expanded(true);
         let mut state = shell.state.borrow_mut();
         state.push_block(TranscriptBlock::Reasoning(Box::new(
-            AssistantBlock::streaming_reasoning("First thought.\n\nSecond thought.\n\nTail"),
+            AssistantBlock::streaming_reasoning("First thought.\n\nSecond thought.\n\nTail")
+                .with_reasoning_expanded(true),
         )));
         state.rendered_transcript(80);
         for _ in 0..4 {
@@ -701,7 +712,7 @@ mod tests {
                 &state.theme.rich_renderer(),
                 &state.theme.reasoning_renderer(),
                 80,
-                true,
+                false,
                 0,
                 0,
                 0,
@@ -710,9 +721,9 @@ mod tests {
             assert_eq!(&actual[start..], expected.lines);
         }
         drop(state);
-        shell.set_verbose_tools(false);
+        shell.set_thinking_expanded(false);
         shell.state.borrow().rendered_transcript(80);
-        shell.set_verbose_tools(true);
+        shell.set_thinking_expanded(true);
         let state = shell.state.borrow();
         let actual = state.rendered_transcript(80).clone();
         let start = state.transcript_cache.borrow().block_starts[0];
@@ -723,7 +734,7 @@ mod tests {
             &state.theme.rich_renderer(),
             &state.theme.reasoning_renderer(),
             80,
-            true,
+            false,
             0,
             0,
             0,

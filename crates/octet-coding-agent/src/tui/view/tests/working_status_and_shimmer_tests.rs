@@ -310,10 +310,15 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
         None,
         None,
     )));
-    let reasoning = TranscriptBlock::Reasoning(Box::new(
-        AssistantBlock::streaming_reasoning("private detail")
-            .with_model_lab(Some(ModelLab::OpenAi)),
-    ));
+    let reasoning_block = |expanded: bool| {
+        TranscriptBlock::Reasoning(Box::new(
+            AssistantBlock::streaming_reasoning("private detail")
+                .with_reasoning_expanded(expanded)
+                .with_model_lab(Some(ModelLab::OpenAi)),
+        ))
+    };
+    let reasoning = reasoning_block(false);
+    let expanded_reasoning = reasoning_block(true);
     let plain = |lines: Vec<String>| {
         lines
             .into_iter()
@@ -334,12 +339,12 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
     ));
     let expanded_reasoning_lines = plain(render_block(
         Some(&tool),
-        &reasoning,
+        &expanded_reasoning,
         &theme,
         &renderer,
         &renderer,
         80,
-        true,
+        false,
     ));
     let tool_line = tool_lines
         .iter()
@@ -350,7 +355,7 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
         .find(|line| line.contains("Thinking"))
         .expect("reasoning row");
     assert!(
-        reasoning_line.contains("Ctrl+O expand"),
+        reasoning_line.contains("Ctrl+T expand"),
         "{reasoning_line:?}"
     );
     let visual_column = |line: &str, needle: &str| {

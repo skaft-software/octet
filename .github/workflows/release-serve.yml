@@ -1,12 +1,14 @@
 name: octet extension release
 
+run-name: ${{ inputs.candidate && format('octet {0} {1} extensions', inputs.release_tag, inputs.candidate) || github.ref_name }}
+
 on:
-  push:
-    tags:
-      - "v*"
-      - "octet-serve-v*"
   workflow_dispatch:
     inputs:
+      candidate:
+        description: Frozen candidate generation (owner CLI only)
+        required: false
+        type: string
       release_tag:
         description: Existing canonical octet tag to receive the extension assets
         required: true
@@ -16,6 +18,10 @@ on:
         required: false
         default: false
         type: boolean
+
+concurrency:
+  group: octet-extension-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   actions: read
@@ -31,12 +37,17 @@ jobs:
     # Never allocate a default-branch cache scope for manually selected source.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 10
+    # GitHub hides draft releases from read-only tokens.
+    permissions:
+      actions: read
+      contents: write
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       source_commit: ${{ steps.release.outputs.source_commit }}
       workflow_commit: ${{ steps.release.outputs.workflow_commit }}
+      mode: ${{ steps.release.outputs.mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -46,10 +57,16 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_CANDIDATE: ${{ inputs.candidate }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_REQUIRE_PROVIDER_ACCEPTANCE: ${{ inputs.require_provider_acceptance }}
         run: |
           set -euo pipefail
+          if [[ -n "${INPUT_CANDIDATE:-}" ]]; then
+            python3 scripts/release.py _resolve "${INPUT_RELEASE_TAG#v}" \
+              --candidate "$INPUT_CANDIDATE" --role extensions >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ -n "$INPUT_RELEASE_TAG" ]]; then
             tag="$INPUT_RELEASE_TAG"
           elif [[ "$GITHUB_REF_TYPE" == tag ]]; then
@@ -63,7 +80,7 @@ jobs:
             exit 1
           fi
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "$tag" ]]; then
+            if [[ "$GITHUB_REF_TYPE" != tag || ( "$GITHUB_REF_NAME" != "$tag" && "$GITHUB_REF_NAME" != "octet-serve-$tag" ) ]]; then
               echo "manual releases must dispatch this workflow from the exact canonical tag $tag" >&2
               exit 1
             fi
@@ -82,7 +99,7 @@ jobs:
           fi
           workflow_commit=$(git rev-parse "$GITHUB_SHA^{commit}")
           if [[ "$workflow_commit" != "$source_commit" ]]; then
-            if [[ "$GITHUB_EVENT_NAME" != push \
+            if [[ ( "$GITHUB_EVENT_NAME" != push && "$GITHUB_EVENT_NAME" != workflow_dispatch ) \
               || "$GITHUB_REF_TYPE" != tag \
               || "$GITHUB_REF_NAME" != "octet-serve-$tag" ]]; then
               echo "workflow ref $workflow_commit does not match canonical release source $source_commit" >&2
@@ -119,42 +136,6 @@ jobs:
           if [[ "$cargo_version" != "$version" ]]; then
             echo "Cargo version $cargo_version does not match release tag $tag" >&2
             exit 1
-          fi
-
-          # On the one-tag path the binary workflow owns CI qualification and
-          # creates the release. Wait for that exact tag-push run to succeed so
-          # an existing release cannot let extensions bypass a failed CI gate.
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" == "$tag" ]]; then
-            for attempt in {0..700}; do
-              binary_run=$(gh api --method GET \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/release-octet.yml/runs" \
-                -f head_sha="$source_commit" -f per_page=100 \
-                --jq "[.workflow_runs[] | select(.event == \"push\" and .head_branch == \"$tag\")] | max_by(.id) | .id // empty")
-              if [[ "$binary_run" =~ ^[0-9]+$ ]]; then
-                binary_identity=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$binary_run" \
-                  --jq '[.head_sha, .status, .conclusion] | @tsv')
-                IFS=$'\t' read -r binary_sha binary_status binary_conclusion <<< "$binary_identity"
-                if [[ "$binary_sha" != "$source_commit" ]]; then
-                  echo "binary release run $binary_run is not bound to $source_commit" >&2
-                  exit 1
-                fi
-                if [[ "$binary_status" == completed ]]; then
-                  if [[ "$binary_conclusion" != success ]]; then
-                    echo "binary release run $binary_run did not succeed: $binary_identity" >&2
-                    exit 1
-                  fi
-                  break
-                fi
-                echo "waiting for binary release run $binary_run: $binary_status"
-              else
-                echo "waiting for the binary release run for $tag"
-              fi
-              if (( attempt == 700 )); then
-                echo "timed out after 350 minutes waiting for the binary release for $tag" >&2
-                exit 1
-              fi
-              sleep 30
-            done
           fi
 
           if ! release_state=$(gh release view "$tag" \
@@ -226,31 +207,33 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   security:
+    if: needs.resolve.outputs.mode != 'ship'
     name: Audit release dependencies
     needs: resolve
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
       # Release audits and artifacts intentionally use clean dependency/build
       # state. Pull-request or branch caches must never enter a privileged
       # publish path.
       - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: cargo audit
       - run: cargo deny check
 
   launcher:
+    if: needs.resolve.outputs.mode != 'ship'
     name: Build verification launcher
     needs: [resolve, security]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
       - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       # Published-package verification installs, updates, and removes the
       # attached bundles from the settled release with this launcher; release
@@ -265,6 +248,7 @@ jobs:
           retention-days: 2
 
   build-bundles:
+    if: needs.resolve.outputs.mode != 'ship'
     name: Build executable-extension bundles
     needs: [resolve, security]
     runs-on: ubuntu-24.04
@@ -274,7 +258,7 @@ jobs:
       # pushes may select a different source for a workflow-only tooling repair.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@599c45df1a24c1c63ae1129a7e59f46654b8fb66
       # Extension release bundles and their smoke-test launcher are built from
@@ -399,6 +383,7 @@ jobs:
   publish:
     name: Sign and attach extension artifacts
     needs: [resolve, launcher, build-bundles]
+    if: always() && needs.resolve.result == 'success' && (needs.resolve.outputs.mode == 'ship' || (needs.launcher.result == 'success' && needs['build-bundles'].result == 'success'))
     runs-on: ubuntu-24.04
     # Gate the only job that can sign or mutate a canonical release.
     environment: stable-release-publish
@@ -409,14 +394,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
           fetch-depth: 0
+      - name: Download digest-verified unsigned candidate
+        if: needs.resolve.outputs.mode == 'ship'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: python3 scripts/release.py _download "$VERSION" --candidate "$CANDIDATE" --role extensions --group extensions --assets release-assets
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: needs.resolve.outputs.mode != 'ship'
         with:
           name: octet-executable-extension-bundles
           path: release-assets
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.3
       - name: Create checksums and keyless signatures
@@ -467,6 +460,7 @@ jobs:
       - name: Attach assets to the canonical octet release
         shell: bash
         env:
+          INPUT_CANDIDATE: ${{ inputs.candidate }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve.outputs.source_commit }}
@@ -476,6 +470,10 @@ jobs:
           WORKFLOW_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if [[ -n "${INPUT_CANDIDATE:-}" ]]; then
+            python3 scripts/release.py _signed "${RELEASE_TAG#v}" --candidate "$INPUT_CANDIDATE" --role extensions --assets release-assets
+            exit 0
+          fi
           verify=(
             --certificate-identity "$COSIGN_IDENTITY"
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
@@ -582,13 +580,14 @@ jobs:
           verify_release_refs publishing
 
   verify-published:
+    if: needs.resolve.outputs.mode != 'ship'
     name: Verify official install and update
     needs: [resolve, publish]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event_name == 'push' && needs.resolve.outputs.source_commit || github.sha }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: octet-extension-test-launcher

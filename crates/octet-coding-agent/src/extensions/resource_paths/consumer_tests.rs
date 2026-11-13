@@ -59,6 +59,21 @@ async fn fixture_with_start(
     root: &Path,
     hold: bool,
 ) -> (App, ExtensionProcess, Arc<Mutex<Vec<Request>>>) {
+    fixture_with_peer(root, hold, None).await
+}
+
+/// The same configured resource consumer, served by a remote UI peer: the
+/// generation that contributes the palette also mounts persistent chrome.
+pub(crate) async fn remote_ui_fixture(root: &Path, script: &str) -> (App, ExtensionProcess) {
+    let (app, process, _) = fixture_with_peer(root, false, Some(script)).await;
+    (app, process)
+}
+
+async fn fixture_with_peer(
+    root: &Path,
+    hold: bool,
+    remote_ui_peer: Option<&str>,
+) -> (App, ExtensionProcess, Arc<Mutex<Vec<Request>>>) {
     if hold {
         std::fs::write(root.join("hold-start"), "").unwrap();
     }
@@ -102,8 +117,15 @@ async fn fixture_with_start(
     std::fs::write(root.join("reply.json"), serde_json::to_vec(&serde_json::json!({
         "skill_paths": [root.join("skills")], "prompt_paths": [root.join("prompts")], "theme_paths": [root.join("themes")],
     })).unwrap()).unwrap();
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/extensions/resource_paths/consumer_fixture.py");
+    let script = match remote_ui_peer {
+        Some(source) => {
+            let script = root.join("remote-ui-peer.py");
+            std::fs::write(&script, source).unwrap();
+            script
+        }
+        None => Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/extensions/resource_paths/consumer_fixture.py"),
+    };
     let manifest = ExtensionManifest::parse(&format!(
         r#"
 name = "consumer-peer"
@@ -121,6 +143,8 @@ commands = ["release-start"]
     let mut runtime = ExtensionRuntimeConfig::new(&workspace);
     runtime.resource_paths = true; // Handwritten test peer, not a production offer.
     runtime.supervise = false;
+    let remote_ui_wake = remote_ui_peer.map(|_| Arc::new(tokio::sync::Notify::new()));
+    runtime.remote_ui = remote_ui_wake.clone();
     if hold {
         // This deadline also covers Python startup and initialize. A 250ms
         // fixture budget failed there under CI load, before the held hook was
@@ -145,6 +169,10 @@ commands = ["release-start"]
     let session = Session::create(root.join("consumer-session.jsonl")).unwrap();
     let owner = session.resource_owner_key();
     let mut extensions = ExecutableExtensions::default();
+    if remote_ui_wake.is_some() {
+        extensions.receivers.push(process.subscribe());
+        extensions.remote_ui_wake = remote_ui_wake;
+    }
     extensions.resource_owner = Some(owner.clone());
     extensions.session_lifecycle_started = true;
     // Exercise the actual deferred hook task and its awaited terminal response.

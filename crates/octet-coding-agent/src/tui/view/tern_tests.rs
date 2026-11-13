@@ -777,6 +777,127 @@ fn validated_images_upload_once_with_payload_free_nodes_and_policy_fallbacks() {
 }
 
 #[test]
+fn native_thinking_toggle_preserves_tool_clicks_and_overrides_reasoning_clicks() {
+    use super::super::{summarize_tool, ToolPanel};
+    use octet_ai::ToolCallId;
+
+    let (mut shell, mut surface, _) = setup(32);
+    let (thinking_id, tool_id) = {
+        let mut state = shell.state.borrow_mut();
+        state.push_block(TranscriptBlock::Reasoning(Box::new(
+            AssistantBlock::finalized_reasoning("retained reasoning".into()),
+        )));
+        let args = json!({"path":"src/lib.rs"});
+        state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("edit".into()),
+            "edit".into(),
+            args.to_string(),
+            summarize_tool("edit", &args),
+            "ok modified=1\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+                .into(),
+            true,
+            false,
+            None,
+            None,
+        ))));
+        (
+            state.transcript_commit_ids[0],
+            state.transcript_commit_ids[1],
+        )
+    };
+    let thinking = id(thinking_id, "reasoning");
+    let tool = id(tool_id, "tool");
+    let collapsed = |surface: &TernSurface, node_id: &str| {
+        find_node(&surface.sent.main, node_id)
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["collapsed"]
+            .as_bool()
+            .unwrap()
+    };
+    let click = |node_id: &str, collapsed| {
+        shell
+            .state
+            .native()
+            .lock()
+            .unwrap()
+            .messages
+            .push_back(Incoming::Event(Event::Toggle {
+                sf: SURFACE.into(),
+                id: node_id.into(),
+                collapsed,
+                key: None,
+            }));
+    };
+    surface.flush(&shell.state).unwrap();
+    click(&tool, false);
+    surface.flush(&shell.state).unwrap();
+    assert!(!collapsed(&surface, &tool));
+    assert!(shell.toggle_thinking());
+    surface.flush(&shell.state).unwrap();
+    assert!(!collapsed(&surface, &thinking));
+    assert!(!collapsed(&surface, &tool), "Ctrl+T resets the tool click");
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .extension_transcript
+            .expanded
+            .get(&tool_id),
+        Some(&true)
+    );
+
+    // Click state belongs to its mode: Ctrl+O keeps a reasoning click, while
+    // the next thinking choice overrides it, including extension render keys.
+    shell
+        .state
+        .native()
+        .lock()
+        .unwrap()
+        .messages
+        .push_back(Incoming::Event(Event::Toggle {
+            sf: SURFACE.into(),
+            id: thinking.clone(),
+            collapsed: true,
+            key: None,
+        }));
+    surface.flush(&shell.state).unwrap();
+    shell.toggle_disclosure();
+    surface.flush(&shell.state).unwrap();
+    assert!(
+        collapsed(&surface, &thinking),
+        "Ctrl+O resets the thinking click"
+    );
+    assert_eq!(
+        shell
+            .state
+            .borrow()
+            .extension_transcript
+            .expanded
+            .get(&thinking_id),
+        Some(&false)
+    );
+    shell.toggle_disclosure();
+    surface.flush(&shell.state).unwrap();
+    shell.toggle_thinking();
+    surface.flush(&shell.state).unwrap();
+    shell.toggle_thinking();
+    surface.flush(&shell.state).unwrap();
+    assert!(
+        !collapsed(&surface, &thinking),
+        "Ctrl+T loses to the thinking click"
+    );
+    assert!(!shell
+        .state
+        .borrow()
+        .extension_transcript
+        .expanded
+        .contains_key(&thinking_id));
+}
+
+#[test]
 fn completed_tool_uses_native_diff_and_retains_disclosure_gestures() {
     use super::super::{summarize_tool, ToolPanel};
     use octet_ai::ToolCallId;

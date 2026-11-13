@@ -4,6 +4,18 @@ Focused bug fixes, protocol and provider improvements, terminal UX work, tests
 and documentation corrections are welcome. The project is pre-1.0, so keep
 changes small and back them with evidence.
 
+## How changes reach main
+
+Send your change as a pull request. It is reviewed as untrusted code, and CI
+must pass. Maintainers and their agents push directly to `main` instead, as
+linear fast-forward commits, each checked by the full `scripts/gate.sh` on the
+exact commit (see [AGENTS.md](AGENTS.md)). `main` is always releasable, and the
+owner chooses when to release.
+
+Opening or reopening a PR adds its human author as an assignee, preserving any
+existing assignees. Bots and the repository owner are excluded. This automation
+reads event metadata only; it never checks out or executes contribution code.
+
 ## Development setup
 
 The octet source supports macOS and Linux and needs Rust 1.89 or newer. A native
@@ -88,7 +100,7 @@ failure. See the [testing lanes](docs/testing/README.md) for broader checks and
 platform limitations.
 
 Start with the narrowest regression that reproduces the behavior, then test the
-affected crate. Before requesting review, run:
+affected crate. Before requesting review, run `scripts/gate.sh` (or at least):
 
 ```sh
 cargo fmt --all -- --check

@@ -4,7 +4,7 @@ use sexy_tui_rs::{visible_width, RichRenderer};
 
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::bounded_tool_failure_reason;
-use super::tool_render::tool_value_indent_width;
+use super::tool_render::{tool_value_indent_width, ToolRows};
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel};
 use crate::tui::theme::OctetTheme;
 
@@ -24,13 +24,13 @@ pub(super) fn source(panel: &ToolPanel) -> Option<String> {
         .map(sanitize_for_terminal)
 }
 
-pub(super) fn render_source(
+pub(super) fn project_source(
     source: &str,
     renderer: &RichRenderer,
     theme: &OctetTheme,
     width: u16,
     expanded: bool,
-) -> Vec<String> {
+) -> ToolRows {
     let label = "Codemode";
     let indent = tool_value_indent_width(label);
     let prefix = format!(
@@ -48,6 +48,7 @@ pub(super) fn render_source(
     };
     let shown = document.lines.len() - hidden;
     let plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
+    let source_text = document.copy_text;
     let mut rows = document
         .lines
         .into_iter()
@@ -59,6 +60,14 @@ pub(super) fn render_source(
             fit_line(&format!("{prefix}{text}"), width)
         })
         .collect::<Vec<_>>();
+    let mut projected = ToolRows::rich_literal(
+        std::mem::take(&mut rows),
+        source_text,
+        indent as u16,
+        content_width,
+    );
+    projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+    projected.prefix("Codemode\n");
     if hidden > 0 {
         let ellipsis = if theme.unicode() { "…" } else { "..." };
         let unit = if hidden == 1 { "row" } else { "rows" };
@@ -71,12 +80,12 @@ pub(super) fn render_source(
         } else {
             short
         };
-        rows.push(fit_line(
+        projected.decoration(fit_line(
             &format!("{continuation}{}", subdued_text(theme, &hint)),
             width,
         ));
     }
-    rows
+    projected
 }
 
 /// Byte length of the leading blank lines plus a first non-empty line that only
@@ -107,14 +116,14 @@ fn repeated_failure_status_len(panel: &ToolPanel, sanitized: &str) -> usize {
 /// A bounded literal preview; long single-line JSON cannot flood the native
 /// surface. This is UI elision, not a claim that captured bytes were discarded.
 /// One owned copy per call: the sanitized text is trimmed in place.
-pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
+fn output_preview(panel: &ToolPanel, expanded: bool) -> (String, bool) {
     let mut output = sanitize_for_terminal(&panel.output);
     let skip = repeated_failure_status_len(panel, &output);
     if skip > 0 {
         output.drain(..skip);
     }
     if expanded {
-        return output;
+        return (output, false);
     }
     let mut end = 0;
     let mut lines = 1;
@@ -125,26 +134,48 @@ pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
         lines += usize::from(ch == '\n');
         end = offset + ch.len_utf8();
     }
-    if end == output.len() {
-        output
-    } else {
-        output.truncate(end);
-        output.push_str("\n(output preview; Ctrl+O for full output)");
-        output
-    }
+    let hidden = end < output.len();
+    output.truncate(end);
+    (output, hidden)
 }
 
-/// Script output is literal data, not Markdown or a guessed diff.
-pub(super) fn render_output(
+pub(super) fn project_output(
     panel: &ToolPanel,
     theme: &OctetTheme,
     width: u16,
     expanded: bool,
-) -> Vec<String> {
-    output_text(panel, expanded)
+) -> ToolRows {
+    let (text, hidden) = output_preview(panel, expanded);
+    let rows = text
         .lines()
         .flat_map(|line| wrap_hanging(&theme.fg("tool_output", line), "", "", width))
-        .collect()
+        .collect();
+    let mut output = ToolRows::literal(rows, text, 0);
+    output.retain_rows(&(0..output.lines.len()).collect::<Vec<_>>());
+    if hidden {
+        for row in wrap_hanging(
+            &theme.fg("tool_output", "(output preview; Ctrl+O for full output)"),
+            "",
+            "",
+            width,
+        ) {
+            output.decoration(row);
+        }
+    }
+    output
+}
+
+pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
+    let (mut text, hidden) = output_preview(panel, expanded);
+    if hidden {
+        text.push_str("\n(output preview; Ctrl+O for full output)");
+    }
+    text
+}
+
+#[cfg(test)]
+fn render_output(panel: &ToolPanel, theme: &OctetTheme, width: u16, expanded: bool) -> Vec<String> {
+    project_output(panel, theme, width, expanded).lines
 }
 
 #[cfg(test)]

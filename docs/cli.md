@@ -57,6 +57,20 @@ becomes model input. In print/plain it reports on stderr. RPC `get_state` and
 `cache_warmed` with `usage`, exact integer `cost`, and `extensionOverride`,
 without assistant-message or turn events. Its usage is session-only.
 
+## Workspace selection
+
+Without `--workspace`, octet starts from the process's current directory (not
+`$PWD`), uses the nearest ancestor with a `.git` directory or worktree `.git`
+file, and otherwise keeps the current directory. Discovery stops **before your
+home directory**: a dotfiles repository at `~/.git` doesn't make all your home
+projects share one workspace. Launching at home still uses home. Paths are
+canonicalized, including symlinked home and invocation paths.
+
+`--workspace PATH` always wins, including `--workspace "$HOME"`. The selected
+root controls relative tool paths, default shell cwd, trusted project resources
+and [workspace-scoped sessions](sessions.md#resume-and-branch). A subdirectory
+of an ordinary project still uses that project's Git root by default.
+
 ## Tools and limits
 
 | Option | What it does |
@@ -99,7 +113,9 @@ argument. The subscription choices are ChatGPT (Codex), GitHub Copilot, Grok, Ki
 [first-run behavior and credential
 privacy](providers.md#first-run-setup-unreleased). The `octet setup` subcommand
 below still configures explicit custom endpoints, and print and RPC modes never
-open onboarding.
+open onboarding. With no provider, headless startup recommends `octet --safe-mode`
+in a terminal for that first-run flow, or `octet setup --help` for endpoint options;
+it omits an empty availability list.
 
 ```text
 octet --login codex
@@ -155,6 +171,11 @@ endpoints](providers.md#local-and-custom-endpoints).
 
 ## Sessions and diagnostics
 
+`extension list`, `--list-models`, `sessions list` and `sessions search` align
+columns by display width on terminals. Descriptive text is ellipsized to fit;
+long identifiers wrap without losing their values. Redirected output keeps the
+full tab-separated rows and the same headers.
+
 ```text
 octet --continue  # -c also continues
 octet -r "prompt after choosing a session"  # boolean resume picker
@@ -193,7 +214,9 @@ so opting out of credential scrubbing doesn't widen that boundary. JSONL is
 Octet's whole durable graph, **not Pi output**; HTML is view-only. Import creates
 a new private session from supported Octet or Pi v3 data, refusing unsupported
 semantics and never granting imported extension/effect authority. Sharing requires
-review and explicit confirmation of an exact redacted snapshot; `--yes` authorizes
+review and explicit confirmation of an exact redacted snapshot. The review path,
+SHA-256 and redaction count each print on their own control-safe line in both
+terminals and pipes; `--yes` authorizes
 an **unlisted**, not private, GitHub gist. Anyone with its link can read it.
 No upload is attempted before approval, and cancellation cannot undo an accepted
 publication. `doctor` runs
@@ -206,6 +229,9 @@ read-mostly checks without starting an agent or an extension. See
 octet eval run SUITE [--artifact-dir DIR] [--baseline REPORT.json]
 octet eval run SUITE --model-profile /absolute/private-model.json
 ```
+
+The console report prints its summary, backend, cases and totals on separate
+lines in both terminals and pipes, with untrusted controls neutralized.
 
 The default is a harness-owned scripted fixture, **not** a model benchmark.
 `--model-profile` explicitly selects an independently running local model
@@ -319,11 +345,16 @@ first. It isn't stable.
 ## Pi import
 
 ```text
-octet migrate pi --dry-run [--json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
+octet migrate pi [--dry-run | --yes | --undo | --details | --json] [--pi-home PATH] [--project PATH] [--npm-root PATH]
 ```
 
-The dry run only reads. It uses no model tokens, runs no package code and
-changes no files. `--json` gives versioned machine output, and `--npm-root` adds
+Without flags it shows a short overview and asks before turning your Pi setup on
+(installing and enabling the Pi adapter, with octet's config backed up first).
+`--dry-run` shows the overview and changes nothing; `--yes` skips the question;
+`--undo` turns the adapter off. The overview uses styling only on a terminal;
+`NO_COLOR`, `--color never` and redirected output keep it plain. Untrusted paths
+remain control-safe in either form. The scan uses no model tokens and runs no
+package code, and Pi's settings are never written. `--json` gives versioned machine output, and `--npm-root` adds
 an explicit legacy `node_modules` search root. `octet migrate import pi` and
 `octet migrate restore` are separate, explicit steps that never copy credentials
 or modify Pi sources. Inventory classifications aren't runtime compatibility

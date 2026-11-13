@@ -1159,6 +1159,127 @@ async fn native_theme_selection_cannot_mutate_a_ceded_terminal() {
 }
 
 #[tokio::test]
+async fn held_native_editor_fence_preserves_in_flight_seed_but_newer_user_input_wins() {
+    use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
+
+    for newer_user_input in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut extensions, _) = fixture(&temp).await;
+        let mut frontend = Frontend::new([]);
+        extensions.remote_ui.set_handoff_pending(true);
+        command(&mut extensions, &mut frontend, &["editor"]).await;
+        let mount = &extensions.remote_ui.mounts[0];
+        let owner = mount.owner.clone();
+        let process = mount.process.clone();
+        let surface = mount.surface_id.clone();
+        let fence = mount.view.id.clone();
+        let native = |ui: &mut RemoteUi, shell: &mut InteractiveShell, editor_id, operation| {
+            ui.apply(
+                process.clone(),
+                owner.clone(),
+                ExtensionRemoteUiOperation::Chrome {
+                    chrome: Chrome::Editor {
+                        surface_id: surface.clone(),
+                        mount_id: Some(fence.clone()),
+                        editor_id,
+                        operation,
+                    },
+                },
+                shell,
+                false,
+            )
+            .unwrap()
+        };
+        let created = native(
+            &mut extensions.remote_ui,
+            &mut frontend.shell,
+            None,
+            serde_json::json!({"op":"create","padding_x":0,"autocomplete_max_visible":5}),
+        );
+        let editor_id = created["editor_id"].as_str().unwrap().to_owned();
+        for operation in [
+            serde_json::json!({"op":"bind"}),
+            serde_json::json!({"op":"set_text","text":"/cmd α尾"}),
+            serde_json::json!({"op":"input","data":"\x1b[D","action":"left","disable_submit":false}),
+        ] {
+            native(
+                &mut extensions.remote_ui,
+                &mut frontend.shell,
+                Some(editor_id.clone()),
+                operation,
+            );
+        }
+        // Force the handoff between the synchronous native mutation and its
+        // later composer/set checkpoint. No adapter timer controls this order.
+        assert_eq!(
+            frontend.shell.extension_editor_snapshot().text,
+            "untouched draft"
+        );
+        let (expected_text, expected_cursor) = if newer_user_input {
+            frontend
+                .shell
+                .extension_set_editor_at("user α尾".into(), Some("user α".len()));
+            ("user α尾", "user α".len())
+        } else {
+            ("/cmd α尾", "/cmd α".len())
+        };
+        let recovery = frontend.shell.extension_editor_snapshot();
+        let identity = extensions.remote_ui.mounts[0]
+            .editors
+            .composer_identity()
+            .unwrap();
+        extensions.remote_ui.palette_published();
+        extensions.remote_ui.set_handoff_pending(false);
+        extensions.remote_ui.settle_held(&mut frontend.shell);
+        let mount = &extensions.remote_ui.mounts[0];
+        let snapshot = mount.editors.composer_snapshot().unwrap();
+        assert_eq!(
+            frontend.shell.extension_editor_snapshot().revision,
+            recovery.revision
+        );
+        if !newer_user_input {
+            assert_eq!(mount.editors.composer_identity().unwrap(), identity);
+        }
+        assert_eq!(snapshot.text, expected_text);
+        assert_eq!(snapshot.cursor, expected_cursor);
+        assert!(mount.held.as_ref().unwrap().awaiting_checkpoint);
+        let checkpoint = ExtensionEditorCheckpoint {
+            surface_id: surface.clone(),
+            mount_id: fence.clone(),
+            input_revision: mount.editor.as_ref().unwrap().input_revision,
+            checkpoint_revision: 1,
+        };
+        extensions
+            .remote_ui
+            .checkpoint_editor(&owner, &checkpoint, snapshot.text, &mut frontend.shell)
+            .unwrap();
+        let committed = frontend.shell.extension_editor_snapshot();
+        assert_eq!(committed.text, expected_text);
+        assert_eq!(committed.cursor, expected_cursor);
+        extensions.remote_ui.settle_held(&mut frontend.shell);
+        let mount = &extensions.remote_ui.mounts[0];
+        assert!(
+            mount.held.is_some(),
+            "checkpoint alone must not reveal the editor"
+        );
+        assert!(!mount.held.as_ref().unwrap().awaiting_checkpoint);
+        let frame = ExtensionRemoteUiFrame {
+            generation: owner.process_generation,
+            resource_owner: owner.clone(),
+            surface_id: surface,
+            revision: mount.revision.map_or(0, |revision| revision + 1),
+            columns: mount.view.columns,
+            rows: mount.view.rows,
+            lines: vec![expected_text.into()],
+        };
+        assert!(extensions.remote_ui.accept_frame(&process, frame));
+        extensions.remote_ui.settle_held(&mut frontend.shell);
+        assert!(extensions.remote_ui.mounts[0].held.is_none());
+        extensions.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn native_editor_service_requires_its_exact_owner_mount_and_live_surface() {
     use octet_agent::extension_remote_ui::ExtensionRemoteUiChrome as Chrome;
     let temp = tempfile::tempdir().unwrap();

@@ -1,0 +1,33 @@
+name: Assign PR author
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions: { pull-requests: write }
+
+jobs:
+  assign-author:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Add the human author as an assignee
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
+              event = json.load(source)
+          author = event["pull_request"]["user"]
+          owner = event["repository"]["owner"]["login"]
+          if author["type"] != "Bot" and author["login"].casefold() != owner.casefold():
+              subprocess.run(
+                  ["gh", "api", "--method", "POST",
+                   f"repos/{os.environ['GITHUB_REPOSITORY']}/issues/{event['number']}/assignees",
+                   "-f", f"assignees[]={author['login']}"],
+                  check=True, stdout=subprocess.DEVNULL,
+              )
+          PY

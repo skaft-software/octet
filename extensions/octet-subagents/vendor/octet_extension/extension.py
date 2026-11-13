@@ -1765,7 +1765,7 @@ class Extension:
             )
         integer_limits = {
             "max_depth": (max_depth, 1, 1),
-            "max_concurrent_children": (max_concurrent_children, 1, 8),
+            "max_concurrent_children": (max_concurrent_children, 1, 16),
             "max_output_bytes": (max_output_bytes, 512, 16 * 1024),
         }
         for name, (value, minimum, maximum) in integer_limits.items():

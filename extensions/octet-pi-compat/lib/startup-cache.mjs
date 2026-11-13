@@ -12,21 +12,17 @@ import module from 'node:module';
 // is not private, so the adapter owns an explicit owner-only directory:
 //
 //   1. `OCTET_PI_COMPAT_CACHE` — explicit override, also used by tests;
-//   2. `<OCTET_EXTENSION_DIR>/.cache` — the reviewed extension directory, so
-//      the cache follows the install and survives a fresh HOME (the review
-//      capture warms this exact directory);
-//   3. `~/.cache/octet-pi-compat` — a standalone run without an extension dir.
+//   2. `$XDG_CACHE_HOME/octet-pi-compat`, or `~/.cache/octet-pi-compat`.
+//
+// Never put default caches under OCTET_EXTENSION_DIR: the native reload watcher
+// observes that tree. Learning a module resolution must not restart the adapter,
+// rerun session_start or replace an already-mounted footer.
 //
 // A directory that cannot be created or is not writable falls through to the
 // next choice, and the last resort is jiti's own default.
 export function startupCacheDirectory() {
   const explicit = process.env.OCTET_PI_COMPAT_CACHE;
   if (explicit) return ensure(explicit);
-  const extensionDir = process.env.OCTET_EXTENSION_DIR;
-  if (extensionDir) {
-    const local = ensure(join(extensionDir, '.cache'));
-    if (local) return local;
-  }
   try {
     const base = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
     return ensure(join(base, 'octet-pi-compat'));

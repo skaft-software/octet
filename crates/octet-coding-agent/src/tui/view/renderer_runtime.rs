@@ -1556,7 +1556,7 @@ impl ShellComponent {
         }
     }
 
-    fn isolated(state: SharedState, application_viewport: bool) -> Self {
+    pub(super) fn isolated(state: SharedState, application_viewport: bool) -> Self {
         let mut component = Self::new(state, application_viewport);
         let theme = component.state.borrow().theme.clone();
         component.owner = Some(RefCell::new(RenderOwner::new(theme)));

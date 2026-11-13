@@ -187,6 +187,56 @@ impl Fixture {
         }
     }
 
+    /// A reviewed, offline Pi editor in this pane's disposable HOME only.
+    fn enable_pi_editor(&self) {
+        let adapter = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extensions/octet-pi-compat")
+            .canonicalize()
+            .unwrap();
+        let factory = self.root().join("reload-editor.ts");
+        fs::write(
+            &factory,
+            r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+class ReloadEditor extends CustomEditor {
+  renderTopBorder(width) { return 'PI-RELOAD-EDITOR'.padEnd(width, '-'); }
+}
+export default pi => pi.on('session_start', (_, ctx) =>
+  ctx.ui.setEditorComponent((t, theme, keys) => new ReloadEditor(t, theme, keys)));
+"#,
+        )
+        .unwrap();
+        let node = Command::new("node")
+            .args(["-p", "process.execPath"])
+            .output()
+            .expect("Node is required for Pi adapter PTY acceptance");
+        assert!(node.status.success());
+        let node = String::from_utf8(node.stdout).unwrap();
+        let configured = Command::new(node.trim())
+            .arg(adapter.join("configure.mjs"))
+            .args(["--reviewed", "--output"])
+            .arg(self.home.join(".octet/extensions/octet-pi-compat"))
+            .arg(factory)
+            .current_dir(&self.workspace)
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("PI_OFFLINE", "1")
+            .env("OCTET_PI_AGENT_DIR", self.root().join("pi-agent"))
+            .output()
+            .expect("configure reviewed Pi editor fixture");
+        assert!(
+            configured.status.success(),
+            "{}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        fs::write(
+            self.home.join(".octet/config.toml"),
+            "enabled_extensions = [\"octet-pi-compat\"]\n",
+        )
+        .unwrap();
+    }
+
     /// One executable scratch copy of the built binary.
     fn copy_binary(&self, name: &str) -> PathBuf {
         let destination = self.bin.join(name);
@@ -276,6 +326,12 @@ impl Pane {
     /// cannot.
     fn ps_argv(&self) -> String {
         process_argv_line(self.pid())
+    }
+
+    /// The pane's current argv, or `None` while the kernel reports none (an
+    /// `execve` is replacing the image). Safe to poll.
+    fn try_ps_argv(&self) -> Option<String> {
+        try_process_argv_line(self.pid())
     }
 
     /// Poll the pane's PTY and liveness until `ready` holds.
@@ -654,31 +710,30 @@ fn shell_quote(path: &Path) -> String {
 }
 
 fn process_argv_line(pid: i32) -> String {
+    try_process_argv_line(pid).unwrap_or_else(|| panic!("no argv reported for pid {pid}"))
+}
+
+/// The process's argv, or `None` when it cannot be read or is momentarily
+/// empty (the kernel reports no argv while an `execve` replaces the image).
+fn try_process_argv_line(pid: i32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let bytes = fs::read(format!("/proc/{pid}/cmdline"))
-            .unwrap_or_else(|error| panic!("cannot read /proc/{pid}/cmdline: {error}"));
+        let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         let args = bytes
             .split(|byte| *byte == 0)
             .filter(|part| !part.is_empty())
             .map(|part| String::from_utf8_lossy(part).into_owned())
             .collect::<Vec<_>>();
-        assert!(
-            !args.is_empty(),
-            "the kernel reported no argv for pid {pid}"
-        );
-        args.join(" ")
+        (!args.is_empty()).then(|| args.join(" "))
     }
     #[cfg(not(target_os = "linux"))]
     {
         let output = Command::new("/bin/ps")
             .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
             .output()
-            .unwrap_or_else(|error| panic!("cannot run ps for pid {pid}: {error}"));
-        assert!(output.status.success(), "ps failed for pid {pid}");
+            .ok()?;
         let line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        assert!(!line.is_empty(), "ps reported no argv for pid {pid}");
-        line
+        (output.status.success() && !line.is_empty()).then_some(line)
     }
 }
 
@@ -939,8 +994,13 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
 
     // (b)/(d) same pid, new image, responsive pane.
     assert_eq!(pane.pid(), pane_pid, "exec preserves the pane pid");
+    let image_path = image.to_str().expect("image path");
     pane.wait_until(STEP_TIMEOUT, "the replacement image argv", |pane| {
-        pane.ps_argv().contains("--resume")
+        // `--resume` alone also matches the marker wrapper's own shell stage
+        // (`/bin/sh <launch> --resume ...`), which `exec`s the image a moment
+        // later; only the replacement image's argv carries its path.
+        pane.try_ps_argv()
+            .is_some_and(|argv| argv.contains("--resume") && argv.contains(image_path))
     });
     let argv = pane.ps_argv();
     assert!(
@@ -963,16 +1023,33 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
     pane.shutdown();
 }
 
-/// (3) An unchanged executable stays in this process, says so, and never runs
-/// the candidate path that a re-exec would have used.
+/// (3) An explicit `/reload --force` restarts even an unchanged executable on
+/// Unix: the same on-disk image replaces this process in place and resumes the
+/// exact session, so stale extension runtime state cannot survive a force.
 #[test]
-fn real_octet_reload_with_an_unchanged_binary_stays_in_place_and_reports_it() {
+fn real_octet_forced_reload_restarts_an_unchanged_binary_and_resumes_the_same_session() {
+    forced_unchanged_binary_restart(false);
+}
+
+#[test]
+fn real_octet_pi_editor_forced_reload_restarts_and_resumes_the_same_session() {
+    forced_unchanged_binary_restart(true);
+}
+
+fn forced_unchanged_binary_restart(pi_editor: bool) {
     let _guard = pty_lock().lock().unwrap_or_else(PoisonError::into_inner);
     let fixture = Fixture::new(UNREACHABLE_PROVIDER);
+    if pi_editor {
+        fixture.enable_pi_editor();
+    }
     let launch = fixture.copy_binary("octet");
-    let marker = fixture.root().join("reexec-marker.log");
     let mut pane = Pane::spawn(fixture, &launch);
     let session = pane.await_ready(STARTUP_TIMEOUT);
+    let session_id = session_id_of(&session);
+    let pane_pid = pane.pid();
+    if pi_editor {
+        pane.wait_for(b"PI-RELOAD-EDITOR", STARTUP_TIMEOUT);
+    }
     let before_argv = pane.ps_argv();
     assert!(
         !before_argv.contains("--resume"),
@@ -980,45 +1057,43 @@ fn real_octet_reload_with_an_unchanged_binary_stays_in_place_and_reports_it() {
     );
 
     pane.pty.write_input(b"/reload --force\r");
-    pane.wait_for(b"binary unchanged", STEP_TIMEOUT);
+    pane.wait_for(b"reloading into build", STEP_TIMEOUT);
+    pane.wait_for(b"To resume this session", STEP_TIMEOUT);
     assert!(
-        contains_bytes(&pane.pty.output, b"resources reloaded"),
-        "the unchanged notice must be the resources-only one: {}",
+        !contains_bytes(&pane.pty.output, b"binary unchanged"),
+        "a forced reload must not fall back to the resources-only notice: {}",
         visible(&pane.pty.output)
-    );
-    // Both of these are written only after the interactive loop decides to
-    // leave the TUI for a replacement image.
-    assert!(
-        !contains_bytes(&pane.pty.output, b"reloading into build"),
-        "an unchanged binary must not produce a ready plan: {}",
-        visible(&pane.pty.output)
-    );
-    assert!(
-        !contains_bytes(&pane.pty.output, b"To resume this session"),
-        "an unchanged binary must not leave the TUI: {}",
-        visible(&pane.pty.output)
-    );
-    assert!(
-        !marker.exists(),
-        "no candidate was ever installed, so no wrapper may have run"
-    );
-    // Any re-exec would have replaced the kernel-visible argv by now.
-    thread::sleep(Duration::from_millis(300));
-    pane.pty.read_available();
-    let after_argv = pane.ps_argv();
-    assert!(
-        !after_argv.contains("--resume"),
-        "the running image was replaced despite an unchanged binary: {after_argv}"
     );
     assert_eq!(
-        after_argv, before_argv,
-        "an unchanged binary must keep the exact image and argv it started with"
+        courtesy_resume_id(&pane.pty.output).as_deref(),
+        Some(session_id.as_str()),
+        "the courtesy line must name the resumed session"
     );
-    assert_eq!(pane.session_files(), vec![session.clone()]);
 
-    // Still fully responsive and able to exit cleanly.
+    // Same pid, same on-disk image, now resuming the pane's own session.
+    assert_eq!(pane.pid(), pane_pid, "exec preserves the pane pid");
+    let launch_path = launch.to_str().expect("launch path");
+    pane.wait_until(STEP_TIMEOUT, "the restarted image argv", |pane| {
+        pane.try_ps_argv()
+            .is_some_and(|argv| argv.contains("--resume") && argv.contains(launch_path))
+    });
+    let argv = pane.ps_argv();
+    assert!(
+        argv.contains(&session_id),
+        "the restarted process must resume the pane's session: {argv}"
+    );
+    let courtesy_at = find_bytes(&pane.pty.output, b"To resume this session")
+        .expect("observed above")
+        + b"To resume this session".len();
+    pane.wait_for_suffix(courtesy_at, b"custom/probe", STEP_TIMEOUT);
+    if pi_editor {
+        pane.wait_for_suffix(courtesy_at, b"PI-RELOAD-EDITOR", STEP_TIMEOUT);
+    }
     pane.pty.write_input(b"/verbose on\r");
     pane.wait_for(b"verbose transcript enabled", STEP_TIMEOUT);
+
+    // The restart kept the same durable session and created no second one.
+    assert_eq!(pane.session_files(), vec![session.clone()]);
     pane.shutdown();
 }
 

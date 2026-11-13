@@ -10,6 +10,43 @@ Every command below is quoted from CI configuration
 lanes; it does not record results. When you report a pass, name the exact
 command that produced it.
 
+## The pre-push gate
+
+Main is always releasable. Follow [AGENTS.md](../../AGENTS.md): maintainer work
+lands as linear fast-forward commits, not PRs. Fetch `origin/main`, check author identities, and
+run the full gate on the exact commit before pushing:
+
+```sh
+CARGO_BUILD_JOBS=6 scripts/gate.sh
+```
+
+Only the full gate qualifies a push. A remote Linux build host is fine. It runs
+CI's Linux `quality` and `test` checks: fmt, clippy, workspace tests and doctests,
+the native editor host and release-catalog Node suites, Python tooling tests,
+release packaging checks and the no-default-features check. Each step prints
+PASS or FAIL; failures do not stop later steps. The final summary exits nonzero
+if any step failed. This does not replace other CI lanes or release qualification.
+
+Use CI's Rust 1.89.0 with rustfmt and clippy, Rust 1.90.0 for packaging, Node
+22.19.0, Python 3 and ripgrep. The gate reads named commands and npm dependency
+setup from `.github/workflows/ci.yml`; keep it and its contract test in sync when
+CI changes. Full mode runs CI's npm installs. Cache dependencies first for an
+offline run. It does not install toolchains. Tests use temporary HOME and TMPDIR
+outside the checkout, while retaining Cargo and rustup caches.
+
+For iteration only:
+
+```sh
+CARGO_BUILD_JOBS=6 scripts/gate.sh --quick --base origin/main
+```
+
+Quick mode runs only fmt, workspace clippy and tests for touched workspace
+crates. The base defaults to `origin/main`; the script does not fetch. The diff
+includes tracked working changes. Workspace manifest, lockfile or toolchain
+changes select every crate; changes outside crates select no crate tests.
+`CARGO_TARGET_DIR` and `CARGO_BUILD_JOBS` are honored in both modes. `--help`
+lists options. Never use a quick pass as push evidence.
+
 ## The local loop
 
 Start with the credential-free smoke lane (Python 3.10+, Rust 1.89+):
@@ -49,12 +86,12 @@ PYTHONPATH='.' python3 -m unittest discover -s tests -t .
 
 ## CI tiers
 
-Every pull request runs the fast tier: `dependency-review`, `dependencies`,
-`quality`, and `test (ubuntu-24.04)`. A PR labeled `ci:full`, a push to `main`,
-or a manual CI dispatch also runs the full tier. Main takes direct pushes and
-squash PRs; the workflow still declares a `merge_group` trigger for
-compatibility, but no merge queue produces those runs. The dispatch-only
-`release-candidate` job retains its narrower trigger.
+Maintainer work lands as gated, linear fast-forward pushes; outside contributions
+arrive as PRs, which select the fast tier (`dependency-review`, `dependencies`,
+`quality`, and `test (ubuntu-24.04)`), or the full tier with `ci:full`. Main pushes
+and manual CI dispatches run the full tier. The retained `merge_group` trigger
+has no merge queue. The dispatch-only `release-candidate` job retains its
+narrower trigger.
 
 | Lane | Tier / runner | What it proves |
 | --- | --- | --- |

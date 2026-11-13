@@ -195,7 +195,7 @@ pub enum ExtensionRuntimeManagerError {
     #[error(transparent)]
     ResourceExhausted(#[from] ExtensionResourceExhausted),
     /// Process start/reload failed without exposing arbitrary child diagnostics.
-    #[error("extension runtime {failure:?}")]
+    #[error("{}", failure_text(*failure, detail.as_deref()))]
     Failed {
         /// Bounded secret-safe failure class.
         failure: ExtensionRuntimeFailure,
@@ -203,6 +203,41 @@ pub enum ExtensionRuntimeManagerError {
         /// never child output.
         detail: Option<String>,
     },
+}
+
+/// Plain words for a startup failure, with the host's own launch detail (a
+/// missing or unusable executable) when there is one. Never child output.
+fn failure_text(failure: ExtensionRuntimeFailure, detail: Option<&str>) -> String {
+    let reason = match failure {
+        ExtensionRuntimeFailure::NotEligible => "it is not enabled and trusted",
+        ExtensionRuntimeFailure::StaleSource => "its source changed while starting",
+        ExtensionRuntimeFailure::Launch => "its process exited during startup",
+        ExtensionRuntimeFailure::Protocol => "it failed the startup handshake",
+        ExtensionRuntimeFailure::StartupTimeout => "it did not finish starting in time",
+        ExtensionRuntimeFailure::ManagerClosed => "octet was shutting down",
+    };
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("{reason} ({detail})"),
+        _ => reason.to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn startup_failures_read_as_plain_words() {
+    let error = ExtensionRuntimeManagerError::Failed {
+        failure: ExtensionRuntimeFailure::Launch,
+        detail: None,
+    };
+    assert_eq!(error.to_string(), "its process exited during startup");
+    let error = ExtensionRuntimeManagerError::Failed {
+        failure: ExtensionRuntimeFailure::Launch,
+        detail: Some("bin/codemode is not executable".into()),
+    };
+    assert_eq!(
+        error.to_string(),
+        "its process exited during startup (bin/codemode is not executable)"
+    );
 }
 
 /// Current externally observable manager state.

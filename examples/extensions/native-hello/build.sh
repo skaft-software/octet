@@ -31,9 +31,11 @@ lib="$CARGO_TARGET_DIR/debug/liboctet_extension.a"
 "${CXX:-c++}" -std=c++17 "${flags[@]}" -I"$root/sdk/c/include" -I"$root/sdk/cpp/include" "$here/cpp/main.cpp" "$lib" "${libs[@]}" -o "$out/hello-cpp"
 "${CC:-cc}" -std=c11 "${flags[@]}" -I"$root/sdk/c/include" "$root/sdk/c/tests/abi.c" "$lib" "${libs[@]}" -o "$out/probe-c"
 "${CXX:-c++}" -std=c++17 "${flags[@]}" -I"$root/sdk/c/include" -I"$root/sdk/cpp/include" "$root/sdk/cpp/tests/probe.cpp" "$lib" "${libs[@]}" -o "$out/probe-cpp"
-python3 - "$out" <<'PY'
-import pathlib, sys
+python3 - "$out" "$root" <<'PY'
+import pathlib, sys, tomllib
 out = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2])
+version = tomllib.loads((root / 'Cargo.toml').read_text())['workspace']['package']['version']
 for language in ('rust', 'c', 'cpp'):
     name = 'native-hello-' + language
     package = out / 'extensions' / name
@@ -44,7 +46,7 @@ for language in ('rust', 'c', 'cpp'):
     (package / 'extension.toml').write_text(f'''name = "{name}"
 version = "0.1.0"
 api_version = "0.4"
-requires_octet = "=0.9.6"
+requires_octet = "={version}"
 [entrypoint]
 command = {binary}
 [capabilities]

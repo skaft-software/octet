@@ -809,7 +809,7 @@ impl fmt::Display for ProviderSetupState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoProvider => formatter.write_str(
-                "no provider is configured; run `octet setup --yes` or start interactive octet",
+                "no provider is configured; run `octet --safe-mode` in a terminal for interactive setup, or `octet setup --help` for an explicit endpoint",
             ),
             Self::EndpointUnreachable => formatter.write_str(
                 "the selected endpoint could not be reached; retry, edit it, or enter a model manually",

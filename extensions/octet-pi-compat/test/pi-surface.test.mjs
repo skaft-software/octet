@@ -78,19 +78,38 @@ test('ctx is a facade: optional members are absent while refusing operations sti
 });
 
 test('footer data is a read-only facade whose optional private mutators are absent', async t => {
-  const runtime = new Runtime({extensions: []}, {});
-  t.after(() => runtime.uninstallChildren());
-  const state = {owner, alive: true, workspace: root, host: {}, statuses: new Map([['fixture', 'ready']]), uiQueues: new Map()};
+  const runtime = new Runtime({extensions: []}, {
+    async request(method) {
+      assert.ok(['ui/open', 'ui/close'].includes(method), method);
+      return method === 'ui/open' ? {columns: 80, rows: 24} : {};
+    },
+    async notify(method) { assert.equal(method, 'ui/frame'); },
+  });
+  t.after(async () => {
+    try { await runtime.ui.shutdown(); } finally { runtime.uninstallChildren(); }
+  });
+  const state = {key: 'footer-facade', owner, alive: true, workspace: root, host: {git_branch: null},
+    statuses: new Map([['fixture', 'ready']]), uiQueues: new Map(), branchListeners: new Set()};
   const store = {id: 1, state, controller: new AbortController(), pending: new Set(), errors: []};
   runtime.foreground = state; runtime.features.add('remote_ui');
-  runtime.ui.mount = async (_store, _placement, _title, make) => make({}, {});
   const ctx = createContext(runtime, store);
-  await ctx.ui.setFooter((_tui, _theme, data) => {
+  let surface, disposed = false;
+  // Keep the real mount: footer factories run in its surface-bound owner scope.
+  await ctx.ui.setFooter((tui, _theme, data) => {
+    surface = runtime.scope.getStore().surface;
+    assert.equal(surface.store.state, state);
+    assert.equal(surface.tui.facade, tui);
     assert.equal(data.setExtensionStatus, undefined);
     assert.equal(data.clearExtensionStatuses, undefined);
     assert.equal(typeof data.onBranchChange, 'function');
     assert.deepEqual(data.getExtensionStatuses(), state.statuses);
     assert.throws(() => { data.setExtensionStatus = () => {}; }, /unsupported_feature/);
-    return {render: () => [], invalidate() {}};
+    data.onBranchChange(() => {});
+    return {render: () => [], invalidate() {}, dispose() { disposed = true; }};
   });
+  assert.equal(state.branchListeners.size, 1);
+  await runtime.ui.close(surface);
+  assert.equal(disposed, true);
+  assert.equal(state.branchListeners.size, 0);
+  assert.equal(runtime.ui.surfaces.size, 0);
 });

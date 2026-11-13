@@ -1,18 +1,30 @@
 # Migrating from Pi
 
-Inspect your Pi setup before importing anything:
+Bring your Pi setup into octet with one command:
 
 ```console
-octet migrate pi --dry-run
+octet migrate pi
 ```
 
-This scanner reads local files without running package code, starting a model,
-or changing either setup. It always runs dry, even without `--dry-run`; it is
-not an apply command or an extension-compatibility promise. Inventory, portable
-setup import/restore, and [native provider support](providers.md) are separate
-capabilities. The former bridge and its `octet pi` command family remain removed.
-A separate, explicitly configured [optional Pi adapter](pi-compatibility.md) can
-load reviewed factories; migration commands neither install nor start it.
+It shows a short overview of what it found (extensions, skills, prompts,
+themes, and packages turned off in Pi), says what turning it on does, and asks
+once. Answering yes installs the [Pi adapter](pi-compatibility.md), backs up
+octet's config to `~/.octet/backups/` and turns the adapter on. Your Pi settings
+are never written, and Pi keeps working as before. Your Pi extensions then run
+with your user permissions, as they do in Pi.
+
+| Command | What it does |
+|---|---|
+| `octet migrate pi --dry-run` | Shows the overview and changes nothing |
+| `octet migrate pi --yes` | Turns it on without asking |
+| `octet migrate pi --undo` | Turns the adapter off again (config backed up first) |
+| `octet migrate pi --details` | Lists every package and extension and how it carries over |
+
+The scan never runs package code or uses a model. Without a terminal and without
+`--yes`, nothing changes. If Node.js 22.19 or newer is missing, it says so before
+installing anything. The former bridge and its `octet pi` command family remain
+removed; portable setup import/restore and [native provider
+support](providers.md) are separate.
 
 ## Current command
 
@@ -21,8 +33,8 @@ The scanner reads `~/.pi/agent/settings.json` and the selected project's
 directory, and `--project` selects another project:
 
 ```console
-octet migrate pi --dry-run --project /path/to/project
-octet migrate pi --dry-run --json > pi-migration.json
+octet migrate pi --details --project /path/to/project
+octet migrate pi --json > pi-migration.json
 ```
 
 It exits before normal octet config, provider discovery, session or extension

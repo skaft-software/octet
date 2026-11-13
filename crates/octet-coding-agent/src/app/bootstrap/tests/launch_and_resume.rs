@@ -99,6 +99,9 @@ fn print_launch_errors_without_model() {
     let boot = bootstrap(config(directory.path(), None)).unwrap();
     let error = resolve_launch_print(&boot, "2026-07-12T00-00-00Z").unwrap_err();
     assert!(error.to_string().contains("no model configured"));
+    assert!(error.to_string().contains("octet setup --help"));
+    assert!(error.to_string().contains("(available: "));
+    assert!(!error.to_string().contains("(available: )"));
 }
 
 #[test]

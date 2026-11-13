@@ -131,21 +131,14 @@ pub(super) fn surface_roles(
     }
 }
 
-fn natural_surface_width(
-    block: &TranscriptBlock,
-    theme: &OctetTheme,
-    preferred_width: u16,
-    expanded_reasoning: bool,
-) -> u16 {
+fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme, preferred_width: u16) -> u16 {
     // A live Markdown surface needs a stable usable width: an empty status/copy
     // projection must not lock subsequent prose into the 12-cell minimum. At
     // completion, measure the actual rich rows (including numbered-list and
     // code/table chrome), rather than the deliberately decoration-free copy.
     let markdown = match block {
         TranscriptBlock::Assistant(assistant) => Some((assistant, theme.rich_renderer())),
-        TranscriptBlock::Reasoning(reasoning)
-            if reasoning.reasoning_expanded || expanded_reasoning =>
-        {
+        TranscriptBlock::Reasoning(reasoning) if reasoning.reasoning_expanded => {
             Some((reasoning, theme.reasoning_renderer()))
         }
         _ => None,
@@ -203,13 +196,10 @@ fn natural_surface_width(
 
 /// The host owns spacing for transient activity and settled event lines. Surface
 /// padding and density continue to govern ordinary prose, media and tools.
-fn has_event_spacing(block: &TranscriptBlock, expanded_reasoning: bool) -> bool {
+fn has_event_spacing(block: &TranscriptBlock) -> bool {
     match block {
         TranscriptBlock::Reasoning(reasoning) => {
-            !reasoning.finished
-                && !reasoning.reasoning_expanded
-                && (!expanded_reasoning
-                    || (reasoning.text.is_empty() && !reasoning.show_reasoning_hint))
+            !reasoning.finished && !reasoning.reasoning_expanded
         }
         TranscriptBlock::Subagents(_)
         | TranscriptBlock::Outcome(_)
@@ -253,13 +243,13 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     block: &TranscriptBlock,
     theme: &'a OctetTheme,
     outer_width: u16,
-    expanded_reasoning: bool,
+    verbose_tools: bool,
 ) -> SurfacePlan<'a> {
     let layout = theme.layout_for_width(outer_width);
     let presentation = PresentationLayout::new(theme, outer_width);
     let kind = transcript_surface_kind(block);
     let surface_kind = if matches!(block, TranscriptBlock::Reasoning(reasoning)
-        if !reasoning.finished && !reasoning.reasoning_expanded && !expanded_reasoning)
+        if !reasoning.finished && !reasoning.reasoning_expanded)
     {
         "activity"
     } else {
@@ -361,13 +351,9 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     let frame_width = match resolved.width {
         ThemeSurfaceWidth::Full => frame_limit,
         ThemeSurfaceWidth::Content => {
-            let requested = natural_surface_width(
-                block,
-                theme,
-                frame_limit.saturating_sub(overhead).max(1),
-                expanded_reasoning,
-            )
-            .saturating_add(overhead);
+            let requested =
+                natural_surface_width(block, theme, frame_limit.saturating_sub(overhead).max(1))
+                    .saturating_add(overhead);
             requested.max(frame_limit.min(12)).min(frame_limit)
         }
     };
@@ -416,7 +402,13 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             || ((chrome == ThemeSurfaceChrome::Band || chrome == ThemeSurfaceChrome::Rail)
                 && padding > 0),
     );
-    let event_spacing = has_event_spacing(block, expanded_reasoning);
+    let event_spacing = has_event_spacing(block);
+    // A padded borderless roster band uses the ordinary tool recipe for its
+    // interior cushions. Probe its fill without the event painter suppressing
+    // blank rows; unpainted/zero-padding bands keep the existing event rhythm.
+    let subagent_band = matches!(block, TranscriptBlock::Subagents(_))
+        && chrome == ThemeSurfaceChrome::Band
+        && vertical_padding_rows > 0;
     // A theme that caps the reading column would otherwise paint its band/rail
     // fills inside that column only, leaving terminal-coloured bars beside
     // them on a wide screen. Borderless filled chrome extends its fill to the
@@ -463,7 +455,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         },
         padding,
         marker_enabled: resolved.marker_gutter != Some(false),
-        event_spacing,
+        event_spacing: event_spacing && !subagent_band,
         frame_left,
         frame_width,
         bleed_left,
@@ -485,13 +477,16 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         theme,
         block_prompt_color(block, theme),
     );
+    let cushioned_subagent = subagent_band && own_cushion_painted;
+    let event_spacing = event_spacing && !cushioned_subagent;
+    surface.event_spacing = event_spacing;
     // Only decorative whitespace participates in seam collapse. A border/rail
     // glyph or a media reservation is content, never a blank spacing row.
-    let previous_blank = previous.map_or(0, |previous| {
+    let (previous_blank, previous_cushioned_subagent) = previous.map_or((0, false), |previous| {
         let plan =
-            compile_surface_plan_for_render(None, previous, theme, outer_width, expanded_reasoning);
-        if matches!(previous, TranscriptBlock::Reasoning(reasoning)
-            if !reasoning.reasoning_expanded && !expanded_reasoning
+            compile_surface_plan_for_render(None, previous, theme, outer_width, verbose_tools);
+        let blank = if matches!(previous, TranscriptBlock::Reasoning(reasoning)
+            if !reasoning.reasoning_expanded
                 && super::reasoning_render::collapsed_reasoning_lines_sized(
                     theme, reasoning, 0, 0, plan.geometry.content_width,
                 ).is_empty())
@@ -520,7 +515,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             ..
         } = previous
         {
-            if !expanded_reasoning && whitespace_cushion(plan.chrome, theme) {
+            if !verbose_tools && whitespace_cushion(plan.chrome, theme) {
                 plan.geometry.trailing_rows + reserved_rows
             } else {
                 plan.geometry.trailing_rows
@@ -535,13 +530,17 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             plan.geometry.trailing_rows
         } else {
             0
-        }
+        };
+        (
+            blank,
+            matches!(previous, TranscriptBlock::Subagents(_)) && !plan.event_spacing,
+        )
     });
     let leading_padding = if event_spacing {
         // A heading separates the surface seam from the event itself; leave the
         // breathing row after it. Borderless seams combine by max, not addition.
         usize::from(has_heading_row || previous_blank == 0)
-    } else if previous.is_some_and(|previous| has_event_spacing(previous, expanded_reasoning))
+    } else if previous.is_some_and(has_event_spacing)
         && previous_blank > 0
         && !has_heading_row
         && whitespace_cushion(chrome, theme)
@@ -576,12 +575,23 @@ pub(super) fn compile_surface_plan_for_render<'a>(
                     }
             )
     };
-    let transition_rows = if event_spacing
-        || (previous.is_some_and(|previous| has_event_spacing(previous, expanded_reasoning))
-            && previous_blank > 0)
+    let transition_rows = if cushioned_subagent {
+        // Host separation is outside the painted band, not its interior row.
+        usize::from(previous_blank == 0)
+    } else if event_spacing
+        || (previous.is_some_and(has_event_spacing) && previous_blank > 0)
         || (compact_activity(block) && previous.is_some_and(compact_activity))
     {
         0
+    } else if previous_cushioned_subagent {
+        // A filled bottom cushion cannot double as the host separator. An
+        // unpainted leading cushion of the next surface can still share it.
+        usize::from(
+            has_heading_row
+                || leading_padding == 0
+                || !whitespace_cushion(chrome, theme)
+                || own_cushion_painted,
+        )
     } else {
         transcript_transition_rows(previous, layout.density)
     };

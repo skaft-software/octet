@@ -276,11 +276,13 @@ Their bounded status, spawn/list result, and durable spawn record include the
 same effective tool-policy snapshot plus source-only parent-inherited versus
 child-override orchestration provenance; they never expose paths, environment
 values, approval material, extension identities, or model arguments.
-During an active interactive run, the product schedules one nonblocking
-owner-scoped subagent status refresh every 250 ms, reduces the resulting fenced
-semantic snapshot, and updates one bounded tool-like **Subagents** transcript
-block in place, including between root turns. Its heading counts worker states
-and up to four active child lines show tasks and input/output tokens; the worker
+Native `AgentEvent::DelegationUpdated` snapshots feed the active interactive run;
+between root turns the product consumes the same bounded host watch stream.
+Both update one owner-fenced, tool-like **Subagents** transcript block in place
+without slash-command polling. Streamed output estimates coalesce at 33 ms,
+including a timer-backed trailing flush when the provider pauses, and never
+enter provider-reported usage or delegated billing. Its heading counts worker
+states and up to four active child lines show tasks and input/output tokens; the worker
 list retains the complete roster and cost. Ctrl+O retains disclosure. Structured
 priced child cost temporarily augments the host-owned footer; after
 `octet-agent` mirrors the settled child usage into root `delegated_agent`

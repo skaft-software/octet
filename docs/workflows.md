@@ -65,7 +65,7 @@ Give both only read and search tools. Summarize their findings; do not edit.
 ```
 
 Unless you narrow them, workers get the same tools as the main session. They run
-one level deep, with at most 8 active and 32 kept in the record. They inherit
+one level deep, with at most 16 active and 32 kept in the record. They inherit
 your permissions and cost and token limits, and you can cancel them and read
 their transcripts. They share your working directory, which isn't isolation.
 Open `/subagents`, including during a run, to see each worker's phase, tool

@@ -1047,6 +1047,44 @@ fn detects_windows_installer_installation_by_default_target() {
 }
 
 #[test]
+fn detects_an_extracted_windows_release_folder_outside_the_default_target() {
+    // A release ZIP unpacked anywhere (Downloads, a tools folder) carries the
+    // same octet.exe + octet-host.exe pair the installer copies. Updating it in
+    // place through the installer's -InstallDirectory is what the user wants;
+    // refusing left Windows users with a one-line error and no update.
+    let root = tempfile::tempdir().unwrap();
+    let default_target = root.path().join("AppData/Local/Programs/octet/bin");
+    let env = InstallEnvironment {
+        windows_install_dir: Some(default_target),
+        ..InstallEnvironment::default()
+    };
+    let extracted = root.path().join("Downloads/octet-0.10.2");
+    create_dir(&extracted);
+    std::fs::write(extracted.join("octet.exe"), "exe").unwrap();
+    std::fs::write(extracted.join("octet-host.exe"), "host").unwrap();
+    assert_eq!(
+        detect_install_method_in(&extracted.join("octet.exe"), &env),
+        InstallMethod::WindowsInstaller {
+            bin_dir: extracted.clone()
+        }
+    );
+
+    // A lone octet.exe is not a release layout; and off Windows (no default
+    // target in the environment) the pair alone never selects PowerShell.
+    let lone = root.path().join("lone");
+    create_dir(&lone);
+    std::fs::write(lone.join("octet.exe"), "exe").unwrap();
+    assert_eq!(
+        detect_install_method_in(&lone.join("octet.exe"), &env),
+        InstallMethod::Unknown
+    );
+    assert_eq!(
+        detect_install_method_in(&extracted.join("octet.exe"), &InstallEnvironment::default()),
+        InstallMethod::Unknown
+    );
+}
+
+#[test]
 fn moves_running_windows_binaries_aside_and_restores_them() {
     let root = tempfile::tempdir().unwrap();
     let bin_dir = root.path();

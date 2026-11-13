@@ -411,7 +411,7 @@ fn bash_output_and_edit_write_diffs_expand_with_global_ctrl_o() {
 }
 
 #[test]
-fn ctrl_o_toggles_all_expandable_transcript_blocks() {
+fn ctrl_o_toggles_tool_and_chrome_blocks_without_revealing_thinking() {
     let mut shell = InteractiveShell::test_shell();
     let args = serde_json::json!({"command": "printf output"});
     let tool_output = (1..=6)
@@ -475,10 +475,28 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
     );
 
     shell.toggle_disclosure();
+    let tools_expanded = transcript(&shell);
+    assert!(
+        !tools_expanded.contains("private reasoning body"),
+        "Ctrl+O leaves thinking to its own toggle: {tools_expanded}"
+    );
+    assert!(tools_expanded.contains("tool output 1"), "{tools_expanded}");
+    assert!(tools_expanded.contains("tool output 3"), "{tools_expanded}");
+    assert!(
+        tools_expanded.contains("shell output 1"),
+        "{tools_expanded}"
+    );
+    assert!(
+        tools_expanded.contains("private compaction body"),
+        "{tools_expanded}"
+    );
+
+    shell.toggle_thinking();
     {
         let mut state = shell.state.borrow_mut();
         state.push_block(TranscriptBlock::Reasoning(Box::new(
-            AssistantBlock::finalized_reasoning("future reasoning body".into()),
+            AssistantBlock::finalized_reasoning("future reasoning body".into())
+                .with_reasoning_expanded(true),
         )));
     }
     let expanded = transcript(&shell);
@@ -488,6 +506,21 @@ fn ctrl_o_toggles_all_expandable_transcript_blocks() {
     assert!(expanded.contains("tool output 3"), "{expanded}");
     assert!(expanded.contains("shell output 1"), "{expanded}");
     assert!(expanded.contains("private compaction body"), "{expanded}");
+
+    shell.toggle_thinking();
+    let thinking_hidden = transcript(&shell);
+    assert!(
+        !thinking_hidden.contains("private reasoning body"),
+        "{thinking_hidden}"
+    );
+    assert!(
+        !thinking_hidden.contains("future reasoning body"),
+        "{thinking_hidden}"
+    );
+    assert!(
+        thinking_hidden.contains("tool output 3"),
+        "hiding thinking must leave expanded tool output alone: {thinking_hidden}"
+    );
 
     shell.toggle_disclosure();
     let collapsed_again = transcript(&shell);
