@@ -1,8 +1,8 @@
 # octet-extension-sdk
 
-This SDK's source distribution is **0.10.4**. The [0.10.4 release-candidate notes](../../docs/releases/v0.10.4.md)
-record the unqualified local scope; no public 0.10.4 artifacts exist.
-Native publication does not publish SDK packages to PyPI or npm.
+This SDK's source distribution is **0.10.4**. See the
+[0.10.4 release notes](../../docs/releases/v0.10.4.md) for changes.
+SDK packages remain unpublished on PyPI and npm.
 
 For new tools, `octet_extension.Extension` supports the current working-tree
 **API `0.4`** feature-negotiated JSON-RPC wire, alongside retained `0.1`/`0.2`.

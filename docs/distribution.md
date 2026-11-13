@@ -1,12 +1,12 @@
 # Distribution channels
 
-The [version-pinned v0.10.3 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.3)
+The [version-pinned v0.10.4 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.4)
 records actual channel availability, immutable assets, signatures and source
 qualification. The [0.10.0 release notes](releases/v0.10.0.md) describe octet's
 first Pi-compatible launch. Native binaries and the six optional extension
 bundles are separate downloads; installation never enables an extension.
 
-The planned npm channel is `@skaft/octet@0.10.4` (launcher plus four signed platform
+The published npm channel is `@skaft/octet@0.10.4` (launcher plus four signed platform
 packages, with provenance). Homebrew, crates.io and SDK registries remain
 separate, unpublished channels. Native publication does not publish them.
 
@@ -17,9 +17,9 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-The distribution target is **0.10.4**, a source candidate, not a published release. The distribution version does not change independent API and schema versions. The [0.7.6
-release](releases/v0.7.6.md) keeps its historical version-matched assets and
-channel evidence.
+The distribution target is **0.10.4**. The distribution version does not change
+independent API and schema versions. The [0.7.6 release](releases/v0.7.6.md)
+keeps its historical version-matched assets and channel evidence.
 
 | Surface | Source identity |
 | --- | --- |
@@ -104,8 +104,8 @@ For a workflow-only repair, keep the canonical tag unchanged, put the reviewed
 release workflow on its dedicated tooling tag, and dispatch that exact tag:
 
 ```sh
-gh workflow run release-octet.yml --ref octet-binaries-v0.10.3 \
-  -f release_tag=v0.10.3 -f force_release=true -f force_reason='explain the CI incident'
+gh workflow run release-octet.yml --ref octet-binaries-v0.10.4 \
+  -f release_tag=v0.10.4 -f force_release=true -f force_reason='explain the CI incident'
 ```
 
 This does not restart product CI or turn failed CI into a pass. Record the
@@ -115,21 +115,20 @@ Cargo can build the published canonical tag's exact source (Rust 1.89+;
 ripgrep is optional, with `grep` as the content-search fallback):
 
 ```sh
-cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.3 --bins octet-coding-agent
+cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.4 --bins octet-coding-agent
 ```
 
 The canonical tag pins the exact source.
 `cargo install octet` and registry-based `cargo install octet-coding-agent`
 aren't the supported Cargo path.
 
-The planned npm channel has five `@skaft/octet*` packages (launcher plus four
-platform packages), built from verified release assets with trusted publishers
-and registry provenance verification. **0.10.4 is not published to npm.** No
-0.10.x package exists yet, so this page gives no npm install command: use the
-version-pinned native release that [installation](installation.md) describes.
-Only after verified publication does the pinned `@skaft/octet@0.10.4` reproduce
-exactly one release; the `latest` dist-tag would track whichever version npm
-publishes as current, which is not an installation of an exact version.
+The npm channel has five `@skaft/octet*` packages (launcher plus four platform
+packages), built from verified release assets with trusted publishers and registry
+provenance verification. **0.10.4 is published to npm.** Install with
+`npm install -g @skaft/octet@0.10.4`; [installation](installation.md) describes
+platform boundaries and recovery. The pinned version selects exactly one release;
+the `latest` dist-tag tracks whichever version npm publishes as current, which is
+not an installation of an exact version.
 Published versions are immutable, so a pinned install can't be silently
 replaced.
 
@@ -272,7 +271,7 @@ A disagreement needs owner reconciliation, not automatic publication.
 
 The version-pinned v0.10.4 shell installer targets macOS arm64 and x64 and
 GNU/Linux x64. The no-lifecycle npm launcher targets the same platforms plus
-Windows x86-64 and would publish as `@skaft/octet@0.10.4`. See the [npm release
+Windows x86-64 and is published as `@skaft/octet@0.10.4`. See the [npm release
 contract](release/npm-trusted-publishing.md) for platform-first publishing and
 provenance checks. CLI installation with Bun is unqualified. Cargo can build and install the local
 checkout without a registry channel. Installing from the public canonical tag

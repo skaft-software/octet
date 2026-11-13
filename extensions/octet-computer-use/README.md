@@ -1,8 +1,8 @@
 # octet computer-use
 
-**Distribution: 0.10.3.** This bundle requires exactly octet 0.10.3.
+**Distribution: 0.10.4.** This bundle requires exactly octet 0.10.4.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.10.3 release notes](../../docs/releases/v0.10.3.md) for published assets.
+[0.10.4 release notes](../../docs/releases/v0.10.4.md) for published assets.
 A reviewed source checkout with `--extension-dir ./extensions` works too.
 Windows and Linux desktop parity remain unqualified.
 
@@ -228,11 +228,11 @@ An explicit `--extension-dir` grants that reviewed source host authority even
 under `--safe-mode`; granted extension code runs with your OS permissions.
 Set `OCTET_CUA_CONFIRM=1` to approve each effectful computer-use action.
 
-**Managed updates (unreleased).** Windows replacement (`octet extension update`)
+**Managed updates.** Windows replacement (`octet extension update`)
 uses locked, recoverable publication rather than atomic
 directory exchange. Close programs using the bundle before updating; listing or
 global managed discovery recovers an interrupted replacement. See
-[Windows update recovery](../../docs/windows.md#managed-extension-updates-unreleased).
+[Windows update recovery](../../docs/windows.md#managed-extension-updates).
 The explicit `--extension-dir` above still lets you test a reviewed candidate
 without replacing an installed bundle.
 

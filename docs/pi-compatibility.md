@@ -19,9 +19,9 @@ rather than becoming `undefined`. A release newer than the newest inventory is
 diagnosed and reuses the nearest older one; a release below 1.0.2, a pre-release,
 or another major series is refused. Nothing silently downgrades Pi.
 
-See the [v0.10.3 release notes](releases/v0.10.3.md) for downloads and launch scope.
-Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter. The
-source tree is the unreleased v0.10.4 candidate.
+See the [v0.10.4 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.4)
+for downloads and the [release notes](releases/v0.10.4.md) for changes.
+Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
@@ -51,7 +51,7 @@ octet --enable-extension octet-pi-compat
 For source development, install locked adapter dependencies as described below,
 then run `./target/release/octet --extension-dir ./extensions --enable-extension octet-pi-compat`.
 To install a downloaded bundle explicitly, use
-`octet extension install --path /absolute/path/octet-pi-compat-0.10.3.tar.gz`.
+`octet extension install --path /absolute/path/octet-pi-compat-0.10.4.tar.gz`.
 
 Each time octet starts with the adapter on, it reads this machine's Pi setup
 (`~/.pi/agent`, or the directory in `PI_CODING_AGENT_DIR`) and mirrors it for

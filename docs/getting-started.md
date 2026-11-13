@@ -8,7 +8,7 @@ lane, verify it with a read-only request, and only then allow edits or commands.
 Shell commands are in `sh` blocks; text in `text` blocks is entered inside the
 interactive Octet UI, not in your shell.
 
-> **Version boundary.** This guide targets octet 0.10.3. The version-pinned
+> **Version boundary.** This guide targets octet 0.10.4. The version-pinned
 > release page records published channels and their qualification; npm and native
 > publication are separate. Check `octet --version` and `octet --help` for the
 > binary you will run. Source builds are not signed release artifacts.
@@ -24,20 +24,25 @@ signed assets and public-install receipts, then check the version:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.10.3/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.10.4/install-octet.sh | sh
 octet --version
 ```
 
-Expected output includes `octet 0.10.3`. The release page is authoritative for
+Expected output includes `octet 0.10.4`. The release page is authoritative for
 signed assets and availability; Homebrew, crates.io, and SDK registries are
 separate unpublished channels.
 
 ### macOS or GNU/Linux: npm launcher
 
-**Not available for this release.** npm packages for the 0.10.x line are not
-published yet, and npm's `latest` tag still resolves to the earlier 0.8.1
-package. Use the native binary lane above. [Installation](installation.md#npm-availability)
-records the publication boundary for the planned channel.
+The published launcher requires Node.js and a matching optional platform runtime:
+
+```sh
+npm install -g @skaft/octet@0.10.4
+octet --version
+```
+
+[Installation](installation.md#npm-availability) records platform boundaries and
+recovery if the registry has not propagated the platform runtime yet.
 
 ### Intentional source checkout: macOS or GNU/Linux
 
@@ -56,7 +61,7 @@ publication. Use the matching binary consistently for the rest of this guide.
 
 ### Native Windows
 
-Use the v0.10.3 release page's MSVC ZIP and `install-octet.ps1`, with their
+Use the v0.10.4 release page's MSVC ZIP and `install-octet.ps1`, with their
 native qualification receipts. WSL, cross-compilation and GNU PR test builds do
 not qualify that executable. Unsigned test artifacts remain separate from the
 stable release; see [Windows](windows.md).
@@ -99,7 +104,7 @@ shell command, history, or session fixture.
 
 ### Interactive setup
 
-For an unconfigured octet 0.10.3 installation, start without `--model`:
+For an unconfigured octet 0.10.4 installation, start without `--model`:
 
 ```sh
 octet --safe-mode

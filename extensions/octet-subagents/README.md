@@ -1,8 +1,8 @@
 # octet-subagents
 
-**Distribution: 0.10.3.** This bundle needs exactly octet 0.10.3.
+**Distribution: 0.10.4.** This bundle needs exactly octet 0.10.4.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.10.3 release notes](../../docs/releases/v0.10.3.md) for published assets.
+[0.10.4 release notes](../../docs/releases/v0.10.4.md) for published assets.
 A reviewed source checkout works too; both routes are described below.
 
 Hand a bounded task to a background worker while the main session carries on.
@@ -56,7 +56,7 @@ are kept across restoration and continuation. Credentials are never returned.
 
 ## Install and enable
 
-With [octet 0.10.3](../../docs/installation.md) and verified matching published
+With [octet 0.10.4](../../docs/installation.md) and verified matching published
 assets, install the bundle, then explicitly enable it:
 
 ```console
@@ -64,13 +64,13 @@ octet extension install octet-subagents
 octet --enable-extension octet-subagents
 ```
 
-For local testing with the `0.10.3` source tree, run from the repository root:
+For local testing with the `0.10.4` source tree, run from the repository root:
 
 ```console
 octet --extension-dir ./extensions --enable-extension octet-subagents
 ```
 
-Don't install a `0.8.1` bundle into the 0.10.3 host. You need Python 3.9+.
+Don't install a `0.8.1` bundle into the 0.10.4 host. You need Python 3.9+.
 Installing has no hook or third-party dependency and starts nothing, and the
 bundle stays disabled until explicitly enabled. Default full access
 (`unsafe_host`) implicitly trusts it without saving a grant. Optional
@@ -185,8 +185,8 @@ attachment.
 
 ## Reference
 
-This bundle has distribution version `0.10.3` and uses API `0.4`, with an exact
-runtime requirement of octet `0.10.3`. The detailed contract is a bundled-runtime
+This bundle has distribution version `0.10.4` and uses API `0.4`, with an exact
+runtime requirement of octet `0.10.4`. The detailed contract is a bundled-runtime
 reference, not a general extension SDK tutorial.
 
 - <a id="safety-model"></a>[Safety model](REFERENCE.md#safety-model): exact

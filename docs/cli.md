@@ -308,8 +308,8 @@ octet extension list
 ```
 
 The six executable bundles are pinned exactly to the
-running host: 0.10.3 bundles require `=0.10.3`. See the
-[0.10.3 release notes](releases/v0.10.3.md) and the version-pinned GitHub release
+running host: 0.10.4 bundles require `=0.10.4`. See the
+[0.10.4 release notes](releases/v0.10.4.md) and the version-pinned GitHub release
 for published assets. Catalog installs need verified published assets that
 match the running host version:
 

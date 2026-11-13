@@ -1,10 +1,10 @@
 # npm trusted publishing
 
-**The octet 0.10.3 npm CLI is not published.** npm is a separate channel from
+**The octet 0.10.4 npm CLI is published.** npm is a separate channel from
 native GitHub releases and needs its own approval and provenance verification.
 See [installation](../installation.md) for native and source-build routes. This maintainer reference describes packaging,
 protected publication, and recovery for the five immutable packages. The
-source/release repository is `skaft-software/octet`; future npm releases use
+source/release repository is `skaft-software/octet`; npm releases use
 trusted publishers for that identity. The already-published native v0.7.0
 signatures retain `skaft-software/ygg`.
 
@@ -50,7 +50,7 @@ All files in the [public documentation inventory](../package-assets.txt) are
 retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
 followed the signed native release, so its bundled docs are that release-time
 snapshot and may still describe npm as unpublished. That historical publication
-does not qualify the 0.10.3 release. Do not rewrite or republish immutable 0.8.1
+does not qualify the 0.10.4 release. Do not rewrite or republish immutable 0.8.1
 packages to refresh docs; a later native release can carry updated documentation.
 Packing restores files that npm's ignore rules would omit before final checksums
 and provenance are computed; it never substitutes checkout documentation.
@@ -125,12 +125,11 @@ provenance is understood; revocation or closure is an explicit maintainer action
 
 ## Installation and updates
 
-The planned CLI is `@skaft/octet@0.10.3`; it is not published yet, and no 0.10.3
-registry provenance or public-install acceptance is established. Until verified
-publication, this page gives no npm install command: use the version-pinned
-native release or a source build from the [installation guide](../installation.md).
-After publication, the install must pin the exact version rather than follow the
-`latest` dist-tag.
+The published CLI is `@skaft/octet@0.10.4`. Install with
+`npm install -g @skaft/octet@0.10.4`, pinning the exact version rather than following
+the `latest` dist-tag. Publication alone does not prove every platform smoke passed;
+consult the release's registry provenance and public-install receipts. The
+[installation guide](../installation.md) includes native and source-build alternatives.
 
 `octet update` offers npm automatically only for a physically validated global
 layout. Local project and `npx` layouts get a manual command instead, so an octet

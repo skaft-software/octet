@@ -8,14 +8,14 @@ none requires a paid provider, registry publication or global SDK installation.
 
 ## Status and contract boundaries
 
-This guide targets feature-negotiated **extension API `0.4`** and the 0.10.3
-source host. Extension version, SDK distribution version, host version
+This guide targets feature-negotiated **extension API `0.4`** and the 0.10.4
+host. Extension version, SDK distribution version, host version
 and API version are independent. Read [the host guide](../extensions.md) for
 current admission rules and [the wire reference](PROTOCOL-REFERENCE.md) when
 implementing a service outside a helper.
 
 The Python, JS/TS and narrow native helper/example sources are integrated in
-this candidate. Experimental Ruby/Bash helpers are withheld, not supported SDKs. They are
+this release. Experimental Ruby/Bash helpers are withheld, not supported SDKs. They are
 local source recipes, not published SDK packages or catalog assets. SDK metadata
 is the source of each distribution's version; neither it nor the host version
 implies the other.
@@ -80,7 +80,7 @@ license and provenance. The generator accepts literal static tool declarations;
 extra modules/assets must be included deliberately. See the
 [Python SDK](../../sdk/python/README.md) and
 [single-file recipe](../../examples/extensions/python-single-file/README.md).
-The generator pins the actual workspace host version (`=0.10.3` here) and emits
+The generator pins the actual workspace host version (`=0.10.4` here) and emits
 relative executable `run-extension`. That launcher uses `OCTET_EXTENSION_DIR`
 when staged by the host, selects the vendored SDK and suppresses bytecode writes;
 no global SDK installation or original checkout path is needed.
@@ -89,7 +89,7 @@ Package this reviewed generated directory using the existing release packager:
 
 ```sh
 bash scripts/package-octet-extension-release.sh \
-  wait-extension /tmp/bundles v0.10.3 /tmp/my-extensions/wait-extension
+  wait-extension /tmp/bundles v0.10.4 /tmp/my-extensions/wait-extension
 # Check the exact produced archive and digest before installation.
 # Extract to a separate reviewed location, then run the provider-free smoke:
 env -u PYTHONPATH CARGO_TARGET_DIR=/tmp/python-single-file-host-target \
@@ -151,7 +151,7 @@ both generated files (the generator refuses overwrites). See
 ### Ruby and Bash: experimental helpers withheld
 
 The language-neutral executable protocol can support Ruby or Bash, but the
-supplied experimental helpers/examples are excluded from this candidate pending
+supplied experimental helpers/examples are excluded from this release pending
 repairs and real native-host tests. Do not use their prototype install/launch
 instructions as a supported SDK path. Independent review reproduced Bash's
 missing SDK under sanitized host launch, detached tool groups escaping host
@@ -237,7 +237,7 @@ existing packager takes the source explicitly:
 ```sh
 # Example placeholders: supply your reviewed source and exact host version.
 bash scripts/package-octet-extension-release.sh \
-  hello-tools /tmp/bundles v0.10.3 /absolute/path/to/hello-tools
+  hello-tools /tmp/bundles v0.10.4 /absolute/path/to/hello-tools
 # Use the actual produced archive path, not a guessed filename.
 octet extension install --path /absolute/path/to/reviewed-bundle.tar.gz
 octet extension list

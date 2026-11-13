@@ -121,7 +121,7 @@ existing files unless `--overwrite` is explicit. It does not copy factories or
 their dependencies. Install a factory's own dependencies separately.
 The generated manifest is local/unpackaged; publishing an installable bundle also
 requires the host's exact `requires_octet` pin and independently reviewed packaging.
-The 0.10.3 release catalog includes this adapter. For an installed bundle,
+The 0.10.4 release catalog includes this adapter. For an installed bundle,
 generate configuration in a separate directory rather than
 overwriting integrity-checked bundle files; see [Bring your Pi extensions](../../docs/pi-compatibility.md#bring-your-pi-extensions).
 
@@ -145,7 +145,7 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-octet 0.10.3 follows **Pi 1.4's extension API** and accepts every Pi release its
+octet 0.10.4 follows **Pi 1.4's extension API** and accepts every Pi release its
 shipped manifests cover: `PI_SUPPORTED_RANGE` is `>=1.0.2 <2.0.0`, a managed Pi
 1.0.2 through 1.x. Manifests for Pi 1.0.2 and 1.5.0 are shipped; a newer 1.x
 release reuses the nearest older manifest and says so on stderr, and a version

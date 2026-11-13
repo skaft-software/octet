@@ -12,7 +12,7 @@ wires or make every low-level service a supported coding-product feature.
 including `octet_version`, `requires_octet`, `OCTET_*`, and `octet_extension`.
 Retained API numbers do not imply aliases for old Ygg wire names or imports.
 The Python/TypeScript source SDK distributions and six bundles
-are version `0.10.3`; the independent Rust SDK stays `0.8.2` and examples keep
+are version `0.10.4`; the independent Rust SDK stays `0.8.2` and examples keep
 their own versions. Native publication does not publish SDK registries; see
 [installation and availability](../installation.md).
 
@@ -768,8 +768,8 @@ does not merge permissions, resource ownership, failure policy, or tool semantic
 ## Installable extension bundles
 
 Catalog commands select the package matching the running host version. For
-octet 0.10.3 availability, consult the
-[release notes](../releases/v0.10.3.md) and [installation](../installation.md).
+octet 0.10.4 availability, consult the
+[release notes](../releases/v0.10.4.md) and [installation](../installation.md).
 
 Executable bundles use runtime `extension.toml`. An archive has exactly one root
 named for the extension, all regular
@@ -792,9 +792,9 @@ unpackaged for legacy runtime compatibility. The current source bundle declares:
 
 ```toml
 name = "octet-web-search"
-version = "0.10.3"
+version = "0.10.4"
 api_version = "0.4"
-requires_octet = "=0.10.3"
+requires_octet = "=0.10.4"
 ```
 
 `requires_octet` is optional for unpackaged local copies but enforced when

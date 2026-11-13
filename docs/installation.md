@@ -4,19 +4,17 @@
 
 <a id="binary-availability"></a>
 
-## octet 0.10.3
+## octet 0.10.4
 
-The source tree is the octet **0.10.4 release candidate**, an unreleased source candidate: v0.10.4 is not yet published, and v0.10.4 is not yet published to npm. The commands below install the published 0.10.3 release.
-
-A Pi-compatibility fix release. Install the native agent below, then
+Install the native agent below, then
 [enable the optional Pi adapter](pi-compatibility.md). The
-[release notes](releases/v0.10.3.md) describe changes and known boundaries.
+[release notes](releases/v0.10.4.md) describe changes and known boundaries.
 
 ## Install native binaries
 
-Native v0.10.3 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
+Native v0.10.4 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
 and Windows x86-64 (MSVC, preview). Use the version-pinned
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.10.3)
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.10.4)
 for signed assets, exact-source CI and public-install receipts. Use only channels
 recorded as available there; unsigned development artifacts are not a release.
 
@@ -27,8 +25,8 @@ qualification is separate from GNU test builds.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.10.3/install-octet.sh | sh
-octet --version   # octet 0.10.3
+  https://github.com/skaft-software/octet/releases/download/v0.10.4/install-octet.sh | sh
+octet --version   # octet 0.10.4
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data stay
@@ -39,25 +37,27 @@ registries remain separate, unpublished channels. CLI installation with Bun is u
 
 ## Install from npm
 
-**v0.10.3 is not yet published to npm.** No package for the 0.10.x line exists
-on npm, so there is no npm install command for this release: use the
-[native installer](#install-native-binaries) above. npm's `latest` dist-tag
-still resolves to the 0.8.1 package from an earlier release line, which is not
-this release.
+**v0.10.4 is published to npm.** Pin the release rather than following a mutable dist-tag:
 
-The planned npm channel would install the same signed platform package on macOS
-Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64: the
-`@skaft/octet` launcher plus the matching platform package
+```sh
+npm install -g @skaft/octet@0.10.4
+octet --version
+```
+
+The npm launcher installs the matching optional platform package on macOS
+Apple silicon and Intel, GNU/Linux x86-64, and Windows x86-64
 (`@skaft/octet-darwin-arm64`, `@skaft/octet-darwin-x64`,
-`@skaft/octet-linux-x64-gnu`, or `@skaft/octet-win32-x64`), with npm provenance,
-from the same verified release assets as the native installer. The launcher has
-no install-time lifecycle scripts. npm publication is separate from native
-publication, so this page gives no npm command until v0.10.3 registry
-publication and provenance are recorded on the release page. [Distribution
-channels](distribution.md) has the exact boundaries. See [Windows](windows.md)
-for native versus unsigned test-build boundaries. The [historical Ygg
-instructions](reference/historical-installation.md) describe older releases, not
-a way to install or migrate to octet.
+`@skaft/octet-linux-x64-gnu`, or `@skaft/octet-win32-x64`). It has no install-time
+lifecycle scripts and never downloads a missing runtime itself. If npm has not
+installed the selected platform runtime, uninstall and retry after registry
+propagation, or use the [native installer](#install-native-binaries).
+
+npm publication and platform qualification are separate from native publication;
+consult the version-pinned release's integrity, provenance and public-install
+receipts. [Distribution channels](distribution.md) has the exact boundaries.
+See [Windows](windows.md) for native versus unsigned test-build boundaries. The
+[historical Ygg instructions](reference/historical-installation.md) describe older
+releases, not a way to install or migrate to octet.
 
 The repository is now `skaft-software/octet`, and the existing v0.7.0 signatures
 and assets are unchanged. For a source install, use a checkout or the Git-tag
@@ -112,7 +112,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.10.3. Check `octet --version`, and use matching
+This checkout targets octet 0.10.4. Check `octet --version`, and use matching
 source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -137,9 +137,9 @@ need Git for Windows or another Bash-compatible shell.
 
 ## Optional packages
 
-Executable extension bundles are pinned to the host version. The 0.10.3 catalog
+Executable extension bundles are pinned to the host version. The 0.10.4 catalog
 includes six optional bundles, including Pi. Older bundles need their matching
-host; do not reuse a 0.9.6 bundle with octet 0.10.3.
+host; do not reuse a 0.9.6 bundle with octet 0.10.4.
 
 ```sh
 octet extension install octet-web-search
@@ -173,7 +173,7 @@ reference](cli.md#packages).
 | `octet-pi-compat` | [Pi 1.0.2 compatibility adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
 
 The six executable-bundle manifests declare API `0.4`, distribution
-version `0.10.3`, and require octet `=0.10.3`. Older bundles stay pinned to their host.
+version `0.10.4`, and require octet `=0.10.4`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.

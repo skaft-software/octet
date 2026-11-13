@@ -1,7 +1,7 @@
 # TypeScript / JavaScript extension SDKs
 
-The **0.10.4 source distributions** have two separate packages/wires. No npm
-publication or registry availability is asserted.
+The **0.10.4 SDK source distributions** have two separate packages/wires.
+SDK packages remain unpublished on npm.
 
 ## Current API `0.4` process authoring
 

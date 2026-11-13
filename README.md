@@ -9,8 +9,7 @@ Rust core · any-language extensions · hears audio, uses your computer</p>
 
 <div align="center">
 
-[![Release: 0.10.3](https://img.shields.io/badge/release-0.10.3-536dfe?style=flat-square)](docs/releases/v0.10.3.md)
-[![Candidate: 0.10.4](https://img.shields.io/badge/candidate-0.10.4-8a8fa3?style=flat-square)](docs/releases/v0.10.4.md)
+[![Release: 0.10.4](https://img.shields.io/badge/release-0.10.4-536dfe?style=flat-square)](docs/releases/v0.10.4.md)
 [![MIT license](https://img.shields.io/badge/license-MIT-1baf7a?style=flat-square)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-skaft.org%2Foctet-536dfe?style=flat-square)](https://skaft.org/octet/)
 ![macOS arm64](https://img.shields.io/badge/macOS-arm64-000000?style=flat-square&logo=apple&logoColor=white)
@@ -34,22 +33,21 @@ and **drive your computer** in the same conversation, which is why it exists.
 ## Install
 
 macOS Apple silicon/Intel and GNU/Linux x86-64, no Node.js required. This pins the exact
-release — recommended for CI and scripted installs. The source is the v0.10.4 release candidate;
-these commands install the published 0.10.3:
+0.10.4 release — recommended for CI and scripted installs:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.10.3/install-octet.sh | sh
+  https://github.com/skaft-software/octet/releases/download/v0.10.4/install-octet.sh | sh
 ```
 
 Windows (PowerShell) is a preview; its installer is version-matched to the same release:
 
 ```powershell
-irm https://github.com/skaft-software/octet/releases/download/v0.10.3/install-octet.ps1 | iex
+irm https://github.com/skaft-software/octet/releases/download/v0.10.4/install-octet.ps1 | iex
 ```
 
-Also available via `cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.3 --bins octet-coding-agent`,
-and from a source checkout. npm is not a supported path for this release: see
+Also available via `cargo install --locked --git https://github.com/skaft-software/octet --tag v0.10.4 --bins octet-coding-agent`,
+and from a source checkout. The npm launcher is published as `@skaft/octet@0.10.4`: see
 [installation](docs/installation.md) for which channels are actually published.
 
 ## Why octet
@@ -133,7 +131,7 @@ Optional first-party integrations: `octet-mcp`, `octet-subagents`, `octet-codemo
 Releases are built and signed in CI, and every asset ships a checksum and a Sigstore bundle.
 
 ```console
-gh release download v0.10.3 --repo skaft-software/octet --pattern OCTET_SHA256SUMS
+gh release download v0.10.4 --repo skaft-software/octet --pattern OCTET_SHA256SUMS
 shasum -a 256 -c OCTET_SHA256SUMS
 ```
 

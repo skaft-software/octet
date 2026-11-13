@@ -1,8 +1,8 @@
 # octet-web-search
 
-**Distribution: 0.10.3.** This bundle needs exactly octet 0.10.3. Use the
+**Distribution: 0.10.4.** This bundle needs exactly octet 0.10.4. Use the
 [version-matched installation](../../docs/installation.md) and the
-[0.10.3 release notes](../../docs/releases/v0.10.3.md) for published assets.
+[0.10.4 release notes](../../docs/releases/v0.10.4.md) for published assets.
 A reviewed source checkout works too; both routes are described below.
 
 Search the public web and retrieve pages with stable citations. Pick [Brave
@@ -12,7 +12,7 @@ tabs, sign in, run JavaScript or submit forms.
 
 ## Start a search
 
-The catalog path needs [octet 0.10.3](../../docs/installation.md), a matching
+The catalog path needs [octet 0.10.4](../../docs/installation.md), a matching
 published bundle, and Python 3.9+ as `python3`:
 
 ```console
@@ -95,7 +95,7 @@ and integrity checks still apply. Granted code runs with your OS authority
 outside the tool-effect broker; safe mode governs brokered effects, not OS
 isolation. Manifest consent metadata isn't a sandbox. Skill loading is independent.
 
-The source bundle `0.10.3` needs exactly octet `0.10.3`. For a reviewed source
+The source bundle `0.10.4` needs exactly octet `0.10.4`. For a reviewed source
 checkout, select it with `--extension-dir ./extensions`. What follows is a
 bundled-runtime reference, not a general SDK authoring tutorial.
 
