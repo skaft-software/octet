@@ -68,8 +68,10 @@ LIFECYCLE_KEYS = {
 SECRET_PATTERNS = (
     re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
     re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    re.compile(rb"\b(?:ghp|gho|ghs|ghr)_[A-Za-z0-9]{20,}\b"),
-    re.compile(rb"\bnpm_[A-Za-z0-9]{20,}\b"),
+    # GitHub and npm tokens are a prefix plus exactly 36 base62 characters. A
+    # compiled string table can place a prefix before a longer run of joined words.
+    re.compile(rb"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b"),
+    re.compile(rb"\bnpm_[A-Za-z0-9]{36}\b"),
     re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
 )
 # Two false-positive byte runs in the already signed v0.8.1 Darwin host binaries.
