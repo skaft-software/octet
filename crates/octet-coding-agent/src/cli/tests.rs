@@ -865,6 +865,26 @@ fn extension_flag_bootstrap_preserves_authority_options_after_dynamic_flags() {
 }
 
 #[test]
+fn extension_flag_bootstrap_keeps_a_subcommand_out_of_activation_names() {
+    let os = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    for args in [
+        os(&["octet", "--enable-extension", "fixture", "sessions", "list"]),
+        os(&["octet", "--enable-extension=fixture", "sessions", "list"]),
+    ] {
+        let bootstrap = extension_flag_bootstrap(&args).expect("bootstrap parses");
+        assert_eq!(bootstrap.enable_extensions, ["fixture"]);
+        assert!(bootstrap.trust_extensions.is_empty());
+        assert!(invocation_has_top_level_subcommand(&args, &[]));
+    }
+
+    let args = os(&["octet", "--trust-extension=fixture", "sessions", "list"]);
+    let bootstrap = extension_flag_bootstrap(&args).expect("bootstrap parses");
+    assert!(bootstrap.enable_extensions.is_empty());
+    assert_eq!(bootstrap.trust_extensions, ["fixture"]);
+    assert!(invocation_has_top_level_subcommand(&args, &[]));
+}
+
+#[test]
 fn extension_flags_parse_types_defaults_inverses_and_help() {
     let registered = register_extension_flags(vec![
         (
@@ -3299,6 +3319,58 @@ fn setup_command_parses_explicit_non_interactive_inputs() {
                 && options.offline
                 && options.manual_model.as_deref() == Some("local-model")
     ));
+}
+
+#[test]
+fn extension_activation_flags_take_one_list_and_keep_the_subcommand() {
+    // One flag takes one comma-separated list, so a following word is never a
+    // second value: `sessions list` stays the subcommand instead of being
+    // persisted as two more extension names.
+    let cli = Cli::try_parse_from([
+        "octet",
+        "--enable-extension",
+        "fixture-one,fixture-two",
+        "--enable-extension",
+        "fixture-three",
+        "sessions",
+        "list",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.enable_extensions,
+        ["fixture-one", "fixture-two", "fixture-three"]
+    );
+    assert!(matches!(
+        cli.command,
+        Some(TopLevelCommand::Sessions {
+            command: SessionCommand::List { .. }
+        })
+    ));
+
+    let cli = Cli::try_parse_from([
+        "octet",
+        "--trust-extension",
+        "fixture-one,fixture-two",
+        "sessions",
+        "list",
+    ])
+    .unwrap();
+    assert_eq!(cli.trust_extensions, ["fixture-one", "fixture-two"]);
+    assert!(matches!(
+        cli.command,
+        Some(TopLevelCommand::Sessions {
+            command: SessionCommand::List { .. }
+        })
+    ));
+}
+
+#[test]
+fn extension_activation_flags_leave_a_bare_second_word_to_the_prompt() {
+    // The flag documents commas as the separator, so an unaccompanied word is
+    // the positional prompt it looks like, not another activation name.
+    let cli = Cli::try_parse_from(["octet", "--enable-extension", "fixture", "explain"]).unwrap();
+    assert_eq!(cli.enable_extensions, ["fixture"]);
+    assert_eq!(cli.message.as_deref(), Some("explain"));
 }
 
 #[test]
