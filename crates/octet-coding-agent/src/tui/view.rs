@@ -2120,8 +2120,20 @@ fn restore_prompt_history_draft(state: &mut ShellState, draft: PromptHistoryDraf
     invalidate_editor_autocomplete(state);
 }
 
+/// Whether a key consults the recalled entry's visual rows before it traverses
+/// history. Dedicated history keys traverse from any row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptHistoryKey {
+    Arrow,
+    Dedicated,
+}
+
 /// Consume boundary arrows for process-local sent-prompt traversal.
-fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool {
+fn navigate_prompt_history(
+    state: &mut ShellState,
+    action: &EditAction,
+    key: PromptHistoryKey,
+) -> bool {
     let moving_up = matches!(action, EditAction::Up);
     let moving_down = matches!(action, EditAction::Down);
     if !moving_up && !moving_down {
@@ -2129,6 +2141,24 @@ fn navigate_prompt_history(state: &mut ShellState, action: &EditAction) -> bool 
     }
 
     if state.prompt_history_navigation.is_some() {
+        if key == PromptHistoryKey::Arrow {
+            // A recalled entry keeps ordinary cursor motion on its interior
+            // visual rows; only the first row (Up) and the last row (Down)
+            // leave it. Pi parity: pi-tui 1.5.1
+            // dist/components/editor.js:754 and :768.
+            let geometry = composer_editor_geometry(state, state.size.0);
+            let projection = state.composer_editor_projection(geometry);
+            let row = projection.cursor_row();
+            let interior = if moving_up {
+                row > 0
+            } else {
+                row.saturating_add(1) < projection.line_count()
+            };
+            drop(projection);
+            if interior {
+                return false;
+            }
+        }
         let index = state
             .prompt_history_navigation
             .as_ref()
@@ -6030,7 +6060,7 @@ impl InteractiveShell {
                     };
                     return;
                 }
-                if navigate_prompt_history(&mut state, &action) {
+                if navigate_prompt_history(&mut state, &action, PromptHistoryKey::Arrow) {
                     return;
                 }
             }
