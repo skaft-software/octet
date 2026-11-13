@@ -1406,6 +1406,33 @@ jobs:
               --no-audit \
               --no-fund
           done
+      - name: Wait for npm registry propagation
+        shell: bash
+        timeout-minutes: 16
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # One deadline for all packages, not fifteen minutes per package.
+          deadline=$((SECONDS + 900))
+          for package in \
+            @skaft/octet-darwin-arm64 @skaft/octet-darwin-x64 \
+            @skaft/octet-linux-x64-gnu @skaft/octet-win32-x64 @skaft/octet; do
+            visible=false
+            while (( SECONDS < deadline )); do
+              if integrity=$(npm view "$package@$VERSION" dist.integrity --registry "$NPM_REGISTRY" \
+                --fetch-retries=0 --fetch-timeout=10000 2>/dev/null) && [[ -n "$integrity" ]]; then
+                visible=true
+                break
+              fi
+              echo "waiting for npm registry propagation: $package@$VERSION"
+              sleep 15
+            done
+            if [[ "$visible" != true ]]; then
+              echo "npm registry propagation timed out after 900s: $package@$VERSION is not visible with dist.integrity" >&2
+              exit 1
+            fi
+          done
       - name: Verify registry integrity and provenance
         shell: bash
         env:
@@ -1579,6 +1606,33 @@ jobs:
         with:
           name: octet-npm
           path: npm-assets
+      - name: Wait for npm registry propagation
+        shell: bash
+        timeout-minutes: 16
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # One deadline for all packages, not fifteen minutes per package.
+          deadline=$((SECONDS + 900))
+          for package in \
+            @skaft/octet-darwin-arm64 @skaft/octet-darwin-x64 \
+            @skaft/octet-linux-x64-gnu @skaft/octet-win32-x64 @skaft/octet; do
+            visible=false
+            while (( SECONDS < deadline )); do
+              if integrity=$(npm view "$package@$VERSION" dist.integrity --registry "$NPM_REGISTRY" \
+                --fetch-retries=0 --fetch-timeout=10000 2>/dev/null) && [[ -n "$integrity" ]]; then
+                visible=true
+                break
+              fi
+              echo "waiting for npm registry propagation: $package@$VERSION"
+              sleep 15
+            done
+            if [[ "$visible" != true ]]; then
+              echo "npm registry propagation timed out after 900s: $package@$VERSION is not visible with dist.integrity" >&2
+              exit 1
+            fi
+          done
       - name: Verify public registry contents and provenance
         shell: bash
         env:
@@ -1664,22 +1718,67 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22.13.0
+      - name: Wait for npm registry propagation
+        shell: bash
+        timeout-minutes: 16
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # One deadline for all packages, not fifteen minutes per package.
+          deadline=$((SECONDS + 900))
+          for package in \
+            @skaft/octet-darwin-arm64 @skaft/octet-darwin-x64 \
+            @skaft/octet-linux-x64-gnu @skaft/octet-win32-x64 @skaft/octet; do
+            visible=false
+            while (( SECONDS < deadline )); do
+              if integrity=$(npm view "$package@$VERSION" dist.integrity --registry "$NPM_REGISTRY" \
+                --fetch-retries=0 --fetch-timeout=10000 2>/dev/null) && [[ -n "$integrity" ]]; then
+                visible=true
+                break
+              fi
+              echo "waiting for npm registry propagation: $package@$VERSION"
+              sleep 15
+            done
+            if [[ "$visible" != true ]]; then
+              echo "npm registry propagation timed out after 900s: $package@$VERSION is not visible with dist.integrity" >&2
+              exit 1
+            fi
+          done
       - name: Install the exact public launcher without lifecycle scripts
         shell: bash
+        timeout-minutes: 10
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           prefix="$RUNNER_TEMP/octet-npm-prefix"
           mkdir -p "$prefix"
-          npm install --global --prefix "$prefix" --registry "$NPM_REGISTRY" \
-            --ignore-scripts \
-            --no-audit \
-            --no-fund \
-            "@skaft/octet@$VERSION"
           PATH="$prefix/bin:$PATH"
           export PATH
-          test "$(octet --version)" = "octet $VERSION"
+          for attempt in 1 2 3; do
+            npm install --global --prefix "$prefix" --registry "$NPM_REGISTRY" \
+              --prefer-online \
+              --ignore-scripts \
+              --no-audit \
+              --no-fund \
+              "@skaft/octet@$VERSION"
+            if octet --version > "$RUNNER_TEMP/npm-version.txt" 2> "$RUNNER_TEMP/npm-runtime-error.txt"; then
+              break
+            fi
+            if ! grep -Fq 'missing the selected platform runtime:' "$RUNNER_TEMP/npm-runtime-error.txt"; then
+              cat "$RUNNER_TEMP/npm-runtime-error.txt" >&2
+              exit 1
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              cat "$RUNNER_TEMP/npm-runtime-error.txt" >&2
+              echo "npm platform runtime still missing after 3 install attempts: @skaft/octet@$VERSION" >&2
+              exit 1
+            fi
+            npm uninstall --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund @skaft/octet
+            sleep 15
+          done
+          test "$(cat "$RUNNER_TEMP/npm-version.txt")" = "octet $VERSION"
           octet --help >/dev/null
           printf '%s\n' '{"protocol_version":1,"request_id":"npm-published-smoke","command":"hello"}' \
             | octet-host \
@@ -2041,16 +2140,60 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22.13.0"
+      - name: Wait for npm registry propagation
+        shell: bash
+        timeout-minutes: 16
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # One deadline for all packages, not fifteen minutes per package.
+          deadline=$((SECONDS + 900))
+          for package in \
+            @skaft/octet-darwin-arm64 @skaft/octet-darwin-x64 \
+            @skaft/octet-linux-x64-gnu @skaft/octet-win32-x64 @skaft/octet; do
+            visible=false
+            while (( SECONDS < deadline )); do
+              if integrity=$(npm view "$package@$VERSION" dist.integrity --registry "$NPM_REGISTRY" \
+                --fetch-retries=0 --fetch-timeout=10000 2>/dev/null) && [[ -n "$integrity" ]]; then
+                visible=true
+                break
+              fi
+              echo "waiting for npm registry propagation: $package@$VERSION"
+              sleep 15
+            done
+            if [[ "$visible" != true ]]; then
+              echo "npm registry propagation timed out after 900s: $package@$VERSION is not visible with dist.integrity" >&2
+              exit 1
+            fi
+          done
       - name: Install exact npm version without lifecycle scripts
         shell: pwsh
+        timeout-minutes: 10
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
           $prefix = Join-Path $env:RUNNER_TEMP 'npm-prefix'
-          npm install --global --prefix $prefix --registry https://registry.npmjs.org/ --ignore-scripts --no-audit --no-fund "@skaft/octet@$env:VERSION"
-          if ($LASTEXITCODE -ne 0) { throw 'Windows npm installation failed' }
-          if ((& "$prefix/octet.cmd" --version) -ne "octet $env:VERSION") { throw 'Windows npm version differs' }
+          $runtimeError = Join-Path $env:RUNNER_TEMP 'npm-runtime-error.txt'
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            npm install --global --prefix $prefix --registry https://registry.npmjs.org/ --prefer-online --ignore-scripts --no-audit --no-fund "@skaft/octet@$env:VERSION"
+            if ($LASTEXITCODE -ne 0) { throw 'Windows npm installation failed' }
+            $versionOutput = & "$prefix/octet.cmd" --version 2> $runtimeError
+            if ($LASTEXITCODE -eq 0) { break }
+            if (-not (Select-String -SimpleMatch -Quiet 'missing the selected platform runtime:' $runtimeError)) {
+              Get-Content $runtimeError | Write-Host
+              throw 'Windows npm launcher failed'
+            }
+            if ($attempt -eq 3) {
+              Get-Content $runtimeError | Write-Host
+              throw "Windows npm platform runtime still missing after 3 install attempts: @skaft/octet@$env:VERSION"
+            }
+            npm uninstall --global --prefix $prefix --ignore-scripts --no-audit --no-fund @skaft/octet
+            if ($LASTEXITCODE -ne 0) { throw 'Windows npm retry uninstall failed' }
+            Start-Sleep -Seconds 15
+          }
+          if ($versionOutput -ne "octet $env:VERSION") { throw 'Windows npm version differs' }
           & "$prefix/octet.cmd" --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'Windows npm help failed' }
           $hello = '{"protocol_version":1,"request_id":"npm-smoke","command":"hello"}' | & "$prefix/octet-host.cmd"

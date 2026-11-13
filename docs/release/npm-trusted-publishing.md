@@ -102,8 +102,18 @@ supporting trusted publishing) before requesting OIDC provenance. It:
    integrity matches exactly;
 4. publishes all four platform packages before the launcher, with provenance
    and scripts disabled; and
-5. verifies registry integrity and provenance, then runs version/help/host
+5. waits for all five exact versions' `dist.integrity` values to become visible,
+   then verifies registry integrity and provenance and runs version/help/host
    handshake/uninstall smokes on GNU/Linux, macOS Intel, Apple silicon, and Windows x86-64.
+
+Registry visibility waits poll every 15 seconds with one 15-minute deadline for
+all five packages and a 16-minute step limit. Each query disables npm's internal
+retries and has a 10-second fetch timeout. Both verification jobs and every npm
+smoke wait independently because registry propagation can differ by runner.
+Smokes keep a 10-minute installation step limit and retry an installation at most
+three times only when the launcher reports a missing selected platform runtime;
+each retry uninstalls first, waits 15 seconds and fetches fresh metadata.
+Integrity, provenance, version, help and host-handshake checks remain mandatory.
 
 npm versions are immutable. After an upload timeout, inspect
 `npm view name@version dist.integrity` and the provenance field. Never blindly

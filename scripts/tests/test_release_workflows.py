@@ -254,5 +254,154 @@ with open(os.environ['CALLS'],'a') as stream: stream.write(json.dumps(sys.argv[1
                 self.assertIn('registry incident',Path(temporary+'/summary').read_text())
 
 
+class NpmPropagationTests(unittest.TestCase):
+    PACKAGES = ('@skaft/octet-darwin-arm64', '@skaft/octet-darwin-x64',
+                '@skaft/octet-linux-x64-gnu', '@skaft/octet-win32-x64', '@skaft/octet')
+
+    def setUp(self):
+        self.graph = jobs('release-octet.yml')[1]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.env = dict(os.environ, PATH=str(self.root)+os.pathsep+os.defpath,
+                        VERSION='1.2.3', RUNNER_TEMP=str(self.root),
+                        NPM_REGISTRY='https://registry.npmjs.org/', CALLS=str(self.root/'calls'))
+        tool = self.root/'npm'
+        tool.write_text(r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['RUNNER_TEMP'])
+a = sys.argv[1:]
+with open(os.environ['CALLS'], 'a') as f: f.write(json.dumps(a)+'\n')
+if a[0] == 'view':
+    counter = root/('view-'+a[1].replace('/', '_'))
+    count = int(counter.read_text())+1 if counter.exists() else 1
+    counter.write_text(str(count))
+    if count <= int(os.environ.get('MISSING_VIEWS', '0')):
+        sys.exit(0 if os.environ.get('EMPTY_VIEW') else 1)
+    print('sha512-visible')
+elif a[0] == 'install':
+    if os.environ.get('INSTALL_FAIL'): sys.exit(1)
+    counter = root/'installs'
+    count = int(counter.read_text())+1 if counter.exists() else 1
+    counter.write_text(str(count))
+    prefix = pathlib.Path(a[a.index('--prefix')+1])/'bin'
+    prefix.mkdir(parents=True, exist_ok=True)
+    binary = prefix/'octet'
+    if count <= int(os.environ.get('MISSING_INSTALLS', '0')):
+        binary.write_text('#!/bin/sh\necho "'+os.environ.get('LAUNCH_ERROR', 'missing the selected platform runtime: @skaft/octet-linux-x64-gnu')+'" >&2\nexit 1\n')
+    else:
+        binary.write_text('#!/bin/sh\necho "octet '+os.environ['VERSION']+'"\n')
+    binary.chmod(0o755)
+    host = prefix/'octet-host'
+    host.write_text('#!/bin/sh\ncat >/dev/null\necho \'{"type":"hello"}\'\n')
+    host.chmod(0o755)
+elif a[0] == 'uninstall':
+    prefix = pathlib.Path(a[a.index('--prefix')+1])/'bin'
+    for p in prefix.iterdir(): p.unlink()
+else: sys.exit('unexpected npm operation')
+''')
+        tool.chmod(0o755)
+
+    def run_step(self, script):
+        # Advance the actual shell deadline without wall-clock sleeps or networking.
+        script = 'sleep() { SECONDS=$((SECONDS + $1)); }\n'+script
+        return subprocess.run(['bash', '-eu', '-c', script], env=self.env,
+                              cwd=self.root, text=True, capture_output=True, timeout=10)
+
+    def calls(self):
+        import json
+        return [json.loads(line) for line in (self.root/'calls').read_text().splitlines()]
+
+    def test_every_registry_reader_waits_with_shared_deadline_and_fetch_timeout(self):
+        for job, next_step in (('publish-npm', 'Verify registry integrity and provenance'),
+                               ('verify-npm-published', 'Verify public registry contents and provenance'),
+                               ('smoke-npm-published', 'Install the exact public launcher without lifecycle scripts'),
+                               ('smoke-npm-windows', 'Install exact npm version without lifecycle scripts')):
+            with self.subTest(job=job):
+                block = self.graph[job]
+                wait = step(block, 'Wait for npm registry propagation')
+                self.assertLess(block.index('Wait for npm registry propagation'), block.index(next_step))
+                self.assertIn('timeout-minutes: 16', block)
+                self.assertEqual(step(self.graph['publish-npm'], 'Wait for npm registry propagation'), wait)
+                self.assertIn('deadline=$((SECONDS + 900))', wait)
+                self.assertLess(wait.index('deadline='), wait.index('for package'))
+                self.assertIn('SECONDS < deadline', wait)
+                self.assertIn('sleep 15', wait)
+                self.assertIn('dist.integrity', wait)
+                self.assertIn('--fetch-retries=0 --fetch-timeout=10000', wait)
+                for package in self.PACKAGES: self.assertIn(package, wait)
+                if job in ('publish-npm', 'verify-npm-published'):
+                    verify = step(block, next_step)
+                    self.assertIn('verify-octet-npm-provenance.py', verify)
+                    self.assertIn('"$expected"', verify)
+                    self.assertNotIn('continue-on-error', block)
+
+    def test_wait_retries_404_and_empty_integrity_until_all_five_versions_are_visible(self):
+        script = step(self.graph['publish-npm'], 'Wait for npm registry propagation')
+        self.env['MISSING_VIEWS'] = '2'
+        for empty in ('', '1'):
+            with self.subTest(empty=bool(empty)):
+                self.env['EMPTY_VIEW'] = empty
+                for path in self.root.glob('view-*'): path.unlink()
+                (self.root/'calls').unlink(missing_ok=True)
+                result = self.run_step(script)
+                self.assertEqual(0, result.returncode, result.stdout+result.stderr)
+                self.assertEqual([package+'@1.2.3' for package in self.PACKAGES for _ in range(3)],
+                                 [call[1] for call in self.calls()])
+                self.assertTrue(all(call[2] == 'dist.integrity' for call in self.calls()))
+
+    def test_wait_expires_and_names_the_missing_package_and_version(self):
+        script = step(self.graph['publish-npm'], 'Wait for npm registry propagation')
+        self.env['MISSING_VIEWS'] = '100'
+        result = self.run_step(script)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('npm registry propagation timed out after 900s', result.stderr)
+        self.assertIn('@skaft/octet-darwin-arm64@1.2.3', result.stderr)
+        self.assertEqual(60, len(self.calls()))
+
+    def test_posix_install_retries_missing_runtime_with_uninstall_before_reinstall(self):
+        script = step(self.graph['smoke-npm-published'], 'Install the exact public launcher without lifecycle scripts')
+        self.env['MISSING_INSTALLS'] = '1'
+        result = self.run_step(script)
+        self.assertEqual(0, result.returncode, result.stdout+result.stderr)
+        self.assertEqual(['install', 'uninstall', 'install', 'uninstall'], [call[0] for call in self.calls()])
+        for call in self.calls():
+            self.assertIn('--ignore-scripts', call)
+        self.assertIn('--prefer-online', self.calls()[0])
+        self.assertFalse((self.root/'octet-npm-prefix/bin/octet').exists())
+
+    def test_posix_install_stops_after_three_missing_runtimes(self):
+        script = step(self.graph['smoke-npm-published'], 'Install the exact public launcher without lifecycle scripts')
+        self.env['MISSING_INSTALLS'] = '10'
+        result = self.run_step(script)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('after 3 install attempts', result.stderr)
+        self.assertEqual(['install', 'uninstall', 'install', 'uninstall', 'install'], [c[0] for c in self.calls()])
+
+    def test_posix_install_does_not_retry_unrelated_failures(self):
+        script = step(self.graph['smoke-npm-published'], 'Install the exact public launcher without lifecycle scripts')
+        self.env.update(MISSING_INSTALLS='1', LAUNCH_ERROR='platform version does not match launcher version')
+        result = self.run_step(script)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(self.env['LAUNCH_ERROR'], result.stderr)
+        self.assertEqual(['install'], [c[0] for c in self.calls()])
+
+    def test_smoke_install_deadlines_and_windows_retry_contract(self):
+        for job in ('smoke-npm-published', 'smoke-npm-windows'):
+            self.assertIn('timeout-minutes: 10', self.graph[job])
+        script = step(self.graph['smoke-npm-windows'], 'Install exact npm version without lifecycle scripts')
+        self.assertIn('$attempt -le 3', script)
+        self.assertIn('$attempt -eq 3', script)
+        self.assertIn('missing the selected platform runtime:', script)
+        self.assertIn('Select-String -SimpleMatch -Quiet', script)
+        self.assertIn('Start-Sleep -Seconds 15', script)
+        self.assertIn('npm uninstall --global', script)
+        self.assertIn('--prefer-online', script)
+        self.assertIn('$LASTEXITCODE -ne 0', script)
+        self.assertLess(script.index('npm uninstall --global'), script.index('Start-Sleep'))
+        self.assertIn('Windows npm help failed', script)
+        self.assertIn('Windows npm host failed', script)
+
+
 if __name__ == '__main__':
     unittest.main()
