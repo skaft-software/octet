@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The model picker filter finds a model when separators in its name are left out: `gpt61` lists `gpt-6.1-Sol`. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
+
 ## [0.10.4] - 2026-11-12
 
 ### Changed
