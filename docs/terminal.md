@@ -90,8 +90,10 @@ you typed carries over into the custom editor. Setup dialogs still appear
 immediately. See [remote UI](extensions/remote-ui.md#palette-handoff-for-persistent-chrome).
 
 Fresh-start composer rows are reserved before the welcome, without provisional
-model branding. The welcome is static and fits the pane height. Typing and late
-update hints do not move it or clear saved history. Cursor placement is part of
+model branding. The default welcome uses a small 8×2 byte mark; narrow panes
+stack its details rather than squeezing permissions and exit help beside it.
+It stays static and fits the pane height. Typing and late update hints do not
+move it or clear saved history. Cursor placement is part of
 the synchronized frame; Working and Thinking animations remain active. Enter
 before model/session resolution keeps the draft without submitting or queuing
 it. Submit after resolution.

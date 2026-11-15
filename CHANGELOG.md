@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The default startup splash uses a smaller 8×2 byte mark and quieter help text;
+  compact themes also use the small mark. Narrow panes stack details to keep
+  permissions and exit help readable; short panes keep the welcome within the
+  space above the composer.
+
 ### Fixed
 
 - Tool labels use available terminal width while keeping their selected values readable.

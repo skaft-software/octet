@@ -39,7 +39,7 @@ composer_bg = "#242424"
 # The startup splash follows the active model family, like the prompt chevron
 # and composer marker. It claims the whole splash, so no `splash` colour is set.
 splash_model_adaptive = true
-# The compact 16x4 startup mark rather than the larger file-theme presentation.
+# The compact 8×2 startup mark rather than the larger file-theme presentation.
 splash_compact = true
 # One breathing cell before the marker aligns activity text with padded prompts.
 event_marker_gutter = 3

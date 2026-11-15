@@ -74,6 +74,19 @@ the welcome. Separate assertions retain credential/setup/error owners. The ANSI
 readiness and lifecycle unit tests also check no pending rails, editable drafts,
 and atomic ready chrome. These tests qualify projections, not desktop paint.
 
+## Compact welcome regression
+
+`real_octet_compact_welcome_survives_narrow_resize` checks both fullscreen and
+inline startup, then resizes through 80, 40, 37, 36, 24 and back to 80 columns.
+Composed VT cells must retain one exact 8×2 byte mark and one version label;
+permissions, the changelog command and exit help must remain readable as details
+move below the mark. Shutdown must restore termios and balance synchronized
+frames. These are offline real-binary checks, not native Tern pixel acceptance.
+
+The separate `view/welcome_card_tests.rs` unit module covers compact custom
+themes, text/row-budget breakpoints, ASCII/no-colour output, and placeholder
+geometry matching the painted card without hidden materialization.
+
 ## Static short-pane regression
 
 Both mouse modes also run at 48x8 and 80x8 with truecolor enabled. The composed

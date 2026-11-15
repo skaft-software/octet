@@ -73,9 +73,14 @@ selected; scope order alone does not overwrite it.
 
 The working directory appears only in the footer, not again in the splash.
 The splash keeps its byte-aligned spacing, version, changelog/update hints,
-permissions, and exit help. Its normal compiled-default mark occupies 16×4
-cells with eight contiguous columns and the `01101111` silhouette. The footer,
-not the splash, owns the current model/reasoning row. Full access is a
+permissions, and exit help. Its compiled-default mark occupies 8×2 cells,
+including on wide terminals, with eight contiguous columns and the `01101111`
+silhouette. Compact custom themes use the same small mark. Details stack beneath
+it when fewer than 24 text cells remain alongside; optional permission prefixes
+shorten before the access-mode text. Placeholder and painted rows share this
+width decision and reserve the entire text column, not only the logo height.
+The name remains prominent while discovery and exit hints use muted text.
+The footer, not the splash, owns the current model/reasoning row. Full access is a
 warning-class permission mode, not an ordinary failure.
 
 The eight-bar byte mark retains its model-blended static gradient on true-colour

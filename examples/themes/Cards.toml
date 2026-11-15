@@ -74,7 +74,7 @@ warning = "#c49a54"
 # `splash` colour is set here (and no `splash_box`, which would border it).
 splash_model_adaptive = true
 
-# Use the compiled default's smaller splash geometry (4-tall mark at 16
+# Use the compiled default's smaller splash geometry (2-tall mark at 8
 # columns) instead of the larger file-theme presentation.
 splash_compact = true
 

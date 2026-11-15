@@ -1431,7 +1431,7 @@ fn assert_green_gemma_frame(parser: &vt100::Parser) {
                     let vt100::Color::Rgb(r, g, b) = cell.fgcolor() else {
                         panic!("logo lost truecolor");
                     };
-                    let column = usize::from(col - 2) / 2; // Fixed 16-cell mark in the default card
+                    let column = usize::from(col - 2); // One cell per column in the 8×2 mark
                     for ((base, accent), actual) in gradient[column]
                         .into_iter()
                         .zip([red, green, blue])
@@ -2047,6 +2047,61 @@ fn real_octet_auto_background_probe_overlaps_model_discovery() {
     assert!(capture.status.success());
     assert!(capture.termios_restored);
     assert!(!uses_alternate_screen(&capture.output));
+}
+
+#[test]
+fn real_octet_compact_welcome_survives_narrow_resize() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for fullscreen in [false, true] {
+        let mut octet = PtyOctet::spawn_at_with_appearance_and_mode(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            MouseMode::Auto,
+            None,
+            (true, false),
+            (80, 18),
+            (2, false, false),
+            (StartupFixture::Model("probe"), Some(fullscreen)),
+        );
+        octet.wait_until(STARTUP_TIMEOUT, |output| {
+            synchronized_frame_end_containing(output, b"full access").is_some()
+        });
+        let mut consumed =
+            synchronized_frame_end_containing(&octet.pty.output, b"full access").unwrap();
+        let mut parser = vt100::Parser::new(18, 80, 512);
+        parser.process(&octet.pty.output[..consumed]);
+        for columns in [80, 40, 37, 36, 24, 80] {
+            if parser.screen().size().1 != columns {
+                octet.pty.drain_for(DRAIN_TIME);
+                let start = octet.pty.output.len();
+                parser.process(&octet.pty.output[consumed..start]);
+                octet.resize(columns, 18);
+                octet.wait_until(STARTUP_TIMEOUT, |output| {
+                    resize_frame_end(&output[start..]).is_some()
+                });
+                let end = start + resize_frame_end(&octet.pty.output[start..]).unwrap();
+                parser.set_size(18, columns);
+                parser.process(&octet.pty.output[start..end]);
+                consumed = end;
+            }
+            let label = format!("compact-welcome fullscreen={fullscreen} width={columns}");
+            assert_single_welcome(&parser, columns, &label);
+            let text = screen_text(&parser, columns);
+            for detail in ["full access", "Ctrl+C / Ctrl+D to exit", "/changelog"] {
+                assert!(text.contains(detail), "{label}: missing {detail}\n{text}");
+            }
+            eprintln!("{label}\n{text}");
+        }
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+        assert_eq!(uses_alternate_screen(&capture.output), fullscreen);
+        assert_eq!(
+            count_bytes(&capture.output, FRAME_BEGIN),
+            count_bytes(&capture.output, FRAME_END)
+        );
+    }
 }
 
 #[test]
@@ -2837,13 +2892,19 @@ fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
         .lines()
         .position(|line| line.contains(&version))
         .unwrap();
-    // The compiled welcome card uses a fixed 16-cell, four-row logo; the
-    // footer owns model identity and the card no longer expands with width.
-    let logo_box = 16;
-    let logo_rows = 4;
-    let scale = logo_box / 8;
-    let top = version_row + (logo_rows - 2 * scale) / 2;
-    let left = 2 + (logo_box - 8 * scale) / 2;
+    // Eight one-cell columns, two rows. Below 37 columns the details stack
+    // underneath, leaving permissions and exit help the full terminal width.
+    let scale = 1;
+    let (top, left) = if columns < 37 {
+        (
+            version_row
+                .checked_sub(2)
+                .expect("stacked byte above identity"),
+            0,
+        )
+    } else {
+        (version_row, 2)
+    };
     let (rows, _) = parser.screen().size();
     for row in 0..usize::from(rows) {
         for col in 0..usize::from(columns) {
