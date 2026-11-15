@@ -251,22 +251,9 @@ pub(super) struct RenderedGeometry {
     pub(super) animation_block_starts: Vec<(u64, usize)>,
 }
 impl RenderedGeometry {
-    #[cfg(test)]
+    /// Capture the frame's pointer geometry, reusing the shell's copy-row
+    /// alignments from earlier frames for blocks that are still visible.
     pub(super) fn capture(state: &ShellState, fence: GeometryFence) -> Self {
-        Self::capture_with(
-            state,
-            fence,
-            &mut super::transcript_selection::CopyRowsMemo::default(),
-        )
-    }
-
-    /// [`Self::capture`], reusing the renderer's copy-row alignments from
-    /// earlier frames for blocks that are still visible.
-    pub(super) fn capture_with(
-        state: &ShellState,
-        fence: GeometryFence,
-        copy_rows: &mut super::transcript_selection::CopyRowsMemo,
-    ) -> Self {
         let chrome =
             super::shell_chrome::shell_chrome(state, state.size.0, std::time::Instant::now());
         let total_rows = state.transcript_cache.borrow().lines.len();
@@ -304,14 +291,16 @@ impl RenderedGeometry {
                                 cache.block_geometries[index],
                                 start.saturating_sub(cache.block_starts[index])
                                     ..end.saturating_sub(cache.block_starts[index]),
-                                copy_rows.block(id),
                             )
                         })
                         .flatten(),
                 })
             })
             .collect::<Vec<_>>();
-        copy_rows.retain(&blocks.iter().map(|block| block.id).collect());
+        state
+            .copy_rows
+            .borrow_mut()
+            .retain(&blocks.iter().map(|block| block.index).collect());
         #[cfg(test)]
         super::fullscreen_work_tests::record(|work| {
             work.bytes_cloned += cache.lines[start..end]
@@ -366,6 +355,22 @@ impl RenderedGeometry {
         } == GeometryFence::capture(state)
     }
 
+    /// Whether this frame still describes the same rows after the application
+    /// scrolled. A captured pointer gesture moves the scroll itself; before the
+    /// next paint reports back, its screen cells still name the rows the reader
+    /// is looking at. Content growth is deliberately tolerated for the same
+    /// reason pointer input already ignores it: rows only arrive at the tail,
+    /// and any stored scroll position is clamped when the next frame resolves.
+    fn is_scroll_compatible(&self, state: &ShellState) -> bool {
+        let current = GeometryFence::capture(state);
+        GeometryFence {
+            semantic: current.semantic,
+            scroll: current.scroll,
+            follow_tail: current.follow_tail,
+            ..self.fence
+        } == current
+    }
+
     /// A completed frame may still describe the transcript after typing or
     /// navigation has changed the draft, chrome, or scroll offset. Reuse only
     /// its *row layout* for keyboard navigation; pointer hit tests and paint
@@ -403,5 +408,17 @@ impl ShellState {
             .as_deref()
             .or(self.render_geometry.as_deref())
             .filter(|geometry| geometry.is_pointer_current(self))
+    }
+
+    /// The frame an in-flight pointer gesture maps cells through. Scrolling is
+    /// what the gesture is doing, so it must not invalidate its own hit tests
+    /// between two paints; every other layout input still does.
+    pub(super) fn gesture_render_geometry(&self) -> Option<&RenderedGeometry> {
+        self.painted_geometry
+            .as_deref()
+            .or(self.render_geometry.as_deref())
+            .filter(|geometry| {
+                geometry.is_pointer_current(self) || geometry.is_scroll_compatible(self)
+            })
     }
 }

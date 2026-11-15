@@ -993,12 +993,18 @@ impl InteractiveShell {
         // borrow. Threaded geometry validation reads the scrollbar mode via
         // `transcript_content_width`, which borrows this same RefCell.
         let frame = state.transcript_navigation.borrow().frame;
+        // A captured drag owns the bar across the scrolls it causes; every
+        // other pointer press names one painted frame exactly.
+        let captured = state.transcript_navigation.borrow().drag_offset.is_some();
         let frame = frame.filter(|frame| {
             frame.size == state.size
                 && if state.render_threaded {
-                    state
-                        .retained_render_geometry()
-                        .is_some_and(|geometry| geometry.generation == frame.generation)
+                    let geometry = if captured {
+                        state.gesture_render_geometry()
+                    } else {
+                        state.retained_render_geometry()
+                    };
+                    geometry.is_some_and(|geometry| geometry.generation == frame.generation)
                 } else {
                     let cache = state.transcript_cache.borrow();
                     !cache.dirty && frame.generation == cache.generation
@@ -1867,5 +1873,266 @@ mod tests {
             .transcript
             .iter()
             .all(|block| !block_copy_text(block).contains('\x1b')));
+    }
+    /// One pointer event inside a burst: the whole gesture arrives before the
+    /// renderer can publish another frame, so the input owner alone carries the
+    /// capture from event to event.
+    fn burst(shell: &mut InteractiveShell, kind: MouseEventKind, column: u16, row: u16) -> bool {
+        shell.transcript_navigation_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// The painted scrollbar frame the input owner may hit-test.
+    fn threaded_bar(shell: &InteractiveShell) -> (u16, usize, usize) {
+        let state = shell.state.borrow();
+        let frame = state
+            .transcript_navigation
+            .borrow()
+            .frame
+            .expect("painted navigation frame");
+        let bar = frame.scrollbar.expect("always-visible scrollbar");
+        assert!(state.retained_render_geometry().is_some());
+        (bar.column, bar.rows, bar.maximum)
+    }
+
+    #[test]
+    fn threaded_scrollbar_drag_keeps_capture_when_only_the_scroll_changed() {
+        let mut shell = search_shell();
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
+        shell.isolate_native_test_renderer();
+        shell.render_written_test_frame();
+        let (column, rows, maximum) = threaded_bar(&shell);
+        assert!(maximum > 0, "the fixture must scroll");
+        // A whole gesture inside one terminal burst: no paint between events.
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            0
+        ));
+        assert!(!shell.state.borrow().follow_tail);
+        let grab = shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .expect("the press captured the bar");
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            4
+        ));
+        assert_eq!(
+            shell
+                .state
+                .borrow()
+                .transcript_navigation
+                .borrow()
+                .drag_offset,
+            Some(grab),
+            "the scroll this drag caused must not release its capture"
+        );
+        let middle = shell.state.borrow().scroll_from_bottom.get();
+        assert!(
+            middle > 0 && middle < maximum,
+            "middle {middle} of {maximum}"
+        );
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            rows as u16 + 4
+        ));
+        assert!(
+            shell.state.borrow().follow_tail,
+            "a drag below the track clamps at the live tail"
+        );
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_some());
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            rows as u16 + 4
+        ));
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_none());
+        assert_eq!(shell.state.borrow().scroll_from_bottom.get(), 0);
+    }
+
+    #[test]
+    fn a_fresh_press_after_a_wheel_scroll_waits_for_its_own_frame() {
+        let mut shell = search_shell();
+        shell.isolate_native_test_renderer();
+        shell.render_written_test_frame();
+        // The wheel moves the view without a paint; a new press then names a
+        // cell of a frame the input owner must not guess at.
+        shell.scroll_lines(-4);
+        assert!(shell.state.borrow().pointer_render_geometry().is_none());
+        shell.begin_transcript_selection(2, 4, false);
+        {
+            let state = shell.state.borrow();
+            assert!(state.pending_selection_anchor.is_none());
+            assert!(
+                state.deferred_pointer_press.is_some(),
+                "a fresh press waits for the frame that names its cell"
+            );
+        }
+        shell.render_written_test_frame();
+        let state = shell.state.borrow();
+        assert!(state.deferred_pointer_press.is_none());
+        assert!(state.pending_selection_anchor.is_some());
+    }
+
+    #[test]
+    fn threaded_scrollbar_drag_cancels_on_a_genuine_layout_change() {
+        let mut shell = search_shell();
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
+        shell.isolate_native_test_renderer();
+        shell.render_written_test_frame();
+        let (column, ..) = threaded_bar(&shell);
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            0
+        ));
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_some());
+        // A different geometry owns the rows now; the captured bar is gone.
+        shell.set_size(60, 16);
+        let before = shell.state.borrow().scroll_from_bottom.get();
+        assert!(!burst(
+            &mut shell,
+            MouseEventKind::Drag(MouseButton::Left),
+            59,
+            1
+        ));
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_none());
+        assert_eq!(shell.state.borrow().scroll_from_bottom.get(), before);
+
+        // An overlay replaces the surface the gesture was captured on.
+        shell.render_written_test_frame();
+        let (column, ..) = threaded_bar(&shell);
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            0
+        ));
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_some());
+        shell.show_report_text("Report", "owns the surface", "body".into());
+        let before = shell.state.borrow().scroll_from_bottom.get();
+        assert!(!burst(
+            &mut shell,
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            2
+        ));
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_none());
+        assert_eq!(shell.state.borrow().scroll_from_bottom.get(), before);
+    }
+
+    #[test]
+    fn threaded_selection_edge_autoscroll_keeps_extending_without_a_repaint() {
+        // One long answer owns every window row, so an edge cell always names
+        // semantic text rather than a separator between short blocks.
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 20);
+        shell.state.borrow_mut().application_viewport_requested = true;
+        let mut text = String::new();
+        for index in 0..200 {
+            text.push_str(&format!("row {index:03} of a long answer\n"));
+        }
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Assistant(Box::new(
+                AssistantBlock::finalized(text),
+            )));
+        shell.isolate_native_test_renderer();
+        shell.render_written_test_frame();
+        let capacity = {
+            let state = shell.state.borrow();
+            state
+                .pointer_render_geometry()
+                .expect("painted geometry")
+                .viewport_rows
+        };
+        assert!(capacity > 4);
+        // Press a content row in the middle of the window, then drag past the
+        // top edge four times with no paint in between.
+        let anchor = (capacity / 2..capacity)
+            .find_map(|row| {
+                shell.begin_transcript_selection(row as u16, 4, false);
+                shell.state.borrow().pending_selection_anchor
+            })
+            .expect("a transcript row owns a semantic position");
+        let start = shell.state.borrow().scroll_from_bottom.get();
+        let mut scrolls = Vec::new();
+        for _ in 0..4 {
+            shell.extend_transcript_selection(0, 4);
+            scrolls.push(shell.state.borrow().scroll_from_bottom.get());
+        }
+        let state = shell.state.borrow();
+        assert!(state.selection_dragging);
+        for pair in scrolls.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "autoscroll stalled after one step: {scrolls:?} from {start}"
+            );
+        }
+        assert_eq!(scrolls[3], start + 8, "two rows per edge event");
+        let focus = state
+            .transcript_selection
+            .as_ref()
+            .expect("selection")
+            .focus;
+        let edge = InteractiveShell::transcript_position_at_gesture_cell(&state, 0, 4)
+            .expect("the top row names content");
+        assert_eq!(
+            focus, edge,
+            "the focus must follow the edge row, not stay at the anchor"
+        );
+        assert_ne!(focus, anchor);
     }
 }

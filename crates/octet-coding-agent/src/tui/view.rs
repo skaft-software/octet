@@ -109,8 +109,8 @@ use self::viewport::{
     max_scroll_for_available, render_shell_viewport_at, render_shell_viewport_update,
 };
 use self::viewport::{
-    max_scroll_from_bottom, resolved_scroll_from_bottom, retain_viewport_anchor, transcript_lines,
-    transcript_viewport_capacity, transcript_viewport_capacity_for_state,
+    max_scroll_from_bottom, resolved_scroll_from_bottom, retain_viewport_anchor,
+    transcript_gesture_viewport_capacity, transcript_lines, transcript_viewport_capacity,
 };
 
 use crate::presentation::tool_display::is_subagent_tool;
@@ -1803,6 +1803,9 @@ pub(crate) struct ShellState {
     /// Cached wrapped transcript lines. Scrolling only slices this cache, and
     /// streaming updates re-render only the changed block.
     transcript_cache: RefCell<TranscriptCache>,
+    /// Row-to-copy alignment of the blocks this shell laid out. Pointer and
+    /// anchor mapping read it instead of re-aligning a whole answer per frame.
+    copy_rows: RefCell<transcript_selection::CopyRowsMemo>,
     extension_transcript: transcript_extensions::State,
     transcript_navigation: RefCell<transcript_navigation::TranscriptNavigation>,
     /// Persistent rich renderers: their syntax caches survive token updates.
@@ -2254,6 +2257,7 @@ impl ShellState {
             file_index_ready: Default::default(),
             path_selection: Default::default(),
             transcript_cache: Default::default(),
+            copy_rows: Default::default(),
             extension_transcript: Default::default(),
             transcript_navigation: Default::default(),
             rich_renderer: Default::default(),
@@ -2475,6 +2479,10 @@ impl ShellState {
         let cache = self.transcript_cache.get_mut();
         cache.width = None;
         cache.dirty = true;
+        // A block revision does not move for a re-layout that keeps the same
+        // text (a tool display refresh, a terminal-image mode change), so the
+        // row alignment index is dropped here instead of trusted.
+        self.copy_rows.get_mut().clear();
     }
 
     fn invalidate_disclosure(&mut self) {
@@ -7368,8 +7376,35 @@ impl InteractiveShell {
         row: u16,
         col: u16,
     ) -> Option<TranscriptPosition> {
+        Self::screen_cell_position(state, row, col, false)
+    }
+
+    /// [`Self::transcript_position_at_screen_cell`] for a gesture that is
+    /// already captured.
+    ///
+    /// Its own scrolling changes the viewport without repainting, and the cells
+    /// it moved over still name the rows on screen. A fresh press keeps the
+    /// strict receipt: it waits for the frame that names it.
+    fn transcript_position_at_gesture_cell(
+        state: &ShellState,
+        row: u16,
+        col: u16,
+    ) -> Option<TranscriptPosition> {
+        Self::screen_cell_position(state, row, col, true)
+    }
+
+    fn screen_cell_position(
+        state: &ShellState,
+        row: u16,
+        col: u16,
+        captured: bool,
+    ) -> Option<TranscriptPosition> {
         if state.render_threaded {
-            let geometry = state.pointer_render_geometry()?;
+            let geometry = if captured {
+                state.gesture_render_geometry()?
+            } else {
+                state.pointer_render_geometry()?
+            };
             if usize::from(row) >= geometry.visible_lines.len() {
                 return None;
             }
@@ -7546,7 +7581,7 @@ impl InteractiveShell {
                 Some(anchor) => anchor,
                 None => return,
             };
-            let current = Self::transcript_position_at_screen_cell(&state, row, col);
+            let current = Self::transcript_position_at_gesture_cell(&state, row, col);
             if current == Some(anchor) {
                 return;
             }
@@ -7559,7 +7594,7 @@ impl InteractiveShell {
             state.selection_dragging = true;
         }
 
-        let mut transcript_rows = transcript_viewport_capacity_for_state(&state, state.size.0);
+        let mut transcript_rows = transcript_gesture_viewport_capacity(&state);
         if transcript_rows == 0 {
             return;
         }
@@ -7582,12 +7617,12 @@ impl InteractiveShell {
             }
         }
         retain_viewport_anchor(&state);
-        transcript_rows = transcript_viewport_capacity_for_state(&state, state.size.0);
+        transcript_rows = transcript_gesture_viewport_capacity(&state);
         if transcript_rows == 0 {
             return;
         }
         let clamped = row.min(transcript_rows.saturating_sub(1) as u16);
-        if let Some(position) = Self::transcript_position_at_screen_cell(&state, clamped, col) {
+        if let Some(position) = Self::transcript_position_at_gesture_cell(&state, clamped, col) {
             if let Some(selection) = state.transcript_selection.as_mut() {
                 selection.focus = position;
             }

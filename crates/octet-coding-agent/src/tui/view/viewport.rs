@@ -76,6 +76,19 @@ pub(super) fn transcript_viewport_capacity_for_state(state: &ShellState, width: 
     transcript_viewport_capacity(chrome.transcript_rows, scroll > 0)
 }
 
+/// Capacity for a pointer gesture that is already captured.
+///
+/// Scrolling is what the gesture is doing, so its own scroll cannot empty the
+/// edge it re-checks before the next paint; any other layout change still does.
+pub(super) fn transcript_gesture_viewport_capacity(state: &ShellState) -> usize {
+    if state.render_threaded {
+        return state
+            .gesture_render_geometry()
+            .map_or(0, |geometry| geometry.viewport_rows);
+    }
+    transcript_viewport_capacity_for_state(state, state.size.0)
+}
+
 /// Wrap each logical overlay row independently and terminate its SGR state.
 /// Picker rows use the legacy closure-styled compatibility API, so each row is
 /// explicitly closed even though sexy-tui 0.2 now preserves extended colors

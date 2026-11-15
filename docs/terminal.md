@@ -254,7 +254,11 @@ report overlays do not change the ordinary ANSI launch default.
 
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
-composer history. Click-drag highlights transcript text without Shift. Release
+composer history. Each event keeps that fixed step: the terminal already applies
+its own acceleration, so octet does not add a second curve. Dragging the
+scrollbar keeps the pointer until you release it, and repeated selection-drag
+events at the top or bottom edge keep scrolling without losing the selection
+between paints. Click-drag highlights transcript text without Shift. Release
 copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under
 a stationary pointer does not expand the selected range on release; a displaced
 release still counts as movement when terminals coalesce drag events. Ctrl+C keeps

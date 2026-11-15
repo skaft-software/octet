@@ -259,8 +259,14 @@ fn render_wake_requires_frame(semantic_command: bool, resized: bool, animation_d
     semantic_command || resized || animation_due
 }
 
+/// How long a semantic wake still has to wait for the next frame slot.
+///
+/// `last_start` is when the previous frame *began*, not when its terminal write
+/// returned: the time spent painting counts toward the interval, so a frame
+/// that outran the budget is immediately due again instead of adding a fresh
+/// interval of idle latency to every following paint.
 fn frame_coalesce_delay(
-    last_render: Option<Instant>,
+    last_start: Option<Instant>,
     now: Instant,
     input_changed: bool,
 ) -> Duration {
@@ -268,9 +274,31 @@ fn frame_coalesce_delay(
     if input_changed {
         return Duration::ZERO;
     }
-    last_render
-        .map(|last| (last + RENDER_INTERVAL).saturating_duration_since(now))
+    last_start
+        .map(|start| (start + RENDER_INTERVAL).saturating_duration_since(now))
         .unwrap_or_default()
+}
+
+/// The semantic stream's frame budget, measured from each frame's start.
+///
+/// One owner keeps the anchor and the decision together so the interval cannot
+/// be reset by the frame that consumed it.
+#[derive(Default)]
+struct FramePacer {
+    /// Start of the frame the semantic stream painted last.
+    last_start: Option<Instant>,
+}
+
+impl FramePacer {
+    /// Record a frame that is about to paint.
+    fn begin(&mut self) {
+        self.last_start = Some(Instant::now());
+    }
+
+    /// Remaining wait for a semantic wake that arrives at `now`.
+    fn delay(&self, now: Instant, input_changed: bool) -> Duration {
+        frame_coalesce_delay(self.last_start, now, input_changed)
+    }
 }
 
 /// A presentation clock keeps its monotonic phase across semantic wakes and
@@ -385,7 +413,7 @@ impl AnimationSchedule {
 /// for Stop. A producer continuously refilling that slot cannot starve painting.
 fn coalesce_render_commands(
     rx: &Receiver<RenderCommand>,
-    last_render: Option<Instant>,
+    pacer: &FramePacer,
     tui: &TUI<'_>,
     suspended: &mut Option<mpsc::Sender<()>>,
     input_changed: impl Fn() -> bool,
@@ -394,8 +422,7 @@ fn coalesce_render_commands(
     let now = Instant::now();
     // The stream throttle never pushes a due dot/shimmer phase into a later
     // slot. Timed frames and input remain independent of semantic traffic.
-    let deadline =
-        now + frame_coalesce_delay(last_render, now, input_changed()).min(animation_deadline);
+    let deadline = now + pacer.delay(now, input_changed()).min(animation_deadline);
     loop {
         // A key admitted during coalescing must also preempt the deadline.
         let remaining = if input_changed() {
@@ -749,7 +776,7 @@ pub(super) fn render_loop_with_terminal(
     let mut last_title = None;
     sync_terminal_chrome(&mut tui, &state, &mut last_title);
 
-    let mut last_render: Option<Instant> = None;
+    let mut pacer = FramePacer::default();
     // Capture before each paint: an edit admitted during a slow terminal write
     // still differs on the next wake, even when that write was not current.
     let mut last_editor_revision = state.borrow().editor.revision();
@@ -843,7 +870,7 @@ pub(super) fn render_loop_with_terminal(
 
         if !coalesce_render_commands(
             &rx,
-            last_render,
+            &pacer,
             &tui,
             &mut suspended,
             || {
@@ -891,11 +918,13 @@ pub(super) fn render_loop_with_terminal(
         // unchanged. Capture before writing so a newer resize during the paint
         // remains pending instead of being mistaken for the rendered geometry.
         let resize_epoch = state.borrow().resize_epoch;
+        // The interval this frame owns starts before the terminal write, so a
+        // slow paint is paid out of the budget rather than added after it.
+        pacer.begin();
         tui.request_render_force(resize_epoch != painted_resize_epoch);
         state.frame_written_at(tui.rendered_viewport_top());
         painted_resize_epoch = resize_epoch;
         resize_schedule.painted();
-        last_render = Some(Instant::now());
     }
 
     // Stop (or channel closure) can overtake a coalesced Render. Publish the
@@ -1353,6 +1382,13 @@ mod scheduler_tests {
         TUI::new(Box::new(NullTerminal))
     }
 
+    /// A pacer whose last frame began at `start`.
+    fn pacer_started_at(start: Instant) -> FramePacer {
+        FramePacer {
+            last_start: Some(start),
+        }
+    }
+
     #[test]
     fn diagnostics_read_the_retained_frame_without_scheduling_a_repaint() {
         let renderer = test_renderer();
@@ -1363,7 +1399,7 @@ mod scheduler_tests {
         let mut suspended = None;
         assert!(coalesce_render_commands(
             &rx,
-            Some(Instant::now()),
+            &pacer_started_at(Instant::now()),
             &renderer,
             &mut suspended,
             || false,
@@ -1387,7 +1423,7 @@ mod scheduler_tests {
         let mut suspended = None;
         assert!(coalesce_render_commands(
             &rx,
-            None,
+            &FramePacer::default(),
             &renderer,
             &mut suspended,
             || false,
@@ -1397,7 +1433,7 @@ mod scheduler_tests {
         tx.send(RenderCommand::Stop).unwrap();
         assert!(!coalesce_render_commands(
             &rx,
-            Some(Instant::now()),
+            &pacer_started_at(Instant::now()),
             &renderer,
             &mut suspended,
             || false,
@@ -1407,7 +1443,7 @@ mod scheduler_tests {
         drop(tx);
         assert!(!coalesce_render_commands(
             &rx,
-            None,
+            &FramePacer::default(),
             &renderer,
             &mut suspended,
             || false,
@@ -1425,7 +1461,7 @@ mod scheduler_tests {
         // The coalescer never consumes a suspend: it hands the ack to the owner.
         assert!(!coalesce_render_commands(
             &rx,
-            None,
+            &FramePacer::default(),
             &renderer,
             &mut suspended,
             || false,
@@ -1451,7 +1487,7 @@ mod scheduler_tests {
         // The edit occurs after the deadline was computed, before waiting.
         assert!(coalesce_render_commands(
             &rx,
-            Some(Instant::now()),
+            &pacer_started_at(Instant::now()),
             &renderer,
             &mut suspended,
             || {
@@ -1472,7 +1508,7 @@ mod scheduler_tests {
         let mut suspended = None;
         assert!(coalesce_render_commands(
             &rx,
-            Some(Instant::now()),
+            &pacer_started_at(Instant::now()),
             &renderer,
             &mut suspended,
             || false,
@@ -1497,17 +1533,65 @@ mod scheduler_tests {
 
     #[test]
     fn semantic_bursts_coalesce_for_at_most_one_terminal_frame() {
-        let last = Instant::now();
+        let start = Instant::now();
         assert_eq!(
-            frame_coalesce_delay(Some(last), last + Duration::from_millis(1), false),
+            frame_coalesce_delay(Some(start), start + Duration::from_millis(1), false),
             Duration::from_millis(15)
         );
         assert_eq!(
-            frame_coalesce_delay(Some(last), last + Duration::from_millis(16), false),
+            frame_coalesce_delay(Some(start), start + Duration::from_millis(16), false),
             Duration::ZERO
         );
-        assert_eq!(frame_coalesce_delay(None, last, false), Duration::ZERO);
-        assert_eq!(frame_coalesce_delay(Some(last), last, true), Duration::ZERO);
+        assert_eq!(frame_coalesce_delay(None, start, false), Duration::ZERO);
+        assert_eq!(
+            frame_coalesce_delay(Some(start), start, true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn pacing_counts_render_time_toward_the_interval() {
+        // The frame's own work is part of its slot. Measuring from the start
+        // means a slow frame hands the stream the next slot immediately, while
+        // a fast frame still coalesces a burst until the interval is spent.
+        let start = Instant::now();
+        let slow = start + Duration::from_millis(30);
+        assert_eq!(
+            frame_coalesce_delay(Some(start), slow, false),
+            Duration::ZERO,
+            "a 30 ms frame must not add another 16 ms of idle latency"
+        );
+        let fast = start + Duration::from_millis(4);
+        assert_eq!(
+            frame_coalesce_delay(Some(start), fast, false),
+            Duration::from_millis(12)
+        );
+        // A key admitted inside the slot still preempts it.
+        assert_eq!(
+            frame_coalesce_delay(Some(start), fast, true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn pacer_records_the_frame_start_not_its_finish() {
+        // `begin` runs before the terminal write, so the anchor it exposes is
+        // the frame's start: a simulated 25 ms paint leaves no wait behind.
+        let mut pacer = FramePacer::default();
+        pacer.begin();
+        let started = pacer.last_start.expect("the pacer recorded a frame");
+        assert_eq!(
+            pacer.delay(started + Duration::from_millis(25), false),
+            Duration::ZERO
+        );
+        assert_eq!(
+            pacer.delay(started + Duration::from_millis(1), false),
+            Duration::from_millis(15)
+        );
+        assert_eq!(
+            pacer.delay(started + Duration::from_millis(1), true),
+            Duration::ZERO
+        );
     }
 }
 
@@ -1618,10 +1702,9 @@ impl Drop for RenderStateGuard<'_> {
             return;
         };
         let owner = &mut **owner;
-        let mut geometry = super::renderer_geometry::RenderedGeometry::capture_with(
+        let mut geometry = super::renderer_geometry::RenderedGeometry::capture(
             &owner.state,
             owner.geometry_fence.expect("accepted model"),
-            &mut owner.copy_rows,
         );
         let mut state = shared.0.lock().expect("shell state mutex poisoned");
         // Every mutable semantic borrow advances this fence, including input,

@@ -771,7 +771,8 @@ fn dragging_into_pinned_chrome_clamps_to_last_semantic_transcript_row() {
         shell.on_prompt_submitted(&format!("record {number}"));
     }
     let _ = render_shell(&shell.state.borrow(), 80);
-    let capacity = transcript_viewport_capacity_for_state(&shell.state.borrow(), 80);
+    let capacity =
+        super::super::viewport::transcript_viewport_capacity_for_state(&shell.state.borrow(), 80);
     assert!(capacity > 1);
 
     shell.begin_transcript_selection(0, 0, false);

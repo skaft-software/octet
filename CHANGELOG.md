@@ -11,6 +11,14 @@
 
 ### Fixed
 
+- Fullscreen scrolling and selection reuse unchanged row-to-copy mappings instead
+  of re-aligning long answers on every event. Partial mappings extend for later
+  rows, and width, theme, disclosure and content changes invalidate stale work.
+  Captured scrollbar drags and selection-edge scrolling survive their own scroll
+  changes between paints; fresh presses still require matching frame geometry.
+  Frame pacing counts render/write time toward the interval instead of adding
+  another interval after a slow frame.
+
 - Tool labels use available terminal width while keeping their selected values readable.
 
 ## [0.10.4] - 2026-11-12

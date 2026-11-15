@@ -140,6 +140,22 @@ force replay. Terminal-owned resume eagerly materializes the complete branch.
 The bounded PageUp/`--mouse app` semantic viewport is a separate ownership mode,
 not a substitute for complete canonical native history.
 
+Semantic-stream frame pacing measures its interval from each frame's start, so
+terminal-write time is paid out of the frame budget instead of being added after
+it. A frame slower than the interval is immediately due again, bursts still
+coalesce into the newest frame, and a key press still preempts the slot. This
+bounds added idle latency; it is not a claim about terminal paint duration.
+
+Row-to-copy alignment is retained per visible block and fenced by block commit
+id, revision, width, surface geometry, theme epoch and disclosure rather than
+rebuilt per event. Unchanged identity and coverage checks are constant-time;
+source-offset lookup uses binary search over aligned rows, and selection
+decoration visits only visible rows. A partial alignment extends when a later
+window needs more rows. Revision-only changes validate the reusable prefix;
+first alignment, changed text and reflow can still require whole-block work.
+These are mapping-work bounds, not constant-time rendering or physical-display
+latency guarantees.
+
 Resize notifications settle after 75 ms of quiet with a 150 ms maximum delay;
 composer edits/readiness changes bypass settling. Height-only changes keep
 wrapped block caches. A changed resize epoch forces replay even after an

@@ -414,12 +414,15 @@ fn memoized_copy_rows_match_a_fresh_alignment_through_a_stream() {
         for visible in [rows.saturating_sub(12)..rows, 0..rows, 3..9] {
             let fresh = CopyRows::build_visible(&painted, text, geometry, None, visible.clone());
             let memoized = CopyRows::build_visible_with(
-                &painted,
-                text,
-                geometry,
-                None,
+                CopySurface {
+                    painted: &painted,
+                    text,
+                    geometry,
+                    output_start: None,
+                },
                 visible.clone(),
                 &mut memo,
+                None,
             );
             assert_eq!(
                 format!("{memoized:?}"),
@@ -437,7 +440,17 @@ fn memoized_copy_rows_match_a_fresh_alignment_through_a_stream() {
     assert_eq!(
         format!(
             "{:?}",
-            CopyRows::build_visible_with(&painted, &full, moved, None, 0..painted.len(), &mut memo)
+            CopyRows::build_visible_with(
+                CopySurface {
+                    painted: &painted,
+                    text: &full,
+                    geometry: moved,
+                    output_start: None,
+                },
+                0..painted.len(),
+                &mut memo,
+                None,
+            )
         ),
         format!("{:?}", CopyRows::build(&painted, &full, moved, None))
     );
@@ -956,4 +969,347 @@ fn capture_and_diff_omission_metadata_never_become_tool_copy_source() {
             );
         }
     }
+}
+
+/// One long answer, as a completed assistant block.
+fn huge_answer(shell: &mut super::super::InteractiveShell, rows: usize) {
+    use super::super::AssistantBlock;
+    let mut text = String::from("HUGE-ANSWER-BEGIN\n");
+    for index in 0..rows {
+        text.push_str(&format!(
+            "row {index:05} · 界é text that wraps once the viewport is narrow\n"
+        ));
+    }
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::finalized(text),
+        )));
+}
+
+/// [`huge_answer`] with a live selection, so the frame decorates semantic rows
+/// the way an active drag does.
+fn huge_answer_selected(shell: &mut super::super::InteractiveShell, rows: usize) {
+    huge_answer(shell, rows);
+    shell.state.borrow_mut().transcript_selection = Some(super::TranscriptSelection {
+        anchor: super::TranscriptPosition {
+            block: 0,
+            offset: 0,
+            trailing_affinity: false,
+        },
+        focus: super::TranscriptPosition {
+            block: 0,
+            offset: 64,
+            trailing_affinity: false,
+        },
+    });
+}
+
+/// The visible `row NNNNN` marker, its terminal cell, and the painted text.
+fn visible_row_marker(lines: &[String]) -> (u16, u16, String) {
+    for (row, line) in lines.iter().enumerate() {
+        let plain = strip_terminal_sequences(line);
+        let Some(at) = plain.find("row ") else {
+            continue;
+        };
+        let Some(token) = plain.get(at..at + 9) else {
+            continue;
+        };
+        if token["row ".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            return (
+                row as u16,
+                visible_width(&plain[..at]) as u16,
+                token.to_owned(),
+            );
+        }
+    }
+    panic!("no visible row marker in {lines:?}");
+}
+
+/// Drag over the visible `row NNNNN` marker and require the copy to be that
+/// painted text, not merely whatever the shell happened to retain.
+fn select_marker(shell: &mut super::super::InteractiveShell, lines: &[String]) -> String {
+    let (row, col, marker) = visible_row_marker(lines);
+    shell.begin_transcript_selection(row, col, false);
+    shell.extend_transcript_selection(row, col + visible_width(&marker) as u16);
+    assert_eq!(
+        shell.selected_plain_text().as_deref(),
+        Some(marker.as_str()),
+        "the drag at {row},{col} must copy the painted {marker}"
+    );
+    marker
+}
+
+#[test]
+fn scrolled_huge_answer_reuses_one_copy_mapping_across_frames() {
+    // A wheel step or a selection move inside a long answer re-checks the
+    // viewport, the anchor and the decorated rows. Once the answer has been
+    // aligned, none of that may re-align or re-project the whole block.
+    let mut shell = super::super::InteractiveShell::test_shell();
+    shell.set_size(120, 40);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    huge_answer_selected(&mut shell, 4096);
+    shell.scroll_lines(-20);
+    selection_frame(&mut shell, false);
+    let _ = take_copy_mapping_work();
+    let mut painted = None;
+    for _ in 0..4 {
+        shell.scroll_lines(-7);
+        painted = Some(selection_frame(&mut shell, false));
+    }
+    assert_eq!(
+        take_copy_mapping_work(),
+        (0, 0),
+        "an unchanged answer was re-aligned while scrolling"
+    );
+    // The reused mapping still names the text the reader clicked.
+    let painted = painted.unwrap();
+    let marker = select_marker(&mut shell, &painted);
+    assert_eq!(
+        shell.selected_plain_text().as_deref(),
+        Some(marker.as_str())
+    );
+}
+
+#[test]
+fn threaded_scrolled_huge_answer_reuses_one_copy_mapping_across_frames() {
+    // The production threaded path: each wheel step is an input-side scroll
+    // followed by a renderer accept, which upgrades the viewport anchor and
+    // repaints the decorated rows.
+    let mut shell = super::super::InteractiveShell::test_shell();
+    shell.set_size(120, 40);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    huge_answer_selected(&mut shell, 4096);
+    shell.isolate_native_test_renderer();
+    shell.scroll_lines(-20);
+    shell.render_written_test_frame();
+    let _ = take_copy_mapping_work();
+    let mut painted = None;
+    for _ in 0..4 {
+        shell.scroll_lines(-7);
+        shell.render_written_test_frame();
+        painted = Some(
+            shell
+                .state
+                .borrow()
+                .pointer_render_geometry()
+                .expect("painted geometry")
+                .visible_lines
+                .clone(),
+        );
+    }
+    assert_eq!(
+        take_copy_mapping_work(),
+        (0, 0),
+        "an unchanged answer was re-aligned by the threaded renderer"
+    );
+    let painted = painted.unwrap();
+    let marker = select_marker(&mut shell, &painted);
+    assert_eq!(
+        shell.selected_plain_text().as_deref(),
+        Some(marker.as_str())
+    );
+}
+
+#[test]
+fn copy_mapping_follows_an_equal_length_replacement() {
+    use super::super::{AssistantBlock, InteractiveShell};
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(90, 30);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    {
+        let mut state = shell.state.borrow_mut();
+        state.push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::finalized("ALPHA-MARKER one\nsecond row stays".into()),
+        )));
+    }
+    let painted = selection_frame(&mut shell, false);
+    let (row, col) = selection_cell(&painted, "ALPHA-MARKER");
+    shell.begin_transcript_selection(row, col, false);
+    shell.extend_transcript_selection(row, col + 12);
+    assert_eq!(shell.selected_plain_text().as_deref(), Some("ALPHA-MARKER"));
+    // Same painted row count and the same byte length: only the revision
+    // separates the replacement from the text the mapping was built for.
+    {
+        let mut state = shell.state.borrow_mut();
+        state.transcript[0] = TranscriptBlock::Assistant(Box::new(AssistantBlock::finalized(
+            "BRAVO-MARKER one\nsecond row stays".into(),
+        )));
+        state.touch_block(0);
+    }
+    let painted = selection_frame(&mut shell, false);
+    let (row, col) = selection_cell(&painted, "BRAVO-MARKER");
+    shell.begin_transcript_selection(row, col, false);
+    shell.extend_transcript_selection(row, col + 12);
+    assert_eq!(shell.selected_plain_text().as_deref(), Some("BRAVO-MARKER"));
+}
+
+#[test]
+fn copy_mapping_identity_covers_disclosure_and_theme_epoch() {
+    use super::super::{CompactionBlock, InteractiveShell};
+    // A collapsed compaction copies only its label; expanding the disclosure
+    // changes the projection without touching the block's revision.
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(90, 30);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    {
+        let mut state = shell.state.borrow_mut();
+        state.push_block(TranscriptBlock::Compaction(Box::new(CompactionBlock {
+            label: "COMPACTION-LABEL".into(),
+            summary: "COMPACTION-SUMMARY 界é".into(),
+            expanded: false,
+        })));
+    }
+    let painted = selection_frame(&mut shell, false);
+    let label_width = visible_width("COMPACTION-LABEL");
+    let collapsed = {
+        let state = shell.state.borrow();
+        let (_, _, geometry) = state.block_span(0).expect("laid out block");
+        state.copy_mapping(0, geometry).map(|rows| rows.text_len())
+    };
+    assert_eq!(collapsed, Some(label_width));
+    shell.state.borrow_mut().verbose_tools = true;
+    let expanded = {
+        let state = shell.state.borrow();
+        let (_, _, geometry) = state.block_span(0).expect("laid out block");
+        state.copy_mapping(0, geometry).map(|rows| rows.text_len())
+    };
+    assert!(
+        expanded.is_some_and(|len| len > label_width),
+        "an expanded projection must name its summary too: {expanded:?} in {painted:?}"
+    );
+
+    // A theme epoch change invalidates the alignment even when the text and
+    // the width are unchanged.
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(90, 30);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    huge_answer_selected(&mut shell, 512);
+    selection_frame(&mut shell, false);
+    let _ = take_copy_mapping_work();
+    shell.state.borrow_mut().theme_epoch += 1;
+    selection_frame(&mut shell, false);
+    assert!(
+        take_copy_mapping_work().0 > 0,
+        "a theme change must not reuse a previous alignment"
+    );
+}
+
+#[test]
+fn a_head_window_alignment_extends_to_reach_later_rows() {
+    // One frame that only reaches the head of a long answer must record a
+    // genuinely partial alignment, and asking for a later row must extend it
+    // instead of answering from (or rebuilding) the prefix.
+    let mut shell = super::super::InteractiveShell::test_shell();
+    shell.set_size(120, 40);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    huge_answer(&mut shell, 2048);
+    let state = shell.state.borrow();
+    state.rendered_transcript(120);
+    let (start, length, geometry) = state.block_span(0).expect("laid out block");
+    let head = {
+        let cache = state.transcript_cache.borrow();
+        let painted = cache.lines[start..start + length].to_vec();
+        drop(cache);
+        visible_block_copy_rows(&state, 0, &painted, geometry, 0..40)
+    };
+    assert!(head.is_some(), "the head window maps its own rows");
+    let (head_aligned, _) = take_copy_mapping_work();
+    assert!(
+        head_aligned > 0 && head_aligned < length / 2,
+        "the head window must stay partial: {head_aligned} of {length}"
+    );
+    // A selection point far below the head window is not in the prefix.
+    let later = length / 2;
+    {
+        let mapping = state.copy_mapping(0, geometry).expect("renderer mapping");
+        assert!(
+            mapping.row(later).is_some(),
+            "the alignment must extend to the later row"
+        );
+    }
+    assert!(state
+        .copy_rows
+        .borrow()
+        .get(0)
+        .is_some_and(|memo| memo.covers(later + 1)));
+    let (extended, _) = take_copy_mapping_work();
+    assert!(
+        extended > 0,
+        "the mapping extended instead of reusing a prefix"
+    );
+    // Once extended, the same query costs nothing.
+    let _ = take_copy_mapping_work();
+    assert!(state
+        .copy_mapping(0, geometry)
+        .is_some_and(|rows| rows.row(later).is_some()));
+    assert_eq!(take_copy_mapping_work(), (0, 0));
+}
+
+#[test]
+fn threaded_session_at_the_head_reaches_later_rows_after_scrolling() {
+    // Production threaded path, no prewarming: isolate before the first frame,
+    // paint only at the head of a long answer, then navigate down and select.
+    let mut shell = super::super::InteractiveShell::test_shell();
+    shell.set_size(120, 40);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    huge_answer(&mut shell, 1024);
+    shell.isolate_native_test_renderer();
+    shell.scroll_lines(i16::MIN);
+    shell.render_written_test_frame();
+    shell.scroll_lines(120);
+    let lines = {
+        shell.render_written_test_frame();
+        shell
+            .state
+            .borrow()
+            .pointer_render_geometry()
+            .expect("painted geometry")
+            .visible_lines
+            .clone()
+    };
+    let marker = select_marker(&mut shell, &lines);
+    assert_eq!(
+        shell.selected_plain_text().as_deref(),
+        Some(marker.as_str())
+    );
+    let decorated = selection_frame(&mut shell, false);
+    assert!(
+        decorated.iter().any(|line| line.contains("\x1b[0;7m")),
+        "a window past the first frame must decorate"
+    );
+}
+
+#[test]
+fn unchanged_tail_selection_costs_nothing_without_prewarming() {
+    // No selection, no off-tail scroll: the tail frame itself has to record a
+    // complete mapping, and the selection made from its own cells must then be
+    // reused by every later frame.
+    let mut shell = super::super::InteractiveShell::test_shell();
+    shell.set_size(120, 40);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    huge_answer(&mut shell, 2048);
+    let lines = selection_frame(&mut shell, false);
+    let marker = select_marker(&mut shell, &lines);
+    assert_eq!(
+        shell.selected_plain_text().as_deref(),
+        Some(marker.as_str())
+    );
+    let _ = take_copy_mapping_work();
+    for _ in 0..3 {
+        let lines = selection_frame(&mut shell, false);
+        assert!(
+            lines.iter().any(|line| line.contains("\x1b[0;7m")),
+            "the tail selection stays painted"
+        );
+    }
+    assert_eq!(
+        take_copy_mapping_work(),
+        (0, 0),
+        "an unchanged tail frame re-projected the whole answer"
+    );
 }

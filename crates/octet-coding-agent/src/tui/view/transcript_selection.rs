@@ -4,6 +4,25 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::presentation::{format_duration, RunOutcome};
 
 use super::outcome_render::{bounded_outcome_detail, completion_text};
+
+#[cfg(test)]
+thread_local! {
+    /// Painted rows the copy mapping had to align again. A frame or pointer
+    /// event on an unchanged block must not spend any.
+    static COPY_ROW_ALIGNMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Semantic copy texts projected for a block. The projection copies the
+    /// complete answer, so it is built only when the block actually changed.
+    static COPY_TEXT_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Take the copy-mapping work one measured region performed.
+#[cfg(test)]
+pub(super) fn take_copy_mapping_work() -> (usize, usize) {
+    (
+        COPY_ROW_ALIGNMENTS.with(|work| work.replace(0)),
+        COPY_TEXT_BUILDS.with(|work| work.replace(0)),
+    )
+}
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::{bounded_tool_failure_reason, looks_like_diff};
 use super::transcript_cache::SurfaceGeometry;
@@ -159,6 +178,8 @@ fn presented_tool(
 }
 
 pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> String {
+    #[cfg(test)]
+    COPY_TEXT_BUILDS.with(|work| work.set(work.get() + 1));
     let block = &state.transcript[index];
     #[cfg(test)]
     super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
@@ -257,14 +278,18 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
     for index in first..after {
         #[cfg(test)]
         super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
-        let Some(&block_start) = cache.block_starts.get(index) else {
+        let Some((block_start, block_rows, geometry)) = state.block_span(index) else {
             continue;
         };
-        let block_end = block_start + cache.block_lengths[index];
-        if block_end <= start_row || block_start >= start_row + lines.len() {
+        if block_start + block_rows <= start_row || block_start >= start_row + lines.len() {
             continue;
         }
-        let text = presented_block_copy_text(state, index);
+        // This runs on every painted frame. The alignment is reused from the
+        // previous frame unless the block, the width, the theme or the
+        // disclosure actually changed.
+        let Some(mapping) = state.copy_mapping(index, geometry) else {
+            continue;
+        };
         let from = if index == start.block {
             start.offset
         } else {
@@ -273,23 +298,16 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
         let to = if index == end.block {
             end.offset
         } else {
-            text.len()
+            mapping.text_len()
         };
-        let geometry = cache.block_geometries[index];
-        let Some(rows) = visible_block_copy_rows(
-            state,
-            index,
-            &cache.lines[block_start..block_end],
-            geometry,
-            start_row.saturating_sub(block_start)
-                ..(start_row + lines.len()).saturating_sub(block_start),
-            &mut BlockCopyMemo::default(),
-        ) else {
-            continue;
-        };
-        let first = block_start + geometry.transition_rows + geometry.leading_rows + rows.first_row;
-        for (row_index, row) in rows.rows.iter().enumerate() {
-            let Some(line) = (first + row_index)
+        let first = block_start + geometry.transition_rows + geometry.leading_rows;
+        let window =
+            start_row.saturating_sub(first)..(start_row + lines.len()).saturating_sub(first);
+        for content_row in window {
+            let Some(row) = mapping.row(content_row) else {
+                break;
+            };
+            let Some(line) = (first + content_row)
                 .checked_sub(start_row)
                 .and_then(|row| lines.get_mut(row))
             else {
@@ -427,19 +445,204 @@ impl AlignedCopyRow {
     }
 }
 
+/// Layout inputs that decide one block's copy rows, compared in O(1).
+///
+/// A frame or a pointer event on an unchanged block therefore costs nothing,
+/// while a change to the block, the width, the surface geometry, the theme or
+/// the disclosure can never reuse an alignment that named different text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CopyMemoIdentity {
+    commit: u64,
+    revision: u64,
+    width: Option<u16>,
+    geometry: SurfaceGeometry,
+    theme_epoch: u64,
+    verbose: bool,
+}
+
+impl CopyMemoIdentity {
+    fn capture(state: &ShellState, index: usize, geometry: SurfaceGeometry) -> Self {
+        Self {
+            commit: state
+                .transcript_commit_ids
+                .get(index)
+                .copied()
+                .unwrap_or(u64::MAX),
+            revision: state.block_revisions.get(index).copied().unwrap_or(0),
+            width: state.transcript_cache.borrow().width,
+            geometry,
+            theme_epoch: state.theme_epoch,
+            verbose: state.verbose_tools,
+        }
+    }
+
+    /// Everything but the block's own revision. A live answer bumps only that,
+    /// so the rows above the change stay usable.
+    fn same_layout(self, other: Self) -> bool {
+        self.commit == other.commit
+            && self.width == other.width
+            && self.geometry == other.geometry
+            && self.theme_epoch == other.theme_epoch
+            && self.verbose == other.verbose
+    }
+}
+
 /// Row alignments of one block, kept between frames by the renderer.
 #[derive(Clone, Debug, Default)]
 pub(super) struct BlockCopyMemo {
+    identity: Option<CopyMemoIdentity>,
     copy_text: String,
     content_left: Option<u16>,
     output_start: Option<usize>,
     shell_output: Option<super::transcript_cache::ShellOutputSource>,
     rows: Vec<AlignedCopyRow>,
+    /// Content rows the block painted for this identity. Trailing decorative
+    /// rows cannot demand an alignment that will never exist.
+    content_rows: usize,
+    /// A tool's bounded presented projection. Tools never align painted rows,
+    /// so their whole mapping is this projection.
+    tool: Option<CopyRows>,
+}
+
+/// One block's projections, as read by an alignment pass.
+#[derive(Clone, Copy)]
+pub(super) struct CopySurface<'a> {
+    /// The block's painted rows.
+    pub(super) painted: &'a [String],
+    /// The block's semantic copy text.
+    pub(super) text: &'a str,
+    pub(super) geometry: SurfaceGeometry,
+    /// Copy-text offset where the shell command header ends, if any.
+    pub(super) output_start: Option<usize>,
+}
+
+impl CopyRows {
+    /// [`Self::build_visible`], reusing the rows `memo` aligned for an earlier
+    /// frame of the same block while its identity is unchanged.
+    ///
+    /// Rows are aligned top to bottom, each searching the copy text from where
+    /// the previous row ended, so a visible row at the bottom of a long block
+    /// depends on every row above it. Without the memo, every frame of a
+    /// streaming answer re-stripped and re-matched the whole answer.
+    fn build_visible_with(
+        surface: CopySurface<'_>,
+        visible: std::ops::Range<usize>,
+        memo: &mut BlockCopyMemo,
+        identity: Option<CopyMemoIdentity>,
+    ) -> Self {
+        let first = surface
+            .geometry
+            .transition_rows
+            .saturating_add(surface.geometry.leading_rows);
+        memo.align(surface, visible.end.saturating_sub(first), identity);
+        memo.visible_rows(surface.geometry, visible)
+    }
 }
 
 impl BlockCopyMemo {
+    /// Extend this block's alignment through `through` content rows.
+    ///
+    /// `identity` is the block's O(1) layout identity: when it still matches
+    /// and already covers `through`, the rows are known to describe the same
+    /// text and painted cells without reading either. A partial alignment (a
+    /// frame painted at the head of a long answer) is extended, never rebuilt.
+    /// `None` keeps the validate-each-row behaviour for one-shot projections
+    /// that own no identity.
+    fn align(
+        &mut self,
+        surface: CopySurface<'_>,
+        through: usize,
+        identity: Option<CopyMemoIdentity>,
+    ) {
+        let CopySurface {
+            painted,
+            text: copy_text,
+            geometry,
+            output_start,
+        } = surface;
+        if let Some(identity) = identity {
+            if self.identity == Some(identity) && self.covers(through) {
+                return;
+            }
+        }
+        let first = geometry
+            .transition_rows
+            .saturating_add(geometry.leading_rows);
+        let content_rows = painted
+            .len()
+            .saturating_sub(first)
+            .saturating_sub(geometry.trailing_rows);
+        let content = painted
+            .get(first..first.saturating_add(content_rows))
+            .unwrap_or_default();
+        let reusable =
+            if self.output_start != output_start || self.shell_output != geometry.shell_output {
+                0
+            } else {
+                match (identity, self.identity) {
+                    (Some(current), Some(previous)) if current == previous => self.rows.len(),
+                    (Some(current), Some(previous)) if current.same_layout(previous) => {
+                        self.reusable_rows(content, copy_text, geometry.content_left)
+                    }
+                    (Some(_), _) => 0,
+                    (None, _) => self.reusable_rows(content, copy_text, geometry.content_left),
+                }
+            };
+        self.identity = identity;
+        self.output_start = output_start;
+        self.shell_output = geometry.shell_output;
+        self.tool = None;
+        self.content_rows = content.len();
+        self.rows.truncate(reusable);
+        if self.copy_text != copy_text {
+            copy_text.clone_into(&mut self.copy_text);
+        }
+        self.content_left = Some(geometry.content_left);
+        let mut cursor = self.rows.last().map_or(0, |row| row.cursor_after);
+        for (row, line) in content
+            .iter()
+            .enumerate()
+            .take(through.min(content.len()))
+            .skip(self.rows.len())
+        {
+            let source = match (output_start, row) {
+                (Some(start), 0) => &copy_text[..start.saturating_sub(1).min(copy_text.len())],
+                (Some(start), 1) => {
+                    cursor = (start + geometry.shell_output.map_or(0, |source| source.start))
+                        .min(copy_text.len());
+                    copy_text
+                }
+                _ => copy_text,
+            };
+            let metadata = output_start.is_some()
+                && row > 0
+                && geometry
+                    .shell_output
+                    .is_some_and(|source| row <= source.metadata_rows);
+            let mut aligned = align_copy_row(
+                if metadata { "" } else { line },
+                source,
+                cursor,
+                geometry.content_left,
+                output_start.is_some() && row > 0,
+            );
+            if metadata {
+                line.clone_into(&mut aligned.painted);
+            }
+            if output_start.is_some() && row == 0 {
+                aligned.to_text_end = false;
+                aligned.missed.clear();
+            }
+            cursor = aligned.cursor_after;
+            self.rows.push(aligned);
+        }
+    }
+
     /// How many leading rows still align exactly as recorded: the same painted
     /// row, and the same copy text wherever the row's searches could look.
+    ///
+    /// Only a revision-only change to the same layout reaches this, so a live
+    /// answer verifies the prefix once instead of re-matching the whole block.
     fn reusable_rows(&self, content: &[String], copy_text: &str, content_left: u16) -> usize {
         if self.content_left != Some(content_left) {
             return 0;
@@ -459,20 +662,152 @@ impl BlockCopyMemo {
             })
             .count()
     }
+
+    /// Whether every content row a window reaches is already aligned.
+    fn covers(&self, through: usize) -> bool {
+        self.tool.is_some() || self.rows.len() >= through.min(self.content_rows)
+    }
+
+    /// One content-row window of this block, projected for a bounded receipt.
+    fn visible_rows(&self, geometry: SurfaceGeometry, visible: std::ops::Range<usize>) -> CopyRows {
+        let first = geometry
+            .transition_rows
+            .saturating_add(geometry.leading_rows);
+        let from = visible.start.saturating_sub(first).min(self.rows.len());
+        let to = visible.end.saturating_sub(first).min(self.rows.len());
+        CopyRows {
+            first_row: from,
+            content_left: geometry.content_left,
+            rows: self.rows[from..to]
+                .iter()
+                .map(|aligned| aligned.row.clone())
+                .collect(),
+        }
+    }
 }
 
-/// Renderer-owned [`BlockCopyMemo`]s, keyed by transcript commit id.
+impl CopyMapping for BlockCopyMemo {
+    fn offset_for(&self, content_row: usize, col: u16) -> Option<usize> {
+        if let Some(tool) = &self.tool {
+            return tool.offset_for(content_row, col);
+        }
+        let row = &self.rows.get(content_row)?.row;
+        let absolute = usize::from(col).saturating_add(usize::from(self.content_left?));
+        let within = absolute.saturating_sub(usize::from(row.painted_cells));
+        Some(row.offset + visual_col_to_offset(&row.text, within))
+    }
+
+    fn row_for_offset(&self, offset: usize, trailing: bool) -> Option<usize> {
+        if let Some(tool) = &self.tool {
+            return tool.row_for_offset(offset, trailing);
+        }
+        if self.rows.is_empty() {
+            return None;
+        }
+        let boundary = self.rows.partition_point(|row| row.row.offset < offset);
+        if boundary < self.rows.len() && self.rows[boundary].row.offset == offset && !trailing {
+            return Some(boundary);
+        }
+        Some(boundary.saturating_sub(1).min(self.rows.len() - 1))
+    }
+
+    fn row(&self, content_row: usize) -> Option<&CopyRow> {
+        match &self.tool {
+            Some(tool) => tool.row(content_row),
+            None => Some(&self.rows.get(content_row)?.row),
+        }
+    }
+
+    fn text_len(&self) -> usize {
+        match &self.tool {
+            Some(tool) => tool.text_len(),
+            None => self.copy_text.len(),
+        }
+    }
+}
+
+/// Renderer-owned [`BlockCopyMemo`]s, keyed by transcript block index.
+///
+/// The index travels with the block's identity, so a shifted index, a replaced
+/// block or a relaid-out width invalidates its entry instead of reusing it.
 #[derive(Default)]
-pub(super) struct CopyRowsMemo(std::collections::HashMap<u64, BlockCopyMemo>);
+pub(super) struct CopyRowsMemo(std::collections::HashMap<usize, BlockCopyMemo>);
 
 impl CopyRowsMemo {
-    pub(super) fn block(&mut self, id: u64) -> &mut BlockCopyMemo {
-        self.0.entry(id).or_default()
+    pub(super) fn get(&self, index: usize) -> Option<&BlockCopyMemo> {
+        self.0.get(&index)
+    }
+
+    /// The block's alignment when it still describes this exact layout, without
+    /// reading the block's text or its painted rows.
+    fn current(
+        &self,
+        state: &ShellState,
+        index: usize,
+        geometry: SurfaceGeometry,
+    ) -> Option<&BlockCopyMemo> {
+        let identity = CopyMemoIdentity::capture(state, index, geometry);
+        self.0
+            .get(&index)
+            .filter(|memo| memo.identity == Some(identity))
+    }
+
+    pub(super) fn block(&mut self, index: usize) -> &mut BlockCopyMemo {
+        self.0.entry(index).or_default()
+    }
+
+    /// Align one block's painted rows, reusing the ones already recorded.
+    fn align(&mut self, state: &ShellState, index: usize, geometry: SurfaceGeometry) -> bool {
+        let identity = CopyMemoIdentity::capture(state, index, geometry);
+        if self
+            .0
+            .get(&index)
+            .is_some_and(|memo| memo.identity == Some(identity) && memo.covers(usize::MAX))
+        {
+            return true;
+        }
+        let mut entry = self.0.remove(&index).unwrap_or_default();
+        let Some((start, length)) = state
+            .block_span(index)
+            .map(|(start, length, _)| (start, length))
+        else {
+            return false;
+        };
+        if matches!(state.transcript.get(index), Some(TranscriptBlock::Tool(_))) {
+            let projected = presented_tool(state, index, Some(geometry.content_width));
+            entry.tool = Some(CopyRows::tool(&projected, geometry, length, 0..length));
+            entry.identity = Some(identity);
+            self.0.insert(index, entry);
+            return true;
+        }
+        let copy_text = presented_block_copy_text(state, index);
+        let output_start = shell_output_copy_start(&state.transcript[index]);
+        let cache = state.transcript_cache.borrow();
+        let Some(painted) = cache.lines.get(start..start.saturating_add(length)) else {
+            return false;
+        };
+        entry.align(
+            CopySurface {
+                painted,
+                text: &copy_text,
+                geometry,
+                output_start,
+            },
+            usize::MAX,
+            Some(identity),
+        );
+        drop(cache);
+        self.0.insert(index, entry);
+        true
     }
 
     /// Forget blocks that left the viewport.
-    pub(super) fn retain(&mut self, visible: &std::collections::HashSet<u64>) {
-        self.0.retain(|id, _| visible.contains(id));
+    pub(super) fn retain(&mut self, visible: &std::collections::HashSet<usize>) {
+        self.0.retain(|index, _| visible.contains(index));
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -486,6 +821,8 @@ fn align_copy_row(
 ) -> AlignedCopyRow {
     #[cfg(test)]
     super::fullscreen_work_tests::record(|work| work.rows_mapped += 1);
+    #[cfg(test)]
+    COPY_ROW_ALIGNMENTS.with(|work| work.set(work.get() + 1));
     let plain = strip_terminal_sequences(line);
     let mut aligned = AlignedCopyRow {
         painted: line.to_owned(),
@@ -543,6 +880,44 @@ fn align_copy_row(
     aligned
 }
 
+/// Cell-to-offset mapping for one block's painted rows.
+///
+/// Both projections answer the same two questions: which copy offset one
+/// painted cell names, and which painted row one copy offset names. The
+/// renderer's bounded paint receipt and its full alignment index therefore
+/// serve the same pointer and anchor code.
+trait CopyMapping {
+    /// Copy offset for one cell of a content row. `col` is relative to the
+    /// block's content inset, the same cell the renderer used.
+    fn offset_for(&self, content_row: usize, col: u16) -> Option<usize>;
+    /// Content row holding one copy offset.
+    fn row_for_offset(&self, offset: usize, trailing: bool) -> Option<usize>;
+    /// One aligned painted row, for decoration.
+    fn row(&self, content_row: usize) -> Option<&CopyRow>;
+    /// End of the semantic text this mapping aligns.
+    fn text_len(&self) -> usize;
+}
+
+impl CopyMapping for CopyRows {
+    fn offset_for(&self, content_row: usize, col: u16) -> Option<usize> {
+        Self::offset_for(self, content_row, col)
+    }
+
+    fn row_for_offset(&self, offset: usize, trailing: bool) -> Option<usize> {
+        Self::row_for_offset(self, offset, trailing)
+    }
+
+    fn row(&self, content_row: usize) -> Option<&CopyRow> {
+        self.rows.get(content_row.checked_sub(self.first_row)?)
+    }
+
+    fn text_len(&self) -> usize {
+        self.rows
+            .last()
+            .map_or(0, |row| row.offset.saturating_add(row.text.len()))
+    }
+}
+
 /// One painted content row aligned with the block's semantic copy text.
 #[derive(Clone, Debug)]
 struct CopyRow {
@@ -594,96 +969,16 @@ impl CopyRows {
         visible: std::ops::Range<usize>,
     ) -> Self {
         Self::build_visible_with(
-            painted,
-            copy_text,
-            geometry,
-            output_start,
+            CopySurface {
+                painted,
+                text: copy_text,
+                geometry,
+                output_start,
+            },
             visible,
             &mut BlockCopyMemo::default(),
+            None,
         )
-    }
-
-    /// [`Self::build_visible`], reusing the rows `memo` aligned for an earlier
-    /// frame of the same block while their inputs are unchanged.
-    ///
-    /// Rows are aligned top to bottom, each searching the copy text from where
-    /// the previous row ended, so a visible row at the bottom of a long block
-    /// depends on every row above it. Without the memo, every frame of a
-    /// streaming answer re-stripped and re-matched the whole answer.
-    fn build_visible_with(
-        painted: &[String],
-        copy_text: &str,
-        geometry: SurfaceGeometry,
-        output_start: Option<usize>,
-        visible: std::ops::Range<usize>,
-        memo: &mut BlockCopyMemo,
-    ) -> Self {
-        let first = geometry
-            .transition_rows
-            .saturating_add(geometry.leading_rows);
-        let content_rows = painted
-            .len()
-            .saturating_sub(first)
-            .saturating_sub(geometry.trailing_rows);
-        let content = painted
-            .get(first..first.saturating_add(content_rows))
-            .unwrap_or_default();
-        let from = visible.start.saturating_sub(first).min(content.len());
-        let to = visible.end.saturating_sub(first).min(content.len());
-        let reusable =
-            if memo.output_start == output_start && memo.shell_output == geometry.shell_output {
-                memo.reusable_rows(content, copy_text, geometry.content_left)
-            } else {
-                0
-            };
-        memo.output_start = output_start;
-        memo.shell_output = geometry.shell_output;
-        memo.rows.truncate(reusable);
-        if memo.copy_text != copy_text {
-            copy_text.clone_into(&mut memo.copy_text);
-        }
-        memo.content_left = Some(geometry.content_left);
-        let mut cursor = memo.rows.last().map_or(0, |row| row.cursor_after);
-        for (row, line) in content.iter().enumerate().take(to).skip(memo.rows.len()) {
-            let source = match (output_start, row) {
-                (Some(start), 0) => &copy_text[..start.saturating_sub(1).min(copy_text.len())],
-                (Some(start), 1) => {
-                    cursor = (start + geometry.shell_output.map_or(0, |source| source.start))
-                        .min(copy_text.len());
-                    copy_text
-                }
-                _ => copy_text,
-            };
-            let metadata = output_start.is_some()
-                && row > 0
-                && geometry
-                    .shell_output
-                    .is_some_and(|source| row <= source.metadata_rows);
-            let mut aligned = align_copy_row(
-                if metadata { "" } else { line },
-                source,
-                cursor,
-                geometry.content_left,
-                output_start.is_some() && row > 0,
-            );
-            if metadata {
-                line.clone_into(&mut aligned.painted);
-            }
-            if output_start.is_some() && row == 0 {
-                aligned.to_text_end = false;
-                aligned.missed.clear();
-            }
-            cursor = aligned.cursor_after;
-            memo.rows.push(aligned);
-        }
-        Self {
-            first_row: from,
-            content_left: geometry.content_left,
-            rows: memo.rows[from..to]
-                .iter()
-                .map(|aligned| aligned.row.clone())
-                .collect(),
-        }
     }
 
     fn tool(
@@ -901,6 +1196,7 @@ fn is_frame_glyph(character: char) -> bool {
 
 /// Copy mapping for the visible part of a block, captured by the renderer.
 /// The receipt retains at most viewport-height rows even for a huge block.
+#[cfg(test)]
 pub(super) fn visible_copy_rows(
     painted: &[String],
     text: &str,
@@ -909,30 +1205,61 @@ pub(super) fn visible_copy_rows(
     visible: std::ops::Range<usize>,
     memo: &mut BlockCopyMemo,
 ) -> Option<CopyRows> {
-    let rows = CopyRows::build_visible_with(painted, text, geometry, output_start, visible, memo);
+    let rows = CopyRows::build_visible_with(
+        CopySurface {
+            painted,
+            text,
+            geometry,
+            output_start,
+        },
+        visible,
+        memo,
+        None,
+    );
     (!rows.is_empty()).then_some(rows)
 }
 
 /// The renderer and the synchronous frontend share this projection. Only the
-/// visible row ranges enter the completed-frame pointer receipt.
+/// visible row ranges enter the completed-frame pointer receipt, and the rows
+/// come from the same alignment index the frame decorated.
 pub(super) fn visible_block_copy_rows(
     state: &ShellState,
     index: usize,
     painted: &[String],
     geometry: SurfaceGeometry,
     visible: std::ops::Range<usize>,
-    memo: &mut BlockCopyMemo,
 ) -> Option<CopyRows> {
     if matches!(state.transcript[index], TranscriptBlock::Tool(_)) {
         let projected = presented_tool(state, index, Some(geometry.content_width));
         let rows = CopyRows::tool(&projected, geometry, painted.len(), visible);
         return (!rows.is_empty()).then_some(rows);
     }
-    visible_copy_rows(
-        painted,
-        &presented_block_copy_text(state, index),
-        geometry,
-        shell_output_copy_start(&state.transcript[index]),
+    let first = geometry
+        .transition_rows
+        .saturating_add(geometry.leading_rows);
+    let through = visible.end.saturating_sub(first);
+    {
+        let index_rows = state.copy_rows.borrow();
+        if let Some(rows) = index_rows
+            .current(state, index, geometry)
+            .filter(|rows| rows.covers(through))
+        {
+            let rows = rows.visible_rows(geometry, visible);
+            return (!rows.is_empty()).then_some(rows);
+        }
+    }
+    let copy_text = presented_block_copy_text(state, index);
+    let identity = CopyMemoIdentity::capture(state, index, geometry);
+    let output_start = shell_output_copy_start(&state.transcript[index]);
+    let mut index_rows = state.copy_rows.borrow_mut();
+    let memo = index_rows.block(index);
+    let rows = CopyRows::build_visible_with(
+        CopySurface {
+            painted,
+            text: &copy_text,
+            geometry,
+            output_start,
+        },
         visible,
         memo,
     )
@@ -983,7 +1310,7 @@ fn painted_copy_rows(
 fn visual_cell_to_copy_offset(
     block: &TranscriptBlock,
     copy_text: &str,
-    rows: Option<&CopyRows>,
+    rows: Option<&dyn CopyMapping>,
     local_row: usize,
     col: u16,
     width: u16,
@@ -1104,12 +1431,7 @@ pub(super) fn visual_line_for_transcript_position(
         }
         (block.start, block.rows, block.surface)
     } else {
-        let cache = state.transcript_cache.borrow();
-        (
-            *cache.block_starts.get(position.block)?,
-            *cache.block_lengths.get(position.block)?,
-            *cache.block_geometries.get(position.block)?,
-        )
+        state.block_span(position.block)?
     };
     let content_rows = total_rows
         .saturating_sub(geometry.transition_rows)
@@ -1119,22 +1441,23 @@ pub(super) fn visual_line_for_transcript_position(
         return None;
     }
     let block = state.transcript.get(position.block)?;
-    let copy_text = presented_block_copy_text(state, position.block);
-    let rows = painted_copy_rows(
-        state,
-        state.retained_render_geometry(),
-        position.block,
-        &copy_text,
-        geometry,
-    );
-    let content_row = copy_offset_to_visual_row(
-        block,
-        &copy_text,
-        rows.as_ref(),
-        position.offset,
-        position.trailing_affinity,
-        geometry.content_width,
-    )
+    let mapped = state
+        .copy_mapping(position.block, geometry)
+        .and_then(|rows| rows.row_for_offset(position.offset, position.trailing_affinity));
+    let content_row = match mapped {
+        Some(row) => row,
+        None => {
+            let copy_text = presented_block_copy_text(state, position.block);
+            copy_offset_to_visual_row(
+                block,
+                &copy_text,
+                None,
+                position.offset,
+                position.trailing_affinity,
+                geometry.content_width,
+            )
+        }
+    }
     .min(content_rows.saturating_sub(1));
     Some(
         start
@@ -1151,7 +1474,7 @@ pub(super) fn selection_position_for_visual_cell(
 ) -> Option<TranscriptPosition> {
     let (block, local_row, total_rows, geometry) = if state.render_threaded {
         let block = state
-            .pointer_render_geometry()?
+            .gesture_render_geometry()?
             .blocks
             .iter()
             .find(|block| visual_line >= block.start && visual_line < block.start + block.rows)?;
@@ -1183,25 +1506,27 @@ pub(super) fn selection_position_for_visual_cell(
     let content_row = geometry.content_row(local_row, total_rows)?;
     let content_col = geometry.content_col(col);
     let transcript_block = state.transcript.get(block)?;
-    let text = presented_block_copy_text(state, block);
-    let rows = painted_copy_rows(
-        state,
-        state.pointer_render_geometry(),
-        block,
-        &text,
-        geometry,
-    );
-    let offset = visual_cell_to_copy_offset(
-        transcript_block,
-        &text,
-        rows.as_ref(),
-        content_row,
-        content_col,
-        geometry.content_width,
-    );
+    let mapped = state
+        .copy_mapping(block, geometry)
+        .and_then(|rows| rows.offset_for(content_row, content_col));
+    let offset = match mapped {
+        Some(offset) => offset,
+        None => {
+            let text = presented_block_copy_text(state, block);
+            let offset = visual_cell_to_copy_offset(
+                transcript_block,
+                &text,
+                None,
+                content_row,
+                content_col,
+                geometry.content_width,
+            );
+            clamp_copy_offset(&text, offset)
+        }
+    };
     Some(TranscriptPosition {
         block,
-        offset: clamp_copy_offset(&text, offset),
+        offset,
         trailing_affinity: false,
     })
 }
@@ -1214,6 +1539,86 @@ fn newline_offset(text: &str, line_index: usize) -> usize {
         .map(str::len)
         .sum::<usize>()
         .min(text.len())
+}
+
+/// One block's copy mapping, borrowed from wherever it is owned: the renderer's
+/// alignment index, or the bounded receipt a completed threaded frame published.
+enum CopyMappingRef<'a> {
+    Aligned {
+        index_rows: std::cell::Ref<'a, CopyRowsMemo>,
+        index: usize,
+    },
+    Painted(&'a CopyRows),
+}
+
+impl CopyMappingRef<'_> {
+    fn mapping(&self) -> &dyn CopyMapping {
+        match self {
+            Self::Aligned { index_rows, index } => {
+                index_rows.get(*index).expect("aligned copy mapping")
+            }
+            Self::Painted(rows) => *rows,
+        }
+    }
+}
+
+impl CopyMapping for CopyMappingRef<'_> {
+    fn offset_for(&self, content_row: usize, col: u16) -> Option<usize> {
+        self.mapping().offset_for(content_row, col)
+    }
+
+    fn row_for_offset(&self, offset: usize, trailing: bool) -> Option<usize> {
+        self.mapping().row_for_offset(offset, trailing)
+    }
+
+    fn row(&self, content_row: usize) -> Option<&CopyRow> {
+        self.mapping().row(content_row)
+    }
+
+    fn text_len(&self) -> usize {
+        self.mapping().text_len()
+    }
+}
+
+impl ShellState {
+    /// Painted row span and surface geometry of one transcript block.
+    fn block_span(&self, index: usize) -> Option<(usize, usize, SurfaceGeometry)> {
+        let cache = self.transcript_cache.borrow();
+        Some((
+            *cache.block_starts.get(index)?,
+            *cache.block_lengths.get(index)?,
+            *cache.block_geometries.get(index)?,
+        ))
+    }
+
+    /// Copy mapping of one block for pointer and anchor work.
+    ///
+    /// Pointer input in the threaded mode reads only the bounded receipt a
+    /// completed frame published, never a whole-block mapping. The renderer and
+    /// the synchronous frontend read this state's alignment index, which is
+    /// reused across frames until the block's identity changes.
+    fn copy_mapping(&self, index: usize, geometry: SurfaceGeometry) -> Option<CopyMappingRef<'_>> {
+        if self.render_threaded {
+            let rows = self
+                .gesture_render_geometry()?
+                .blocks
+                .iter()
+                .find(|block| block.index == index)?
+                .copy_rows
+                .as_ref()?;
+            return Some(CopyMappingRef::Painted(rows));
+        }
+        // Bind the alignment borrow out before reading: a temporary in an `if`
+        // condition would still be alive inside the block below.
+        let aligned = self.copy_rows.borrow_mut().align(self, index, geometry);
+        if !aligned {
+            return None;
+        }
+        Some(CopyMappingRef::Aligned {
+            index_rows: self.copy_rows.borrow(),
+            index,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -208,6 +208,20 @@ not the broader semantic render revision; an unrelated mutable borrow cannot
 lose a painted scrollbar. Search visibility also fences the layout. Search-result
 feedback retains the full input/render revision fence so newer query or navigation
 intent cannot flow backwards.
+A captured scrollbar drag owns its own scrolling: it keeps
+the bar's captured geometry across frames that differ only in scroll offset, and
+releases it on the button release or on a genuine layout change (size, resize
+epoch, theme, content width, disclosure, overlay, search, panel). A fresh press
+still waits for the frame that names its cell. The same rule lets a selection
+dragged past either edge keep scrolling, and keep extending its focus, between
+paints instead of stalling at the first step.
+Row-to-copy alignment is renderer-private as well. The renderer keeps one
+alignment per block it laid out, fenced by the block's commit id and revision plus
+width, surface geometry, theme epoch and disclosure. An unchanged block reuses it
+in O(1), a block whose revision moved revalidates only the prefix that still
+aligns, and a full layout invalidation drops the index. Pointer input in the
+threaded mode still reads only the bounded per-frame receipt, so a whole-block
+mapping never crosses to the input owner.
 Interactive rich rows retain zero-width link metadata independently of terminal
 OSC 8 support. The output adapter suppresses only unsupported OSC 8 envelopes,
 including fragmented writes; capability reporting, painted geometry, HTTP(S)-only
