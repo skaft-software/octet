@@ -532,11 +532,8 @@ pub enum TranscriptItem {
         id: ToolCallId,
         text: String,
         is_error: bool,
-        /// Milliseconds between the tool's effect admission and the
-        /// finalization of its result. `None` for legacy entries, for
-        /// interrupted calls, and for results whose timing window was not
-        /// recorded.
-        duration_ms: Option<u64>,
+        /// Recorded monotonic elapsed time, or a legacy wall-clock estimate.
+        duration: Option<std::time::Duration>,
         /// Opaque bounded image projection. Text/copy/plain surfaces ignore
         /// this field and retain their existing payload-free semantics.
         images: Vec<ToolResultImage>,
@@ -603,18 +600,20 @@ fn media_marker(media: &octet_ai::Media) -> String {
     }
 }
 
-/// Wall-time window, in milliseconds, recorded in the tool call's
-/// durable metadata.
-fn tool_result_duration_ms(metadata: Option<&EntryMetadata>) -> Option<u64> {
-    metadata.and_then(|metadata| {
-        match (
-            metadata.tool_started_unix_ms,
-            metadata.tool_finished_unix_ms,
-        ) {
-            (Some(started), Some(finished)) => Some(finished.saturating_sub(started)),
-            _ => None,
-        }
-    })
+/// Prefer the original monotonic measurement; old sessions may only have a
+/// wall-clock window, which is an approximation with different boundaries.
+fn tool_result_duration(metadata: Option<&EntryMetadata>) -> Option<std::time::Duration> {
+    let metadata = metadata?;
+    metadata
+        .tool_duration_us
+        .map(std::time::Duration::from_micros)
+        .or_else(|| {
+            Some(std::time::Duration::from_millis(
+                metadata
+                    .tool_finished_unix_ms?
+                    .saturating_sub(metadata.tool_started_unix_ms?),
+            ))
+        })
 }
 
 /// Presentation diff recorded in the tool result's durable metadata.
@@ -759,7 +758,7 @@ fn push_message(
                             id: result.tool_call_id.clone(),
                             text: tool_result_text(&result.content),
                             is_error: result.is_error,
-                            duration_ms: tool_result_duration_ms(metadata),
+                            duration: tool_result_duration(metadata),
                             diff: tool_result_diff(metadata),
                             images,
                         });
@@ -1036,7 +1035,7 @@ fn hydrate_entries_with_image_budget(
                                 id: call.id.clone(),
                                 text: "interrupted before a durable tool result was recorded; this call is not running and will be reconciled before the next prompt".into(),
                                 is_error: true,
-                                duration_ms: None,
+                                duration: None,
                                 diff: None,
                                 images: Vec::new(),
                             });
@@ -1139,6 +1138,69 @@ mod tests {
     use octet_ai::{
         AssistantMessage, AssistantPart, ModelId, Protocol, ToolCall, ToolResult, UserMessage,
     };
+
+    #[test]
+    fn tool_duration_prefers_monotonic_and_falls_back_for_legacy_sessions() {
+        use std::time::Duration;
+        let mut metadata = EntryMetadata {
+            tool_duration_us: Some(812),
+            tool_started_unix_ms: Some(1000),
+            tool_finished_unix_ms: Some(1002),
+            ..EntryMetadata::default()
+        };
+        assert_eq!(
+            tool_result_duration(Some(&metadata)),
+            Some(Duration::from_micros(812))
+        );
+        metadata.tool_duration_us = None;
+        assert_eq!(
+            tool_result_duration(Some(&metadata)),
+            Some(Duration::from_millis(2))
+        );
+        metadata.tool_started_unix_ms = None;
+        assert_eq!(tool_result_duration(Some(&metadata)), None);
+    }
+
+    #[test]
+    fn persisted_tool_duration_replays_with_the_live_display() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timing.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        let live = Duration::from_nanos(812_999);
+        session
+            .append_with_metadata(
+                EntryValue::Message(Message::User(UserMessage {
+                    content: vec![UserPart::ToolResult(ToolResult {
+                        tool_call_id: ToolCallId("timed".into()),
+                        content: vec![ToolResultPart::Text("ok".into())],
+                        is_error: false,
+                        added_tool_names: None,
+                        tool_name: None,
+                    })],
+                })),
+                Some(EntryMetadata {
+                    tool_duration_us: Some(live.as_micros() as u64),
+                    ..EntryMetadata::default()
+                }),
+            )
+            .unwrap();
+        drop(session);
+        let session = Session::open(&path).unwrap();
+        let items = hydrate_transcript(&session).unwrap();
+        let resumed = items
+            .iter()
+            .find_map(|item| match item {
+                TranscriptItem::ToolResult { duration, .. } => *duration,
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(crate::presentation::format_duration(live), "812µs");
+        assert_eq!(
+            crate::presentation::format_duration(live),
+            crate::presentation::format_duration(resumed)
+        );
+    }
 
     fn user(text: &str) -> EntryValue {
         EntryValue::Message(Message::User(UserMessage {
@@ -1640,7 +1702,7 @@ mod tests {
                     id: ToolCallId("call-1".into()),
                     text: "ok".into(),
                     is_error: false,
-                    duration_ms: None,
+                    duration: None,
                     diff: None,
                     images: Vec::new(),
                 },
@@ -1675,6 +1737,7 @@ mod tests {
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
+                    tool_duration_us: None,
                     extension_metadata: Default::default(),
                 }),
             )
@@ -1703,6 +1766,7 @@ mod tests {
                     tool_output: None,
                     tool_started_unix_ms: None,
                     tool_finished_unix_ms: None,
+                    tool_duration_us: None,
                     extension_metadata: Default::default(),
                 }),
             )

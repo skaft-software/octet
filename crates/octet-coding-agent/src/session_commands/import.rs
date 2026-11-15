@@ -416,7 +416,8 @@ fn known_omitted_record_field(record: &Value, path: &[&str], value: &Value) -> b
             | "tool_composition"
             | "replay_safe_tool_calls"
             | "tool_started_unix_ms"
-            | "tool_finished_unix_ms" => is_none,
+            | "tool_finished_unix_ms"
+            | "tool_duration_us" => is_none,
             "local_synthetic_assistant" => value == &Value::Bool(false),
             "extension_metadata" => value.as_object().is_some_and(|map| map.is_empty()),
             _ => false,

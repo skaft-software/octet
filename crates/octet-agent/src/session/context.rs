@@ -141,6 +141,7 @@ impl Session {
                 metadata.tool_output = None;
                 metadata.tool_started_unix_ms = None;
                 metadata.tool_finished_unix_ms = None;
+                metadata.tool_duration_us = None;
                 metadata.local_synthetic_assistant = false;
                 metadata
             })

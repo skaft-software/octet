@@ -19,6 +19,7 @@ use super::renderer_runtime::SharedState;
 use super::terminal_text::sanitize_for_terminal;
 use super::tern_theme::NativeTheme;
 use super::{AssistantBlock, NoticeTone, ShellState, TranscriptBlock};
+use crate::presentation::format_duration;
 use crate::tui::theme::ModelLab;
 
 pub(super) const SURFACE: &str = "octet.session";
@@ -2070,14 +2071,6 @@ fn tool_title(name: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => "Tool".to_owned(),
-    }
-}
-
-fn format_duration(duration: Duration) -> String {
-    if duration.as_secs() >= 1 {
-        format!("{:.1}s", duration.as_secs_f64())
-    } else {
-        format!("{}ms", duration.as_millis())
     }
 }
 

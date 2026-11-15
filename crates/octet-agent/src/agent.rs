@@ -990,6 +990,7 @@ impl Agent {
             replay_safe_tool_calls: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
+            tool_duration_us: None,
             native_steering: None,
             local_synthetic_assistant: false,
             extension_metadata: Default::default(),

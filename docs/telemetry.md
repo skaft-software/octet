@@ -42,6 +42,13 @@ Hosts must surface those diagnostics at a lifecycle boundary. Shutdown is
 bounded, but cannot cancel an uninterruptible OS write; a timed-out worker may
 outlive its caller, and pending records are not claimed delivered.
 
+The JSONL `tool_finished` record has `elapsed_us`, the monotonic tool duration
+truncated to microseconds, alongside the existing truncated `elapsed_ms` field.
+It is the same measurement retained for tool-result replay. The duration's
+boundaries depend on the execution path and are not an isolated measurement of
+tool execution or of individual hooks. Other telemetry fields retain their
+specified units.
+
 ## Inference observations (unreleased)
 
 `AgentEvent::ProviderInference` carries independently frozen client and optional

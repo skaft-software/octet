@@ -72,6 +72,7 @@ fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
                 tool_composition: None,
                 tool_started_unix_ms: None,
                 tool_finished_unix_ms: None,
+                tool_duration_us: None,
                 native_steering: None,
                 local_synthetic_assistant: false,
                 extension_metadata: Default::default(),
@@ -93,6 +94,7 @@ fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
                 tool_composition: None,
                 tool_started_unix_ms: None,
                 tool_finished_unix_ms: None,
+                tool_duration_us: None,
                 native_steering: None,
                 local_synthetic_assistant: false,
                 extension_metadata: Default::default(),
@@ -116,6 +118,7 @@ fn prompt_metadata_persists_safe_identity_and_exact_normalized_color() {
             tool_composition: None,
             tool_started_unix_ms: None,
             tool_finished_unix_ms: None,
+            tool_duration_us: None,
             native_steering: None,
             local_synthetic_assistant: false,
             extension_metadata: Default::default(),
@@ -546,4 +549,41 @@ fn entry_label_refuses_unknown_entry_and_invalid_text() {
     let label = "y".repeat(MAX_ENTRY_LABEL_BYTES);
     session.set_entry_label(&entry, &label).unwrap();
     assert_eq!(session.entry_label(&entry), Some(label.as_str()));
+}
+
+#[test]
+fn tool_timing_survives_reopen_only_on_tool_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_path(&dir);
+    let mut session = Session::create(&path).unwrap();
+    let timing = EntryMetadata {
+        tool_duration_us: Some(812),
+        tool_started_unix_ms: Some(1000),
+        tool_finished_unix_ms: Some(1001),
+        ..EntryMetadata::default()
+    };
+    let id = session
+        .append_with_metadata(
+            EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: ToolCallId("timed".into()),
+                    content: vec![octet_ai::ToolResultPart::Text("ok".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                    tool_name: None,
+                })],
+            })),
+            Some(timing.clone()),
+        )
+        .unwrap();
+    let other = session
+        .append_with_metadata(user("not a tool result"), Some(timing))
+        .unwrap();
+    drop(session);
+    let session = Session::open(&path).unwrap();
+    let metadata = session.entry(&id).unwrap().metadata.as_ref().unwrap();
+    assert_eq!(metadata.tool_duration_us, Some(812));
+    assert_eq!(metadata.tool_started_unix_ms, Some(1000));
+    assert_eq!(metadata.tool_finished_unix_ms, Some(1001));
+    assert!(session.entry(&other).unwrap().metadata.is_none());
 }

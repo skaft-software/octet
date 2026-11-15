@@ -91,6 +91,21 @@ impl PriceDisplay {
 
 /// Render a short elapsed interval without floating-point conversion.
 pub fn format_duration(duration: Duration) -> String {
+    let micros = duration.as_micros();
+    if micros < 1_000 {
+        return format!("{micros}µs");
+    }
+    if micros < 1_000_000 {
+        let whole = micros / 1_000;
+        let fraction = micros % 1_000;
+        if fraction == 0 {
+            return format!("{whole}ms");
+        }
+        return format!(
+            "{whole}.{}ms",
+            format!("{fraction:03}").trim_end_matches('0')
+        );
+    }
     let seconds = duration.as_secs();
     if seconds < 60 {
         let tenths = seconds.saturating_mul(10).saturating_add(u64::from(
@@ -101,5 +116,30 @@ pub fn format_duration(duration: Duration) -> String {
         let minutes = seconds / 60;
         let remainder = seconds % 60;
         format!("{minutes}m{remainder:02}s")
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_units_and_boundaries() {
+        for (nanos, expected) in [
+            (0, "0µs"),
+            (999, "0µs"),
+            (999_999, "999µs"),
+            (1_000_000, "1ms"),
+            (1_250_000, "1.25ms"),
+            (999_999_999, "999.999ms"),
+            (1_000_000_000, "1.0s"),
+            (1_250_000_000, "1.3s"),
+            (60_000_000_000, "1m00s"),
+        ] {
+            let duration = Duration::from_nanos(nanos);
+            assert_eq!(format_duration(duration), expected);
+            let persisted = Duration::from_micros(duration.as_micros() as u64);
+            assert_eq!(format_duration(duration), format_duration(persisted));
+        }
     }
 }

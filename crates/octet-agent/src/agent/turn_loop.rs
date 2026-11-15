@@ -3312,8 +3312,9 @@ impl Agent {
                     }
                     if let Err(e) = session.append_with_metadata(
                         EntryValue::Message(Message::User(message)),
-                        details.map(|tool_output| EntryMetadata {
-                            tool_output: Some(tool_output),
+                        Some(EntryMetadata {
+                            tool_output: details,
+                            tool_duration_us: Some(duration.as_micros().min(u64::MAX as u128) as u64),
                             tool_started_unix_ms: started_unix_ms,
                             tool_finished_unix_ms: finished_unix_ms,
                             ..EntryMetadata::default()

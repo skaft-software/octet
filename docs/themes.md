@@ -207,7 +207,12 @@ thinking_expanded = false
 Completed shell-tool rows (`bash`, `exec`, `powershell`) show `Took 1.3s` in the
 terminal transcript when recorded timing is available, including after resume.
 This is a final duration, not a live counter; it is decoration, excluded from
-copied command output. Collapsed activity groups keep their existing disclosure.
+copied command output. Values below 1 ms use microseconds (e.g. `812µs`),
+values below 1 s use milliseconds (e.g. `1.25ms`), and longer values use
+seconds or minutes. New sessions retain the monotonic elapsed value to the
+microsecond; older sessions may have only an approximate wall-clock window or
+no timing. These are operational timings, not benchmark-grade measurements.
+Collapsed activity groups keep their existing disclosure.
 
 Customize the wording in a native TOML theme, or use an empty string to hide it:
 

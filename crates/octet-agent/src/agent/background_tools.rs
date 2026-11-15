@@ -183,8 +183,9 @@ impl BackgroundTools {
         let message = with_tool_name(message, &call.name);
         session.append_with_metadata(
             EntryValue::Message(Message::User(message)),
-            details.map(|tool_output| EntryMetadata {
-                tool_output: Some(tool_output),
+            Some(EntryMetadata {
+                tool_output: details,
+                tool_duration_us: Some(execution.duration.as_micros().min(u64::MAX as u128) as u64),
                 tool_started_unix_ms: execution.started_unix_ms,
                 tool_finished_unix_ms: execution.finished_unix_ms,
                 ..EntryMetadata::default()

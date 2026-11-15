@@ -703,6 +703,9 @@ pub struct EntryMetadata {
     /// Unix milliseconds when the tool call's outcome was finalized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_finished_unix_ms: Option<u64>,
+    /// Monotonic elapsed tool-call duration, truncated to microseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_us: Option<u64>,
     /// Marks a locally generated assistant boundary that intentionally has no
     /// authoritative provider sidecar.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -787,9 +790,6 @@ impl EntryMetadata {
             .tool_output
             .and_then(|details| details.into_validated().ok())
             .filter(|details| !details.is_empty());
-        // The timing window is only meaningful beside a retained tool result.
-        self.tool_started_unix_ms = None;
-        self.tool_finished_unix_ms = None;
         let mut encoded_metadata_bytes = 0usize;
         let mut sanitized_extension_metadata = BTreeMap::new();
         for (namespace, entry_metadata) in std::mem::take(&mut self.extension_metadata)
@@ -819,6 +819,9 @@ impl EntryMetadata {
             || self.display_text.is_some()
             || self.run_outcome.is_some()
             || self.tool_output.is_some()
+            || self.tool_started_unix_ms.is_some()
+            || self.tool_finished_unix_ms.is_some()
+            || self.tool_duration_us.is_some()
             || self.tool_composition.is_some()
             || self.replay_safe_tool_calls.is_some()
             || self.local_synthetic_assistant

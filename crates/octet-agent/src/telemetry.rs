@@ -677,6 +677,10 @@ impl EventObserver for TelemetryObserver {
                     "elapsed_ms".into(),
                     Value::Number(duration_ms(*duration).into()),
                 );
+                fields.insert(
+                    "elapsed_us".into(),
+                    Value::Number((duration.as_micros().min(u64::MAX as u128) as u64).into()),
+                );
                 fields.insert("result_bytes".into(), Value::Number(result_bytes.into()));
                 match state_change {
                     Some(changed) => {
@@ -1401,7 +1405,7 @@ mod tests {
             &AgentEvent::ToolFinished {
                 id: ToolCallId("call-1".into()),
                 result: Ok(ToolOutput::new("contents")),
-                duration: Duration::from_millis(2),
+                duration: Duration::from_micros(812),
             },
             "owner-1",
         );
@@ -1460,6 +1464,12 @@ mod tests {
         assert!(records
             .iter()
             .any(|record| record["record"] == "tool_started"));
+        let tool = records
+            .iter()
+            .find(|record| record["record"] == "tool_finished")
+            .unwrap();
+        assert_eq!(tool["elapsed_us"], 812);
+        assert_eq!(tool["elapsed_ms"], 0);
         assert!(!lines.contains("secret task"));
         assert!(!lines.contains("secret.txt"));
         let request = records

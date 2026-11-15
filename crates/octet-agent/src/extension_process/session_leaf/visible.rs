@@ -75,7 +75,8 @@ impl Serialize for VisibleMetadata<'_> {
             tool_composition,
             replay_safe_tool_calls,
             tool_started_unix_ms,
-            tool_finished_unix_ms
+            tool_finished_unix_ms,
+            tool_duration_us
         );
         if metadata.local_synthetic_assistant {
             map.serialize_entry("local_synthetic_assistant", &true)?;
@@ -176,6 +177,7 @@ pub(super) fn clone_entry(entry: &Entry, namespace: &str) -> Result<Entry, Exten
         replay_safe_tool_calls: m.replay_safe_tool_calls.clone(),
         tool_started_unix_ms: m.tool_started_unix_ms,
         tool_finished_unix_ms: m.tool_finished_unix_ms,
+        tool_duration_us: m.tool_duration_us,
         local_synthetic_assistant: m.local_synthetic_assistant,
         extension_metadata: m
             .extension_metadata

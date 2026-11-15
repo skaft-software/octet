@@ -1,6 +1,7 @@
 //! Durable transcript-item projection into the interactive shell model.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::time::Duration;
 
 use super::{
@@ -196,7 +197,7 @@ pub(super) fn append_hydrated_items(
                 id,
                 text,
                 is_error,
-                duration_ms,
+                duration,
                 diff,
                 images,
             } => {
@@ -243,7 +244,7 @@ pub(super) fn append_hydrated_items(
                             apply_hydrated_tool_result(panel, &text, is_error);
                             panel.images = registered_images;
                             panel.diff = diff.clone();
-                            panel.duration = duration_ms.map(Duration::from_millis);
+                            panel.duration = duration;
                         }
                     }
                 } else if let Some(index) = state.tool_panels.get(&id).copied() {
@@ -252,7 +253,7 @@ pub(super) fn append_hydrated_items(
                         apply_hydrated_tool_result(panel, &text, is_error);
                         panel.images = registered_images;
                         panel.diff = diff;
-                        panel.duration = duration_ms.map(Duration::from_millis);
+                        panel.duration = duration;
                     }
                 } else {
                     let model_lab = state.model_lab;
@@ -276,6 +277,7 @@ pub(super) fn append_hydrated_items(
                     );
                     panel.images = registered_images;
                     panel.diff = diff;
+                    panel.duration = duration;
                     let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
                     state.tool_panels.insert(id, index);
                 }
@@ -395,7 +397,7 @@ mod tests {
                     id: read.clone(),
                     text: "content".into(),
                     is_error: false,
-                    duration_ms: None,
+                    duration: None,
                     diff: None,
                     images: Vec::new(),
                 },
@@ -403,7 +405,7 @@ mod tests {
                     id: bash.clone(),
                     text: "permission denied".into(),
                     is_error: true,
-                    duration_ms: None,
+                    duration: None,
                     diff: None,
                     images: Vec::new(),
                 },
@@ -457,7 +459,7 @@ mod tests {
                     }
                     .into(),
                     is_error: path == "src/b.rs",
-                    duration_ms: None,
+                    duration: None,
                     diff: None,
                     images: Vec::new(),
                 }],
@@ -545,7 +547,7 @@ mod tests {
             id: id.clone(),
             text: "ok".into(),
             is_error: false,
-            duration_ms: None,
+            duration: None,
             diff: None,
             images: Vec::new(),
         };
@@ -603,7 +605,7 @@ mod tests {
                 id: spawn,
                 text: "SECRET-WORKER-OUTPUT".into(),
                 is_error: false,
-                duration_ms: None,
+                duration: None,
                 diff: None,
                 images: Vec::new(),
             }],
@@ -614,7 +616,7 @@ mod tests {
                 id: wait,
                 text: "SECRET-FAILURE".into(),
                 is_error: true,
-                duration_ms: None,
+                duration: None,
                 diff: None,
                 images: Vec::new(),
             }],
@@ -675,7 +677,7 @@ mod tests {
                 id,
                 text: "{\"child_id\":\"pending-child\"}".into(),
                 is_error: false,
-                duration_ms: None,
+                duration: None,
                 diff: None,
                 images: Vec::new(),
             }],
@@ -717,7 +719,7 @@ mod tests {
                 id: read.clone(),
                 text: "ordinary output".into(),
                 is_error: false,
-                duration_ms: None,
+                duration: None,
                 diff: None,
                 images: Vec::new(),
             }],
@@ -735,7 +737,7 @@ mod tests {
                 id: read,
                 text: "updated ordinary output".into(),
                 is_error: false,
-                duration_ms: None,
+                duration: None,
                 diff: None,
                 images: Vec::new(),
             }],
@@ -761,7 +763,7 @@ mod tests {
             id: id.clone(),
             text: text.into(),
             is_error: false,
-            duration_ms: Some(7),
+            duration: Some(Duration::from_millis(7)),
             diff: None,
             images: Vec::new(),
         };

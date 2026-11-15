@@ -14,7 +14,7 @@ fn result(id: &str, text: &str, is_error: bool) -> TranscriptItem {
         id: ToolCallId(id.into()),
         text: text.into(),
         is_error,
-        duration_ms: None,
+        duration: None,
         diff: None,
         images: Vec::new(),
     }
