@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Completed shell-tool rows show their recorded duration. Native TOML themes can
+  customize the `tool_duration` text or hide it with an empty string; timing stays
+  out of copied output.
+
 - The default startup splash uses a smaller 8×2 byte mark and quieter help text;
   compact themes also use the small mark. Narrow panes stack details to keep
   permissions and exit help readable; short panes keep the welcome within the

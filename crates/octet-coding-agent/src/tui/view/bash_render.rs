@@ -235,6 +235,39 @@ pub(super) fn project_compact_bash_output(
     expanded: bool,
     output_indent: &str,
 ) -> ToolRows {
+    let mut rows = project_bash_output_body(panel, theme, width, expanded, output_indent);
+    // Native shell rows are host-owned, so this decoration must work without
+    // the optional adapter. Pi compatibility reference: coding-agent/src/core/
+    // tools/render-utils.ts:146 prefers recorded timing for its final "Took" line.
+    if let Some(duration) = panel.duration.filter(|_| panel.finished) {
+        let template = theme
+            .resolve::<String>("tool_duration")
+            .unwrap_or_else(|| "Took {duration}".into());
+        if !template.trim().is_empty() {
+            let text = template.replace(
+                "{duration}",
+                &crate::presentation::format_duration(duration),
+            );
+            for row in wrap_hanging(
+                &subdued_text(theme, &text),
+                output_indent,
+                output_indent,
+                width,
+            ) {
+                rows.decoration(row);
+            }
+        }
+    }
+    rows
+}
+
+fn project_bash_output_body(
+    panel: &ToolPanel,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+    output_indent: &str,
+) -> ToolRows {
     let compact = compact_bash_output(panel);
     let ellipsis = if theme.unicode() { "…" } else { "..." };
     let loss_details = capture_loss_details(&compact);
@@ -402,6 +435,44 @@ mod tests {
     use crate::presentation::summarize_tool;
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{test_theme, test_theme_with};
+
+    #[test]
+    fn shell_duration_is_themeable_final_only_and_copy_safe() {
+        let mut panel = panel("true", "exit=0 duration=99s\n(no output)");
+        panel.duration = Some(std::time::Duration::from_millis(1250));
+        for expanded in [false, true] {
+            for is_error in [false, true] {
+                panel.is_error = is_error;
+                let rows = project_compact_bash_output(&panel, &test_theme(), 80, expanded, "");
+                assert!(plain_rows(&rows.lines).join("\n").contains("Took 1.3s"));
+                assert!(!rows.text.contains("Took"));
+                assert!(rows.copy_rows.last().unwrap().is_none());
+            }
+        }
+        for (template, expected) in [
+            ("finished in {duration}", "finished in 1.3s"),
+            ("", ""),
+            ("  ", ""),
+        ] {
+            let theme = crate::tui::theme::test_theme_from_source(&format!(
+                "[tokens]\ntool_duration = {template:?}\n"
+            ));
+            let rows = project_compact_bash_output(&panel, &theme, 80, false, "");
+            let text = plain_rows(&rows.lines).join("\n");
+            assert!(!text.contains("Took"));
+            if !expected.is_empty() {
+                assert!(text.contains(expected), "{text}");
+            } else {
+                assert!(!text.contains("1.3s"), "{text}");
+            }
+        }
+        for (finished, duration) in [(false, panel.duration), (true, None)] {
+            panel.finished = finished;
+            panel.duration = duration;
+            let rows = project_compact_bash_output(&panel, &test_theme(), 80, false, "");
+            assert!(!plain_rows(&rows.lines).join("\n").contains("Took"));
+        }
+    }
 
     #[test]
     fn bash_output_excludes_capture_paths_but_keeps_literal_output_and_loss_notices() {

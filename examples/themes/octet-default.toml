@@ -29,6 +29,9 @@ terminal = "light-dark"
 adaptive = false
 
 [colors]
+# Completed shell calls: {duration} is substituted; an empty string hides it.
+tool_duration = "Took {duration}"
+
 # Base text and neutral chrome.
 foreground = "default"
 muted = "#777777"

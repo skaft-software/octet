@@ -202,6 +202,24 @@ quiet_tool_summaries = true
 thinking_expanded = false
 ```
 
+## Shell duration
+
+Completed shell-tool rows (`bash`, `exec`, `powershell`) show `Took 1.3s` in the
+terminal transcript when recorded timing is available, including after resume.
+This is a final duration, not a live counter; it is decoration, excluded from
+copied command output. Collapsed activity groups keep their existing disclosure.
+
+Customize the wording in a native TOML theme, or use an empty string to hide it:
+
+```toml
+[tokens]
+tool_duration = "finished in {duration}"
+# tool_duration = ""
+```
+
+`{duration}` is the only substitution. Styling follows `muted`. This token does
+not extend the Pi JSON schema or change native Tern tool-card metadata.
+
 ## Startup and terminal replies
 
 The first branded frame waits for resolved model and setup state, workspace and
