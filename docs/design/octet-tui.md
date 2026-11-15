@@ -458,10 +458,13 @@ complete captured failure output stays available through global disclosure.
 Omission metadata distinguishes a collapsible UI tail from bytes already
 discarded by the tool capture.
 
-Tool values begin two cells after their labels (with a six-cell minimum for
-short names), avoiding a wide dead column while keeping each wrapped header's
-value column fixed. Computer-use labels omit their shared `computer_use_` prefix
-to preserve the action name within the label cap. A muted vertical `│` joins
+Tool labels use the available header width while reserving a readable value
+column (up to 16 cells, or half the inner width in small panes). Truncation stays
+cell/grapheme-aware; selected-value, private-argument disclosure, and semantic
+copy rules do not change. Tool values begin two cells after their labels (with a
+six-cell minimum for short names), avoiding a wide dead column while keeping
+each wrapped header's value column fixed. Computer-use labels continue to omit
+their shared `computer_use_` prefix to preserve the action name. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
 the output's ownership visible without adding another indentation level.
 

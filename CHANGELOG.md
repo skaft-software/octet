@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Tool labels use available terminal width while keeping their selected values readable.
+
 ## [0.10.4] - 2026-11-12
 
 ### Changed

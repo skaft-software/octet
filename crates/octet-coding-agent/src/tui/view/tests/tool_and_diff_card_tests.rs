@@ -679,11 +679,113 @@ fn tool_values_follow_labels_without_a_wide_dead_column() {
             "{label}"
         );
     }
-    assert!(visible_width(&tool_grid_label("an_extremely_long_tool_name")) <= 18);
+    let long_label = "an extremely long tool name";
+    assert_eq!(tool_grid_label(long_label, 80), long_label);
+    for width in [8, 12, 20, 32] {
+        let label = tool_grid_label(long_label, width);
+        let value_width = usize::from(width) - tool_value_indent_width(&label);
+        assert!(value_width >= 2, "{width}: {label}");
+        assert!(
+            visible_width(&label) <= usize::from(width),
+            "{width}: {label}"
+        );
+    }
 }
 
 #[test]
-fn computer_use_labels_keep_distinct_actions_within_the_width_cap() {
+fn tool_label_truncation_preserves_grapheme_boundaries() {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let label = "界面 👩‍💻 e\u{301} long extension tool name";
+    for width in 0..=80 {
+        let shown = strip_terminal_sequences(&tool_grid_label(label, width));
+        assert!(
+            visible_width(&shown) <= usize::from(width),
+            "{width}: {shown}"
+        );
+        let prefix = shown.strip_suffix('…').unwrap_or(&shown);
+        assert!(label.starts_with(prefix), "{width}: {shown}");
+        assert!(
+            prefix.len() == label.len()
+                || label
+                    .grapheme_indices(true)
+                    .any(|(index, _)| index == prefix.len()),
+            "{width}: {shown}"
+        );
+    }
+}
+
+#[test]
+fn tool_labels_use_available_width_without_exposing_private_arguments() {
+    let theme = crate::tui::theme::test_theme();
+    for name in [
+        "mcp_cua_repl_js_9f68e4cd",
+        "mcp_界面_👩‍💻_repl_js_9f68e4cd",
+        "mcp_\u{1b}[31mrepl\u{1b}[0m_js_9f68e4cd",
+    ] {
+        let args = serde_json::json!({"query": "readable-value", "private": "PRIVATE-ARGUMENT"});
+        let panel = TranscriptBlock::Tool(Box::new(ToolPanel::new(
+            ToolCallId("wide-label".into()),
+            name.into(),
+            args.to_string(),
+            summarize_tool(name, &args),
+            String::new(),
+            false,
+            false,
+            None,
+            None,
+        )));
+        let label = sanitize_for_terminal(&super::tool_render::tool_display_label(name));
+        for width in [80, 120, 180] {
+            let rows = render_block(
+                None,
+                &panel,
+                &theme,
+                &theme.rich_renderer(),
+                &theme.reasoning_renderer(),
+                width,
+                false,
+            );
+            let plain = strip_terminal_sequences(&rows.join("\n"));
+            assert!(
+                plain.contains(&format!("{label}  readable-value")),
+                "{width}: {plain}"
+            );
+            assert!(!plain.contains("PRIVATE-ARGUMENT"), "{plain}");
+            assert!(rows
+                .iter()
+                .all(|row| visible_width(row) <= usize::from(width)));
+        }
+        for width in [8, 12, 20, 32, 46] {
+            let rows = render_block(
+                None,
+                &panel,
+                &theme,
+                &theme.rich_renderer(),
+                &theme.reasoning_renderer(),
+                width,
+                false,
+            );
+            let plain = strip_terminal_sequences(&rows.join("\n"));
+            assert!(
+                rows.iter()
+                    .all(|row| visible_width(row) <= usize::from(width)),
+                "{width}: {plain}"
+            );
+            assert!(!plain.contains("PRIVATE-ARGUMENT"), "{plain}");
+            assert!(!plain.contains('\u{fffd}'), "{plain}");
+            if width >= 32 {
+                assert!(
+                    plain.contains("readable-value"),
+                    "a readable value must survive at {width}: {plain}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn computer_use_labels_keep_distinct_actions_within_the_available_width() {
     let names = [
         "computer_use_status",
         "computer_use_setup",
@@ -713,7 +815,7 @@ fn computer_use_labels_keep_distinct_actions_within_the_width_cap() {
         .iter()
         .map(|name| {
             let label = super::tool_render::tool_display_label(name);
-            assert_eq!(tool_grid_label(&label), label, "{name}");
+            assert_eq!(tool_grid_label(&label, 40), label, "{name}");
             label
         })
         .collect();

@@ -112,9 +112,9 @@ fn compute_tool_diff(panel: &ToolPanel) -> Option<String> {
 /// separation from their value.
 const TOOL_VALUE_MIN_WIDTH: usize = 6;
 
-/// Keep extension-defined labels useful without allowing an arbitrary tool
-/// name to consume the entire row before its value begins.
-const TOOL_LABEL_MAX_WIDTH: usize = 18;
+/// Keep a readable value beside long extension labels. Tiny panes share the
+/// available width rather than reserving a fixed value column.
+const TOOL_VALUE_PREVIEW_WIDTH: usize = 16;
 
 pub(crate) fn tool_display_label(name: &str) -> String {
     match name {
@@ -148,8 +148,10 @@ pub(super) fn shell_row_label(name: &str) -> &'static str {
     }
 }
 
-pub(super) fn tool_grid_label(label: &str) -> String {
-    truncate_to_width(label, TOOL_LABEL_MAX_WIDTH, Some("…"))
+pub(super) fn tool_grid_label(label: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let value_width = TOOL_VALUE_PREVIEW_WIDTH.min(width / 2);
+    truncate_to_width(label, width.saturating_sub(value_width + 2), Some("…"))
 }
 
 pub(super) fn tool_value_indent_width(label: &str) -> usize {

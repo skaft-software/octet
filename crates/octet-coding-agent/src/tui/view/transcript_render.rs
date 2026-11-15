@@ -166,7 +166,7 @@ pub(super) fn render_tool(
             &panel.display.success
         };
         let copy_label = sanitize_for_terminal(&tool_display_label(&panel.name));
-        let tool = tool_grid_label(&copy_label);
+        let tool = tool_grid_label(&copy_label, width);
         let label = if quiet_summary {
             theme.fg("muted", &tool)
         } else {
