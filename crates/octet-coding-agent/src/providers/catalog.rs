@@ -428,6 +428,7 @@ fn register_static_model(
         capabilities.input_modalities = capabilities.input_modalities.with(octet_ai::Modality::Pdf);
     }
     catalog.register_model(ModelSpec {
+        context_window_options: None,
         preset: octet_ai::ModelPreset {
             mistral_reasoning: match model.reasoning_mode {
                 super::models::StaticReasoningMode::MistralEffort => {
@@ -519,6 +520,7 @@ pub(crate) fn register_discovered_model_at_route(
         return Ok(());
     }
     catalog.register_model(ModelSpec {
+        context_window_options: None,
         preset,
         id: ModelId(catalog_id),
         endpoint: EndpointId(route.endpoint_id.into()),

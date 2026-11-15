@@ -1232,6 +1232,7 @@ mod tests {
     fn model() -> Model {
         Model {
             spec: Arc::new(ModelSpec {
+                context_window_options: None,
                 id: ModelId("telemetry-model".into()),
                 endpoint: EndpointId("local".into()),
                 api_name: "telemetry-model".into(),

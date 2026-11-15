@@ -29,8 +29,7 @@ use crate::app::{
     thinking_to_reasoning, App,
 };
 use crate::codex_context::{
-    resolve_codex_context_window, CodexContextOverride, CodexContextTier,
-    CODEX_ASTRA_MAX_CONTEXT_WINDOW, CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV,
+    resolve_codex_context_window, CodexContextOverride, CODEX_CONTEXT_OVERRIDE_ENV,
     CODEX_MAX_OUTPUT_TOKENS,
 };
 use crate::config::{CompactionMode, Config, Mode, ResumeSelector};
@@ -286,6 +285,7 @@ fn extension_provider_bootstrap_model(catalog: &ModelCatalog) -> Model {
     });
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("extension-provider-bootstrap".to_owned()),
             endpoint: endpoint.id.clone(),
@@ -3359,6 +3359,7 @@ fn register_deepseek_legacy_alias(
         crate::providers::cache_compatibility(declaration.compatibility, api_name, route.protocol);
     let pricing = crate::providers::pricing_for(declaration, api_name);
     catalog.register_model(ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId(DEEPSEEK_MODEL_ID.into()),
         endpoint: endpoint_id,
@@ -3709,6 +3710,7 @@ fn openrouter_models_from_response(
         let supports_tools = model_metadata_supports_tools(entry);
 
         models.push(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId(format!("{}/{api_name}", declaration.id)),
             endpoint: EndpointId(route.endpoint_id.into()),
@@ -5659,6 +5661,7 @@ fn register_custom_openai_provider(
         };
 
         catalog.register_model(ModelSpec {
+            context_window_options: None,
             preset: model.preset.clone(),
             id: ModelId(custom_model_id(provider_id, legacy_single_endpoint, model)),
             endpoint: endpoint_id.clone(),
@@ -6331,16 +6334,9 @@ pub(crate) fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<
     })
 }
 
-// Codex's checked-in defaults are only a discovery fallback. The authenticated
-// `/models` response is authoritative for plan-specific advertised limits; octet
-// then applies the bounded working-window policy implemented by
-// `crate::codex_context` (the deliberate 272K cap, the per-family entitlement
-// ceiling, the explicit opt-in override, and the clamp notice), so frontends
-// and bootstrap share one definition.
-/// Codex retains the provider-advertised maximum as discovery metadata, while
-/// octet budgets every Codex family against a 272K working window. Smaller
-/// advertised windows remain authoritative.
-const CODEX_MODEL_CACHE_VERSION: u8 = 11;
+// Cache source defaults and maxima separately from effective budgets. Version 12
+// invalidates limits normalized by the retired 272K/plan-selection policy.
+const CODEX_MODEL_CACHE_VERSION: u8 = 12;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
@@ -6377,8 +6373,7 @@ struct DiscoveredCodexModel {
     output_modalities: ModalitySet,
     reasoning_options: octet_ai::types::ReasoningOptions,
     context_window: u64,
-    /// Backend default window before octet's deliberate working cap. Kept so the
-    /// explicit override and its clamp notice can be re-resolved exactly.
+    /// Backend default retained separately from the user-selected budget.
     #[serde(default)]
     default_context_window: u64,
     max_context_window: u64,
@@ -6511,9 +6506,8 @@ fn codex_reasoning_range(
 #[cfg(test)]
 fn codex_models_from_response(
     body: &serde_json::Value,
-    plan: Option<&crate::auth::codex::ChatGptPlan>,
 ) -> anyhow::Result<Vec<DiscoveredCodexModel>> {
-    codex_inventory_from_response(body, plan).map(|inventory| inventory.models)
+    codex_inventory_from_response(body).map(|inventory| inventory.models)
 }
 
 /// A decoded Codex inventory plus the entries it had to leave out.
@@ -6526,10 +6520,7 @@ struct CodexInventory {
 /// Decode an inventory, failing closed per model: an entry with malformed or
 /// unusable reasoning metadata is left out, never registered with guessed
 /// choices, and never costs the account its other models.
-fn codex_inventory_from_response(
-    body: &serde_json::Value,
-    plan: Option<&crate::auth::codex::ChatGptPlan>,
-) -> anyhow::Result<CodexInventory> {
+fn codex_inventory_from_response(body: &serde_json::Value) -> anyhow::Result<CodexInventory> {
     // The subscription backend uses `models`, while OpenAI-compatible proxies
     // commonly expose the same inventory under `data`. Accepting both keeps
     // OAuth discovery working through enterprise gateways as well.
@@ -6560,26 +6551,15 @@ fn codex_inventory_from_response(
             &["context_window", "context_length", "max_context_tokens"],
         );
         let advertised_max = positive_u64(entry, &["max_context_window"]);
-        let (mut default_context_window, mut max_context_window) =
+        let (default_context_window, max_context_window) =
             match (advertised_context, advertised_max) {
                 (Some(context), Some(maximum)) => (context.min(maximum), maximum),
                 (Some(context), None) => (context, context),
                 (None, Some(maximum)) => (maximum, maximum),
                 (None, None) => fallback,
             };
-        if known_gpt_6_model(id) {
-            // Keep the observed GPT-6 input envelope distinct from the
-            // conservative Codex working budget, and never overstate the
-            // provider's 872K input allowance when only a total window appears.
-            max_context_window = max_context_window.min(CODEX_ASTRA_MAX_CONTEXT_WINDOW);
-            default_context_window = default_context_window.min(max_context_window);
-        }
-        // The plan-selected, pre-cap backend window for this model. octet's
-        // deliberate working cap is applied by `crate::codex_context`, which also
-        // reports the clamp and applies the explicit opt-in override.
         let resolution = resolve_codex_context_window(
             id,
-            codex_context_tier(plan),
             default_context_window,
             max_context_window,
             positive_u64(entry, &["max_output_tokens", "max_completion_tokens"]),
@@ -6675,57 +6655,19 @@ fn report_skipped_codex_models(skipped: &[String]) {
     );
 }
 
-/// Checked-in discovery fallback windows for a Codex family. The policy itself
-/// (working cap and entitlement ceiling) is owned by `crate::codex_context`.
+/// Reviewed offline fallback windows; authenticated inventory takes precedence.
 fn codex_model_context_limits(model_id: &str) -> (u64, u64) {
-    crate::codex_context::entitled_context_windows(model_id)
+    crate::codex_context::fallback_context_windows(model_id)
 }
 
-/// The plan tier that selects between the backend default and advertised maximum.
-fn codex_context_tier(plan: Option<&crate::auth::codex::ChatGptPlan>) -> CodexContextTier {
-    CodexContextTier::from_plan_entitlement(
-        plan.is_some_and(crate::auth::codex::ChatGptPlan::uses_max_context_window),
-    )
-}
-
-/// Resolve one Codex model's context envelope without a user override.
-///
-/// Used by discovery and the conservative fallback catalog. The explicit opt-in
-/// override is applied once, where discovered metadata becomes catalog limits.
-fn codex_context_window_for_plan(
-    model_id: &str,
-    default_context_window: u64,
-    max_context_window: u64,
-    plan: Option<&crate::auth::codex::ChatGptPlan>,
-) -> u64 {
-    resolve_codex_context_window(
-        model_id,
-        codex_context_tier(plan),
-        default_context_window,
-        max_context_window,
-        None,
-        CodexContextOverride::NONE,
-    )
-    .expect("resolving a Codex context window without a user override cannot fail")
-    .context_window
-}
-
-fn codex_model_limits(
-    model_id: &str,
-    plan: Option<&crate::auth::codex::ChatGptPlan>,
-) -> (ModelLimits, u64) {
-    let (default_context_window, max_context_window) = codex_model_context_limits(model_id);
+fn codex_model_limits(model_id: &str) -> (ModelLimits, u64) {
+    let (context_window, maximum) = codex_model_context_limits(model_id);
     (
         ModelLimits {
-            context_window: codex_context_window_for_plan(
-                model_id,
-                default_context_window,
-                max_context_window,
-                plan,
-            ),
-            max_output_tokens: CODEX_MAX_OUTPUT_TOKENS,
+            context_window,
+            max_output_tokens: CODEX_MAX_OUTPUT_TOKENS.min(context_window),
         },
-        max_context_window,
+        maximum,
     )
 }
 
@@ -6859,7 +6801,7 @@ pub(crate) enum CodexInventorySource {
     OnlineDiscovery,
     /// The checked-in conservative fallback catalog. Used when the cache is
     /// missing, stale, invalid, or unusable and no discovery could complete:
-    /// carries no dynamic capability and keeps the plan's entitlement ceiling.
+    /// carries no dynamic capability and retains reviewed fallback windows.
     ConservativeFallback,
     /// The unit-test registration path: no ambient HOME and no network. A
     /// fresh, account- and plan-matched cache is still authoritative, but it is
@@ -6916,16 +6858,10 @@ fn codex_inventory_models(
                 conservative_offline_codex_models(models),
                 CodexInventorySource::FreshCache,
             ),
-            Ok(None) => (
-                fallback_codex_models(initial_claims.plan.as_ref()),
-                fallback_source,
-            ),
+            Ok(None) => (fallback_codex_models(), fallback_source),
             Err(error) => {
                 let _ = error;
-                (
-                    fallback_codex_models(initial_claims.plan.as_ref()),
-                    fallback_source,
-                )
+                (fallback_codex_models(), fallback_source)
             }
         };
     }
@@ -6943,18 +6879,10 @@ fn codex_inventory_models(
                     );
                     (discovery.models, CodexInventorySource::OnlineDiscovery)
                 }
-                Err(_) => {
-                    // Discovery may have refreshed a token before the inventory
-                    // request failed, so re-read claims for the fallback limits.
-                    let current_claims = crate::auth::codex::usable_subscription_claims(store)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| initial_claims.clone());
-                    (
-                        fallback_codex_models(current_claims.plan.as_ref()),
-                        CodexInventorySource::ConservativeFallback,
-                    )
-                }
+                Err(_) => (
+                    fallback_codex_models(),
+                    CodexInventorySource::ConservativeFallback,
+                ),
             }
         }
     }
@@ -6994,14 +6922,12 @@ fn conservative_offline_codex_models(
     models
 }
 
-fn fallback_codex_models(
-    plan: Option<&crate::auth::codex::ChatGptPlan>,
-) -> Vec<DiscoveredCodexModel> {
+fn fallback_codex_models() -> Vec<DiscoveredCodexModel> {
     crate::auth::codex::MODELS
         .iter()
         .map(|model_id| {
             let (default_context_window, _) = codex_model_context_limits(model_id);
-            let (limits, max_context_window) = codex_model_limits(model_id, plan);
+            let (limits, max_context_window) = codex_model_limits(model_id);
             let mut reasoning_options = codex_fallback_reasoning_options(model_id);
             // The checked-in model contract alone cannot establish account
             // authority for V2/Ultra when the live inventory is unreachable.
@@ -7167,7 +7093,7 @@ fn discover_codex_models_with(
             .error_for_status()
             .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
         let body = bounded_discovery_json_async(response, "Codex models").await?;
-        let inventory = codex_inventory_from_response(&body, claims.plan.as_ref())?;
+        let inventory = codex_inventory_from_response(&body)?;
         report_skipped_codex_models(&inventory.skipped);
         Ok(CodexDiscovery {
             claims,
@@ -7186,20 +7112,18 @@ fn codex_user_agent() -> String {
 
 /// Read the explicit opt-in Codex context-window override.
 ///
-/// Fail-closed: an unreadable, unrecognised, or out-of-range value leaves the
-/// deliberate cap in force and reports why.
+/// Invalid values report why and leave the provider default in force.
 fn codex_context_override_from_env() -> anyhow::Result<CodexContextOverride> {
     let mut diagnostics = crate::output::DiagnosticCheck::new(
         crate::output::DiagnosticComponent::Bootstrap("codex-context-override".into()),
     );
     let result = (|| {
         let requested = optional_env(CODEX_CONTEXT_OVERRIDE_ENV)?;
-        let acknowledged = optional_env(CODEX_CONTEXT_ACKNOWLEDGE_ENV)?;
-        match CodexContextOverride::parse(requested.as_deref(), acknowledged.as_deref()) {
+        match CodexContextOverride::parse(requested.as_deref()) {
             Ok(user_override) => Ok(user_override),
             Err(error) => {
                 diagnostics.problem(format!(
-                    "warning: {error}; keeping the deliberate Codex context cap"
+                    "warning: {error}; using the provider default Codex context window"
                 ));
                 Ok(CodexContextOverride::NONE)
             }
@@ -7211,14 +7135,10 @@ fn codex_context_override_from_env() -> anyhow::Result<CodexContextOverride> {
 
 /// Resolve the context envelope for one discovered Codex model.
 ///
-/// The deliberate working cap is applied here as it always has been; a
-/// deliberate reduction is reported through the typed [`CodexContextClamp`] the
-/// caller observes, and the explicit opt-in override can raise the window (never
-/// past the model's entitlement) when the operator acknowledged it. A refused
-/// override keeps the deliberate cap.
+/// A refused override reports why and keeps the provider default. The maximum
+/// comes from the same inventory as the default, not a local entitlement table.
 fn codex_context_resolve_for_registration(
     model: &DiscoveredCodexModel,
-    tier: CodexContextTier,
     user_override: CodexContextOverride,
 ) -> crate::codex_context::CodexContextWindow {
     let mut diagnostics = crate::output::DiagnosticCheck::new(
@@ -7226,7 +7146,6 @@ fn codex_context_resolve_for_registration(
     );
     let result = match resolve_codex_context_window(
         &model.id,
-        tier,
         model.default_context_window,
         model.max_context_window,
         Some(model.max_output_tokens),
@@ -7235,11 +7154,10 @@ fn codex_context_resolve_for_registration(
         Ok(resolution) => resolution,
         Err(error) => {
             diagnostics.problem(format!(
-                "warning: {error}; keeping the deliberate Codex context cap"
+                "warning: {error}; using the provider default Codex context window"
             ));
             resolve_codex_context_window(
                 &model.id,
-                tier,
                 model.default_context_window,
                 model.max_context_window,
                 Some(model.max_output_tokens),
@@ -7257,8 +7175,8 @@ fn codex_context_resolve_for_registration(
 /// Catalog enumeration must never print: a user running a non-Codex model would
 /// otherwise read a note about every Codex model in the catalog. The note is
 /// shown by [`Bootstrap::codex_context_note`] for the effective session model
-/// only. Above the standard tier the whole request is metered differently, which
-/// is why such a route carries a note at all.
+/// only. Provider defaults do not need a note; explicit changes label the source
+/// and effective budgets without making subscription-price claims.
 fn codex_context_record_note(
     notes: &mut CodexContextNotes,
     catalog_id: &ModelId,
@@ -7268,45 +7186,6 @@ fn codex_context_record_note(
     if let Some(note) = crate::codex_context::codex_context_session_note(model_id, resolution) {
         notes.record(catalog_id.clone(), note);
     }
-}
-
-/// The durable uncertainty operation for one resolved catalog model, if any.
-///
-/// `Some` only for a Codex route whose effective window is above the 272K
-/// standard tier, where the whole request is priced differently. A public
-/// provider with a large context window (1M Gemini, for example) is not a Codex
-/// route and keeps exact accounting, so the endpoint is part of the decision.
-fn codex_context_uncertainty_operation(model: &Model) -> Option<&'static str> {
-    (model.endpoint.id.0 == crate::auth::codex::ENDPOINT_ID
-        && model.spec.limits.context_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP)
-        .then_some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
-}
-
-/// Mark a route whose effective Codex context window is above the 272K standard
-/// tier as uncertain on the session before the first request.
-///
-/// Above 272K the whole request is priced differently, so the durable session
-/// record must say the known totals are only a subtotal instead of letting an
-/// exact-looking cost stand. The uncertainty record is sticky and written at
-/// most once per session; a route at or below 272K, or any non-Codex route, is
-/// left exact. Called at every launch boundary, including a mid-session model
-/// switch, so a switch onto a raised Codex route cannot leave an exact-looking
-/// cost behind.
-fn record_codex_context_uncertainty(session: &mut Session, model: &Model) -> anyhow::Result<()> {
-    let Some(operation) = codex_context_uncertainty_operation(model) else {
-        return Ok(());
-    };
-    // This deduplicates durable exposure markers, not a cost-exactness report.
-    // Unpriced completed receipts alone must not suppress this route exposure.
-    if session.has_uncertain_usage() {
-        return Ok(());
-    }
-    session.record_usage_uncertainty(
-        model.endpoint.id.clone(),
-        model.spec.id.clone(),
-        operation,
-    )?;
-    Ok(())
 }
 
 /// Select the coding product's inference contract independently of inventory
@@ -7417,7 +7296,6 @@ fn register_openai_codex_with_notes(
     })?;
 
     let user_override = codex_context_override_from_env()?;
-    let tier = codex_context_tier(initial_claims.plan.as_ref());
 
     for model in models {
         // GPT-6 routes are always namespaced so an OAuth selection cannot be
@@ -7431,7 +7309,7 @@ fn register_openai_codex_with_notes(
             ModelId(model.id.clone())
         };
         let limits = {
-            let resolution = codex_context_resolve_for_registration(&model, tier, user_override);
+            let resolution = codex_context_resolve_for_registration(&model, user_override);
             // Recording is not printing: the note is shown once, for the
             // effective session model only (see `codex_context_note`).
             codex_context_record_note(notes, &catalog_id, &model.id, &resolution);
@@ -7450,6 +7328,10 @@ fn register_openai_codex_with_notes(
             route.protocol,
         );
         catalog.register_model(ModelSpec {
+            context_window_options: Some(octet_ai::types::ContextWindowOptions {
+                default: model.default_context_window,
+                maximum: model.max_context_window,
+            }),
             preset: Default::default(),
             id: catalog_id,
             endpoint: EndpointId(route.endpoint_id.into()),
@@ -7506,6 +7388,7 @@ pub(crate) fn register_offline_openrouter_model(
     // when an explicit offline batch model cannot be found in the inventory
     // cache, where the provider remains the authority on actual availability.
     catalog.register_model(ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: catalog_id,
         endpoint: endpoint_id,
@@ -8036,8 +7919,7 @@ pub fn model_catalog_with_offline(offline: bool) -> anyhow::Result<ModelCatalog>
 
 /// Build the runtime catalog and the Codex context notes recorded for it.
 ///
-/// Recording happens here because the deliberate cap, the entitlement ceiling
-/// and the explicit override are all resolved while Codex models are registered.
+/// Source limits and explicit overrides are resolved during registration.
 /// Nothing is printed: frontends ask [`Bootstrap::codex_context_note`] for the
 /// effective session model's single note instead.
 pub fn model_catalog_with_offline_and_codex_notes(
@@ -9160,10 +9042,6 @@ fn build_app_with_consumer(
     let mut prepared_session = prepared_session.into_inner();
     let mut session = open_launch_session(&mut prepared_session, launch.session)?;
     let prepared_config = prepared_config.into_inner();
-    // Above 272K the whole request is priced differently, so the durable record
-    // must mark the route uncertain at launch rather than let a later
-    // exact-looking cost claim stand. Sticky, and written at most once.
-    record_codex_context_uncertainty(&mut session, &bootstrap_model)?;
 
     if let Some((_, mut extensions)) = prestarted_extensions.take() {
         extensions.clear_provider_catalog(&mut catalog, &client);
@@ -9497,7 +9375,7 @@ pub(super) fn try_select_model_at_idle(
         app.executable_extensions.has_dynamic_tool_provider(),
     )?;
     startup_phase("model.select.begin");
-    record_codex_context_uncertainty(app.agent.session_mut(), &model)?;
+
     let previous_tier = app.agent.service_tier();
     let clear_tier = previous_tier.is_some() && !crate::commands::codex_fast_tier_endpoint(&model);
     if clear_tier {
@@ -9768,7 +9646,7 @@ fn rebuild_app_with_start_reason(
     // A mid-session switch onto a raised Codex route must not leave an
     // exact-looking cost behind; the record is sticky, so an ordinary rebuild is
     // a no-op.
-    record_codex_context_uncertainty(&mut session, &model)?;
+
     let goal_session_id = terminal_goal_session_id(&session)?;
     let goal_driver = GoalDriver::new(goal_store.clone(), goal_session_id.clone());
 
@@ -10159,262 +10037,43 @@ mod codex_context_note_regression_tests {
             .unwrap_or_else(|| panic!("{model_id} is registered on the Codex endpoint"))
     }
 
-    /// Catalog enumeration must never print. It records at most one note for the
-    /// models whose effective window needs one, and nothing for a route whose
-    /// window is the deliberate cap itself.
-    ///
-    /// A "reduced" route is one whose effective window is below what the plan
-    /// advertises. Terra's 500K default is reduced even on Plus; on a Pro plan
-    /// every 872K/1M family is reduced.
     #[test]
-    fn registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route() {
-        for (plan, reduced, plain) in [
-            (
-                "plus",
-                &["gpt-6.1-terra"][..],
-                &[
-                    "gpt-5.6-luna",
-                    "gpt-5.6-sol",
-                    "gpt-5.6-terra",
-                    "gpt-6.1-sol",
-                    "gpt-6-astra",
-                    "gpt-6-sol",
-                    "gpt-6-luna",
-                    "gpt-5.5",
-                    "gpt-5.4",
-                    "gpt-5.4-mini",
-                ][..],
-            ),
-            (
-                "pro",
-                &[
-                    "gpt-6.1-sol",
-                    "gpt-6.1-terra",
-                    "gpt-6-astra",
-                    "gpt-6-sol",
-                    "gpt-6-luna",
-                    "gpt-5.4",
-                    "gpt-5.6-luna",
-                    "gpt-5.6-sol",
-                    "gpt-5.6-terra",
-                ][..],
-                &["gpt-5.5", "gpt-5.4-mini"][..],
-            ),
-        ] {
+    fn registration_uses_the_same_provider_defaults_on_all_subscription_plans() {
+        for plan in ["plus", "pro", "prolite", "free", "business", "future-tier"] {
             let (catalog, notes) = registered_notes(plan);
-            let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
-            assert!(
-                catalog
-                    .models()
-                    .any(|model| model.endpoint == codex_endpoint),
-                "the fallback Codex inventory is registered"
-            );
             for model_id in crate::auth::codex::MODELS {
-                assert!(
-                    reduced.contains(model_id) || plain.contains(model_id),
-                    "{plan}: {model_id} is not covered by the expectation table"
-                );
                 let id = catalog_id(&catalog, model_id);
-                let note = notes.note_for(&id);
-                if reduced.contains(model_id) {
-                    let note = note.unwrap_or_else(|| {
-                        panic!("{plan}: {model_id} is reduced and needs a note")
-                    });
-                    assert!(note.starts_with("note: Codex model"), "{note}");
-                    assert!(!note.contains("Session::"), "{note}");
-                    assert!(!note.contains("record_usage_uncertainty"), "{note}");
-                    assert!(
-                        !note.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
-                        "{note}"
-                    );
-                    // Exactly one note per model: the lookup is stable.
-                    assert_eq!(notes.note_for(&id), Some(note));
-                } else {
-                    assert_eq!(
-                        note, None,
-                        "{plan}: {model_id} is not reduced and needs no note"
-                    );
-                }
+                let model = catalog.resolve(&id).unwrap();
+                let (default, maximum) = crate::codex_context::fallback_context_windows(model_id);
+                assert_eq!(
+                    model.spec.limits.context_window, default,
+                    "{plan}/{model_id}"
+                );
+                assert_eq!(
+                    model.spec.context_window_options,
+                    Some(octet_ai::types::ContextWindowOptions { default, maximum })
+                );
+                assert_eq!(notes.note_for(&id), None);
             }
         }
     }
 
-    /// A session whose effective model is not a Codex route prints nothing, even
-    /// though the catalog is full of Codex models.
     #[test]
-    fn a_non_codex_effective_model_has_no_note_while_the_catalog_has_codex_models() {
-        let (catalog, notes) = registered_notes("plus");
-        let codex_endpoint = EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned());
-        assert!(
-            catalog
-                .models()
-                .any(|model| model.endpoint == codex_endpoint),
-            "the catalog carries Codex models"
-        );
-
-        let mut non_codex = catalog
-            .models()
-            .filter(|model| model.endpoint != codex_endpoint)
-            .map(|model| model.id.clone())
-            .collect::<Vec<_>>();
-        non_codex.sort_by(|left, right| left.0.cmp(&right.0));
-        assert!(!non_codex.is_empty(), "the catalog carries other providers");
-        for id in &non_codex {
-            assert_eq!(
-                notes.note_for(id),
-                None,
-                "{} is not a Codex route and must print no Codex note",
-                id.0
-            );
-        }
-
-        // `Bootstrap::codex_context_note` is exactly this lookup, so the
-        // effective-model boundary returns one note for a reduced Codex route
-        // and nothing for any other model. The process-boundary test in
-        // `tests/parity_cli.rs` asserts the same through the real CLI.
-        let effective = catalog_id(&catalog, "gpt-6.1-terra");
-        let note = notes
-            .note_for(&effective)
-            .expect("a reduced Codex model has one note")
-            .to_owned();
-        assert_eq!(notes.note_for(&effective), Some(note.as_str()));
-    }
-
-    /// Above the 272K standard tier the session is durably marked uncertain
-    /// before its first request, so no exact-looking cost is ever claimed. The
-    /// record is sticky and written at most once; a route at or below the
-    /// standard tier stays exact.
-    #[test]
-    fn an_above_standard_tier_route_marks_the_session_uncertain_once() {
-        let (catalog, notes) = registered_notes("plus");
-        let directory = tempfile::tempdir().unwrap();
-
-        // An explicitly raised route still records sticky above-tier exposure.
-        let luna_id = catalog_id(&catalog, "gpt-5.6-luna");
-        let mut luna = catalog.resolve(&luna_id).unwrap();
-        assert_eq!(codex_context_uncertainty_operation(&luna), None);
-        assert!(notes.note_for(&luna_id).is_none());
-        std::sync::Arc::make_mut(&mut luna.spec)
-            .limits
-            .context_window = 372_000;
-        assert_eq!(
-            codex_context_uncertainty_operation(&luna),
-            Some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
-        );
-        let mut session = Session::create(directory.path().join("luna.jsonl")).unwrap();
-        assert!(!session.has_uncertain_usage());
-        record_codex_context_uncertainty(&mut session, &luna).unwrap();
-        assert!(
-            session.has_uncertain_usage(),
-            "372K must route cost/usage through has_uncertain_usage"
-        );
-        let records = session.usage_uncertainty_records().to_vec();
-        assert_eq!(records.len(), 1, "{records:?}");
-        assert_eq!(
-            records[0].operation,
-            crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
-        );
-        assert_eq!(records[0].endpoint.0, crate::auth::codex::ENDPOINT_ID);
-        assert_eq!(records[0].model, luna_id);
-
-        // Sticky: a second launch of the same session appends nothing.
-        record_codex_context_uncertainty(&mut session, &luna).unwrap();
-        assert_eq!(session.usage_uncertainty_records().len(), 1);
-
-        // A route whose effective window is the deliberate 272K cap is exact.
-        let capped_id = catalog_id(&catalog, "gpt-5.5");
-        let capped = catalog.resolve(&capped_id).unwrap();
-        assert_eq!(codex_context_uncertainty_operation(&capped), None);
-        let mut exact = Session::create(directory.path().join("exact.jsonl")).unwrap();
-        record_codex_context_uncertainty(&mut exact, &capped).unwrap();
-        assert!(!exact.has_uncertain_usage());
-        assert!(exact.usage_uncertainty_records().is_empty());
-
-        // A non-Codex route is never marked uncertain, even when its context
-        // window is far above 272K: the cap is a Codex policy, not a global one.
-        let non_codex_id = catalog
-            .models()
-            .find(|model| model.endpoint != EndpointId(crate::auth::codex::ENDPOINT_ID.to_owned()))
-            .map(|model| model.id.clone())
-            .expect("the catalog carries other providers");
-        let non_codex = catalog.resolve(&non_codex_id).unwrap();
-        assert_eq!(codex_context_uncertainty_operation(&non_codex), None);
-        record_codex_context_uncertainty(&mut exact, &non_codex).unwrap();
-        assert!(!exact.has_uncertain_usage());
-    }
-
-    /// The note the effective model needs is produced from the same resolution
-    /// every route in the catalog is recorded from.
-    #[test]
-    fn the_recorded_note_matches_the_effective_resolution() {
-        let luna = codex_discovered_model(
-            "gpt-5.6-luna",
-            crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
-            crate::codex_context::CODEX_ASTRA_MAX_CONTEXT_WINDOW,
-            128_000,
-        );
-        let resolution = codex_context_resolve_for_registration(
-            &luna,
-            CodexContextTier::Extended,
-            CodexContextOverride::NONE,
-        );
-        let note = codex_context_session_note("gpt-5.6-luna", &resolution).unwrap();
-        assert!(note.contains("effective 272K"), "{note}");
+    fn override_note_is_delivered_lazily_once_and_matches_effective_limits() {
+        let model = codex_discovered_model("gpt-6.1-sol", 500_000, 600_000, 128_000);
+        let window =
+            codex_context_resolve_for_registration(&model, CodexContextOverride::new(600_000));
+        let expected = codex_context_session_note("gpt-6.1-sol", &window).unwrap();
+        let id = ModelId("codex/gpt-6.1-sol".into());
         let mut notes = CodexContextNotes::default();
-        codex_context_record_note(
-            &mut notes,
-            &ModelId("gpt-5.6-luna".to_owned()),
-            "gpt-5.6-luna",
-            &resolution,
-        );
-        assert_eq!(
-            notes.note_for(&ModelId("gpt-5.6-luna".to_owned())),
-            Some(note.as_str())
-        );
-    }
-
-    /// The note is delivered lazily and at most once per session, and a route
-    /// that needs no note never consumes the delivery.
-    #[test]
-    fn the_codex_context_note_is_delivered_lazily_and_at_most_once() {
-        let (catalog, notes) = registered_notes("plus");
-        let effective = catalog_id(&catalog, "gpt-6.1-terra");
-        let expected = notes
-            .note_for(&effective)
-            .expect("a reduced Codex route has one note")
-            .to_owned();
-
-        // A model with no note never consumes the once-per-session delivery, so
-        // a non-Codex first turn cannot swallow the Codex route's note.
-        let other = catalog
-            .models()
-            .map(|model| model.id.clone())
-            .find(|id| notes.note_for(id).is_none())
-            .expect("the catalog carries non-Codex models");
-        assert_eq!(notes.take_for(&other), None);
-        assert_eq!(notes.note_for(&effective), Some(expected.as_str()));
-
-        // The first pull delivers exactly the recorded wording, still without any
-        // internal API name or operation id, and still naming the deliberate cap.
-        let delivered = notes
-            .take_for(&effective)
-            .expect("the first pull delivers the note");
-        assert_eq!(delivered, expected);
-        assert!(delivered.starts_with("note: Codex model"), "{delivered}");
-        assert!(!delivered.contains("Session::"), "{delivered}");
-        assert!(
-            !delivered.contains(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION),
-            "{delivered}"
-        );
-        assert!(delivered.contains("deliberate"), "{delivered}");
-        assert!(delivered.contains("double-priced"), "{delivered}");
-
-        // Startup showed nothing, and every later pull stays silent: the note can
-        // never be repeated in one session, and the peek is still available to
-        // diagnostics.
-        assert_eq!(notes.take_for(&effective), None);
-        assert_eq!(notes.take_for(&effective), None);
-        assert_eq!(notes.note_for(&effective), Some(expected.as_str()));
+        codex_context_record_note(&mut notes, &id, "gpt-6.1-sol", &window);
+        assert_eq!(notes.take_for(&ModelId("other".into())), None);
+        assert_eq!(notes.note_for(&id), Some(expected.as_str()));
+        assert_eq!(notes.take_for(&id), Some(expected.clone()));
+        assert_eq!(notes.take_for(&id), None);
+        assert_eq!(notes.note_for(&id), Some(expected.as_str()));
+        assert!(expected.contains("effective 600K"));
+        assert!(!expected.contains("double-priced"));
     }
 
     /// The startup phase trace is off by default, and its gate plus line format

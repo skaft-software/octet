@@ -2647,17 +2647,13 @@ fn open_active_codex_context(
     surface: &commands::CodexContextSurface,
 ) {
     let mut items = vec![format!(
-        "Keep the deliberate {} window",
+        "Keep the current {} window",
         surface.effective_window()
     )];
     let mut descriptions = vec![Some("no change".into())];
     if let Some(target) = surface.raise_target() {
-        items.push(format!(
-            "Acknowledge and raise to {target} tokens (double-priced; websocket risk)"
-        ));
-        descriptions.push(Some(
-            crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING.into(),
-        ));
+        items.push(format!("Use {target} tokens on the next launch"));
+        descriptions.push(Some(surface.raise_instruction(target)));
     }
     shell.open_panel(Panel::SelectList {
         surface: OrdinarySurfaceMetadata::with_purpose(
@@ -4542,9 +4538,7 @@ where
                                 if matches!(result, PanelResult::Confirm(1)) {
                                     if let Some(surface) = codex_context_surface(&inspection.model) {
                                         if let Some(target) = surface.raise_target() {
-                                            shell.notice(format!("{} Set acknowledged for the launch boundary.",
-                                                crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING));
-                                            match surface.raise(target, true) {
+                                            match surface.raise(target) {
                                                 Ok(window) => shell.notice(format!("Codex context window raise to {window} tokens accepted: {}", surface.raise_instruction(target))),
                                                 Err(reason) => shell.error(format!("Codex context window unchanged at {} tokens: {reason}", surface.effective_window())),
                                             }
@@ -6884,20 +6878,9 @@ async fn thinking_configuration_picker(
 /// Codex context-window facts for the effort menu, or `None` on every other
 /// route.
 ///
-/// Entitlement is read from the same subscription credential the launch used,
-/// and an unreadable or unparsable credential reports `false` so an unknown plan
-/// never grants a raise above the deliberate cap.
+/// Source limits come from the registered model, not subscription-plan guesses.
 fn codex_context_surface(model: &octet_ai::Model) -> Option<commands::CodexContextSurface> {
-    if !commands::codex_responses_endpoint(model) {
-        return None;
-    }
-    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
-    let entitled = crate::auth::codex::usable_subscription_claims(&store)
-        .ok()
-        .flatten()
-        .and_then(|claims| claims.plan)
-        .is_some_and(|plan| plan.uses_max_context_window());
-    commands::CodexContextSurface::capture(model, entitled)
+    commands::CodexContextSurface::capture(model)
 }
 
 fn delegated_session_text(

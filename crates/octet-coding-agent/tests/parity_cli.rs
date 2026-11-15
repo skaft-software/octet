@@ -897,60 +897,44 @@ fn sessions_search_is_incremental_and_reports_the_index_change() {
     );
 }
 
-/// Row 1 — the Codex context-window flag is an explicit opt-in override of the
-/// deliberate 272K cap: above the cap without the acknowledgement it fails
-/// closed before any run, and zero is refused.
+/// The numeric option needs no obsolete surcharge flag. Provider maxima are
+/// checked at registration, not against a universal CLI ceiling.
 #[test]
-fn codex_context_window_override_fails_closed_without_acknowledgement() {
+fn codex_context_window_override_checks_minimum_and_removes_obsolete_consent() {
     let fixture = Fixture::new(None);
-
-    let unacknowledged = fixture.run(&["--codex-context-window", "500000", "--print", "hello"]);
-    assert!(
-        !unacknowledged.status.success(),
-        "an unacknowledged raise must fail closed"
-    );
-    let stderr = stderr_of(&unacknowledged);
-    assert!(
-        stderr.contains("double-priced"),
-        "diagnostic names the cost cliff: {stderr}"
-    );
-    assert!(
-        stderr.contains("acknowledge-cost-cliff"),
-        "diagnostic names the flag: {stderr}"
-    );
-
-    let zero = fixture.run(&["--codex-context-window", "0", "--print", "hello"]);
-    assert!(!zero.status.success(), "zero must fail closed");
-    assert!(
-        stderr_of(&zero).contains("greater than zero"),
-        "{}",
-        stderr_of(&zero)
-    );
-
-    let oversized = fixture.run(&["--codex-context-window", "2000000", "--print", "hello"]);
-    assert!(
-        !oversized.status.success(),
-        "above every entitlement must fail closed"
-    );
-}
-
-/// Row 1 — with the acknowledgement the opt-in is accepted and a non-Codex run
-/// is unaffected (the deliberate default stays untouched without the flag).
-#[test]
-fn codex_context_window_override_is_accepted_with_the_acknowledgement() {
-    let api = LoopbackApi::start();
-    let fixture = Fixture::new(Some(&api.url));
-    let accepted = fixture.run(&[
-        "--model",
-        "custom/probe",
+    for tokens in ["0", "16383"] {
+        let refused = fixture.run(&["--codex-context-window", tokens, "--print", "hello"]);
+        assert!(!refused.status.success());
+        assert!(stderr_of(&refused).contains("at least 16384"));
+    }
+    let obsolete = fixture.run(&[
         "--codex-context-window",
         "500000",
         "--codex-context-window-acknowledge-cost-cliff",
         "--print",
         "hello",
     ]);
-    assert_success(&accepted);
-    assert!(stdout_of(&accepted).contains(ASSISTANT_TEXT));
+    assert!(!obsolete.status.success());
+    assert!(stderr_of(&obsolete).contains("unexpected argument"));
+}
+
+#[test]
+fn codex_context_window_override_needs_no_ack_and_does_not_change_other_providers() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    for tokens in ["500000", "2000000"] {
+        let accepted = fixture.run(&[
+            "--model",
+            "custom/probe",
+            "--codex-context-window",
+            tokens,
+            "--print",
+            "hello",
+        ]);
+        assert_success(&accepted);
+        assert!(stdout_of(&accepted).contains(ASSISTANT_TEXT));
+        assert!(!stderr_of(&accepted).contains("double-priced"));
+    }
 }
 
 /// A documented vision model from a provider whose live inventory is sparse must

@@ -237,6 +237,7 @@ impl FauxProvider {
             timeout: Duration::from_secs(10),
         };
         let spec = ModelSpec {
+            context_window_options: None,
             id: options.model_id.clone(),
             endpoint: options.endpoint_id.clone(),
             api_name: options.model_id.0.clone(),

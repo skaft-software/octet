@@ -30,14 +30,11 @@ async fn codex_inference_uses_pi_parallel_wire_contract_when_inventory_prefers_l
         .await;
     let client = AiClient::new();
     for id in ["gpt-6.1-sol", "gpt-6-luna", "gpt-account-preview"] {
-        let inventory = codex_models_from_response(
-            &serde_json::json!({"models": [{
-                "slug": id, "use_responses_lite": true,
-                "multi_agent_version": "v2", "supports_reasoning_effort_updates": true,
-                "supported_reasoning_levels": ["low", "high", "ultra"]
-            }]}),
-            None,
-        )
+        let inventory = codex_models_from_response(&serde_json::json!({"models": [{
+            "slug": id, "use_responses_lite": true,
+            "multi_agent_version": "v2", "supports_reasoning_effort_updates": true,
+            "supported_reasoning_levels": ["low", "high", "ultra"]
+        }]}))
         .unwrap();
         let discovered = &inventory[0];
         assert!(
@@ -61,6 +58,7 @@ async fn codex_inference_uses_pi_parallel_wire_contract_when_inventory_prefers_l
         );
         let model = Model {
             spec: Arc::new(ModelSpec {
+                context_window_options: None,
                 id: ModelId(format!("codex/{id}")),
                 endpoint: EndpointId(crate::auth::codex::ENDPOINT_ID.into()),
                 api_name: id.into(),
@@ -168,11 +166,7 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
         assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
         assert_eq!(
             model.spec.limits.context_window,
-            if *model_id == "gpt-5.6-luna" {
-                CODEX_5_6_CONTEXT_WINDOW
-            } else {
-                CODEX_CONTEXT_WINDOW_CAP
-            }
+            crate::codex_context::fallback_context_windows(model_id).0
         );
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
         // Subscription pricing is reviewed only where it was observed.
@@ -265,8 +259,7 @@ fn codex_astra_is_namespaced_without_a_direct_openai_model() {
 
 #[test]
 fn codex_astra_fallback_is_conservative_and_retains_advertised_max() {
-    let pro = crate::auth::codex::ChatGptPlan::Pro;
-    let models = fallback_codex_models(Some(&pro));
+    let models = fallback_codex_models();
     let astra = models
         .iter()
         .find(|model| model.id == "gpt-6-astra")
@@ -352,19 +345,16 @@ fn offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities
         .unwrap();
     let cached = CodexDiscovery {
         claims,
-        models: codex_models_from_response(
-            &serde_json::json!({
-                "models": [{
-                    "slug": "cached-account-model",
-                    "context_window": 196_000,
-                    "max_output_tokens": 24_000,
-                    "use_responses_lite": true,
-                    "multi_agent_version": "v2",
-                    "supported_reasoning_levels": ["high", "ultra"]
-                }]
-            }),
-            Some(&crate::auth::codex::ChatGptPlan::Plus),
-        )
+        models: codex_models_from_response(&serde_json::json!({
+            "models": [{
+                "slug": "cached-account-model",
+                "context_window": 196_000,
+                "max_output_tokens": 24_000,
+                "use_responses_lite": true,
+                "multi_agent_version": "v2",
+                "supported_reasoning_levels": ["high", "ultra"]
+            }]
+        }))
         .unwrap(),
     };
     save_codex_model_cache(&store, &cached).unwrap();
@@ -417,11 +407,11 @@ fn offline_codex_registration_uses_cached_inventory_without_dynamic_capabilities
         .resolve(&ModelId("gpt-5.6-sol".into()))
         .unwrap();
     assert_eq!(fallback.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
-    // GPT-5.6 uses OpenAI's published standard costs on the Codex route too.
     let luna = fallback_catalog
         .resolve(&ModelId("gpt-5.6-luna".into()))
         .unwrap();
     assert_eq!(luna.spec.limits.context_window, CODEX_5_6_CONTEXT_WINDOW);
+    // GPT-5.6 uses OpenAI's published standard costs on the Codex route too.
     let luna_pricing = luna.spec.pricing.as_ref().expect("codex luna pricing");
     assert_eq!(luna_pricing.input, octet_ai::TokenRate(200_000));
     assert_eq!(luna_pricing.output, octet_ai::TokenRate(1_200_000));
@@ -503,7 +493,7 @@ fn codex_spark_and_astra_are_registered_as_image_capable() {
 #[test]
 fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
     assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.159.2");
-    assert_eq!(CODEX_MODEL_CACHE_VERSION, 11);
+    assert_eq!(CODEX_MODEL_CACHE_VERSION, 12);
     let url = codex_models_url().unwrap();
     assert_eq!(url.path(), "/backend-api/codex/models");
     assert_eq!(
@@ -515,7 +505,7 @@ fn codex_catalog_query_uses_gpt6_compatible_client_and_cache_versions() {
 }
 
 #[test]
-fn codex_discovery_accepts_account_catalog_and_caps_live_context() {
+fn codex_discovery_accepts_account_catalog_and_retains_live_context() {
     let body = serde_json::json!({
         "models": [
             {
@@ -535,13 +525,13 @@ fn codex_discovery_accepts_account_catalog_and_caps_live_context() {
             {"slug": "gpt-5.6-luna"}
         ]
     });
-    let models = codex_models_from_response(&body, None).unwrap();
+    let models = codex_models_from_response(&body).unwrap();
     assert_eq!(models.len(), 3, "duplicate slugs must be collapsed");
     let luna = models
         .iter()
         .find(|model| model.id == "gpt-5.6-luna")
         .unwrap();
-    assert_eq!(luna.context_window, CODEX_5_6_CONTEXT_WINDOW);
+    assert_eq!(luna.context_window, 400_000);
     assert_eq!(luna.max_context_window, 400_000);
     assert_eq!(luna.max_output_tokens, 150_000);
     assert_eq!(luna.min_effort, octet_ai::ReasoningEffort::Low);
@@ -582,10 +572,10 @@ fn codex_astra_live_object_metadata_requires_explicit_ultra_and_v2() {
             "multi_agent_version": "v2"
         }]
     });
-    let models = codex_models_from_response(&body, None).unwrap();
+    let models = codex_models_from_response(&body).unwrap();
     let astra = &models[0];
     assert_eq!(astra.id, "gpt-6-astra");
-    assert_eq!(astra.context_window, 272_000);
+    assert_eq!(astra.context_window, 872_000);
     assert_eq!(astra.max_context_window, 872_000);
     assert_eq!(astra.max_output_tokens, 128_000);
     assert_eq!(astra.min_effort, octet_ai::ReasoningEffort::Low);
@@ -597,13 +587,13 @@ fn codex_astra_live_object_metadata_requires_explicit_ultra_and_v2() {
     let mut lower_output_body = body.clone();
     lower_output_body["models"][0]["max_output_tokens"] = serde_json::json!(64_000);
     assert_eq!(
-        codex_models_from_response(&lower_output_body, None).unwrap()[0].max_output_tokens,
+        codex_models_from_response(&lower_output_body).unwrap()[0].max_output_tokens,
         64_000
     );
 
     let offline = conservative_offline_codex_models(models.clone());
     let offline_astra = &offline[0];
-    assert_eq!(offline_astra.context_window, 272_000);
+    assert_eq!(offline_astra.context_window, 872_000);
     assert_eq!(offline_astra.max_context_window, 872_000);
     assert_eq!(offline_astra.min_effort, octet_ai::ReasoningEffort::Low);
     assert_eq!(offline_astra.max_effort, octet_ai::ReasoningEffort::Max);
@@ -617,7 +607,7 @@ fn codex_astra_live_object_metadata_requires_explicit_ultra_and_v2() {
         .pop()
         .unwrap();
     assert_eq!(removed["effort"], "ultra");
-    let max_only = codex_models_from_response(&max_only_body, None).unwrap();
+    let max_only = codex_models_from_response(&max_only_body).unwrap();
     let astra = &max_only[0];
     assert_eq!(astra.min_effort, octet_ai::ReasoningEffort::Low);
     assert_eq!(astra.max_effort, octet_ai::ReasoningEffort::Max);
@@ -627,7 +617,7 @@ fn codex_astra_live_object_metadata_requires_explicit_ultra_and_v2() {
         .as_object_mut()
         .unwrap()
         .remove("multi_agent_version");
-    let without_v2 = codex_models_from_response(&body, None).unwrap();
+    let without_v2 = codex_models_from_response(&body).unwrap();
     let astra = &without_v2[0];
     assert_eq!(astra.min_effort, octet_ai::ReasoningEffort::Low);
     assert_eq!(astra.max_effort, octet_ai::ReasoningEffort::Max);
@@ -685,7 +675,7 @@ fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
         let claims = crate::auth::codex::usable_subscription_claims(&store)
             .unwrap()
             .unwrap();
-        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        let models = codex_models_from_response(&body).unwrap();
         assert_eq!(models.len(), 2);
         for model in &models {
             let sol = model.id == "gpt-5.6-sol";
@@ -818,7 +808,7 @@ fn codex_gpt6_sol_luna_inventory_registers_exact_oauth_contracts() {
         let claims = crate::auth::codex::usable_subscription_claims(&store)
             .unwrap()
             .unwrap();
-        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        let models = codex_models_from_response(&body).unwrap();
         assert_eq!(models.len(), 2);
         for model in &models {
             assert_eq!(model.context_window, 272_000);
@@ -867,7 +857,7 @@ fn codex_gpt6_sol_luna_inventory_registers_exact_oauth_contracts() {
 }
 
 #[test]
-fn codex_gpt_6_1_sol_priority_default_and_inventory_contract() {
+fn codex_gpt_6_1_sol_bundled_catalog_contract() {
     let body: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../fixtures/providers/gpt-6.1-sol.json"
     ))
@@ -876,60 +866,52 @@ fn codex_gpt_6_1_sol_priority_default_and_inventory_contract() {
     assert_eq!(body["models"][0]["minimal_client_version"], "0.153.0");
     assert_eq!(CODEX_MODELS_CLIENT_VERSION, "0.159.2");
     assert_eq!(crate::auth::codex::MODELS[0], "gpt-6.1-sol");
+    assert_eq!(fallback_codex_models()[0].id, crate::auth::codex::MODELS[0]);
+    let models = codex_models_from_response(&body).unwrap();
+    assert_eq!(models.len(), 1);
+    let sol = &models[0];
+    assert_eq!(sol.id, "gpt-6.1-sol");
+    assert_eq!(sol.display_name.as_deref(), Some("GPT-6.1-Sol"));
+    assert_eq!(sol.context_window, 272_000);
+    assert_eq!(sol.max_context_window, 872_000);
+    assert_eq!(sol.max_output_tokens, 128_000);
+    assert_eq!(sol.reasoning_options.default.as_deref(), Some("low"));
     assert_eq!(
-        fallback_codex_models(None)[0].id,
-        crate::auth::codex::MODELS[0]
+        sol.reasoning_options.values,
+        ["low", "medium", "high", "xhigh", "max", "ultra"]
     );
-    for plan in [
-        crate::auth::codex::ChatGptPlan::Plus,
-        crate::auth::codex::ChatGptPlan::Pro,
-    ] {
-        let models = codex_models_from_response(&body, Some(&plan)).unwrap();
-        assert_eq!(models.len(), 1);
-        let sol = &models[0];
-        assert_eq!(sol.id, "gpt-6.1-sol");
-        assert_eq!(sol.display_name.as_deref(), Some("GPT-6.1-Sol"));
-        assert_eq!(sol.context_window, 272_000);
-        assert_eq!(sol.max_context_window, 872_000);
-        assert_eq!(sol.max_output_tokens, 128_000);
-        assert_eq!(sol.reasoning_options.default.as_deref(), Some("low"));
-        assert_eq!(
-            sol.reasoning_options.values,
-            ["low", "medium", "high", "xhigh", "max", "ultra"]
-        );
-        assert_eq!(sol.min_effort, octet_ai::ReasoningEffort::Low);
-        assert_eq!(sol.max_effort, octet_ai::ReasoningEffort::Ultra);
-        assert!(sol.responses_lite);
-        assert_eq!(sol.agent_delegation, Some(AgentDelegation::V2));
-        assert!(codex_supports_image_input(&sol.id));
-        // An account inventory missing V2 cannot authorize Ultra even for a
-        // bundled model. A sparse positive V2 inventory may use the fallback.
-        let mut sparse = body.clone();
-        sparse["models"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("supported_reasoning_levels");
-        assert_eq!(
-            codex_models_from_response(&sparse, Some(&plan)).unwrap()[0]
-                .reasoning_options
-                .values,
-            sol.reasoning_options.values
-        );
-        sparse["models"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("multi_agent_version");
-        let without_v2 = codex_models_from_response(&sparse, Some(&plan)).unwrap();
-        assert_eq!(without_v2[0].max_effort, octet_ai::ReasoningEffort::Max);
-        assert_eq!(without_v2[0].reasoning_options.values.len(), 5);
-        assert_eq!(without_v2[0].agent_delegation, None);
-    }
+    assert_eq!(sol.min_effort, octet_ai::ReasoningEffort::Low);
+    assert_eq!(sol.max_effort, octet_ai::ReasoningEffort::Ultra);
+    assert!(sol.responses_lite);
+    assert_eq!(sol.agent_delegation, Some(AgentDelegation::V2));
+    assert!(codex_supports_image_input(&sol.id));
+    // An account inventory missing V2 cannot authorize Ultra even for a
+    // bundled model. A sparse positive V2 inventory may use the fallback.
+    let mut sparse = body.clone();
+    sparse["models"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("supported_reasoning_levels");
+    assert_eq!(
+        codex_models_from_response(&sparse).unwrap()[0]
+            .reasoning_options
+            .values,
+        sol.reasoning_options.values
+    );
+    sparse["models"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("multi_agent_version");
+    let without_v2 = codex_models_from_response(&sparse).unwrap();
+    assert_eq!(without_v2[0].max_effort, octet_ai::ReasoningEffort::Max);
+    assert_eq!(without_v2[0].reasoning_options.values.len(), 5);
+    assert_eq!(without_v2[0].agent_delegation, None);
 
     let raw = codex_fallback_reasoning_options("gpt-6.1-sol");
     assert_eq!(raw.default.as_deref(), Some("low"));
     assert_eq!(raw.values.last().map(String::as_str), Some("ultra"));
-    let fallback = &fallback_codex_models(Some(&crate::auth::codex::ChatGptPlan::Pro))[0];
-    assert_eq!(fallback.context_window, 272_000);
+    let fallback = &fallback_codex_models()[0];
+    assert_eq!(fallback.context_window, 500_000);
     assert_eq!(fallback.max_context_window, 872_000);
     assert_eq!(fallback.reasoning_options.default.as_deref(), Some("low"));
     assert_eq!(
@@ -946,7 +928,7 @@ fn codex_gpt_6_1_sol_priority_default_and_inventory_contract() {
     let claims = crate::auth::codex::usable_subscription_claims(&store)
         .unwrap()
         .unwrap();
-    let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+    let models = codex_models_from_response(&body).unwrap();
     save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
     let mut catalog = base_model_catalog(true).unwrap();
     register_openai_codex(&mut catalog, store, true).unwrap();
@@ -957,6 +939,7 @@ fn codex_gpt_6_1_sol_priority_default_and_inventory_contract() {
     assert_eq!(public.endpoint.id.0, "openai");
     assert_eq!(codex.endpoint.id.0, crate::auth::codex::ENDPOINT_ID);
     assert_eq!(codex.spec.display_name.as_deref(), Some("GPT-6.1-Sol"));
+    // Advertised inventory wins over the 500K offline fallback.
     assert_eq!(codex.spec.limits.context_window, 272_000);
     assert!(codex
         .spec
@@ -1096,14 +1079,14 @@ fn codex_reasoning_updates_need_positive_fresh_account_metadata() {
             "supports_reasoning_effort_updates": assertion,
             "use_responses_lite":true, "multi_agent_version":"v2"
         }]});
-        let models = codex_models_from_response(&body, None).unwrap();
+        let models = codex_models_from_response(&body).unwrap();
         assert_eq!(models[0].reasoning_effort_updates, assertion == true);
         assert!(models[0].responses_lite);
         assert_eq!(models[0].agent_delegation, Some(AgentDelegation::V2));
         let offline = conservative_offline_codex_models(models);
         assert!(!offline[0].reasoning_effort_updates);
     }
-    assert!(fallback_codex_models(None)
+    assert!(fallback_codex_models()
         .iter()
         .all(|model| !model.reasoning_effort_updates));
     let endpoint = crate::providers::CODEX
@@ -1292,7 +1275,7 @@ fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
         version: 8,
         account_id: claims.account_id.clone(),
         plan: codex_plan_cache_key(&claims).map(str::to_owned),
-        models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
+        models: codex_models_from_response(&body).unwrap(),
     };
     store
         .save_model_cache(&serde_json::to_vec(&old_cache).unwrap())
@@ -1308,7 +1291,7 @@ fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
     body["models"][0]["slug"] = serde_json::json!("gpt-6-future");
     let live = CodexDiscovery {
         claims: claims.clone(),
-        models: codex_models_from_response(&body, claims.plan.as_ref()).unwrap(),
+        models: codex_models_from_response(&body).unwrap(),
     };
     let requests = std::cell::Cell::new(0);
     let (models, source) = codex_inventory_models(&store, &claims, false, false, |_| {
@@ -1329,13 +1312,110 @@ fn codex_fresh_pre_gpt6_cache_refreshes_once_before_use() {
     assert_eq!(cached, models);
 }
 
+/// The old cache could retain a 500K source default while its effective
+/// window was capped at 272K. Refresh must carry the source default all the
+/// way through registration, compaction and the context surface.
+fn assert_codex_6_1_refresh_replaces_the_old_272k_working_window(model_id: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    // Synthetic, model-only projection of the observed 500K inventory shape;
+    // no account details or cached instructions are copied into this fixture.
+    let body = serde_json::json!({"models": [{
+        "slug": model_id,
+        "context_window": 500_000,
+        "max_context_window": 872_000,
+        "default_reasoning_level": "low",
+        "supported_reasoning_levels": [
+            {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+            {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+        ],
+        "input_modalities": ["text", "image"],
+        "use_responses_lite": true,
+        "multi_agent_version": "v2"
+    }]});
+    let models = codex_models_from_response(&body).unwrap();
+    assert_eq!(models[0].default_context_window, 500_000);
+    assert_eq!(models[0].context_window, 500_000);
+    let mut old_model = models[0].clone();
+    old_model.context_window = 272_000;
+    let old_cache = CodexModelCache {
+        version: 11,
+        account_id: claims.account_id.clone(),
+        plan: codex_plan_cache_key(&claims).map(str::to_owned),
+        models: vec![old_model],
+    };
+    store
+        .save_model_cache(&serde_json::to_vec(&old_cache).unwrap())
+        .unwrap();
+    assert!(load_codex_model_cache(&store, &claims).unwrap().is_none());
+
+    let (offline, source) = codex_inventory_models(&store, &claims, true, false, |_| {
+        panic!("offline must not refresh the old inventory")
+    });
+    assert_eq!(source, CodexInventorySource::ConservativeFallback);
+    assert_eq!(
+        offline
+            .iter()
+            .find(|model| model.id == model_id)
+            .unwrap()
+            .context_window,
+        500_000
+    );
+
+    let requests = std::cell::Cell::new(0);
+    let (refreshed, source) = codex_inventory_models(&store, &claims, false, false, |_| {
+        requests.set(requests.get() + 1);
+        Ok(CodexDiscovery {
+            claims: claims.clone(),
+            models: models.clone(),
+        })
+    });
+    assert_eq!(source, CodexInventorySource::OnlineDiscovery);
+    assert_eq!(requests.get(), 1);
+    assert_eq!(refreshed[0].context_window, 500_000);
+    assert_eq!(
+        load_codex_model_cache(&store, &claims).unwrap(),
+        Some(refreshed)
+    );
+
+    let mut catalog = ModelCatalog::default();
+    register_openai_codex(&mut catalog, store, true).unwrap();
+    let model = catalog
+        .resolve(&ModelId(format!("codex/{model_id}")))
+        .unwrap();
+    assert_eq!(model.spec.limits.context_window, 500_000);
+    assert_eq!(crate::compaction::context_window(&model), 500_000);
+    let surface = crate::commands::CodexContextSurface::capture(&model).unwrap();
+    assert_eq!(surface.effective_window(), 500_000);
+    assert_eq!(surface.raise_target(), Some(872_000));
+    assert_eq!(surface.raise(600_000).unwrap(), 600_000);
+    assert!(surface.raise(872_001).is_err());
+    assert!(surface
+        .summary_lines()
+        .join("\n")
+        .contains("Provider default 500K"));
+}
+
+#[test]
+fn codex_sol_refresh_replaces_the_old_272k_working_window() {
+    assert_codex_6_1_refresh_replaces_the_old_272k_working_window("gpt-6.1-sol");
+}
+
+#[test]
+fn codex_terra_refresh_replaces_the_old_272k_working_window() {
+    assert_codex_6_1_refresh_replaces_the_old_272k_working_window("gpt-6.1-terra");
+}
+
 #[test]
 fn codex_live_inventory_does_not_inject_unadvertised_astra() {
-    let models = codex_models_from_response(
-        &serde_json::json!({"models": [{"slug": "gpt-5.6-sol"}]}),
-        None,
-    )
-    .unwrap();
+    let models =
+        codex_models_from_response(&serde_json::json!({"models": [{"slug": "gpt-5.6-sol"}]}))
+            .unwrap();
     assert!(models.iter().all(|model| model.id != "gpt-6-astra"));
 }
 
@@ -1346,9 +1426,9 @@ fn codex_malformed_exact_choices_fail_closed_and_no_v2_removes_only_ultra() {
         serde_json::json!(["low", "low"]),
         serde_json::json!(["ultra"]),
     ] {
-        assert!(codex_models_from_response(&serde_json::json!({"models":[{"slug":"gpt-5.6-test", "supported_reasoning_levels":levels}]}), None).is_err());
+        assert!(codex_models_from_response(&serde_json::json!({"models":[{"slug":"gpt-5.6-test", "supported_reasoning_levels":levels}]})).is_err());
     }
-    let models = codex_models_from_response(&serde_json::json!({"models":[{"slug":"gpt-5.6-no-v2", "supported_reasoning_levels":["high", "ultra"]}]}), None).unwrap();
+    let models = codex_models_from_response(&serde_json::json!({"models":[{"slug":"gpt-5.6-no-v2", "supported_reasoning_levels":["high", "ultra"]}]})).unwrap();
     assert_eq!(models[0].max_effort, octet_ai::ReasoningEffort::High);
     assert_eq!(models[0].reasoning_options.values, ["high"]);
     assert_eq!(models[0].agent_delegation, None);
@@ -1358,14 +1438,11 @@ fn codex_malformed_exact_choices_fail_closed_and_no_v2_removes_only_ultra() {
 /// left out and named, while the rest of the account's inventory survives.
 #[test]
 fn codex_malformed_entry_is_left_out_without_discarding_the_inventory() {
-    let inventory = codex_inventory_from_response(
-        &serde_json::json!({"models": [
-            {"slug": "gpt-5.6-broken", "supported_reasoning_levels": ["low", "low"]},
-            {"slug": "gpt-5.6-empty", "supported_reasoning_levels": ["ultra"]},
-            {"slug": "gpt-5.6-sol"}
-        ]}),
-        None,
-    )
+    let inventory = codex_inventory_from_response(&serde_json::json!({"models": [
+        {"slug": "gpt-5.6-broken", "supported_reasoning_levels": ["low", "low"]},
+        {"slug": "gpt-5.6-empty", "supported_reasoning_levels": ["ultra"]},
+        {"slug": "gpt-5.6-sol"}
+    ]}))
     .unwrap();
     let ids = inventory
         .models
@@ -1382,46 +1459,14 @@ fn codex_malformed_entry_is_left_out_without_discarding_the_inventory() {
 }
 
 #[test]
-fn codex_discovery_caps_default_and_max_plan_windows_at_272k() {
-    let body = serde_json::json!({
-        "models": [{
-            "slug": "gpt-5.4",
-            "context_window": 272_000,
-            "max_context_window": 1_000_000
-        }]
-    });
-    let plus = crate::auth::codex::ChatGptPlan::Plus;
-    let pro = crate::auth::codex::ChatGptPlan::Pro;
-    let pro_lite = crate::auth::codex::ChatGptPlan::ProLite;
-
-    assert_eq!(
-        codex_models_from_response(&body, Some(&plus)).unwrap()[0].context_window,
-        272_000
-    );
-    assert_eq!(
-        codex_models_from_response(&body, Some(&pro)).unwrap()[0].context_window,
-        272_000
-    );
-    assert_eq!(
-        codex_models_from_response(&body, Some(&pro_lite)).unwrap()[0].context_window,
-        272_000
-    );
-
-    let smaller_body = serde_json::json!({
-        "models": [{
-            "slug": "gpt-small-window",
-            "context_window": 128_000,
-            "max_context_window": 200_000
-        }]
-    });
-    assert_eq!(
-        codex_models_from_response(&smaller_body, Some(&plus)).unwrap()[0].context_window,
-        128_000
-    );
-    assert_eq!(
-        codex_models_from_response(&smaller_body, Some(&pro)).unwrap()[0].context_window,
-        200_000
-    );
+fn codex_discovery_uses_provider_default_not_maximum_or_an_octet_cap() {
+    for (default, maximum) in [(500_000, 872_000), (128_000, 200_000), (600_000, 1_200_000)] {
+        let body = serde_json::json!({"models": [{"slug":"gpt-6.1-sol", "context_window":default, "max_context_window":maximum}]});
+        let model = codex_models_from_response(&body).unwrap().remove(0);
+        assert_eq!(model.context_window, default);
+        assert_eq!(model.default_context_window, default);
+        assert_eq!(model.max_context_window, maximum);
+    }
 }
 
 #[test]
@@ -1444,11 +1489,11 @@ fn codex_terra_catalog_contract_survives_discovery_and_fallback() {
         let claims = crate::auth::codex::usable_subscription_claims(&store)
             .unwrap()
             .unwrap();
-        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        let models = codex_models_from_response(&body).unwrap();
         let terra = &models[0];
         assert_eq!(terra.default_context_window, 500_000);
         assert_eq!(terra.max_context_window, 872_000);
-        assert_eq!(terra.context_window, 272_000);
+        assert_eq!(terra.context_window, 500_000);
         assert_eq!(terra.reasoning_options.default.as_deref(), Some("low"));
         assert_eq!(terra.max_effort, octet_ai::ReasoningEffort::Ultra);
         save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
@@ -1465,7 +1510,7 @@ fn codex_terra_catalog_contract_survives_discovery_and_fallback() {
             let model = catalog
                 .resolve(&ModelId("codex/gpt-6.1-terra".into()))
                 .unwrap();
-            assert_eq!(model.spec.limits.context_window, 272_000);
+            assert_eq!(model.spec.limits.context_window, 500_000);
             assert_eq!(model.spec.limits.max_output_tokens, 128_000);
             assert!(model.spec.pricing.is_none());
             let options = model
@@ -1485,7 +1530,7 @@ fn codex_terra_catalog_contract_survives_discovery_and_fallback() {
 }
 
 #[test]
-fn codex_current_schema_cache_reclamps_the_historical_luna_working_window() {
+fn codex_registration_reresolves_cached_effective_limits_from_source_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("codex.json");
     write_codex_credential(&path, false, "pro");
@@ -1511,29 +1556,14 @@ fn codex_current_schema_cache_reclamps_the_historical_luna_working_window() {
     register_openai_codex(&mut catalog, store, true).unwrap();
     let model = catalog.resolve(&ModelId("gpt-5.6-luna".into())).unwrap();
     assert_eq!(model.spec.limits.context_window, 272_000);
-    assert_eq!(codex_context_uncertainty_operation(&model), None);
 }
 
 #[test]
-fn codex_discovery_keeps_luna_below_the_cost_cliff() {
-    let body = serde_json::json!({
-        "models": [{
-            "slug": "gpt-5.6-luna",
-            "context_window": 400_000,
-            "max_context_window": 1_000_000
-        }]
-    });
-    let plus = crate::auth::codex::ChatGptPlan::Plus;
-    let pro = crate::auth::codex::ChatGptPlan::Pro;
-
-    assert_eq!(
-        codex_models_from_response(&body, Some(&plus)).unwrap()[0].context_window,
-        CODEX_5_6_CONTEXT_WINDOW
-    );
-    assert_eq!(
-        codex_models_from_response(&body, Some(&pro)).unwrap()[0].context_window,
-        CODEX_5_6_CONTEXT_WINDOW
-    );
+fn codex_discovery_keeps_larger_luna_defaults_without_a_cost_cliff() {
+    let body = serde_json::json!({"models": [{"slug":"gpt-5.6-luna", "context_window":400_000, "max_context_window":1_000_000}]});
+    let model = codex_models_from_response(&body).unwrap().remove(0);
+    assert_eq!(model.context_window, 400_000);
+    assert_eq!(model.max_context_window, 1_000_000);
 }
 
 #[test]
@@ -1549,7 +1579,7 @@ fn codex_model_cache_is_scoped_to_account_and_plan() {
         "models": [{"slug": "gpt-5.6-sol", "context_window": 272_000}]
     });
     let discovery = CodexDiscovery {
-        models: codex_models_from_response(&body, Some(&plus)).unwrap(),
+        models: codex_models_from_response(&body).unwrap(),
         claims: claims.clone(),
     };
     save_codex_model_cache(&store, &discovery).unwrap();
@@ -1628,19 +1658,16 @@ fn codex_model_cache_fails_closed_when_stale_future_dated_or_incomplete() {
         account_id: "acct-a".into(),
         plan: Some(plus.clone()),
     };
-    let models = codex_models_from_response(
-        &serde_json::json!({
-            "models": [{
-                "slug": "gpt-5.6-sol",
-                "context_window": 272_000,
-                "max_output_tokens": 128_000,
-                "supported_reasoning_levels": ["high", "ultra"],
-                "use_responses_lite": true,
-                "multi_agent_version": "v2"
-            }]
-        }),
-        Some(&plus),
-    )
+    let models = codex_models_from_response(&serde_json::json!({
+        "models": [{
+            "slug": "gpt-5.6-sol",
+            "context_window": 272_000,
+            "max_output_tokens": 128_000,
+            "supported_reasoning_levels": ["high", "ultra"],
+            "use_responses_lite": true,
+            "multi_agent_version": "v2"
+        }]
+    }))
     .unwrap();
     let valid = serde_json::to_vec(&CodexModelCache {
         version: CODEX_MODEL_CACHE_VERSION,

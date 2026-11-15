@@ -159,6 +159,7 @@ fn codex_model(uri: &str, transport: EndpointTransport) -> Model {
     let endpoint_id = EndpointId("recovery-current".to_owned());
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId("recovery-current-model".to_owned()),
             endpoint: endpoint_id.clone(),
             api_name: "recovery-current-model".to_owned(),

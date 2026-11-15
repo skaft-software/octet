@@ -174,6 +174,7 @@ fn test_model(uri: &str, protocol: Protocol, audio: bool) -> Model {
     };
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId("read-concurrency-scripted".into()),
             endpoint: EndpointId("read-concurrency-test".into()),
             api_name: "read-concurrency-scripted".into(),

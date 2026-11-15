@@ -35,6 +35,7 @@ pub(crate) fn model(protocol: Protocol, pricing: Option<Pricing>) -> Model {
         .with(Modality::Audio);
     let output = ModalitySet::none().with(Modality::Audio);
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("fixture-model".to_string()),
         endpoint: EndpointId("fixture-ep".to_string()),

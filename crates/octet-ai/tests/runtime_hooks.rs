@@ -33,6 +33,7 @@ const SSE_BODY: &str = "data: {\"id\": \"chatcmpl-hooks\", \"choices\": [{\"delt
 
 fn test_model(base_url: &str, auth: Auth) -> Model {
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("hook-model".to_string()),
         endpoint: EndpointId("hook-ep".to_string()),

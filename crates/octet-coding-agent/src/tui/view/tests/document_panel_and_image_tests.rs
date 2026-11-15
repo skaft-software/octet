@@ -310,6 +310,7 @@ async fn actual_read_image_reaches_live_shell_and_reopened_session() {
     std::fs::write(workspace.path().join("pixel.png"), png).unwrap();
     let model = Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("image-fixture".into()),
             endpoint: EndpointId("local".into()),

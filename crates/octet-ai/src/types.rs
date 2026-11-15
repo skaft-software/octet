@@ -817,6 +817,15 @@ pub struct ModelLimits {
     pub max_output_tokens: u64,
 }
 
+/// Provider context budgets retained separately from the effective model limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextWindowOptions {
+    /// Provider-selected default budget in tokens.
+    pub default: u64,
+    /// Largest user-selected budget the provider advertises in tokens.
+    pub maximum: u64,
+}
+
 /// Complete description of a model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelSpec {
@@ -835,6 +844,9 @@ pub struct ModelSpec {
     pub capabilities: Capabilities,
     /// Model context/output token limits.
     pub limits: ModelLimits,
+    /// Optional provider default and maximum before a user budget is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_options: Option<ContextWindowOptions>,
     /// Pricing rates for this model.
     pub pricing: Option<Pricing>,
     /// Prompt-cache compatibility settings for this model/endpoint.

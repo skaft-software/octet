@@ -79,12 +79,6 @@ impl ChatGptPlan {
             Self::Unknown(raw) => raw,
         }
     }
-
-    /// Consumer Pro variants may activate the model's larger advertised
-    /// context window. Other plans retain the backend's default window.
-    pub(crate) fn uses_max_context_window(&self) -> bool {
-        matches!(self, Self::Pro | Self::ProLite)
-    }
 }
 
 /// Routing and entitlement claims derived from a subscription JWT. Account
@@ -492,9 +486,6 @@ mod tests {
     #[test]
     fn plan_claims_cover_pro_lite_aliases_and_preserve_unknown_values() {
         assert_eq!(ChatGptPlan::from_raw("prolite"), Some(ChatGptPlan::ProLite));
-        assert!(ChatGptPlan::Pro.uses_max_context_window());
-        assert!(ChatGptPlan::ProLite.uses_max_context_window());
-        assert!(!ChatGptPlan::Plus.uses_max_context_window());
         assert_eq!(
             ChatGptPlan::from_raw(" Future_Tier "),
             Some(ChatGptPlan::Unknown("future_tier".into()))

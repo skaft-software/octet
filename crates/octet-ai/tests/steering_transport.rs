@@ -17,6 +17,7 @@ fn model(url: String) -> Model {
     };
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("gpt-6-test".into()),
             endpoint: EndpointId("test".into()),

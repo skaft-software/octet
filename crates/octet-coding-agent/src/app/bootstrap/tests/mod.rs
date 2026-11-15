@@ -53,6 +53,4 @@ mod tool_registry;
 pub(super) use codex_tier_and_readiness::codex_discovered_model;
 
 use super::*;
-use crate::codex_context::{
-    CODEX_5_6_CONTEXT_WINDOW, CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW,
-};
+use crate::codex_context::{CODEX_5_6_CONTEXT_WINDOW, CODEX_LEGACY_CONTEXT_WINDOW};

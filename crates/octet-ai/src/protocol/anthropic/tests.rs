@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 fn make_test_model(reasoning: bool) -> Model {
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("test-claude".to_string()),
         endpoint: EndpointId("anthropic-ep".to_string()),

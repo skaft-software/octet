@@ -883,6 +883,7 @@ impl Respond for ContextAwareScript {
 fn scripted_model(uri: &str) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId("scripted".to_string()),
             endpoint: EndpointId("test".to_string()),
             api_name: "scripted-model".to_string(),

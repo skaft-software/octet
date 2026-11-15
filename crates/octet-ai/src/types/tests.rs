@@ -150,6 +150,10 @@ fn test_modality_set_algebra() {
 #[test]
 fn test_model_spec_serde_round_trip() {
     let spec = ModelSpec {
+        context_window_options: Some(ContextWindowOptions {
+            default: 128_000,
+            maximum: 200_000,
+        }),
         preset: Default::default(),
         id: ModelId("test-model".to_string()),
         endpoint: EndpointId("test-endpoint".to_string()),
@@ -190,6 +194,19 @@ fn test_model_spec_serde_round_trip() {
 
     let serialized = serde_json::to_string(&spec).unwrap();
     let deserialized: ModelSpec = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(
+        spec.context_window_options,
+        deserialized.context_window_options
+    );
+    let mut legacy = serde_json::to_value(&spec).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("context_window_options");
+    assert!(serde_json::from_value::<ModelSpec>(legacy)
+        .unwrap()
+        .context_window_options
+        .is_none());
     assert_eq!(spec.id, deserialized.id);
     assert_eq!(spec.protocol, deserialized.protocol);
     assert_eq!(

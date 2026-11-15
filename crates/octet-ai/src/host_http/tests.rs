@@ -30,6 +30,7 @@ type Observations = Arc<Mutex<Vec<&'static str>>>;
 fn model(protocol: Protocol) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId("custom/helper-model".into()),
             endpoint: EndpointId("custom/helper".into()),
             api_name: "wire-model".into(),

@@ -43,6 +43,7 @@ impl Respond for Script {
 fn model(base_url: &str) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("gemini-audio-fixture".into()),
             endpoint: EndpointId("google-fixture".into()),

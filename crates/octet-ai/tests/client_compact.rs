@@ -18,6 +18,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn model(base_url: &str, protocol: Protocol) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("compact-test".into()),
             endpoint: EndpointId("compact-endpoint".into()),

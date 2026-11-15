@@ -241,7 +241,7 @@ Account-advertised input/output modalities and exact thinking choices/defaults
 survive discovery and its normalized cache, including newly named models such as
 Terra when an account actually advertises them. Explicit text-only, false or
 malformed input assertions do not inherit the historical vision-family fallback.
-Cache schema 11 refreshes older records that discarded modality metadata. Only
+Cache schema 12 also invalidates older context-policy records. Only
 media implemented by the selected codec become usable: Codex Responses accepts
 advertised images/PDFs, not audio input or generated media. Unknown reasoning
 assertions do not receive guessed thinking levels. None of this borrows direct
@@ -254,12 +254,12 @@ Codex discovery sends compatibility version **`0.159.2`**. GPT-6 Sol and Luna
 need at least `0.155.0`: older query versions filter them out on the server,
 even when the account has access. Read-only checks on 2026-09-23 confirmed that
 changing only this query version from `0.153.2`/`0.154.0` to `0.156.1` returned
-**`gpt-6-sol`** and **`gpt-6-luna`** with the same OAuth credential. Cache
-version 8 invalidates the older filtered inventories, and the next online launch
+**`gpt-6-sol`** and **`gpt-6-luna`** with the same OAuth credential. The current cache
+schema invalidates older filtered inventories, and the next online launch
 refreshes them without another login. Offline launches never perform this
 refresh.
 
-The 2026-09-23 OAuth contracts include text and image input, a 272K working
+The 2026-09-23 OAuth contracts include text and image input, a 272K provider-default
 window, medium reasoning by default, and low, medium, high, xhigh and max
 choices. Sol also advertises Ultra, and both advertise Responses Lite and V2
 delegation. All three GPT-6 routes positively advertise
@@ -271,24 +271,27 @@ imported into the OAuth choices. Output budgeting and separately sourced prices
 are unchanged, because the inventory check didn't establish those values. New
 slugs need account inventory, not a static alias.
 
-The Codex 6.1 Sol bundled catalog advertises a 272K default and 872K maximum
-context, low reasoning by default with low through Ultra, Lite/V2 and
-priority 1. Offline fallback removes dynamic Ultra/V2. That catalog lists a
-0.153.0 minimum, but the live backend withheld 6.1 Sol from the 0.156.1 query
-version while Codex 0.159.2 listed it for the same account. Discovery therefore
-sends 0.159.2, and cache schema 10 refreshes older inventories. Its subscription
-price stays unknown.
+The current [model guide](https://developers.openai.com/codex/models) gives
+**GPT-6.1 Sol a 500K default** in Codex/ChatGPT Work. Its reviewed fallback uses
+that default and an 872K maximum; Terra's bundled default/maximum are also
+500K/872K. Live account windows override fallbacks. The provider default is the
+working budget, not a universal octet cap, and a Pro claim does not automatically
+select the maximum. An explicit `--codex-context-window` is bounded by the
+provider maximum without a cost-cliff acknowledgement or local plan gate.
 
-The [bundled catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
-adds GPT-6.1 Terra with a **500,000-token default** and 872K maximum. It keeps
-6.1 Sol at 272K/872K, whereas the public model guide names Sol for the 500K
-default. Account discovery wins over either fallback. All models, including
-GPT-5.6 Luna, keep octet's deliberate 272K working cap; GPT-5.6 maxima are 872K.
-Terra's conservative fallback uses low through max, default low, without Ultra/V2
-or an invented subscription price. Discovery retains the backend default
-separately from its maximum; neither the public guide nor a public API window grants an account a
-larger working window. The entitlement-checked, acknowledged override remains
-opt-in; see [Codex context policy](codex-context.md).
+The bundled Sol catalog also lists low through Ultra, Lite/V2 and priority 1.
+Offline fallback strips dynamic Ultra/V2, retaining low through max, default low.
+Discovery sends compatibility version 0.159.2; cache schema 12 refreshes older
+context-policy records while retaining account/plan binding and freshness checks.
+
+OpenAI's [pricing guide](https://developers.openai.com/codex/pricing) states that
+Sol's included subscription usage has no long-context surcharge and that API
+prices do not estimate included tasks. octet's Codex cost accounting is
+unchanged: the reviewed subscription allowlist keeps its API-equivalent rates and
+long-context tiers, an unreviewed model stays unpriced, and a public quote on the
+direct OpenAI route never prices an OAuth route automatically. Credit rates are
+not converted into an invented per-token USD tariff. Context length alone does
+not mark token usage uncertain. See [Codex context windows](codex-context.md).
 
 </details>
 

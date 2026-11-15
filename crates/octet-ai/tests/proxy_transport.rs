@@ -30,6 +30,7 @@ const SSE_BODY: &str = "data: {\"id\": \"chatcmpl-proxy\", \"choices\": [{\"delt
 
 fn test_model(base_url: &str) -> Model {
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("proxy-model".to_string()),
         endpoint: EndpointId("proxy-ep".to_string()),

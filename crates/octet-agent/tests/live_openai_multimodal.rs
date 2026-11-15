@@ -49,6 +49,7 @@ async fn live_openai_compatible_inline_png_reaches_the_model() {
 
     let model = Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId(format!("live/{api_name}")),
             endpoint: EndpointId("live-openai".into()),
             api_name,

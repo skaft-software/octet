@@ -218,6 +218,7 @@ fn model() -> Model {
 fn model_with_api_name(api_name: &str) -> Model {
     Model {
         spec: std::sync::Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("gemini-test".to_owned()),
             api_name: api_name.to_owned(),

@@ -204,6 +204,7 @@ pub(super) fn scripted_model(uri: &str) -> octet_ai::Model {
 
     octet_ai::Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("scripted".into()),
             endpoint: EndpointId("test".into()),
@@ -250,12 +251,6 @@ pub(super) fn scripted_codex_model(uri: &str) -> octet_ai::Model {
         .runtime
         .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
     model
-}
-
-/// The effort menu must offer the Codex context-window surface on a Codex
-/// route and nowhere else, and it must report the live effective window.
-pub(super) fn octet_ai_operation_name() -> &'static str {
-    crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
 }
 
 /// Inspection facts for tests that drive `drive_active_run` directly. The

@@ -864,6 +864,7 @@ impl ExtensionProviderRuntime {
                         .with(octet_ai::Modality::Image);
                 }
                 let mut specification = ModelSpec {
+                    context_window_options: None,
                     id: model_id.clone(),
                     endpoint: endpoint_id.clone(),
                     api_name: provider_model.api_name.clone(),

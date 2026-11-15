@@ -46,12 +46,12 @@ fn write_ephemeral_transcript(path: &Path, uncertain: bool) -> PathBuf {
         )
         .unwrap();
     if uncertain {
-        // The operation id the Codex above-272K policy exports.
+        // Historical uncertainty records must still survive policy changes.
         session
             .record_usage_uncertainty(
                 EndpointId("custom".into()),
                 ModelId("probe".into()),
-                crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION,
+                "codex-context-above-272k",
             )
             .unwrap();
     }
@@ -80,7 +80,7 @@ fn ephemeral_accounting_keeps_usage_and_uncertainty_without_the_transcript() {
     assert_eq!(record.usage_uncertainty_records.len(), 1);
     assert_eq!(
         record.usage_uncertainty_records[0].operation,
-        crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION
+        "codex-context-above-272k"
     );
     assert!(record.has_uncertain_usage, "unknown usage must survive");
 

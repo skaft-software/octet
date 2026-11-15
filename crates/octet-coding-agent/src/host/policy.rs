@@ -237,6 +237,7 @@ pub(crate) fn register_inline_model(
         });
     }
     catalog.register_model(ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: model_id.clone(),
         endpoint: endpoint_id,

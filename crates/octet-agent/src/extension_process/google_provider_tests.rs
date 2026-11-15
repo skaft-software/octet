@@ -217,6 +217,7 @@ async fn google_native_process_delegate_keeps_google_wire_auth_route_and_usage()
     };
     let native = octet_ai::Model {
         spec: Arc::new(octet_ai::ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: octet_ai::ModelId("native-google-model".into()),
             api_name: "gemini-local".into(),

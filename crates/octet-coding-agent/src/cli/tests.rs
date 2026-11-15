@@ -779,42 +779,36 @@ fn gpt_6_astra_uses_the_generic_cli_model_path() {
 }
 
 #[test]
-fn codex_context_window_flag_parses_and_fails_closed_above_the_cap() {
-    let parsed = Cli::try_parse_from([
+fn codex_context_window_flag_checks_minimum_not_a_cost_cliff() {
+    for tokens in ["500000", "872000", "2000000"] {
+        let parsed = Cli::try_parse_from(["octet", "--codex-context-window", tokens]).unwrap();
+        assert!(parsed.parity.validate().is_ok());
+        assert_eq!(
+            parsed
+                .parity
+                .codex_context_override()
+                .unwrap()
+                .requested_tokens,
+            Some(tokens.parse().unwrap())
+        );
+    }
+    assert!(Cli::try_parse_from(["octet", "--codex-context-window", "garbage"]).is_err());
+    for tokens in ["0", "16383"] {
+        let parsed = Cli::try_parse_from(["octet", "--codex-context-window", tokens]).unwrap();
+        assert!(parsed.parity.validate().is_err());
+    }
+    assert!(Cli::try_parse_from([
         "octet",
         "--codex-context-window",
         "500000",
-        "--codex-context-window-acknowledge-cost-cliff",
+        "--codex-context-window-acknowledge-cost-cliff"
     ])
-    .unwrap();
-    assert!(parsed.parity.validate().is_ok());
-    let override_ = parsed.parity.codex_context_override().unwrap();
-    assert_eq!(override_.requested_tokens, Some(500_000));
-    assert!(override_.acknowledge_cost_cliff);
-
-    // Garbage is refused by clap before validation runs.
-    assert!(Cli::try_parse_from(["octet", "--codex-context-window", "garbage"]).is_err());
-    // Zero, oversized and above-cap-without-acknowledgement fail validation.
-    let zero = Cli::try_parse_from(["octet", "--codex-context-window", "0"]).unwrap();
-    assert!(zero.parity.validate().is_err(), "zero must fail closed");
-    let oversized = Cli::try_parse_from(["octet", "--codex-context-window", "2000000"]).unwrap();
-    assert!(
-        oversized.parity.validate().is_err(),
-        "above every entitlement must fail"
-    );
-    let unacknowledged =
-        Cli::try_parse_from(["octet", "--codex-context-window", "500000"]).unwrap();
-    let error = unacknowledged.parity.validate().unwrap_err();
-    assert!(error.to_string().contains("double-priced"), "{error}");
-    assert!(error.to_string().contains("websocket"), "{error}");
-    // The acknowledgement flag requires the window flag.
-    assert!(
-        Cli::try_parse_from(["octet", "--codex-context-window-acknowledge-cost-cliff"]).is_err()
-    );
-    // No flag leaves the deliberate default untouched (no override).
-    let absent = Cli::try_parse_from(["octet", "--offline"]).unwrap();
-    assert!(absent.parity.validate().is_ok());
-    assert!(absent.parity.codex_context_override().is_none());
+    .is_err());
+    let help = Cli::try_parse_from(["octet", "--help"])
+        .unwrap_err()
+        .to_string();
+    assert!(!help.contains("double-priced"));
+    assert!(!help.contains("acknowledge-cost-cliff"));
 }
 
 fn extension_flag(

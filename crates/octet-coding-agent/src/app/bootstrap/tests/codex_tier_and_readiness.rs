@@ -4,26 +4,6 @@
 //! suite is organised and why it is split this way.
 use super::support::*;
 use super::*;
-use crate::codex_context::CodexContextClampReporter;
-
-#[test]
-fn codex_context_tier_follows_the_plan_entitlement() {
-    use crate::auth::codex::ChatGptPlan;
-    for (plan, tier) in [
-        (Some(ChatGptPlan::Pro), CodexContextTier::Extended),
-        (Some(ChatGptPlan::ProLite), CodexContextTier::Extended),
-        (Some(ChatGptPlan::Plus), CodexContextTier::Default),
-        (Some(ChatGptPlan::Free), CodexContextTier::Default),
-        (Some(ChatGptPlan::Team), CodexContextTier::Default),
-        (
-            Some(ChatGptPlan::Unknown("future-tier".into())),
-            CodexContextTier::Default,
-        ),
-        (None, CodexContextTier::Default),
-    ] {
-        assert_eq!(codex_context_tier(plan.as_ref()), tier, "{plan:?}");
-    }
-}
 
 pub(in crate::app::bootstrap) fn codex_discovered_model(
     model_id: &str,
@@ -50,128 +30,57 @@ pub(in crate::app::bootstrap) fn codex_discovered_model(
 }
 
 #[test]
-fn codex_registration_keeps_the_deliberate_cap_and_reports_it_once() {
-    let astra = codex_discovered_model("gpt-6-astra", 872_000, 872_000, 128_000);
-    let mut reporter = CodexContextClampReporter::default();
-    let resolution = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Extended,
-        CodexContextOverride::NONE,
-    );
-    assert_eq!(resolution.context_window, CODEX_CONTEXT_WINDOW_CAP);
-    assert_eq!(resolution.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
-    assert!(!resolution.override_applied);
-    // The deliberate cap keeps accounting on the standard published tier; the
-    // clamp must still be visible rather than silent.
-    assert!(!resolution.has_uncertain_usage);
-    let clamp = resolution.clamp.clone().expect("astra is clamped");
-    assert_eq!(clamp.advertised_context_window, 872_000);
-    assert_eq!(clamp.effective_context_window, CODEX_CONTEXT_WINDOW_CAP);
-
-    // Report through the same boundary the registration loop uses.
-    assert_eq!(
-        reporter.observe(resolution.clamp.clone()),
-        Some(clamp.clone())
-    );
-    assert_eq!(reporter.observe(resolution.clamp.clone()), None);
-    assert_eq!(reporter.observe(None), None);
-    assert_eq!(reporter.observe(resolution.clamp), Some(clamp));
-}
-
-#[test]
-fn codex_registration_applies_only_an_acknowledged_entitled_override() {
-    let astra = codex_discovered_model("gpt-6-astra", 872_000, 872_000, 128_000);
-
-    // A Plus-style session cannot raise the window even when acknowledged.
-    let refused = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Default,
-        CodexContextOverride::raising(500_000, true),
-    );
-    assert_eq!(refused.context_window, CODEX_CONTEXT_WINDOW_CAP);
-    assert!(!refused.override_applied);
-
-    // An unacknowledged Pro request is refused too.
-    let refused = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Extended,
-        CodexContextOverride::raising(500_000, false),
-    );
-    assert_eq!(refused.context_window, CODEX_CONTEXT_WINDOW_CAP);
-    assert!(!refused.override_applied);
-
-    // Above entitlement is refused rather than silently clamped.
-    let refused = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Extended,
-        CodexContextOverride::raising(872_001, true),
-    );
-    assert_eq!(refused.context_window, CODEX_CONTEXT_WINDOW_CAP);
-
-    // The acknowledged Pro request raises to the model's entitlement.
-    let raised = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Extended,
-        CodexContextOverride::raising(872_000, true),
-    );
-    assert_eq!(raised.context_window, CODEX_ASTRA_MAX_CONTEXT_WINDOW);
+fn codex_registration_uses_defaults_and_only_provider_limits_bound_overrides() {
+    let model = codex_discovered_model("gpt-6.1-sol", 500_000, 600_000, 128_000);
+    let default = codex_context_resolve_for_registration(&model, CodexContextOverride::NONE);
+    assert_eq!(default.context_window, 500_000);
+    assert!(!default.override_applied);
+    let raised = codex_context_resolve_for_registration(&model, CodexContextOverride::new(600_000));
+    assert_eq!(raised.context_window, 600_000);
     assert!(raised.override_applied);
-    assert!(raised.clamp.is_none());
-    assert!(raised.has_uncertain_usage);
-    assert_eq!(
-        raised.uncertain_usage_operation(),
-        Some("codex-context-above-272k")
-    );
-    assert_eq!(raised.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
+    let refused =
+        codex_context_resolve_for_registration(&model, CodexContextOverride::new(600_001));
+    assert_eq!(refused.context_window, 500_000);
+    assert!(!refused.override_applied);
 }
 
+/// A 500K Codex window is a provider default, not an accounting problem: a
+/// mid-session switch onto it must not inject the retired above-272K exposure.
 #[test]
-fn codex_registration_names_above_tier_accounting_for_every_raised_route() {
-    // Every above-tier Luna route now requires an acknowledged override.
-    let luna = codex_discovered_model(
-        "gpt-5.6-luna",
-        CODEX_5_6_CONTEXT_WINDOW,
-        CODEX_ASTRA_MAX_CONTEXT_WINDOW,
-        128_000,
-    );
-    let resolution = codex_context_resolve_for_registration(
-        &luna,
-        CodexContextTier::Extended,
-        CodexContextOverride::raising(372_000, true),
-    );
-    assert_eq!(resolution.context_window, 372_000);
-    assert!(resolution.override_applied);
-    assert!(resolution.clamp.is_none());
-    assert!(
-        resolution.has_uncertain_usage,
-        "above 272K the whole request is metered differently"
-    );
-    assert_eq!(
-        resolution.uncertain_usage_operation(),
-        Some("codex-context-above-272k")
-    );
-
-    let astra = codex_discovered_model("gpt-6-astra", 872_000, 872_000, 128_000);
-    let capped = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Extended,
-        CodexContextOverride::NONE,
-    );
-    assert_eq!(capped.context_window, CODEX_CONTEXT_WINDOW_CAP);
-    assert_eq!(capped.uncertain_usage_operation(), None);
-    assert!(capped.clamp.is_some(), "the cap stays visible");
-
-    // An acknowledged raise turns the same route into an uncertain one.
-    let raised = codex_context_resolve_for_registration(
-        &astra,
-        CodexContextTier::Extended,
-        CodexContextOverride::raising(500_000, true),
-    );
-    assert_eq!(raised.context_window, 500_000);
-    assert_eq!(
-        raised.uncertain_usage_operation(),
-        Some("codex-context-above-272k")
-    );
+fn a_large_codex_window_is_not_marked_uncertain_at_a_model_switch() {
+    let directory = tempfile::tempdir().unwrap();
+    let boot = bootstrap(config(directory.path(), Some("gpt-4o-mini"))).unwrap();
+    let launch = LaunchSelection {
+        model: ModelId("gpt-4o-mini".into()),
+        session: SessionSelection::CreateNew(directory.path().join("switch.jsonl")),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+    };
+    let mut app = build_app(boot, launch, "system".into()).unwrap();
+    let base = app.catalog.resolve(&ModelId("gpt-4o-mini".into())).unwrap();
+    let mut endpoint = (*base.endpoint).clone();
+    endpoint.id = EndpointId("codex-switch-fixture".into());
+    endpoint.runtime.responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
+    app.catalog.register_endpoint(endpoint.clone()).unwrap();
+    let mut spec = (*base.spec).clone();
+    spec.id = ModelId("codex/gpt-6.1-sol".into());
+    spec.api_name = "gpt-6.1-sol".into();
+    spec.endpoint = endpoint.id.clone();
+    spec.protocol = Protocol::OpenAiResponses;
+    spec.limits.context_window = 500_000;
+    spec.context_window_options = Some(octet_ai::ContextWindowOptions {
+        default: 500_000,
+        maximum: 872_000,
+    });
+    app.catalog.register_model(spec).unwrap();
+    let raised = app
+        .catalog
+        .resolve(&ModelId("codex/gpt-6.1-sol".into()))
+        .unwrap();
+    let app = rebuild_app(app, Some(raised), None, None, None).unwrap();
+    assert_eq!(app.model.spec.limits.context_window, 500_000);
+    assert!(!app.agent.session().has_uncertain_usage());
+    assert!(app.agent.session().usage_uncertainty_records().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -295,19 +204,16 @@ fn a_fresh_codex_cache_serves_dynamic_capabilities_without_a_discovery_request()
         .unwrap();
     let cached = CodexDiscovery {
         claims: claims.clone(),
-        models: codex_models_from_response(
-            &serde_json::json!({
-                "models": [{
-                    "slug": "cached-account-model",
-                    "context_window": 196_000,
-                    "max_output_tokens": 24_000,
-                    "use_responses_lite": true,
-                    "multi_agent_version": "v2",
-                    "supported_reasoning_levels": ["high", "ultra"]
-                }]
-            }),
-            claims.plan.as_ref(),
-        )
+        models: codex_models_from_response(&serde_json::json!({
+            "models": [{
+                "slug": "cached-account-model",
+                "context_window": 196_000,
+                "max_output_tokens": 24_000,
+                "use_responses_lite": true,
+                "multi_agent_version": "v2",
+                "supported_reasoning_levels": ["high", "ultra"]
+            }]
+        }))
         .unwrap(),
     };
     save_codex_model_cache(&store, &cached).unwrap();
@@ -331,7 +237,7 @@ fn a_fresh_codex_cache_serves_dynamic_capabilities_without_a_discovery_request()
 
 /// A cache that is stale, bound to another account, or structurally invalid must
 /// never be trusted. Discovery runs exactly once; when it also fails, the
-/// conservative fallback keeps the plan's entitlement window and carries no
+/// conservative fallback keeps the reviewed model default and carries no
 /// dynamic capability and no unadvertised Ultra.
 #[test]
 fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities() {
@@ -344,19 +250,16 @@ fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities(
         .unwrap();
     let live = CodexDiscovery {
         claims: claims.clone(),
-        models: codex_models_from_response(
-            &serde_json::json!({
-                "models": [{
-                    "slug": "live-account-model",
-                    "context_window": 300_000,
-                    "max_output_tokens": 32_000,
-                    "use_responses_lite": true,
-                    "multi_agent_version": "v2",
-                    "supported_reasoning_levels": ["low", "ultra"]
-                }]
-            }),
-            claims.plan.as_ref(),
-        )
+        models: codex_models_from_response(&serde_json::json!({
+            "models": [{
+                "slug": "live-account-model",
+                "context_window": 300_000,
+                "max_output_tokens": 32_000,
+                "use_responses_lite": true,
+                "multi_agent_version": "v2",
+                "supported_reasoning_levels": ["low", "ultra"]
+            }]
+        }))
         .unwrap(),
     };
     let mut cached = live.clone();
@@ -438,7 +341,7 @@ fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities(
     assert_eq!(discovery_requests.get(), 1);
     assert!(
         models.iter().any(|model| model.id == "gpt-5.6-luna"),
-        "the fallback catalog keeps the plan's entitlement models"
+        "the fallback catalog keeps the reviewed models"
     );
     let luna = models
         .iter()
@@ -446,7 +349,7 @@ fn an_unusable_codex_cache_discovers_once_and_never_serves_dynamic_capabilities(
         .unwrap();
     assert_eq!(
         luna.context_window, CODEX_5_6_CONTEXT_WINDOW,
-        "the plan's entitlement window survives the fallback"
+        "the reviewed default window survives the fallback"
     );
     for model in &models {
         assert!(!model.responses_lite, "{}", model.id);
@@ -629,19 +532,16 @@ fn a_fixture_registration_honours_a_fresh_cache_without_a_discovery_request() {
 
     let cached = CodexDiscovery {
         claims: claims.clone(),
-        models: codex_models_from_response(
-            &serde_json::json!({
-                "models": [{
-                    "slug": "cached-fixture-model",
-                    "context_window": 196_000,
-                    "max_output_tokens": 24_000,
-                    "use_responses_lite": true,
-                    "multi_agent_version": "v2",
-                    "supported_reasoning_levels": ["high", "ultra"]
-                }]
-            }),
-            claims.plan.as_ref(),
-        )
+        models: codex_models_from_response(&serde_json::json!({
+            "models": [{
+                "slug": "cached-fixture-model",
+                "context_window": 196_000,
+                "max_output_tokens": 24_000,
+                "use_responses_lite": true,
+                "multi_agent_version": "v2",
+                "supported_reasoning_levels": ["high", "ultra"]
+            }]
+        }))
         .unwrap(),
     };
     save_codex_model_cache(&store, &cached).unwrap();
@@ -679,15 +579,14 @@ fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
             "gpt-5.6-luna",
             &crate::codex_context::resolve_codex_context_window(
                 "gpt-5.6-luna",
-                crate::codex_context::CodexContextTier::Default,
                 372_000,
                 372_000,
                 Some(128_000),
-                crate::codex_context::CodexContextOverride::NONE,
+                crate::codex_context::CodexContextOverride::new(300_000),
             )
             .unwrap(),
         )
-        .expect("the advertised 372K window is clamped"),
+        .expect("an explicit override has a note"),
     );
     boot.codex_context_notes = notes;
 

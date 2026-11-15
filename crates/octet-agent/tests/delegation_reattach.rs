@@ -151,6 +151,7 @@ impl ScriptState {
 fn scripted_model(uri: &str) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId("reattach-scripted".into()),
             endpoint: EndpointId("reattach-test".into()),
             api_name: "reattach-scripted".into(),

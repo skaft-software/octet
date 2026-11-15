@@ -1,261 +1,118 @@
-# Codex context windows: the deliberate 272K cap, its notice, and the opt-in override
+# Codex subscription context windows
 
-This document covers how octet budgets an OpenAI Codex ("Sign in with ChatGPT")
-OAuth session's context window, why the conservative cap exists, how a clamp is
-reported, and how an operator can deliberately raise the window.
+octet uses the model's **provider default** context budget. There is no universal
+272K cap, Pro/ProLite context gate, or cost-cliff acknowledgement.
 
-Implementation: `crates/octet-coding-agent/src/codex_context.rs` (policy, pure
-resolution, notice). Bootstrap application:
-`crates/octet-coding-agent/src/app/bootstrap.rs`
-(`codex_context_override_from_env`, `codex_context_resolve_for_registration`,
-`codex_context_record_note`, `record_codex_context_uncertainty`,
-`register_openai_codex_with_notes`).
+## Sources and defaults
 
-## 1. The cap is deliberate
+OpenAI's [Codex model guide](https://developers.openai.com/codex/models) and
+[GPT-6.1 Sol model page](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+state that **GPT-6.1 Sol defaults to 500,000 tokens in Codex and ChatGPT Work**.
+The [Codex pricing guide](https://developers.openai.com/codex/pricing) explicitly
+states that Sol usage drawn from a subscription has **no long-context surcharge**
+and that API token prices must not be used to estimate included subscription tasks.
+Those statements concern subscription usage, not the separate direct-API tariff.
 
-`CODEX_CONTEXT_WINDOW_CAP = 272_000` is a product decision, not a defect:
+Authenticated `/models` metadata takes precedence, including smaller limits.
+The provider default and maximum are distinct: a maximum is not automatically
+selected because a credential says Pro. Explicit positive metadata wins over
+checked-in fallbacks; a model with only one advertised window uses that window
+as both default and maximum. A default above an explicit maximum is normalized
+to that maximum.
 
-* long-running Codex sessions were dropping their **websocket** connections as
-  context grew;
-* the original policy used OpenAI's then-current 272K guidance; and
-* usage above 272K is **double-priced** (guidance: about 2x input / 1.5x output
-  for the *whole* request, not only the excess).
+When neither window is advertised, or discovery is unavailable, reviewed
+fallbacks are:
 
-octet therefore keeps the 272K cap by default for every model, including
-`gpt-5.6-luna`; larger windows always require the explicit opt-in below. The
-websocket drop-protection work itself lives in `crates/octet-ai` and is owned
-separately; this document
-only records the budgeting policy and the notice that references it.
+| Model (`api_name`) | Default | Maximum |
+| --- | ---: | ---: |
+| `gpt-6.1-sol`, `gpt-6.1-terra` | 500,000 | 872,000 |
+| `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` | 272,000 | 872,000 |
+| `gpt-5.6-*`, `codex-auto-review` | 272,000 | 872,000 |
+| `gpt-5.4` | 272,000 | 1,000,000 |
+| other legacy/unknown models | 272,000 | 272,000 |
 
-The [bundled catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
-lists a **500,000-token default** for `gpt-6.1-terra`, and 272K for `gpt-6.1-sol`,
-with an 872K maximum for both. The public model guide names Sol for the 500K
-default instead; account discovery remains authoritative rather than inferring
-one model's contract from that prose. Discovery retains defaults separately from
-maximums and still applies the 272K cap. A larger provider default alone does not
-remove the consent/entitlement gates below, and a public API context window or tariff
-cannot establish a subscription contract. Changing the deliberate cap remains
-a separate product decision, not a metadata-freshness correction.
+The [pinned bundled catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
+provides the remaining fallbacks, including Terra's 500K default. It still lists
+Sol at 272K; octet uses the explicit current public Sol default instead when no
+account metadata is available. These fallbacks do not prove account availability,
+reasoning capabilities, or subscription prices.
 
-## 2. Working window and entitlement table
+## Selecting a budget
 
-| Model (`api_name`) | Provider default fallback | Working cap | Advertised/entitled ceiling |
-| --- | --- | --- | --- |
-| `gpt-6.1-terra` | 500,000 | 272,000 | 872,000 |
-| `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-luna` | 272,000 | 272,000 | 872,000 |
-| `gpt-5.6-*` (sol, terra, luna), `codex-auto-review` | 272,000 | 272,000 | 872,000 |
-| `gpt-5.4` (legacy) | 272,000 | 272,000 | 1,000,000 |
-| any other/legacy Codex id | 272,000 | 272,000 | 272,000 |
+```sh
+octet --model codex/gpt-6.1-sol --codex-context-window 600000
+# Equivalent launch-only environment setting:
+OCTET_CODEX_CONTEXT_WINDOW=600000 octet --model codex/gpt-6.1-sol
+```
 
-* **Working window** = `working_context_window(model_id)`; what octet actually
-  budgets requests against.
-* **Advertised/entitled ceiling** = `entitled_max_context_window(model_id)`; the
-  largest window the explicit override may ever request.
-* The authenticated `/models` response remains authoritative for *advertised*
-  limits: a smaller provider-advertised window stays authoritative, and
-  `Pro`/`ProLite` (`ChatGptPlan::uses_max_context_window`) selects the larger
-  advertised window before the working cap is applied. The cap therefore still
-  applies on a Pro plan — that is intentional.
-* `max_output_tokens` is always bounded by the effective `context_window`, and
-  `gpt-6-astra` keeps its 128K output contract regardless of its input envelope.
+The optional budget must be at least **16,384 tokens** and no larger than the
+provider maximum for that model. It may raise or lower the default. Invalid
+values are reported and registration keeps the provider default; they are never
+silently clamped into a different requested value. The CLI checks the minimum;
+model-specific maximum validation occurs against the inventory at registration.
+Other providers are unaffected by this option.
 
-Resolution is a pure function of its arguments:
+The effort menu displays the **effective** budget and registered provider
+**default** and **maximum**, not a reconstructed family/plan entitlement. When a
+larger budget is available, the menu provides next-launch instructions; it does
+not change the active catalog or persist configuration. Missing source metadata
+does not produce an invented raise target.
+
+The old `--codex-context-window-acknowledge-cost-cliff` flag was removed. Remove
+it from scripts; the old acknowledgement environment variable is no longer read.
+No acknowledgement is needed for a valid budget.
+
+## Resolution and accounting
+
+Implementation: `crates/octet-coding-agent/src/codex_context.rs` and registration
+in `src/app/bootstrap.rs`. The SDK resolver is:
 
 ```rust
-octet_sdk::codex_context::resolve_codex_context_window(
-    model_id,                        // e.g. "gpt-6-astra"
-    tier,                            // CodexContextTier::{Default, Extended}
+resolve_codex_context_window(
+    model_id,
     discovered_default_context_window,
     discovered_max_context_window,
-    advertised_max_output_tokens,    // Option<u64>
-    user_override,                   // CodexContextOverride
-) -> Result<CodexContextWindow, CodexContextWindowError>
+    advertised_max_output_tokens,
+    CodexContextOverride::new(requested_tokens), // or NONE
+)
 ```
 
-`CodexContextTier::from_plan_entitlement(ChatGptPlan::uses_max_context_window())`
-is the only conversion; `Extended` means "this account's plan activates the
-model's larger advertised window".
+`CodexContextOverride::parse` takes only the optional token-count string. The
+retired tier, clamp, acknowledgement and above-272K uncertainty APIs are removed.
+`ModelSpec::context_window_options` retains provider default/maximum separately
+from the effective `ModelLimits::context_window`. Menus use those exact source
+limits, so a live maximum smaller than a family fallback cannot be exceeded.
+Output budgeting never exceeds the effective window; Astra retains its separate
+128K output bound.
 
-## 3. The clamp is reported, not silent
+A large context window alone does **not** create an unknown-usage exposure.
+Token receipts, genuinely unknown attempts and unpriced usage remain separate
+accounting facts. Codex cost accounting is unchanged: the reviewed subscription
+allowlist keeps its rates and long-context tiers, models without a reviewed rate
+stay unpriced, and a public API quote never automatically prices an OAuth route.
+Published credit rates are not converted into an invented per-token USD tariff.
+Historical usage and uncertainty records are not rewritten or cleared.
 
-`resolve_codex_context_window` returns
-`CodexContextWindow::clamp: Option<CodexContextClamp>` whenever the deliberate cap
-reduced the window below what the model advertises or the plan entitles. The
-value is typed and bounded (a fixed template with numeric placeholders and the
-model id), never an ad-hoc print:
+Using the provider default is silent. An explicit override that changes it gets
+one labelled note (provider default, maximum, effective), with no invented cost
+cliff or context-based WebSocket warning. Catalog enumeration records rather
+than prints that note. Frontends deliver it only for the effective session model,
+at most once; non-Codex sessions do not receive it.
 
-```rust
-pub struct CodexContextClamp {
-    pub model_id: String,
-    pub advertised_context_window: u64,
-    pub effective_context_window: u64,
-}
-impl CodexContextClamp { pub fn message(&self) -> String; }
-```
+This is **client-side budgeting**, not a provider wire setting. It controls
+compaction and request admission; provider-side enforcement is unchanged. Codex
+Responses omits `max_output_tokens` and has no verified context-window wire field.
+For a smaller working set, use the independent
+[`compaction.max_active_tokens`](context.md) setting.
 
-The message states the model id, the labelled advertised and effective windows,
-and the reason (OpenAI's 272K recommendation, the double-priced cliff, and the
-websocket-drop risk). It offers the in-app remedy first
-(`--codex-context-window`, the model effort menu) and keeps
-`OCTET_CODEX_CONTEXT_WINDOW` plus
-`OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1` as the scriptable
-alternative. Windows are printed with explicit labels (`advertised 872K,
-entitled 872K, effective 272K`), never as three bare numbers.
-
-A user-chosen *lower* window is not a clamp, and an override that was applied is
-not a clamp either: only a deliberate reduction is reported.
-
-### Emission: one note, never at startup
-
-`codex_context_session_note(model_id, &window)` is the single user-facing note for
-an *effective* Codex session model. It returns `None` unless that model's window is
-reduced by the deliberate cap or above the 272K standard tier, and its wording is
-plain user language: no internal API name, no operation id, and the effective
-window is identical in the clamp and above-standard-tier variants.
-
-Startup renders **nothing**: no note, no "starting extensions", no phase text.
-Catalog construction only *records* notes (`CodexContextNotes`, one per model that
-needs one); the recording is not an emission. Delivery is lazy and belongs to the
-frontend that owns the transcript or an on-demand surface:
-
-* interactive TUI: the opened `App` carries the notes
-  (`App::codex_context_notes`). Pull the note with
-  `App::take_codex_context_note()` when the user can act on it — the first
-  assistant turn after readiness — or read it without consuming via
-  `App::codex_context_report()` from `/context`, `/status`, or `/telemetry`. Both
-  accessors always use the effective model only, so a session on another provider
-  shows no Codex note however many Codex models the catalog carries. These two
-  calls are the frontend-owned delivery points (`modes/interactive.rs` and the
-  `/context` / `/status` / `/telemetry` surfaces); no startup frame, catalog
-  build, or extension lifecycle renders the note, and nothing in
-  `app/bootstrap.rs` prints it;
-* `Bootstrap::take_codex_context_note(&ModelId)` is the same latch available
-  before `build_app`, kept for frontends that resolve a model without building the
-  `App` yet;
-* print / `--mode json` / `--mode rpc` launch resolution has no transcript to
-  attach to, so the bounded line goes to stderr there.
-
-The latch is once-per-session and survives `rebuild_app` (a delivered note stays
-delivered, an undelivered note is carried to the new `App`). `shell.notice` and
-`Bootstrap::codex_context_note` remain available for diagnostics, but no startup
-frame consumes either. `CodexContextClampReporter::observe` remains available for a
-frontend that tracks transitions after launch (a model switch mid-session reports
-again, at most once per transition).
-
-The same launch boundary records uncertainty: `build_app_with_runtime_manager`
-calls `record_codex_context_uncertainty(&mut session, &model)` right after the
-session is opened (and `rebuild_app` repeats it on a mid-session model switch), so
-a route whose effective window is above 272K is durably `has_uncertain_usage`
-before its first request. The decision is the Codex endpoint plus an effective
-window above 272K, so a non-Codex provider with a large context window keeps exact
-accounting. The record is sticky and written at most once per session.
-
-## 4. The opt-in override
-
-Requirements: opt-in only, bounded by the model's entitled ceiling, requiring the
-Pro/ProLite entitlement for anything above the deliberate cap, and requiring an
-explicit acknowledgement of the cost cliff and websocket risk.
-
-### Interface
-
-* CLI: `--codex-context-window <TOKENS>` with
-  `--codex-context-window-acknowledge-cost-cliff` (parsed and validated by
-  `crate::cli::parity::ParityOptions`, then published to the environment bridge by
-  `install_codex_context_env` before bootstrap).
-* Environment (used by bootstrap, so print/headless/TUI launches have the same
-  lever): `OCTET_CODEX_CONTEXT_WINDOW` and
-  `OCTET_CODEX_CONTEXT_WINDOW_ACKNOWLEDGE_COST_CLIFF=1`.
-* API: `CodexContextOverride::{NONE, raising(tokens, acknowledged),
-  parse(requested, acknowledged)}` then `resolve_codex_context_window`.
-
-Accepted acknowledgement values are `1/true/yes/on`; `0/false/no/off` and empty
-mean "not acknowledged". Anything else is an error. Parsing and resolution are
-fail-closed: an unparseable or refused override leaves the deliberate cap in
-force (with a warning) and never silently becomes a different window.
-
-### Gates (all must pass)
-
-| Request | Result |
-| --- | --- |
-| no override | deliberate cap, exact accounting |
-| below `16_384` | refused: `OverrideBelowMinimum` |
-| above the model's entitlement ceiling | refused: `OverrideAboveEntitlement` |
-| above the working window on a non-entitled plan | refused: `OverrideRequiresEntitlement` |
-| above the working window without the acknowledgement | refused: `OverrideRequiresAcknowledgement` |
-| above the working window, entitled and acknowledged | granted, up to the entitlement |
-| at or below the working window | granted (narrowing only) |
-
-### Acknowledgement wording
-
-Frontends must render `CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING` before accepting
-the acknowledgement flag:
-
-> I understand that a Codex request above 272K tokens is double-priced (about 2x
-> input and 1.5x output for the whole request, not only the excess) and that
-> oversized long-running sessions are more likely to drop the Codex websocket.
-
-## 5. Above 272K, usage and cost are uncertain
-
-Above the standard 272K tier the whole request is priced differently, so octet
-must not present an exact-looking cost. `CodexContextWindow::has_uncertain_usage`
-is `true` whenever an explicit override raises the effective window above 272K.
-`CodexContextWindow::uncertain_usage_operation()` returns the operation id
-`codex-context-above-272k` (`CODEX_ABOVE_STANDARD_TIER_OPERATION`) to pass to
-`Session::record_usage_uncertainty(endpoint, model, operation)`, which keeps
-`has_uncertain_usage` true and therefore keeps known-cost totals and hard
-ceilings fail-closed.
-
-The effective-model note for such a route says so in plain language ("this
-session's usage is recorded as uncertain instead of an exact cost") without
-naming the API or the operation id.
-
-Wiring note: the record is appended by the launch boundary that owns the session
-before the first request — `build_app_with_runtime_manager` calls
-`record_codex_context_uncertainty`, and `rebuild_app` repeats it for a mid-session
-model switch, using the operation id `uncertain_usage_operation()` returns. The
-agent loop keeps its own attempt-scoped uncertainty records (failed/unknown
-attempts) and treats `has_uncertain_usage` as sticky, so known-cost totals and hard
-ceilings fail closed for the whole session.
-
-## 6. It is client-side budgeting, not a wire field
-
-`ModelLimits::context_window` controls when octet compacts and how large a request
-octet is willing to send. The Codex request only carries `max_output_tokens`;
-octet does not send a context-window envelope field, and no verified Codex wire
-field exists for one. Raising this value therefore raises octet's own budget and
-compaction threshold; provider-side enforcement is unchanged.
-
-## 7. History
-
-* `uses_max_context_window()` (Pro/ProLite entitlement signal) predates the cap.
-* `d635c80b perf: cap Codex request context at 272K (#224)` introduced the flat
-  272K cap deliberately, for the websocket/guidance/double-pricing reasons above,
-  and bumped the Codex model cache schema to invalidate larger cached limits.
-* `c29103fb ... Codex Luna context support (#398)` added the per-model
-  `codex_context_window_cap` (372K for `gpt-5.6-luna`, 272K otherwise) and applied
-  it on top of the plan gate, plus the `gpt-6-astra` 872K advertised envelope.
-* The catalog refresh removes Luna's historical 372K working-cap exception:
-  all default budgets stay at or below 272K, and even a 272,001-token override
-  requires entitlement and acknowledgement. GPT-5.6 maxima are now 872K;
-  Terra's 500K default is metadata, not an automatic budget increase. Existing
-  normalized caches are re-resolved at registration, so no schema bump is needed.
-* The gap the original notice change closed was **observability and consent**: the cap was
-  silent (a session simply compacted at 272K with no explanation), there was no
-  opt-in way to raise it, and nothing marked usage above 272K as uncertain. The
-  budget values themselves are unchanged.
-* The Codex model-cache schema is now version 7: entries carry the pre-cap
-  backend default window (`default_context_window`) alongside the effective
-  window, so an override and its notice are resolved exactly; version 6 caches
-  are ignored and refreshed.
-
-## 8. Startup visibility: nothing on screen, everything attributable off screen
+## Startup visibility: nothing on screen, everything attributable off screen
 
 Two properties are deliberately separated:
 
 **The screen shows nothing.** The interactive frame, the pre-ready transcript, and
-the extension/model startup path render no Codex note and no startup chatter. The
-one Codex note a session owes is recorded during catalog construction and delivered
-lazily (see §3), never by the startup frame.
+the extension/model startup path render no Codex note and no startup chatter. Any
+explicit-override note a session owes is recorded during catalog construction and delivered
+lazily (see above), never by the startup frame.
 
 **Latency stays attributable off screen.** Every startup boundary calls
 `startup_phase("<name>")` (`crate::app::bootstrap::startup_phase`). It is silent by
@@ -298,29 +155,13 @@ Unrelated configured providers are not part of that envelope at all: readiness
 names only the proven route (plus a configured compaction route), and everything
 else is deferred to `Bootstrap::enrich_catalog`.
 
-## 9. Tests
+## Tests
 
-* `crates/octet-coding-agent/tests/codex_context_window.rs` — cap holds per
-  family on a Pro plan, non-entitled plans cannot exceed the cap, acknowledged
-  Pro overrides reach 872K/1M, above-entitlement and unacknowledged requests fail
-  closed, above-272K marks usage uncertain, output never exceeds the window, the
-  notice fires once per transition and never without a clamp, the single session
-  note is absent for an unreduced route, Luna requires consent immediately above
-  272K, catalog fallbacks match the pinned source, and no note names an internal
-  API or operation id.
-* `crates/octet-coding-agent/src/app/bootstrap.rs`
-  (`codex_context_note_regression_tests`) — registration records one note per
-  reduced model and none for an unreduced route (table-driven for Plus and Pro),
-  a non-Codex effective model has no note while the catalog carries Codex models,
-  the recorded note matches the effective resolution, and an above-272K route
-  marks the session uncertain exactly once while a 272K route stays exact.
-* `crates/octet-coding-agent/tests/parity_cli.rs`
-  (`codex_context_notes_are_not_emitted_for_a_non_codex_session_or_per_turn`) —
-  process boundary: with a synthetic Codex credential (so the catalog carries
-  Codex models) and a two-turn non-Codex session, stderr contains no Codex note.
-* `crates/octet-coding-agent/src/app/bootstrap/tests.rs` —
-  `codex_context_tier_follows_the_plan_entitlement`,
-  `codex_registration_keeps_the_deliberate_cap_and_reports_it_once`,
-  `codex_registration_applies_only_an_acknowledged_entitled_override`.
-* `crates/octet-coding-agent/src/codex_context.rs` — in-module unit tests for the
-  gate matrix, parse fail-closed behaviour, and the reporter.
+- `tests/codex_context_window.rs`: documented defaults, source-limit precedence,
+  overrides across 272K without consent, lower/upper bound validation, output
+  budgeting, parsing and truthful override notes.
+- Bootstrap tests: live/cache/fallback registration, all-plan default behavior,
+  old-cache invalidation and subscription/API pricing separation.
+- CLI and interactive tests: obsolete flag removal, minimum validation,
+  live-limit menus and no surcharge/uncertainty copy.
+- `octet-ai` tests: optional source-limit metadata round trip and validation.

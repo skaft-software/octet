@@ -1146,22 +1146,13 @@ pub async fn thinking_picker(
 /// One-line Codex context-window row for the effort menu.
 pub(crate) fn codex_context_menu_row(surface: &crate::commands::CodexContextSurface) -> String {
     format!(
-        "Codex context window… (currently {} tokens{})",
-        surface.effective_window(),
-        if surface.has_uncertain_usage() {
-            ", cost/usage UNCERTAIN"
-        } else {
-            ""
-        }
+        "Codex context window… (currently {} tokens)",
+        surface.effective_window()
     )
 }
 
-/// Present the read-only Codex context-window facts and, when the plan is
-/// entitled, one explicit raise target.
-///
-/// Raising is deliberately a two-step, fail-closed interaction: the
-/// acknowledgement wording must be accepted before the request is validated,
-/// and a refused request names the exact reason and changes nothing.
+/// Present live Codex context facts and next-launch instructions for a budget
+/// within the provider's advertised maximum. The running budget is unchanged.
 pub(crate) async fn codex_context_menu<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
@@ -1173,20 +1164,18 @@ where
     let facts = surface.summary_lines();
     let target = surface.raise_target();
     let mut items: Vec<String> = vec![format!(
-        "Keep the deliberate {} window",
+        "Keep the current {} window",
         surface.effective_window()
     )];
     if let Some(target) = target {
-        items.push(format!(
-            "Acknowledge and raise to {target} tokens (double-priced; websocket risk)"
-        ));
+        items.push(format!("Use {target} tokens on the next launch"));
     }
     let descriptions: Vec<Option<String>> = items
         .iter()
         .enumerate()
         .map(|(index, _)| {
             (index == 1 && target.is_some())
-                .then(|| crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING.to_owned())
+                .then(|| surface.raise_instruction(target.unwrap()))
                 .or_else(|| (index == 0).then(|| "no change".to_owned()))
                 .or_else(|| Some(facts.join(" · ")))
         })
@@ -1212,13 +1201,7 @@ where
     if index != 1 {
         return Ok(());
     }
-    // The acknowledgement stage names both consequences before the raise is
-    // validated; the raise itself still fails closed on any refused gate.
-    shell.notice(format!(
-        "{} Set acknowledged for the launch boundary.",
-        crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING
-    ));
-    match surface.raise(target, true) {
+    match surface.raise(target) {
         Ok(window) => shell.notice(format!(
             "Codex context window raise to {window} tokens accepted: {}",
             surface.raise_instruction(target)

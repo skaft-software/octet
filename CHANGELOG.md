@@ -4,9 +4,13 @@
 
 ### Changed
 
-- Codex context metadata includes GPT-6.1 Terra's 500K default and the current
-  872K maxima. Every model now budgets at most 272K by default, including
-  GPT-5.6 Luna; larger windows require entitlement and cost-cliff acknowledgement.
+- Codex uses provider-default context budgets instead of a universal 272K cap,
+  preserving GPT-6.1 Sol and Terra's advertised 500K defaults through discovery,
+  caching, registration and compaction. Explicit budgets use provider maxima
+  without a Pro-plan gate or cost-cliff acknowledgement; menus retain those
+  source limits. Old normalized caches refresh. Large windows no
+  longer fabricate unknown-usage records. Codex subscription pricing and the
+  direct-API long-context tariffs are unchanged.
 
 - Completed shell-tool rows show their recorded duration. Native TOML themes can
   customize the `tool_duration` text or hide it with an empty string; timing stays

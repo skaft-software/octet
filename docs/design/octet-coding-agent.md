@@ -196,15 +196,13 @@ full skill bodies are not injected by this composition.
 
 Before installing the agent policy, bootstrap combines the generic fractional
 threshold with an optional absolute active-context ceiling. Codex request
-budgeting caps every model, including GPT-5.6 Luna, at 272,000 tokens by default.
-Smaller provider windows remain authoritative, while
-larger advertised maxima remain discovery metadata. An explicit
+budgeting uses the provider's default window, or an explicit user-selected window
+within the provider's maximum, without a universal 272K cap. An explicit
 `compaction.max_active_tokens` further constrains the working set; zero or unset
-removes only that additional absolute ceiling, not the model-specific Codex
-route cap. `threshold_fraction` remains authoritative. The lower effective
-threshold is applied on initial construction, rebuild, interactive
-reconfiguration, and RPC toggles, and `/context` reports that same effective
-capacity.
+removes only that additional absolute ceiling. `threshold_fraction` remains
+authoritative. The lower effective threshold is applied on initial construction,
+rebuild, interactive reconfiguration, and RPC toggles, and `/context` reports
+that same effective capacity.
 
 The product pre-request gate and `octet-agent` overflow recovery share one
 structured summarization implementation. Conversation messages are first
@@ -411,20 +409,22 @@ closed.
 
 Authenticated Codex discovery sends compatibility client version `0.159.2` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 10 invalidates inventories
-queried with older compatibility, context-window or GPT-6.1 Sol policies; entries carry the
-pre-cap backend default window so the deliberate Codex cap can be reported and an
-explicit operator override resolved exactly (`docs/codex-context.md`). It
-preserves those fields, applies the 272K default working cap to every model,
-and remains scoped to the authenticated account context. Only
-fresh, complete, account-matched metadata is registered. Stale or future-dated
-cache entries are refreshed synchronously before online catalog construction;
+`multi_agent_version: "v2"`. Cache schema version 12 invalidates old context-policy
+records and retains the provider default and maximum separately from the effective
+budget. Registration uses the default unless a validated operator override is
+present; neither a flat 272K cap nor a Pro-plan maximum selection applies.
+`ModelSpec::context_window_options` carries the same source limits into menus,
+which must not reconstruct account limits from a model-name table. See
+[Codex context windows](../codex-context.md).
+
+Only fresh, complete, account-matched metadata is registered. Stale or
+future-dated entries refresh synchronously before online catalog construction;
 malformed, incomplete, duplicate, or inconsistent entries fail closed. Offline
-launches may retain fresh cached model identities and limits but strip Ultra,
-Responses Lite, and delegation. octet never infers those dynamic capabilities
-from model names or OAuth plans. Astra additionally retains its 872K advertised
-input maximum as discovery metadata while ordinary request budgeting stays at
-272K.
+launches may retain fresh cached identities and limits but strip Ultra, Responses
+Lite, and delegation. Dynamic capabilities are never inferred from names or
+plans. Codex subscription pricing still comes only from the reviewed allowlist
+(including its long-context tiers), and a large context budget does not create an
+unknown-usage record.
 
 Ultra is selectable only when a complete live-derived reasoning range
 explicitly includes `ultra`, V2 delegation is present, and the linked

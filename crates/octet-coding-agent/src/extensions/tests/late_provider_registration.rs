@@ -396,6 +396,7 @@ async fn a_conflicting_late_model_never_replaces_a_resident_catalog_route() {
         .unwrap();
     catalog
         .register_model(ModelSpec {
+            context_window_options: None,
             id: shadow.clone(),
             endpoint: EndpointId("resident-route".into()),
             api_name: "resident-model".into(),

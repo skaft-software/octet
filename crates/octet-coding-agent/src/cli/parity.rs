@@ -7,9 +7,7 @@ use octet_agent::Session;
 use octet_ai::{Media, Modality, ModelId};
 
 use super::Cli;
-use crate::codex_context::{
-    CodexContextOverride, CODEX_CONTEXT_WINDOW_CAP, CODEX_PRO_CONTEXT_WINDOW,
-};
+use crate::codex_context::{CodexContextOverride, CODEX_CONTEXT_OVERRIDE_MIN_TOKENS};
 use crate::config::{Config, Mode, ResumeSelector};
 use crate::session_store::SessionStore;
 
@@ -38,19 +36,10 @@ pub struct ParityOptions {
     /// model selection and cycling to the credential-filtered catalog.
     #[arg(long, value_name = "PATTERNS")]
     pub models: Option<String>,
-    /// Raise the deliberate 272K Codex context cap. Above 272K the whole request
-    /// is double-priced (about 2x input / 1.5x output, not only the excess) and
-    /// long-running sessions are more likely to lose their websocket. Requires a
-    /// Pro/ProLite plan and, above the cap, an explicit acknowledgement.
+    /// Select a Codex client-side context budget, bounded by the provider's
+    /// discovered maximum. Defaults to the provider's default window.
     #[arg(long = "codex-context-window", value_name = "TOKENS")]
     pub codex_context_window: Option<u64>,
-    /// Acknowledge the double-priced cost cliff and increased websocket-drop
-    /// risk of raising the Codex context window above the deliberate 272K cap.
-    #[arg(
-        long = "codex-context-window-acknowledge-cost-cliff",
-        requires = "codex_context_window"
-    )]
-    pub codex_context_window_acknowledge_cost_cliff: bool,
 }
 
 impl ParityOptions {
@@ -70,44 +59,21 @@ impl ParityOptions {
         }
         if let Some(tokens) = self.codex_context_window {
             self.validate_codex_context(tokens)?;
-        } else {
-            debug_assert!(
-                !self.codex_context_window_acknowledge_cost_cliff,
-                "clap requires --codex-context-window for the acknowledgement flag"
-            );
         }
         Ok(())
     }
 
-    /// Fail-closed validation of `--codex-context-window`, independent of the
-    /// model. Entitlement/ceiling checks that need the resolved model run later
-    /// in `codex_context::resolve_codex_context_window`.
+    /// Validate the minimum here; the selected route's provider maximum is
+    /// checked during registration, not against a hard-coded family ceiling.
     fn validate_codex_context(&self, tokens: u64) -> anyhow::Result<()> {
-        if tokens == 0 {
-            anyhow::bail!("--codex-context-window must be greater than zero");
-        }
-        if tokens > CODEX_PRO_CONTEXT_WINDOW {
-            anyhow::bail!(
-                "--codex-context-window {tokens} is above the {CODEX_PRO_CONTEXT_WINDOW}-token maximum any Codex model is entitled to"
-            );
-        }
-        if tokens > CODEX_CONTEXT_WINDOW_CAP && !self.codex_context_window_acknowledge_cost_cliff {
-            anyhow::bail!(
-                "--codex-context-window {tokens} is above the deliberate {CODEX_CONTEXT_WINDOW_CAP}-token Codex cap: {} Re-run with --codex-context-window-acknowledge-cost-cliff to accept the cost cliff and the websocket-drop risk",
-                crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING
-            );
+        if tokens < CODEX_CONTEXT_OVERRIDE_MIN_TOKENS {
+            anyhow::bail!("--codex-context-window must be at least {CODEX_CONTEXT_OVERRIDE_MIN_TOKENS} tokens");
         }
         Ok(())
     }
 
-    /// The parsed opt-in Codex context-window override, when the flag is set.
-    ///
-    /// Uses the shared `codex_context` policy type so the CLI, TUI and the
-    /// resolution entry point cannot drift.
     pub fn codex_context_override(&self) -> Option<CodexContextOverride> {
-        self.codex_context_window.map(|tokens| {
-            CodexContextOverride::raising(tokens, self.codex_context_window_acknowledge_cost_cliff)
-        })
+        self.codex_context_window.map(CodexContextOverride::new)
     }
 
     /// Publish the opt-in override through the stable environment bridge that the
@@ -720,14 +686,13 @@ mod tests {
     use super::*;
     #[test]
     fn codex_context_preserves_inherited_environment_unless_explicitly_overridden() {
-        use crate::codex_context::{CODEX_CONTEXT_ACKNOWLEDGE_ENV, CODEX_CONTEXT_OVERRIDE_ENV};
+        use crate::codex_context::CODEX_CONTEXT_OVERRIDE_ENV;
         const CHILD: &str = "OCTET_TEST_CODEX_CONTEXT_INHERITANCE";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "cli::parity::tests::codex_context_preserves_inherited_environment_unless_explicitly_overridden"])
                 .env(CHILD, "1")
                 .env(CODEX_CONTEXT_OVERRIDE_ENV, "872000")
-                .env(CODEX_CONTEXT_ACKNOWLEDGE_ENV, "1")
                 .output().unwrap();
             assert!(
                 output.status.success(),
@@ -739,14 +704,12 @@ mod tests {
         }
         ParityOptions::default().install_codex_context_env();
         assert_eq!(std::env::var(CODEX_CONTEXT_OVERRIDE_ENV).unwrap(), "872000");
-        assert_eq!(std::env::var(CODEX_CONTEXT_ACKNOWLEDGE_ENV).unwrap(), "1");
         ParityOptions {
             codex_context_window: Some(200_000),
             ..Default::default()
         }
         .install_codex_context_env();
         assert_eq!(std::env::var(CODEX_CONTEXT_OVERRIDE_ENV).unwrap(), "200000");
-        assert_eq!(std::env::var(CODEX_CONTEXT_ACKNOWLEDGE_ENV).unwrap(), "0");
     }
 
     #[test]

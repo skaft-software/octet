@@ -189,6 +189,7 @@ impl Fixture {
         };
         let model = octet_ai::Model {
             spec: Arc::new(octet_ai::ModelSpec {
+                context_window_options: None,
                 preset: Default::default(),
                 id: octet_ai::ModelId("hook-fixture-model".into()),
                 api_name: "selected".into(),

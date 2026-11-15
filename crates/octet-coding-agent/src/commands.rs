@@ -4,7 +4,6 @@ use std::path::Path;
 
 use crate::app::{reasoning_label, App, Reconfig};
 use crate::cli::parity::ScopedModel;
-use crate::codex_context::CodexContextTier;
 use crate::compaction::{context_window, estimate_next_request_tokens};
 use crate::config::{CompactionMode, TuiMode};
 use crate::presentation::{format_token_rate, ModelDisplayMetadata};
@@ -620,191 +619,69 @@ pub fn codex_responses_endpoint(model: &Model) -> bool {
 }
 
 /// Read-only Codex context-window facts for one Codex route, plus the
-/// deliberately fail-closed raise path.
-///
-/// The deliberate 272K working cap is a maintainer decision, not a defect: it
-/// is reported as a clamp together with its reason rather than hidden. Above
-/// 272K the whole request is priced differently, so the surface names the
-/// uncertainty operation instead of rendering an exact-looking figure.
+/// provider-bounded next-launch budget selection. Source limits come from the
+/// registered model, so the UI cannot substitute a static family ceiling for
+/// a smaller account-inventory maximum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexContextSurface {
     model_id: String,
-    /// Window the live session actually budgets against.
     effective_window: u64,
-    /// Window the plan selects before octet's deliberate cap.
-    advertised_window: u64,
-    /// Largest window the model's entitlement allows an override to request.
-    entitled_max_window: u64,
-    /// Whether the account's plan carries the Pro/ProLite entitlement.
-    entitled: bool,
+    options: Option<octet_ai::types::ContextWindowOptions>,
 }
 
 impl CodexContextSurface {
-    /// Capture the surface for a Codex route, or `None` for every other route.
-    ///
-    /// `entitled` mirrors `ChatGptPlan::uses_max_context_window`; the caller
-    /// reads it from the subscription credential and defaults to `false` when
-    /// it cannot be established, so an unknown plan never grants a raise.
-    pub fn capture(model: &Model, entitled: bool) -> Option<Self> {
-        if !codex_responses_endpoint(model) {
-            return None;
-        }
-        let model_id = model.spec.api_name.clone();
-        let (fallback_default, entitled_max_window) =
-            crate::codex_context::entitled_context_windows(&model_id);
-        let advertised_window =
-            if CodexContextTier::from_plan_entitlement(entitled) == CodexContextTier::Extended {
-                fallback_default.max(entitled_max_window)
-            } else {
-                fallback_default
-            };
-        Some(Self {
-            model_id,
+    pub fn capture(model: &Model) -> Option<Self> {
+        codex_responses_endpoint(model).then(|| Self {
+            model_id: model.spec.api_name.clone(),
             effective_window: model.spec.limits.context_window,
-            advertised_window,
-            entitled_max_window,
-            entitled,
+            options: model.spec.context_window_options,
         })
     }
 
-    /// Window the live session budgets against.
     pub fn effective_window(&self) -> u64 {
         self.effective_window
     }
 
-    /// The deliberate reduction of the advertised window, when the cap (rather
-    /// than the plan's own default) is what narrowed it.
-    pub fn clamp(&self) -> Option<crate::codex_context::CodexContextClamp> {
-        let working = crate::codex_context::working_context_window(&self.model_id);
-        (self.effective_window == working && self.advertised_window > working).then(|| {
-            crate::codex_context::CodexContextClamp {
-                model_id: self.model_id.clone(),
-                advertised_context_window: self.advertised_window,
-                effective_context_window: self.effective_window,
-            }
-        })
-    }
-
-    /// `true` when the effective window is above the standard 272K tier, where
-    /// the whole request is double-priced and cost/usage cannot be claimed
-    /// exactly.
-    pub fn has_uncertain_usage(&self) -> bool {
-        self.effective_window > crate::codex_context::CODEX_CONTEXT_WINDOW_CAP
-    }
-
-    /// The `Session::record_usage_uncertainty` operation to record for this
-    /// route, when its accounting is uncertain.
-    #[cfg(test)]
-    pub fn uncertain_usage_operation(&self) -> Option<&'static str> {
-        self.has_uncertain_usage()
-            .then_some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
-    }
-
-    /// The largest window this route may be raised to, or `None` when the plan
-    /// carries no entitlement for a window above the deliberate cap.
     pub fn raise_target(&self) -> Option<u64> {
-        (self.entitled
-            && self.entitled_max_window
-                > crate::codex_context::working_context_window(&self.model_id))
-        .then_some(self.entitled_max_window)
+        self.options
+            .filter(|o| o.maximum > self.effective_window)
+            .map(|o| o.maximum)
     }
 
-    /// Bounded, truthful facts for the effort/thinking menu.
-    ///
-    /// Plain user language only, matching the session's Codex context notes:
-    /// every window is labelled, no internal API path or operation identifier is
-    /// ever rendered, and cost is never shown as an exact figure above the 272K
-    /// standard tier. The diagnostic operation id stays in
-    /// [`Self::uncertain_usage_operation`], which the session recorder reads
-    /// directly; the deliberate 272K cap is a decision, never a defect.
     pub fn summary_lines(&self) -> Vec<String> {
         let label = crate::codex_context::context_window_label;
-        let cap = label(crate::codex_context::CODEX_CONTEXT_WINDOW_CAP);
-        let entitled = self.entitled_max_window.max(self.effective_window);
         let mut lines = vec![format!(
-            "Codex context window — advertised {}, entitled {}, effective {}{}",
-            label(self.advertised_window),
-            label(entitled),
-            label(self.effective_window),
-            if self.has_uncertain_usage() {
-                ": cost and usage are UNCERTAIN"
-            } else {
-                ""
-            },
+            "Codex context window — effective {}",
+            label(self.effective_window)
         )];
-        if self.has_uncertain_usage() {
+        if let Some(options) = self.options {
             lines.push(format!(
-                "At {} — above the {cap} standard tier — every request is double-priced (about 2x input and 1.5x output for the whole request, not just the excess) and long-running sessions are likelier to drop the Codex websocket, so this session's cost and usage are reported as UNCERTAIN instead of an exact figure.",
-                label(self.effective_window),
+                "Provider default {}, maximum {}",
+                label(options.default),
+                label(options.maximum)
             ));
         }
-        match self.clamp() {
-            Some(clamp) => lines.push(clamp.message()),
-            None => lines.push(format!(
-                "octet budgets {} for this Codex route; the provider advertises {}.",
-                label(self.effective_window),
-                label(self.advertised_window),
-            )),
-        }
-        match self.raise_target() {
-            Some(target) => lines.push(format!(
-                "Raise to {}: {}",
-                label(target),
-                self.raise_instruction(target)
-            )),
-            None => lines.push(self.raise_blocked_reason()),
-        }
+        lines.push("This is a client-side budget; provider limits still apply. Subscription usage is not priced using API tariffs.".into());
         lines
     }
 
-    /// Why no raise is offered for this route.
-    ///
-    /// Every window is labelled, so the reader never has to guess which number
-    /// is the deliberate cap and which is the plan's own entitlement ceiling.
-    pub fn raise_blocked_reason(&self) -> String {
-        let label = crate::codex_context::context_window_label;
-        let working = label(crate::codex_context::working_context_window(&self.model_id));
-        if self.entitled_max_window <= crate::codex_context::working_context_window(&self.model_id)
-        {
-            format!(
-                "no raise is available for {}: the deliberate {working} window is already this model's entitlement ceiling",
-                self.model_id
-            )
-        } else {
-            format!(
-                "raising above the deliberate {working} window requires a Codex Pro or ProLite plan"
-            )
-        }
-    }
-
-    /// Validate one raise request through the shared Codex context-window
-    /// policy. Fail closed: an unacknowledged or above-entitlement request is
-    /// refused and the deliberate cap stays in force.
-    pub fn raise(&self, requested: u64, acknowledged: bool) -> Result<u64, String> {
-        let (fallback_default, fallback_max) =
-            crate::codex_context::entitled_context_windows(&self.model_id);
+    pub fn raise(&self, requested: u64) -> Result<u64, String> {
+        let options = self
+            .options
+            .ok_or("provider context limits are unavailable; refresh the model inventory")?;
         crate::codex_context::resolve_codex_context_window(
             &self.model_id,
-            CodexContextTier::from_plan_entitlement(self.entitled),
-            fallback_default,
-            fallback_max,
+            options.default,
+            options.maximum,
             None,
-            crate::codex_context::CodexContextOverride::raising(requested, acknowledged),
+            crate::codex_context::CodexContextOverride::new(requested),
         )
-        .map(|resolved| resolved.context_window)
+        .map(|window| window.context_window)
         .map_err(|error| error.to_string())
     }
 
-    /// The exact launch settings that actually apply a raise.
-    ///
-    /// The Codex context window is resolved once at launch from the process
-    /// environment, so no in-session selection can change the live catalog.
     pub fn raise_instruction(&self, requested: u64) -> String {
-        format!(
-            "launch with `--codex-context-window {requested} --codex-context-window-acknowledge-cost-cliff`, or set {}=1 and {}={requested} (takes effect on the next launch)",
-            crate::codex_context::CODEX_CONTEXT_ACKNOWLEDGE_ENV,
-            crate::codex_context::CODEX_CONTEXT_OVERRIDE_ENV,
-        )
+        format!("launch with `--codex-context-window {requested}`, or set {}={requested} (takes effect on the next launch)", crate::codex_context::CODEX_CONTEXT_OVERRIDE_ENV)
     }
 }
 

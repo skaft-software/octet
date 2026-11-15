@@ -50,7 +50,7 @@ under [Live metadata](#live-metadata-v082).
 - `gpt-4o-mini` text pricing uses $0.15/M input, $0.60/M output, and $0.075/M cached input, represented as 150,000 / 600,000 / 75,000 microdollars per million tokens.
 - `gpt-5.4-mini` pricing uses $0.75/M input, $4.50/M output, and $0.075/M cached input. OpenAI does not separately bill cache writes for this route.
 - `gpt-6-astra` is an explicit Responses contract observation rather than a generated models.dev entry: 1,050,000 context, 128,000 output, text/image input, text output, and `low` through `max` reasoning. Base input/cache-read/cache-write/output rates are $10/$1/$12.50/$50 per million; above 272K input they are $20/$2/$25/$75.
-- The Codex inventory observed with compatibility client `0.153.2` publishes Astra's `low` through `ultra` reasoning levels as objects, defaults to `low`, and separately reports `use_responses_lite`, `multi_agent_version`, visibility, and API support. octet retains its 872K advertised input maximum, budgets 272K actively, treats a successful account inventory—not the model name or plan—as authoritative for dynamic Lite/V2 features, and maps explicitly selected Ultra to `max` model effort only with V2 delegation.
+- The Codex inventory observed with compatibility client `0.153.2` publishes Astra's `low` through `ultra` reasoning levels as objects, defaults to `low`, and separately reports `use_responses_lite`, `multi_agent_version`, visibility, and API support. octet retains the provider default and maximum separately, uses the default budget, treats a successful account inventory—not the model name or plan—as authoritative for dynamic Lite/V2 features, and maps explicitly selected Ultra to `max` model effort only with V2 delegation.
 - Anthropic text pricing records the published input/output/cache-read/5-minute-write rates and the explicit one-hour write rate of 2× input: Sonnet 4.5 and 4.6 use $3/$15/$0.30/$3.75/$6; Opus 4.8 uses $5/$25/$0.50/$6.25/$10; Fable 5 uses $10/$50/$1/$12.50/$20, all per million tokens.
 - The audio seed entry intentionally has `pricing: null` because this repository has no authoritative price snapshot for its separate text/audio token classes.
 
@@ -706,7 +706,8 @@ therefore sends 0.159.2, and cache schema 10 refreshes inventories fetched as
 0.156.1. As for Astra, **online account inventory** establishes Lite/V2;
 Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
 or unreachable inventory keeps the conservative low-through-max fallback. The
-working 272K limit and optional Pro/ProLite 872K entitlement remain distinct.
+current fallback instead uses the documented 500K Sol default (see below); live
+account metadata remains authoritative.
 The model-only test fixture
 `crates/octet-coding-agent/fixtures/providers/gpt-6.1-sol.json` is a
 bundled-catalog projection, not a live OAuth inference result.
@@ -733,26 +734,30 @@ context/entitlement or subscription-pricing allowlists. Copied names and suffix
 aliases on other routes gain no public API authority. These are contract
 observations and deterministic tests, not live inference/cache-hit evidence.
 
-The current [Codex model guide](https://developers.openai.com/codex/models)
-reports **500,000** as GPT-6.1 Sol's default in Codex/ChatGPT Work. The bundled
-catalog still lists Sol at 272K and assigns 500K to Terra instead; account
-discovery is authoritative when sources disagree. Octet retains account discovery
-defaults separately from maximums and its deliberate 272K working cap. The existing
-acknowledged, entitlement-checked override remains opt-in; neither the guide nor
-API context/pricing establishes an account's entitlement or subscription price.
-See [context policy](../../../docs/codex-context.md).
-
-## Codex context catalog refresh
+The current [Codex model guide](https://developers.openai.com/codex/models) and
+[Sol API model page](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+explicitly state **500,000** as GPT-6.1 Sol's default in Codex/ChatGPT Work.
+The [Codex pricing guide](https://developers.openai.com/codex/pricing) states
+that Sol usage drawn from a subscription has no long-context surcharge and that
+API token prices must not estimate included subscription tasks. octet therefore
+uses 500K as Sol's offline fallback, despite the older bundled catalog's 272K
+entry. Live account defaults/maxima override fallbacks, including smaller limits.
 
 The [pinned catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
-adds `gpt-6.1-terra`: 500K default / 872K maximum, low default reasoning with
-low through Ultra, text/image input and V2. Its offline fallback strips Ultra/V2.
-GPT-5.6 sol/terra/luna and `codex-auto-review` advertise 272K/872K. The window
-projection is pinned in `tests/codex_context_window.rs` in the coding-agent crate.
-All default working budgets now stop at 272K, removing Luna's 372K exception;
-every above-272K override requires entitlement and explicit acknowledgement.
-Public API prices, legacy model availability and subscription pricing are
-unchanged. This is bundled metadata evidence, not live account or inference QA.
+also supplies Terra's 500K/872K fallback and the 272K/872K defaults/maxima for
+GPT-5.6 sol/terra/luna and `codex-auto-review`. Terra's offline reasoning remains
+low through max, default low, without dynamic Ultra/V2. These model observations
+are not live account or inference QA.
+
+There is no universal 272K working cap, plan-name context gate, or cost-cliff
+acknowledgement. Overrides validate against the provider maximum. Cache schema
+12 discards records from the retired policy. Public API prices and their tiers
+remain separate and unchanged. Subscription pricing is unchanged:
+reviewed Codex rates and their long-context tiers still apply, an unreviewed
+model stays unpriced, and published credits are not converted into an invented
+USD tariff. Larger budgets do not fabricate unknown token-usage exposures;
+normal unpriced-receipt accounting remains intact. See
+[context policy](../../../docs/codex-context.md).
 
 ## Reasoning contract supplement (2026-09-05)
 

@@ -957,151 +957,46 @@ fn codex_route(model_id: &str, context_window: u64) -> octet_ai::Model {
 }
 
 #[test]
-fn namespaced_terra_context_surface_uses_the_provider_model_id() {
-    let mut model = codex_route("gpt-6.1-terra", 272_000);
-    std::sync::Arc::make_mut(&mut model.spec).id = octet_ai::ModelId("codex/gpt-6.1-terra".into());
-    let surface = CodexContextSurface::capture(&model, false).unwrap();
+fn codex_context_surface_uses_live_metadata_not_family_or_plan_guesses() {
+    let mut model = codex_route("gpt-6.1-sol", 500_000);
+    let spec = std::sync::Arc::make_mut(&mut model.spec);
+    spec.id = octet_ai::ModelId("codex/gpt-6.1-sol".into());
+    spec.context_window_options = Some(octet_ai::types::ContextWindowOptions {
+        default: 500_000,
+        maximum: 600_000,
+    });
+    let surface = CodexContextSurface::capture(&model).unwrap();
+    assert_eq!(surface.effective_window(), 500_000);
+    assert_eq!(surface.raise_target(), Some(600_000));
+    assert_eq!(surface.raise(600_000), Ok(600_000));
+    assert!(surface.raise(600_001).unwrap_err().contains("600000"));
+    assert!(surface.raise(1).is_err());
     let summary = surface.summary_lines().join("\n");
-    assert!(summary.contains("advertised 500K"), "{summary}");
-    assert!(summary.contains("entitled 872K"), "{summary}");
-    assert!(summary.contains("effective 272K"), "{summary}");
-    let pro = CodexContextSurface::capture(&model, true).unwrap();
-    assert_eq!(pro.raise_target(), Some(872_000));
-    assert!(pro.raise(872_000, false).is_err());
-    assert_eq!(pro.raise(872_000, true), Ok(872_000));
-}
-
-#[test]
-fn codex_context_surface_is_absent_for_every_other_route() {
-    let (_directory, app) = app_for_status();
-    assert_eq!(
-        CodexContextSurface::capture(&app.model, true),
-        None,
-        "a non-Codex route must not offer a Codex context-window surface"
-    );
-}
-
-#[test]
-fn codex_context_surface_reports_the_deliberate_cap_and_why() {
-    // astra advertises 872K, which the deliberate 272K cap reduces.
-    let surface = CodexContextSurface::capture(&codex_route("gpt-6-astra", 272_000), true)
-        .expect("Codex route");
-    assert_eq!(surface.effective_window(), 272_000);
-    assert!(!surface.has_uncertain_usage());
-    let clamp = surface
-        .clamp()
-        .expect("the deliberate cap must be reported");
-    assert_eq!(clamp.advertised_context_window, 872_000);
-    assert_eq!(clamp.effective_context_window, 272_000);
-    let message = clamp.message();
-    assert!(message.contains("double-priced"), "{message}");
-    assert!(message.contains("websocket"), "{message}");
-    let summary = surface.summary_lines().join("\n");
-    // Labelled windows, matching the session note's house style.
-    assert!(summary.contains("advertised 872K"), "{summary}");
-    assert!(summary.contains("effective 272K"), "{summary}");
-}
-
-/// The effort menu is user-facing prose. It must never render an internal
-/// API path, function call, or operation identifier, and every window it
-/// quotes must be labelled.
-#[test]
-fn the_effort_menu_summary_never_renders_internal_identifiers() {
-    for (model_id, window) in [
-        ("gpt-6-astra", 272_000u64),
-        ("gpt-5.6-luna", 372_000),
-        ("gpt-6-astra", 872_000),
-        ("gpt-5.6-luna", 1_000_000),
+    assert!(summary.contains("effective 500K"), "{summary}");
+    assert!(summary.contains("default 500K, maximum 600K"), "{summary}");
+    for obsolete in [
+        "double-priced",
+        "websocket",
+        "UNCERTAIN",
+        "entitled",
+        "Pro or ProLite",
+        "::",
+        "codex-context-above-272k",
     ] {
-        for entitled in [false, true] {
-            let surface = CodexContextSurface::capture(&codex_route(model_id, window), entitled)
-                .expect("Codex route");
-            let summary = surface.summary_lines().join("\n");
-            for leak in [
-                "Session::",
-                "record_usage_uncertainty",
-                "codex-context-above-272k",
-                "uncertain_usage_operation",
-                "::",
-                "()",
-                "crates/",
-                "fn ",
-                "CodexContext",
-            ] {
-                assert!(
-                    !summary.contains(leak),
-                    "{model_id}/{window}/entitled={entitled}: internal identifier {leak:?} \
-                     leaked: {summary}"
-                );
-            }
-            // Every quoted window is labelled, never a bare number.
-            assert!(
-                !summary.contains("272000") && !summary.contains("372000"),
-                "unlabelled window: {summary}"
-            );
-            assert!(!summary.contains('$'), "exact cost figure: {summary}");
-            // The deliberate cap is described as a decision, never a defect.
-            for wrong in ["bug", "regression", "broken", "incorrect"] {
-                assert!(!summary.contains(wrong), "{wrong:?} in {summary}");
-            }
-            assert!(
-                !summary.contains("no ceiling") && !summary.contains("?"),
-                "placeholder-style blob: {summary}"
-            );
-        }
+        assert!(!summary.contains(obsolete), "{summary}");
     }
+    assert!(surface
+        .raise_instruction(600_000)
+        .contains("--codex-context-window 600000"));
+    assert!(!surface.raise_instruction(600_000).contains("acknowledge"));
 }
 
 #[test]
-fn above_the_standard_tier_cost_is_uncertain_never_an_exact_figure() {
-    // An explicitly raised window, not Luna's default.
-    let surface = CodexContextSurface::capture(&codex_route("gpt-5.6-luna", 372_000), true)
-        .expect("Codex route");
-    assert!(surface.has_uncertain_usage());
-    assert_eq!(
-        surface.uncertain_usage_operation(),
-        Some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
-    );
-    let summary = surface.summary_lines().join("\n");
-    assert!(summary.contains("UNCERTAIN"), "{summary}");
-    assert!(summary.contains("double-priced"), "{summary}");
-    assert!(summary.contains("websocket"), "{summary}");
-    assert!(
-        !summary.contains('$'),
-        "no exact-looking cost figure may be rendered above the standard tier: {summary}"
-    );
-    // The operation id is an internal diagnostic; it is recorded by the
-    // session, never rendered. `the_effort_menu_summary_never_renders_...`
-    // asserts that for every Codex family and entitlement.
-    assert!(!summary.contains("codex-context-above-272k"), "{summary}");
-}
-
-#[test]
-fn a_raise_fails_closed_without_the_entitlement_or_the_acknowledgement() {
-    let unentitled = CodexContextSurface::capture(&codex_route("gpt-6-astra", 272_000), false)
-        .expect("Codex route");
-    assert_eq!(unentitled.raise_target(), None);
-    let refused = unentitled.raise(872_000, true).unwrap_err();
-    assert!(refused.contains("Pro or ProLite"), "{refused}");
-    assert!(
-        unentitled
-            .summary_lines()
-            .join("\n")
-            .contains("Pro or ProLite"),
-        "the unentitled surface must say what a raise needs"
-    );
-
-    let entitled = CodexContextSurface::capture(&codex_route("gpt-6-astra", 272_000), true)
-        .expect("Codex route");
-    assert_eq!(entitled.raise_target(), Some(872_000));
-    let unacknowledged = entitled.raise(872_000, false).unwrap_err();
-    assert!(unacknowledged.contains("double-priced"), "{unacknowledged}");
-    assert!(unacknowledged.contains("websocket"), "{unacknowledged}");
-    assert_eq!(entitled.raise(872_000, true), Ok(872_000));
-    // Above the model's entitlement the request is refused outright.
-    let above = entitled.raise(4_000_000, true).unwrap_err();
-    assert!(above.contains("872000"), "{above}");
-    assert!(entitled
-        .raise_instruction(872_000)
-        .contains("--codex-context-window 872000"));
+fn codex_context_surface_does_not_invent_missing_provider_limits() {
+    let surface = CodexContextSurface::capture(&codex_route("gpt-6.1-sol", 500_000)).unwrap();
+    assert_eq!(surface.raise_target(), None);
+    assert!(surface.raise(872_000).is_err());
+    assert!(!surface.summary_lines().join("\n").contains("872K"));
+    let (_directory, app) = app_for_status();
+    assert_eq!(CodexContextSurface::capture(&app.model), None);
 }

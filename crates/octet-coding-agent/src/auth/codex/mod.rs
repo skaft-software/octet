@@ -19,7 +19,9 @@ pub use login::{login, login_without_prompt, logout};
 pub(crate) use login::{
     login_progress_channel, login_with_progress, DeviceLoginPhase, LoginFallback, LoginProgress,
 };
-pub(crate) use oauth::{ChatGptPlan, SubscriptionClaims};
+#[cfg(test)]
+pub(crate) use oauth::ChatGptPlan;
+pub(crate) use oauth::SubscriptionClaims;
 pub use resolver::CodexResolver;
 pub(crate) use store::REFRESH_LOCK_WAIT;
 pub use store::{default_path, CredentialStore};

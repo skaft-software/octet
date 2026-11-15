@@ -196,6 +196,7 @@ impl ModelCatalog {
 
         for m_cfg in cfg.models {
             let spec = ModelSpec {
+                context_window_options: None,
                 id: m_cfg.id,
                 endpoint: m_cfg.endpoint,
                 api_name: m_cfg.api_name,
@@ -391,6 +392,11 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
         || spec.capabilities.deferred_tool_loading
         || !spec.capabilities.input_modalities.is_valid()
         || !spec.capabilities.output_modalities.is_valid()
+        || spec.context_window_options.is_some_and(|options| {
+            options.default == 0
+                || options.default > options.maximum
+                || spec.limits.context_window > options.maximum
+        })
         || spec.limits.context_window == 0
         || spec.limits.max_output_tokens == 0
         || spec.limits.max_output_tokens > spec.limits.context_window

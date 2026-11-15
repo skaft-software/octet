@@ -111,7 +111,7 @@ fn mistral_conversations_discovery_does_not_invent_reasoning_controls() {
 #[test]
 fn exact_codex_cache_roundtrip_retains_choices_default_label_and_offline_holes() {
     let fixture = thinking_hotfix_fixture();
-    let models = codex_models_from_response(&fixture["codex_exact"], None).unwrap();
+    let models = codex_models_from_response(&fixture["codex_exact"]).unwrap();
     let cached: Vec<DiscoveredCodexModel> =
         serde_json::from_slice(&serde_json::to_vec(&models).unwrap()).unwrap();
     assert_eq!(models, cached);

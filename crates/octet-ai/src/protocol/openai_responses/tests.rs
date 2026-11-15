@@ -52,6 +52,7 @@ fn user_req(content: Vec<UserPart>, compatibility: CompatibilityMode) -> Request
 
 fn make_test_model(reasoning: bool) -> Model {
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("test-o1".to_string()),
         endpoint: EndpointId("responses-ep".to_string()),

@@ -812,3 +812,25 @@ fn review_regression_always_on_checks_legacy_exact_values() {
     };
     validate_model_spec(&spec).unwrap();
 }
+
+#[test]
+fn provider_context_options_must_contain_the_default_and_effective_budgets() {
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let mut spec = (*model.spec).clone();
+    for (default, maximum, valid) in [
+        (128_000, 200_000, true),
+        (0, 200_000, false),
+        (200_001, 200_000, false),
+        (64_000, 64_000, false),
+    ] {
+        spec.context_window_options = Some(crate::ContextWindowOptions { default, maximum });
+        assert_eq!(
+            validate_model_spec(&spec).is_ok(),
+            valid,
+            "{default}/{maximum}"
+        );
+    }
+}

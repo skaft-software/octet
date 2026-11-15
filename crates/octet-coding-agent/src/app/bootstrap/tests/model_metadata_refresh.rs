@@ -16,11 +16,9 @@ fn codex_refresh_entry(id: &str) -> serde_json::Value {
 fn codex_refresh_keeps_modalities_and_exact_thinking_without_a_model_patch() {
     for id in ["gpt-6.1-terra", "future-account-model"] {
         assert_eq!(codex_supports_image_input(id), id == "gpt-6.1-terra");
-        let models = codex_models_from_response(
-            &serde_json::json!({"models":[codex_refresh_entry(id)]}),
-            None,
-        )
-        .unwrap();
+        let models =
+            codex_models_from_response(&serde_json::json!({"models":[codex_refresh_entry(id)]}))
+                .unwrap();
         let model = &models[0];
         for modality in [Modality::Image, Modality::Pdf, Modality::Audio] {
             assert!(
@@ -95,7 +93,7 @@ fn codex_refresh_round_trips_modalities_and_exact_thinking_through_cache_and_off
     entry["use_responses_lite"] = serde_json::json!(true);
     entry["supports_reasoning_effort_updates"] = serde_json::json!(true);
     let discovery = CodexDiscovery {
-        models: codex_models_from_response(&serde_json::json!({"models":[entry]}), None).unwrap(),
+        models: codex_models_from_response(&serde_json::json!({"models":[entry]})).unwrap(),
         claims: claims.clone(),
     };
     save_codex_model_cache(&store, &discovery).unwrap();
@@ -149,15 +147,12 @@ fn codex_refresh_round_trips_modalities_and_exact_thinking_through_cache_and_off
 
 #[test]
 fn codex_unknown_reasoning_assertions_never_receive_guessed_thinking_levels() {
-    let inventory = codex_inventory_from_response(
-        &serde_json::json!({"models":[
-            {"slug":"unknown-null", "reasoning":null},
-            {"slug":"unknown-control", "reasoning":{"control":"future-control"}},
-            {"slug":"explicit-off", "reasoning":false},
-            codex_refresh_entry("valid-account-model")
-        ]}),
-        None,
-    )
+    let inventory = codex_inventory_from_response(&serde_json::json!({"models":[
+        {"slug":"unknown-null", "reasoning":null},
+        {"slug":"unknown-control", "reasoning":{"control":"future-control"}},
+        {"slug":"explicit-off", "reasoning":false},
+        codex_refresh_entry("valid-account-model")
+    ]}))
     .unwrap();
     assert_eq!(inventory.skipped.len(), 2);
     assert_eq!(inventory.models.len(), 2);

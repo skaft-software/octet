@@ -21,6 +21,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn responses_model(base_url: &str) -> Model {
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("test-model".to_string()),
         endpoint: EndpointId("test-ep".to_string()),

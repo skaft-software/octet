@@ -25,6 +25,7 @@ fn model(id: &str, protocol: Protocol, images: bool) -> Model {
     };
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId(id.to_string()),
             endpoint: EndpointId("test".to_string()),

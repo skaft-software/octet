@@ -41,6 +41,7 @@ fn reasoning_capability() -> ReasoningCapability {
 fn fixture_model(base_url: &str, reasoning: bool) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             preset: Default::default(),
             id: ModelId("pi-messages-fixture".to_owned()),
             api_name: "radius-fixture".to_owned(),

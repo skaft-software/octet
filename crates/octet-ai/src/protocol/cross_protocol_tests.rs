@@ -30,6 +30,7 @@ fn make_model(
     }
 
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId(format!("model-{:?}", protocol)),
         endpoint: EndpointId("ep-1".to_string()),

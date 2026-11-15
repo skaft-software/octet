@@ -13,6 +13,7 @@ use octet_ai::{
 
 fn make_test_model(base_url_str: &str, protocol: Protocol) -> Model {
     let spec = ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("test-model".to_string()),
         endpoint: EndpointId("test-ep".to_string()),

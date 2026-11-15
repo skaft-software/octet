@@ -791,7 +791,7 @@ impl App {
     /// `/telemetry`) and never delivers or latches.
     ///
     /// Returns nothing for a model that needs no note (any non-Codex route, or
-    /// a Codex route whose effective window is the deliberate 272K policy).
+    /// a Codex route using its provider default window).
     #[cfg(test)]
     pub fn codex_context_report(&self) -> Option<&str> {
         self.codex_context_notes.note_for(&self.model.spec.id)

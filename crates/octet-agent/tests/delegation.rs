@@ -512,6 +512,7 @@ impl Respond for InFlightDeliveryScript {
 fn scripted_model(uri: &str) -> Model {
     Model {
         spec: Arc::new(ModelSpec {
+            context_window_options: None,
             id: ModelId("delegation-scripted".into()),
             endpoint: EndpointId("delegation-test".into()),
             api_name: "delegation-scripted".into(),

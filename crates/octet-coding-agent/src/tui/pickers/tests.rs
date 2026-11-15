@@ -552,6 +552,7 @@ async fn live_subagent_picker_refreshes_and_keeps_the_stable_selection() {
 #[test]
 fn model_label_uses_friendly_metadata_without_wire_id_noise() {
     let spec = octet_ai::ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("my-custom".into()),
         endpoint: octet_ai::EndpointId("local".into()),
@@ -604,6 +605,7 @@ fn model_label_uses_friendly_metadata_without_wire_id_noise() {
 #[test]
 fn custom_model_label_removes_provider_repository_and_quantization_noise() {
     let mut spec = octet_ai::ModelSpec {
+        context_window_options: None,
         preset: Default::default(),
         id: ModelId("custom/Intel/Qwen3.6-27B-int4-AutoRound".into()),
         endpoint: octet_ai::EndpointId("custom-openai".into()),

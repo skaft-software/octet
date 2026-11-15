@@ -23,7 +23,7 @@ fn discovery_rejects_error_objects_instead_of_hiding_them_as_empty() {
         "error": {"message": "unauthorized"}
     }))
     .is_err());
-    assert!(codex_models_from_response(&serde_json::json!({"models": []}), None).is_err());
+    assert!(codex_models_from_response(&serde_json::json!({"models": []})).is_err());
 }
 
 #[test]
