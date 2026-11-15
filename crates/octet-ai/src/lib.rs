@@ -231,6 +231,104 @@ pub fn validate_provider_request(
     )
 }
 
+/// Validates a context projection using dispatch normalization, while keeping
+/// newly introduced media strict even when it is placed in historical turns.
+/// `canonical` is the original host-owned request, not a prior hook projection.
+pub fn validate_provider_projection(
+    model: &Model,
+    canonical: &Request,
+    request: &Request,
+) -> Result<Vec<Diagnostic>, AiError> {
+    use crate::types::{AssistantPart, Message, ToolResultPart, UserPart};
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+
+    fn key(kind: u8, media: &crate::Media) -> (u8, [u8; 32]) {
+        let bytes = serde_json::to_vec(media).expect("media serializes");
+        (kind, Sha256::digest(bytes).into())
+    }
+    let mut original = HashMap::new();
+    for message in &canonical.messages {
+        match message {
+            Message::User(user) => {
+                for part in &user.content {
+                    match part {
+                        UserPart::Media(media) => {
+                            *original.entry(key(0, media)).or_insert(0usize) += 1
+                        }
+                        UserPart::ToolResult(result) => {
+                            for part in &result.content {
+                                if let ToolResultPart::Media(media) = part {
+                                    *original.entry(key(1, media)).or_insert(0usize) += 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Message::Assistant(assistant) => {
+                for part in &assistant.content {
+                    if let AssistantPart::Media(media) = part {
+                        *original.entry(key(2, media)).or_insert(0usize) += 1;
+                    }
+                }
+            }
+        }
+    }
+    let mut probe = request.clone();
+    let mut has_new = false;
+    let mut is_original = |kind, media: &crate::Media| {
+        let count = original.entry(key(kind, media)).or_default();
+        if *count > 0 {
+            *count -= 1;
+            true
+        } else {
+            has_new = true;
+            false
+        }
+    };
+    for message in &mut probe.messages {
+        match message {
+            Message::User(user) => {
+                for part in &mut user.content {
+                    match part {
+                        UserPart::Media(media) if is_original(0, media) => {
+                            *part = UserPart::Text(String::new())
+                        }
+                        UserPart::ToolResult(result) => {
+                            for part in &mut result.content {
+                                if let ToolResultPart::Media(media) = part {
+                                    if is_original(1, media) {
+                                        *part = ToolResultPart::Text(String::new());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Message::Assistant(assistant) => {
+                for part in &mut assistant.content {
+                    if let AssistantPart::Media(media) = part {
+                        if is_original(2, media) {
+                            *part = AssistantPart::Text(String::new());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if has_new {
+        probe.messages = transform::transform_request_preserving_media(probe.messages, model);
+        validate_provider_request(model, &probe)?;
+    }
+    let mut normalized = request.clone();
+    normalized.messages = transform::transform_request_messages_owned(normalized.messages, model);
+    validate_provider_request(model, &normalized)
+}
+
 /// Strictness for cross-protocol / capability degradation.
 ///
 /// Before either mode is validated, [`transform_messages`] derives a

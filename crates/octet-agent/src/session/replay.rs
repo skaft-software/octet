@@ -108,7 +108,13 @@ impl Session {
                         &mut suffix,
                     )? {
                         if !suffix.is_empty() {
-                            Arc::make_mut(items).extend(suffix);
+                            let adds_images = suffix.iter().any(|item| matches!(item,
+                                octet_ai::ResponsesReplayItem::User(user) if super::context::turn_has_tool_images(user)));
+                            let items = Arc::make_mut(items);
+                            items.extend(suffix);
+                            if adds_images {
+                                bound_replay_images(items);
+                            }
                         }
                     } else {
                         // Cache the fallback too: a permanent legacy gap must
@@ -205,6 +211,7 @@ impl Session {
         };
 
         if self.append_responses_replay(&branch[start..], &branch, endpoint, model, &mut replay)? {
+            bound_replay_images(&mut replay);
             Ok(Some(replay))
         } else {
             Ok(None)
@@ -376,5 +383,69 @@ impl Session {
             }
         }
         Ok(state)
+    }
+}
+
+// Keep native computer outputs intact: their paired wire item carries a
+// screenshot rather than the text-capable function-output shape. Opaque
+// provider output is authoritative and is never modified here.
+fn bound_replay_images(replay: &mut [octet_ai::ResponsesReplayItem]) {
+    use octet_ai::ResponsesReplayItem;
+    let mut computer_calls = std::collections::HashSet::new();
+    let mut protected = HashMap::new();
+    for (index, item) in replay.iter().enumerate() {
+        match item {
+            ResponsesReplayItem::Output(output) | ResponsesReplayItem::Compacted(output) => {
+                for part in output.items() {
+                    let value = part.as_json();
+                    if value.get("type").and_then(serde_json::Value::as_str)
+                        == Some("computer_call")
+                    {
+                        if let Some(id) = value.get("call_id").and_then(serde_json::Value::as_str) {
+                            computer_calls.insert(id.to_owned());
+                        }
+                    }
+                }
+            }
+            ResponsesReplayItem::LocalAssistant(assistant) => {
+                for part in &assistant.content {
+                    if let octet_ai::AssistantPart::ToolCall(call) = part {
+                        if call.name == "computer_use_preview" {
+                            computer_calls.insert(call.id.0.clone());
+                        }
+                    }
+                }
+            }
+            ResponsesReplayItem::User(user) => {
+                let calls: std::collections::HashSet<_> = user
+                    .content
+                    .iter()
+                    .filter_map(|part| {
+                        if let UserPart::ToolResult(result) = part {
+                            computer_calls
+                                .contains(&result.tool_call_id.0)
+                                .then(|| result.tool_call_id.0.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !calls.is_empty() {
+                    protected.insert(index, calls);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut kept = 0;
+    let empty = std::collections::HashSet::new();
+    for (index, item) in replay.iter_mut().enumerate().rev() {
+        if let ResponsesReplayItem::User(user) = item {
+            super::context::bound_tool_result_turn(
+                user,
+                &mut kept,
+                protected.get(&index).unwrap_or(&empty),
+            );
+        }
     }
 }

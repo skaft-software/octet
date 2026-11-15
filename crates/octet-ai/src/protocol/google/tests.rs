@@ -257,6 +257,84 @@ fn model_with_api_name(api_name: &str) -> Model {
 }
 
 #[test]
+fn trailing_model_turn_gets_a_wire_only_user_continuation() {
+    use crate::CompatibilityMode::{Lossy, Strict};
+
+    let model = model_with_api_name("gemini-4-argon");
+    for (compatibility, trailing_user) in [
+        (Strict, None),
+        (Lossy, None),
+        (Strict, Some(Vec::new())),
+        (
+            Lossy,
+            Some(vec![UserPart::Media(Media::image_bytes(
+                bytes::Bytes::from_static(b"png"),
+                mime::IMAGE_PNG,
+            ))]),
+        ),
+    ] {
+        let mut request = Request {
+            messages: vec![
+                Message::User(UserMessage {
+                    content: vec![UserPart::Text("Start the task.".into())],
+                }),
+                Message::Assistant(AssistantMessage {
+                    content: vec![
+                        AssistantPart::ProviderMetadata(
+                            ProviderPartMetadata::GoogleThoughtSignature {
+                                signature: "signed-text".into(),
+                            },
+                        ),
+                        AssistantPart::Text("Part one.".into()),
+                    ],
+                    model: model.spec.id.clone(),
+                    protocol: Protocol::GoogleGenerativeAi,
+                }),
+            ],
+            compatibility,
+            ..base_request()
+        };
+        if let Some(content) = trailing_user {
+            request
+                .messages
+                .push(Message::User(UserMessage { content }));
+        }
+        let original = serde_json::to_value(&request).unwrap();
+        let parts = build_request(&model, &request).unwrap();
+        let body: Value = serde_json::from_slice(&parts.body).unwrap();
+        // Check the encoded tail: empty or lossy-dropped user content does not
+        // supply the user turn required by generateContent.
+        assert_eq!(
+            body["contents"],
+            serde_json::json!([
+                {"role": "user", "parts": [{"text": "Start the task."}]},
+                {"role": "model", "parts": [{"text": "Part one.", "thoughtSignature": "signed-text"}]},
+                {"role": "user", "parts": [{"text": "Continue."}]},
+            ])
+        );
+        assert_eq!(serde_json::to_value(&request).unwrap(), original);
+    }
+}
+
+#[test]
+fn existing_user_turn_needs_no_continuation() {
+    let request = Request {
+        messages: vec![Message::User(UserMessage {
+            content: vec![UserPart::Text("Start the task.".into())],
+        })],
+        ..base_request()
+    };
+    let parts = build_request(&model(), &request).unwrap();
+    let body: Value = serde_json::from_slice(&parts.body).unwrap();
+    assert_eq!(
+        body["contents"],
+        serde_json::json!([
+            {"role": "user", "parts": [{"text": "Start the task."}]},
+        ])
+    );
+}
+
+#[test]
 fn maps_structured_output_to_native_json_schema() {
     let mut request = Request {
         output_format: OutputFormat::JsonSchema(crate::types::JsonSchemaFormat {
@@ -348,6 +426,7 @@ fn uses_model_specific_google_tool_call_id_shape() {
 
     let modern = build_request(&model_with_api_name("gemini-3-flash"), &request).unwrap();
     let modern_body: Value = serde_json::from_slice(&modern.body).unwrap();
+    assert_eq!(modern_body["contents"].as_array().unwrap().len(), 2);
     assert_eq!(
         modern_body["contents"][0]["parts"][0]["functionCall"]["id"],
         "call-1"
@@ -524,7 +603,7 @@ fn repeated_and_prefix_related_text_chunks_are_preserved_as_deltas() {
         request.messages.push(Message::Assistant(response.message));
         let contents =
             google_contents(&model_with_api_name("gemini-4-argon-contributor"), &request).unwrap();
-        let replay = &contents.last().unwrap()["parts"][0];
+        let replay = &contents[0]["parts"][0];
         assert_eq!(replay["text"], "aaaaa");
         assert_eq!(replay["thoughtSignature"], "c2lnbmVk");
         assert_eq!(replay.get("thought"), thought.then_some(&Value::Bool(true)));

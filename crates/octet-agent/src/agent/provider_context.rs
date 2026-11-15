@@ -55,6 +55,14 @@ pub(super) fn provider_request_client(
     client.with_provider_request_hooks(hooks)
 }
 
+fn validate_projection(
+    model: &Model,
+    canonical: &Request,
+    request: &Request,
+) -> Result<Vec<octet_ai::Diagnostic>, AiError> {
+    octet_ai::validate_provider_projection(model, canonical, request)
+}
+
 fn refused(reason: &'static str) -> AgentError {
     AgentError::ProviderContextPreparation(reason.to_owned())
 }
@@ -508,7 +516,7 @@ async fn project_context_hooks(
                 "tools": request.tools.len(),
                 "schema_bytes": tools.iter().map(|(_, n)| n).sum::<usize>(),
                 "largest": tools.iter().take(5).map(|(n, s)| format!("{n}={s}")).collect::<Vec<_>>(),
-                "validation": octet_ai::validate_provider_request(model, &request)
+                "validation": validate_projection(model, &canonical, &request)
                     .err()
                     .map(|e| e.to_string()),
             });
@@ -526,9 +534,9 @@ async fn project_context_hooks(
         // a 116-tool Pi fleet must never be able to end a run. Fall back only to
         // the request that reached this hook, and only when it still validates,
         // so identity, loadout and host-authority checks above stay fatal.
-        if let Err(error) = octet_ai::validate_provider_request(model, &request) {
+        if let Err(error) = validate_projection(model, &canonical, &request) {
             let detail: String = error.to_string().chars().take(240).collect();
-            if octet_ai::validate_provider_request(model, &accepted_before_hook).is_ok() {
+            if validate_projection(model, &canonical, &accepted_before_hook).is_ok() {
                 request = accepted_before_hook;
                 // One precise notice beats the generic hook-failure line plus a
                 // detail line. Deduplicate on the hook's own identity, the same

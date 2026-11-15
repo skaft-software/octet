@@ -451,3 +451,97 @@ fn replay_debug_json(
         })
         .collect()
 }
+
+#[test]
+fn replay_bounds_function_screenshots_but_preserves_native_computer_results() {
+    for incremental in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("images.jsonl")).unwrap();
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&ModelId("gpt-5.4-mini-responses".into()))
+            .unwrap();
+        let endpoint = model.endpoint.id.clone();
+        let model_id = model.spec.id.clone();
+        session.append(user("drive")).unwrap();
+        for index in 0..7 {
+            let native = index == 0;
+            let call_id = format!("call_{index}");
+            let output = octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(
+                if native {
+                    serde_json::json!({"type":"computer_call", "call_id":call_id, "action":{"type":"screenshot"}, "unknown":"preserved"})
+                } else {
+                    serde_json::json!({"type":"function_call", "call_id":call_id, "name":"capture", "arguments":"{}", "unknown":"preserved"})
+                }
+            ).unwrap()]);
+            session
+                .append_assistant_turn(
+                    AssistantMessage {
+                        content: vec![],
+                        model: model_id.clone(),
+                        protocol: Protocol::OpenAiResponses,
+                    },
+                    endpoint.clone(),
+                    model_id.clone(),
+                    Usage::default(),
+                    None,
+                    StopReason::EndTurn,
+                    Some(output),
+                )
+                .unwrap();
+            session
+                .append(EntryValue::Message(Message::User(UserMessage {
+                    content: vec![UserPart::ToolResult(ToolResult {
+                        tool_call_id: ToolCallId(call_id),
+                        content: vec![
+                            octet_ai::ToolResultPart::Text(format!("result {index}")),
+                            octet_ai::ToolResultPart::Media(octet_ai::Media::image_bytes(
+                                bytes::Bytes::from(format!("image-{index}")),
+                                "image/png".parse().unwrap(),
+                            )),
+                        ],
+                        is_error: false,
+                        added_tool_names: None,
+                        tool_name: None,
+                    })],
+                })))
+                .unwrap();
+            if incremental {
+                session
+                    .responses_replay_snapshot(&endpoint, &model_id)
+                    .unwrap();
+            }
+        }
+        let replay = session
+            .responses_replay_snapshot(&endpoint, &model_id)
+            .unwrap()
+            .unwrap();
+        let input = octet_ai::responses::encode_responses_replay(&model, None, &replay).unwrap();
+        let items: Vec<_> = input.items().iter().map(|item| item.as_json()).collect();
+        let function_outputs: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect();
+        assert_eq!(function_outputs.len(), 6);
+        let encoded = serde_json::to_string(&function_outputs).unwrap();
+        assert_eq!(encoded.matches("input_image").count(), 4);
+        assert_eq!(encoded.matches(TOOL_IMAGE_PLACEHOLDER).count(), 2);
+        let computer = items
+            .iter()
+            .find(|item| item["type"] == "computer_call_output")
+            .unwrap();
+        assert!(computer["output"]["image_url"].as_str().is_some());
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["unknown"] == "preserved")
+                .count(),
+            7
+        );
+        let full = session
+            .rebuild_responses_replay(&endpoint, &model_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));
+    }
+}

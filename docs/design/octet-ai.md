@@ -67,6 +67,14 @@ Google's opaque `thoughtSignature` is retained as position-bound
 It is replayed only to the same Google model; transformations to any other model
 or protocol drop it.
 
+After pairing function responses, a trailing encoded `model` turn gets a
+wire-only `user` turn containing `Continue.` so continuation requests do not
+attempt unsupported model prefill. Existing user/function-response turns are
+unchanged; canonical history and signed model parts are never rewritten. Encoded
+payload hooks run later and can replace this output; opt-in final-wire request
+tracing records the bounded final `contents` role for diagnosis, not provider
+acceptance or executable provenance.
+
 The codec accepts inline image bytes and model-advertised inline audio
 (WAV/MP3/AAC/FLAC/Ogg Opus) as `inlineData`. It never fetches user-provided
 media URLs or forwards audio provider references. Raw PCM16 lacks sample-rate

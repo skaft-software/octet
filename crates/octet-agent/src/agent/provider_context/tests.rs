@@ -1390,3 +1390,124 @@ fn async_projection_registration_refuses_optional_synchronous_responses_prewarm(
     assert!(observations.lock().unwrap().is_empty());
     assert!(captures.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn no_op_hook_accepts_cross_protocol_historical_reasoning() {
+    struct Noop;
+    #[async_trait::async_trait]
+    impl ProviderContextHook for Noop {
+        async fn project_context(
+            &self,
+            _: &Request,
+            _: &ProviderContextProjectionContext,
+        ) -> Result<Option<ProviderContextProjection>, String> {
+            Ok(None)
+        }
+    }
+    let mut req = request();
+    let old_model = octet_ai::ModelId("old-chat-model".into());
+    req.messages.push(Message::Assistant(AssistantMessage {
+        model: old_model.clone(),
+        protocol: Protocol::OpenAiChat,
+        content: vec![AssistantPart::Reasoning(octet_ai::ReasoningPart {
+            text: Some("historical reasoning".into()),
+            state: Some(octet_ai::ReasoningState {
+                protocol: Protocol::OpenAiChat,
+                model: old_model,
+                kind: octet_ai::ReasoningStateKind::ChatReasoningDetails { details: vec![] },
+            }),
+        })],
+    }));
+    req.messages.push(projected_user("continue"));
+    let before = serialize_conversation(&req.messages);
+    let responses_model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+        .unwrap();
+    let result = project_with_fresh_session(
+        req,
+        &[Arc::new(Noop)],
+        &identity(),
+        &responses_model,
+        &AbortFlag::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(serialize_conversation(&result.messages), before);
+}
+
+#[tokio::test]
+async fn rewritten_cross_protocol_history_normalizes_reasoning_but_rejects_new_historical_media() {
+    struct HistoricalEdit(bool);
+    #[async_trait::async_trait]
+    impl ProviderContextHook for HistoricalEdit {
+        fn continues_on_failure(&self) -> bool {
+            true
+        }
+        async fn project_context(
+            &self,
+            request: &Request,
+            _: &ProviderContextProjectionContext,
+        ) -> Result<Option<ProviderContextProjection>, String> {
+            let mut messages = request.messages.clone();
+            let Message::User(user) = &mut messages[0] else {
+                unreachable!()
+            };
+            user.content.push(if self.0 {
+                UserPart::Media(Media::audio_bytes(
+                    bytes::Bytes::from_static(b"audio"),
+                    octet_ai::AudioFormat::Wav,
+                ))
+            } else {
+                UserPart::Text("edited history".into())
+            });
+            Ok(Some(ProviderContextProjection {
+                messages,
+                system: request.system.clone(),
+                tools: None,
+            }))
+        }
+    }
+    let mut req = request();
+    let old_model = octet_ai::ModelId("old-chat-model".into());
+    req.messages.push(Message::Assistant(AssistantMessage {
+        model: old_model.clone(),
+        protocol: Protocol::OpenAiChat,
+        content: vec![AssistantPart::Reasoning(octet_ai::ReasoningPart {
+            text: Some("reasoning".into()),
+            state: Some(octet_ai::ReasoningState {
+                protocol: Protocol::OpenAiChat,
+                model: old_model,
+                kind: octet_ai::ReasoningStateKind::ChatReasoningDetails { details: vec![] },
+            }),
+        })],
+    }));
+    req.messages.push(projected_user("continue"));
+    let model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-5.4-mini-responses".into()))
+        .unwrap();
+    let edited = project_with_fresh_session(
+        req.clone(),
+        &[Arc::new(HistoricalEdit(false))],
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+    )
+    .await
+    .unwrap();
+    assert!(serialize_conversation(&edited.messages).contains("edited history"));
+    let rejected = project_with_fresh_session(
+        req.clone(),
+        &[Arc::new(HistoricalEdit(true))],
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serialize_conversation(&rejected.messages),
+        serialize_conversation(&req.messages)
+    );
+}

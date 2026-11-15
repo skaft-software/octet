@@ -162,6 +162,116 @@ async fn gemini_current_request_tool_stream_signature_and_usage_fixture() {
 }
 
 #[tokio::test]
+async fn google_routes_continue_after_a_model_turn_without_http_400() {
+    use octet_ai::AssistantPart;
+    use serde_json::{json, Value};
+    use wiremock::{Request as WireRequest, Respond};
+
+    struct RejectModelTail;
+    impl Respond for RejectModelTail {
+        fn respond(&self, request: &WireRequest) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let contents = body["contents"].as_array().unwrap();
+            if contents.last().unwrap()["role"] == "model" {
+                return ResponseTemplate::new(400).set_body_json(json!({
+                    "error": {"code": 400, "status": "INVALID_ARGUMENT",
+                        "message": "Requests ending with a model turn are not supported"}
+                }));
+            }
+            let part = if contents.len() == 1 {
+                json!({"text": "Part one.", "thoughtSignature": "signed-text"})
+            } else {
+                json!({"text": "Continued."})
+            };
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {}\n\n",
+                    json!({
+                        "candidates": [{"content": {"parts": [part]}, "finishReason": "STOP"}]
+                    })
+                ))
+        }
+    }
+
+    for (provider, api_name, base_path) in [
+        ("google", "gemini-2.5-flash", "/v1beta/"),
+        (
+            "vertex",
+            "gemini-2.5-flash",
+            "/v1/projects/fixture/locations/us-central1/publishers/google/",
+        ),
+        ("opencode", "gemini-4-argon", "/zen/v1/"),
+        ("opencode-go", "gemini-4-argon", "/inference/go/v1/"),
+        (
+            "opencode-go",
+            "gemini-4-argon-contributor",
+            "/inference/go/v1/",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "{base_path}models/{api_name}:streamGenerateContent"
+            )))
+            .respond_with(RejectModelTail)
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut model = fixture_model(&format!("{}{base_path}", server.uri()));
+        let gateway = provider.starts_with("opencode");
+        let spec = Arc::make_mut(&mut model.spec);
+        spec.id = ModelId(format!("{provider}/{api_name}"));
+        spec.api_name = api_name.into();
+        spec.endpoint = EndpointId(if gateway {
+            format!("{provider}-google")
+        } else {
+            provider.into()
+        });
+        spec.cache.send_session_affinity_headers = gateway;
+        let endpoint = Arc::make_mut(&mut model.endpoint);
+        endpoint.id = model.spec.endpoint.clone();
+        if gateway {
+            endpoint.auth = Auth::bearer("fixture-key");
+        }
+        let client = AiClient::new();
+        let mut request = plain_fixture_request();
+        request.session_id = Some("continue-session".into());
+        let first = client.complete(&model, request.clone()).await.unwrap();
+        request.messages.push(Message::Assistant(first.message));
+        let continued = client
+            .complete(&model, request)
+            .await
+            .expect("continuation must not end with a model turn");
+        assert!(matches!(continued.message.content.as_slice(),
+            [AssistantPart::Text(text)] if text == "Continued."
+        ));
+        let requests = server.received_requests().await.unwrap();
+        let replay: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(replay["contents"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            replay["contents"][1],
+            json!({
+                "role": "model", "parts": [{"text": "Part one.", "thoughtSignature": "signed-text"}]
+            })
+        );
+        assert_eq!(
+            replay["contents"][2],
+            json!({
+                "role": "user", "parts": [{"text": "Continue."}]
+            })
+        );
+        if gateway {
+            assert_eq!(requests[1].headers["authorization"], "Bearer fixture-key");
+            assert_eq!(
+                requests[1].headers["x-opencode-session"],
+                "continue-session"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn opencode_parallel_google_calls_survive_streaming_and_result_replay() {
     use octet_ai::{AssistantPart, StopReason, ToolResult, ToolResultPart};
     use wiremock::{Request as WireRequest, Respond};

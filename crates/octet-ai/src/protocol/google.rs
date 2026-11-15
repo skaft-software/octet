@@ -265,6 +265,19 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
         &tool_names,
         include_tool_call_id,
     );
+    // Google routes reject trailing model turns as unsupported prefill. Check
+    // the encoded tail because an empty or lossy-dropped user turn may leave
+    // model output last. Preserve that output and add only a wire-level cue.
+    if contents
+        .last()
+        .is_some_and(|content| content["role"] == "model")
+    {
+        push_content(
+            &mut contents,
+            "user",
+            vec![text_part("Continue.".to_owned(), None, false)],
+        );
+    }
     Ok(contents)
 }
 

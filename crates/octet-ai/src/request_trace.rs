@@ -205,6 +205,22 @@ pub(crate) fn request_shape(body: &Value) -> Map<String, Value> {
         .filter_map(|(key, value)| Some((key.clone(), json!(value.as_array()?.len()))))
         .collect();
     shape.insert("array_lengths".into(), Value::Object(arrays));
+    // Payload hooks can replace the codec output. Report only a finite role
+    // vocabulary from the final body, never an arbitrary hook-supplied string.
+    if let Some(contents) = object.get("contents").and_then(Value::as_array) {
+        let role = match contents
+            .last()
+            .and_then(|item| item.get("role"))
+            .and_then(Value::as_str)
+        {
+            Some("user") => "user",
+            Some("model") => "model",
+            Some(_) => "other",
+            None if contents.is_empty() => "empty",
+            None => "missing",
+        };
+        shape.insert("contents_final_role".into(), json!(role));
+    }
     shape.insert(
         "previous_response_id".into(),
         json!(object

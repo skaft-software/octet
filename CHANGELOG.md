@@ -23,6 +23,15 @@
 
 ### Fixed
 
+- Provider-context hook projections validate target-normalized replay, avoiding
+  cross-protocol reasoning refusals without changing the saved conversation.
+  Newly introduced media remains subject to strict validation.
+- Responses replay bounds ordinary tool-result screenshots, retaining opaque
+  output and native computer-call screenshots required by their wire shape.
+- Google-compatible requests ending in an encoded model turn get a wire-only
+  continuation; opt-in request tracing records the final contents role after hooks.
+  This does not establish the cause of any particular provider error.
+
 - Fullscreen scrolling and selection reuse unchanged row-to-copy mappings instead
   of re-aligning long answers on every event. Partial mappings extend for later
   rows, and width, theme, disclosure and content changes invalidate stale work.

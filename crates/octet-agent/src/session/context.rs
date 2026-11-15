@@ -735,13 +735,13 @@ fn is_tool_image(part: &octet_ai::ToolResultPart) -> bool {
     )
 }
 
-fn turn_has_tool_images(turn: &UserMessage) -> bool {
-    is_tool_result_turn(turn)
-        && turn.content.iter().any(|part| match part {
-            UserPart::Media(octet_ai::Media::Image(_)) => true,
-            UserPart::ToolResult(result) => result.content.iter().any(is_tool_image),
-            _ => false,
-        })
+pub(super) fn turn_has_tool_images(turn: &UserMessage) -> bool {
+    let adjacent = is_tool_result_turn(turn);
+    turn.content.iter().any(|part| match part {
+        UserPart::Media(octet_ai::Media::Image(_)) => adjacent,
+        UserPart::ToolResult(result) => result.content.iter().any(is_tool_image),
+        _ => false,
+    })
 }
 
 /// Replaces tool-result images older than the newest
@@ -754,51 +754,61 @@ fn turn_has_tool_images(turn: &UserMessage) -> bool {
 fn bound_tool_result_images(messages: &mut [Message]) {
     let mut kept = 0usize;
     for message in messages.iter_mut().rev() {
-        let Message::User(turn) = message else {
-            continue;
-        };
-        if !turn_has_tool_images(turn) {
-            continue;
+        if let Message::User(turn) = message {
+            bound_tool_result_turn(turn, &mut kept, &std::collections::HashSet::new());
         }
-        let mut omitted_adjacent = 0usize;
-        let mut index = turn.content.len();
-        while index > 0 {
-            index -= 1;
-            match &mut turn.content[index] {
-                UserPart::Media(octet_ai::Media::Image(_)) => {
-                    if kept < MODEL_VISIBLE_TOOL_IMAGE_LIMIT {
-                        kept += 1;
-                    } else {
-                        turn.content.remove(index);
-                        omitted_adjacent += 1;
-                    }
+    }
+}
+
+pub(super) fn bound_tool_result_turn(
+    turn: &mut UserMessage,
+    kept: &mut usize,
+    protected_calls: &std::collections::HashSet<String>,
+) {
+    if !turn_has_tool_images(turn) {
+        return;
+    }
+    let adjacent = is_tool_result_turn(turn);
+    let mut omitted_adjacent = 0usize;
+    let mut index = turn.content.len();
+    while index > 0 {
+        index -= 1;
+        match &mut turn.content[index] {
+            UserPart::Media(octet_ai::Media::Image(_)) if adjacent => {
+                if *kept < MODEL_VISIBLE_TOOL_IMAGE_LIMIT {
+                    *kept += 1;
+                } else {
+                    turn.content.remove(index);
+                    omitted_adjacent += 1;
                 }
-                UserPart::ToolResult(result) => {
-                    for part in result.content.iter_mut().rev() {
-                        if is_tool_image(part) {
-                            if kept < MODEL_VISIBLE_TOOL_IMAGE_LIMIT {
-                                kept += 1;
-                            } else {
-                                *part = octet_ai::ToolResultPart::Text(
-                                    TOOL_IMAGE_PLACEHOLDER.to_owned(),
-                                );
-                            }
+            }
+            UserPart::ToolResult(result) => {
+                if protected_calls.contains(&result.tool_call_id.0) {
+                    continue;
+                }
+                for part in result.content.iter_mut().rev() {
+                    if is_tool_image(part) {
+                        if *kept < MODEL_VISIBLE_TOOL_IMAGE_LIMIT {
+                            *kept += 1;
+                        } else {
+                            *part =
+                                octet_ai::ToolResultPart::Text(TOOL_IMAGE_PLACEHOLDER.to_owned());
                         }
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
-        if omitted_adjacent > 0 {
-            if let Some(result) = turn.content.iter_mut().rev().find_map(|part| match part {
-                UserPart::ToolResult(result) => Some(result),
-                _ => None,
-            }) {
-                for _ in 0..omitted_adjacent {
-                    result.content.push(octet_ai::ToolResultPart::Text(
-                        TOOL_IMAGE_PLACEHOLDER.to_owned(),
-                    ));
-                }
+    }
+    if omitted_adjacent > 0 {
+        if let Some(result) = turn.content.iter_mut().rev().find_map(|part| match part {
+            UserPart::ToolResult(result) => Some(result),
+            _ => None,
+        }) {
+            for _ in 0..omitted_adjacent {
+                result.content.push(octet_ai::ToolResultPart::Text(
+                    TOOL_IMAGE_PLACEHOLDER.to_owned(),
+                ));
             }
         }
     }

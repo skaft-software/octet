@@ -331,7 +331,11 @@ tools and execution authority are unchanged. Complete tool-call/result pairs
 may be omitted and result text summarized; call identity, arguments, async
 execution authority, result status and unresolved calls must be preserved.
 Every intermediate request is strictly validated and bounded to 64 MiB of
-serialized canonical request. Hook errors are redacted and fail closed before
+serialized canonical request. Validation uses dispatch's target-normalized
+history without changing the hook-visible request. A separate strict probe keeps
+newly supplied media intact, including media inserted into historical turns;
+matching original media is identified by content, role and occurrence count.
+Hook errors are redacted and fail closed before
 provider I/O; ordered hooks share a five-second deadline capped by the endpoint
 timeout, with cancellation winning same-poll completion.
 
@@ -350,7 +354,10 @@ hooks are registered; real inference and its exact cache refresh retain the
 validated effective request. Opaque Responses replay remains an explicit
 limitation: a changed canonical projection is refused when a hidden `input`
 window would ignore it. The host never silently drops provider replay state to
-make a projection appear to work. Effective request estimates are planning data,
+make a projection appear to work. Responses replay bounds ordinary tool-result
+images in both cold and incremental projections, but retains native computer-call
+screenshots and opaque output because their wire shapes cannot carry the ordinary
+text placeholder. Effective request estimates are planning data,
 never a sound provider input upper bound: finite token/cost ceilings still refuse
 before dispatch when that authoritative bound is unavailable.
 

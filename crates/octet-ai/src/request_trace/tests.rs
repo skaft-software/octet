@@ -138,3 +138,19 @@ fn trace_is_off_without_the_environment_flag() {
     let blank = BTreeMap::from([(REQUEST_TRACE_ENV.to_owned(), "  ".to_owned())]);
     assert!(RequestTrace::from_env(&blank).is_none());
 }
+
+#[test]
+fn contents_final_role_is_bounded_and_reports_wire_tail() {
+    for (contents, expected) in [
+        (json!([]), "empty"),
+        (json!([{"role":"model"}]), "model"),
+        (json!([{"role":"user"}]), "user"),
+        (json!([{"role":"secret"}]), "other"),
+        (json!([{}]), "missing"),
+    ] {
+        assert_eq!(
+            request_shape(&json!({"contents": contents}))["contents_final_role"],
+            expected
+        );
+    }
+}

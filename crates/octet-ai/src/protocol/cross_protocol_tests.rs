@@ -228,7 +228,8 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
         if protocol == Protocol::GoogleGenerativeAi {
             // This fixture's generic Google model does not advertise call IDs.
             // Check native name-based pairing and the inserted error's position
-            // instead of requiring an unsupported wire field.
+            // instead of requiring an unsupported wire field. The final user
+            // cue avoids unsupported model prefill without moving the result.
             assert_eq!(
                 body["contents"],
                 serde_json::json!([
@@ -240,7 +241,8 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
                             "error": "Tool execution result was not supplied by the caller."
                         }}}
                     ]},
-                    {"role": "model", "parts": [{"text": "continued"}]}
+                    {"role": "model", "parts": [{"text": "continued"}]},
+                    {"role": "user", "parts": [{"text": "Continue."}]}
                 ])
             );
         } else {

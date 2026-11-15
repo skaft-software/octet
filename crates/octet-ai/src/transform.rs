@@ -132,6 +132,46 @@ pub(crate) fn transform_request_messages_owned(
     insert_missing_tool_results(transformed)
 }
 
+// Validation probe for hook-introduced media: normalize reasoning and tool
+// identities exactly as dispatch does, but never replace media with a fallback.
+pub(crate) fn transform_request_preserving_media(
+    messages: Vec<Message>,
+    target: &Model,
+) -> Vec<Message> {
+    if target.spec.protocol == Protocol::MistralConversations {
+        return insert_missing_tool_results(messages);
+    }
+    let transformed = messages
+        .into_iter()
+        .map(|message| match message {
+            Message::User(user) => Message::User(UserMessage {
+                content: user
+                    .content
+                    .into_iter()
+                    .map(normalize_pending_user_part_owned)
+                    .collect(),
+            }),
+            Message::Assistant(assistant) => {
+                let same_model =
+                    assistant.model == target.spec.id && assistant.protocol == target.spec.protocol;
+                Message::Assistant(AssistantMessage {
+                    content: assistant
+                        .content
+                        .into_iter()
+                        .filter_map(|part| match part {
+                            AssistantPart::Media(_) => Some(part),
+                            other => transform_assistant_part_owned(other, same_model, target),
+                        })
+                        .collect(),
+                    model: assistant.model,
+                    protocol: assistant.protocol,
+                })
+            }
+        })
+        .collect();
+    insert_missing_tool_results(transformed)
+}
+
 fn normalize_pending_user_part_owned(part: UserPart) -> UserPart {
     match part {
         UserPart::Text(_) | UserPart::Media(_) => part,

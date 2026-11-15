@@ -1136,8 +1136,11 @@ interpretation limits.
 
 ## Model-visible tool-result images
 
-A long computer-use run produces many screenshots. Only the newest four
-tool-result images (`MODEL_VISIBLE_TOOL_IMAGE_LIMIT`) are sent to the model;
-older ones are replaced in the request with a short text placeholder. The
-session journal keeps every image, so reopening, export and audit are
-unchanged. Images you attach to a prompt are not affected.
+A long computer-use run produces many screenshots. Canonical context and
+Responses replay retain the newest four ordinary tool-result images
+(`MODEL_VISIBLE_TOOL_IMAGE_LIMIT`); older ones are replaced in the request with
+a short text placeholder. Responses native computer-call results are exempt:
+their screenshot-only wire shape cannot carry that placeholder, so replay keeps
+their screenshots. Opaque provider output is also preserved verbatim. The session
+journal keeps every image, so reopening, export and audit are unchanged. Images
+you attach to a prompt are not affected.
