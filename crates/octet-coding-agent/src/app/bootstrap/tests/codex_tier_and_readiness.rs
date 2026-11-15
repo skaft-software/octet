@@ -127,27 +127,21 @@ fn codex_registration_applies_only_an_acknowledged_entitled_override() {
 
 #[test]
 fn codex_registration_names_above_tier_accounting_for_every_raised_route() {
-    // The recorded session note branches on `uncertain_usage_operation`, so this
-    // asserts the same trigger the registration loop uses. The documented 372K
-    // luna window is above the standard tier without any override, while the
-    // deliberate 272K cap owes no obligation.
+    // Every above-tier Luna route now requires an acknowledged override.
     let luna = codex_discovered_model(
         "gpt-5.6-luna",
         CODEX_5_6_CONTEXT_WINDOW,
-        CODEX_5_6_CONTEXT_WINDOW,
+        CODEX_ASTRA_MAX_CONTEXT_WINDOW,
         128_000,
     );
     let resolution = codex_context_resolve_for_registration(
         &luna,
-        CodexContextTier::Default,
-        CodexContextOverride::NONE,
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(372_000, true),
     );
-    assert_eq!(resolution.context_window, CODEX_5_6_CONTEXT_WINDOW);
-    assert!(!resolution.override_applied, "luna needs no override");
-    assert!(
-        resolution.clamp.is_none(),
-        "372K luna is the documented window"
-    );
+    assert_eq!(resolution.context_window, 372_000);
+    assert!(resolution.override_applied);
+    assert!(resolution.clamp.is_none());
     assert!(
         resolution.has_uncertain_usage,
         "above 272K the whole request is metered differently"
@@ -693,7 +687,7 @@ fn the_recorded_codex_note_reaches_the_app_lazily_and_survives_a_rebuild() {
             )
             .unwrap(),
         )
-        .expect("372K is above the standard tier"),
+        .expect("the advertised 372K window is clamped"),
     );
     boot.codex_context_notes = notes;
 

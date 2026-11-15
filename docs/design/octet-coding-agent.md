@@ -196,8 +196,8 @@ full skill bodies are not injected by this composition.
 
 Before installing the agent policy, bootstrap combines the generic fractional
 threshold with an optional absolute active-context ceiling. Codex request
-budgeting caps most models, including Astra, at 272,000 tokens; GPT-5.6 Luna may
-use up to 372,000 tokens. Smaller provider windows remain authoritative, while
+budgeting caps every model, including GPT-5.6 Luna, at 272,000 tokens by default.
+Smaller provider windows remain authoritative, while
 larger advertised maxima remain discovery metadata. An explicit
 `compaction.max_active_tokens` further constrains the working set; zero or unset
 removes only that additional absolute ceiling, not the model-specific Codex
@@ -415,8 +415,8 @@ parses the provider's string/object reasoning levels, `use_responses_lite`, and
 queried with older compatibility, context-window or GPT-6.1 Sol policies; entries carry the
 pre-cap backend default window so the deliberate Codex cap can be reported and an
 explicit operator override resolved exactly (`docs/codex-context.md`). It
-preserves those fields, uses a 372K working window for GPT-5.6 Luna and 272K for
-other Codex models, and remains scoped to the authenticated account context. Only
+preserves those fields, applies the 272K default working cap to every model,
+and remains scoped to the authenticated account context. Only
 fresh, complete, account-matched metadata is registered. Stale or future-dated
 cache entries are refreshed synchronously before online catalog construction;
 malformed, incomplete, duplicate, or inconsistent entries fail closed. Offline

@@ -54,19 +54,19 @@ provider's message.
 <details>
 <summary>Codex budgeting</summary>
 
-The authenticated Codex working-window policy caps most models, including Astra,
-at 272K request tokens, and keeps larger provider-advertised maximums as
-discovery metadata. GPT-5.6 Luna is the model-specific exception and may use up
-to a 372K working window. Smaller discovered provider windows still win. This
-limits repeated prompt encoding and moves long sessions to compaction before
+The authenticated Codex working-window policy caps every model, including Luna,
+at 272K request tokens by default, and keeps larger provider-advertised defaults
+and maximums as discovery metadata. Smaller discovered provider windows still
+win. This limits repeated prompt encoding and moves long sessions to compaction before
 oversized requests dominate latency and cost. A zero or unset
 `compaction.max_active_tokens` removes only the extra working-set ceiling, not
 the model-specific Codex route cap. A smaller explicit ceiling stays a separate
 setting.
 
-The public [Codex model guide](https://developers.openai.com/codex/models) lists
-a 500K default for GPT-6.1 Sol in Codex/Work. This is distinct from octet's 272K
-working policy and the separately discovered maximum. It does not automatically
+The [bundled catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
+lists a 500K default for GPT-6.1 Terra and 272K for 6.1 Sol; account discovery
+remains authoritative, even where the public guide differs. This is distinct
+from octet's 272K working policy and the separately discovered maximum. It does not automatically
 raise octet's cap or establish an account entitlement; the existing acknowledged,
 entitlement-checked [override](codex-context.md) remains opt-in.
 

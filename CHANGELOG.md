@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Codex context metadata includes GPT-6.1 Terra's 500K default and the current
+  872K maxima. Every model now budgets at most 272K by default, including
+  GPT-5.6 Luna; larger windows require entitlement and cost-cliff acknowledgement.
+
 - Completed shell-tool rows show their recorded duration. Native TOML themes can
   customize the `tool_duration` text or hide it with an empty string; timing stays
   out of copied output.

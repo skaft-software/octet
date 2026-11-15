@@ -5,7 +5,7 @@
 //! This module owns the Codex context-window *policy* in one place:
 //!
 //! * the deliberate conservative working cap (`CODEX_CONTEXT_WINDOW_CAP`,
-//!   272K, with the documented `gpt-5.6-luna` 372K exception), and
+//!   272K for every model), and
 //! * the per-family advertised/entitled ceiling used to bound the explicit
 //!   opt-in override.
 //!
@@ -46,13 +46,13 @@ pub const CODEX_CONTEXT_WINDOW_CAP: u64 = 272_000;
 /// Historical name for the conservative working window.
 pub const CODEX_LEGACY_CONTEXT_WINDOW: u64 = 272_000;
 
-/// Context window octet uses for the `gpt-5.6-*` family.
-pub const CODEX_5_6_CONTEXT_WINDOW: u64 = 372_000;
+/// Default context window advertised for the `gpt-5.6-*` family.
+pub const CODEX_5_6_CONTEXT_WINDOW: u64 = 272_000;
 
 /// Advertised/entitled ceiling for GPT-6 Codex models.
 pub const CODEX_ASTRA_MAX_CONTEXT_WINDOW: u64 = 872_000;
 
-/// Advertised/entitled ceiling for Pro/ProLite `gpt-5.4` and `codex-auto-review`.
+/// Historical advertised/entitled ceiling for Pro/ProLite `gpt-5.4`.
 pub const CODEX_PRO_CONTEXT_WINDOW: u64 = 1_000_000;
 
 /// Default Codex output contract when the backend advertises nothing smaller.
@@ -62,14 +62,14 @@ pub const CODEX_MAX_OUTPUT_TOKENS: u64 = 128_000;
 /// contract.
 pub const CODEX_ASTRA_MODEL_ID: &str = "gpt-6-astra";
 
-fn codex_gpt_6_model(model_id: &str) -> bool {
+pub(crate) fn codex_gpt_6_model(model_id: &str) -> bool {
     matches!(
         model_id,
-        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna"
     )
 }
 
-/// The one family whose conservative working window is 372K rather than 272K.
+/// GPT-5.6 Luna model identifier; it shares the standard working cap.
 pub const CODEX_LUNA_MODEL_ID: &str = "gpt-5.6-luna";
 
 /// Smallest override octet accepts; below this a Codex session cannot work.
@@ -431,8 +431,7 @@ fn codex_context_remedy() -> String {
 /// `None` when the effective window is neither reduced by the deliberate cap nor
 /// above the 272K standard tier. The text is plain user language: it names no
 /// internal API or operation identifier, labels every window it quotes, and
-/// states the same effective window in every variant (the 372K documented
-/// `gpt-5.6-luna` window therefore never reads as a clamp to 272K).
+/// states the same effective window in every variant.
 pub fn codex_context_session_note(model_id: &str, window: &CodexContextWindow) -> Option<String> {
     let effective = window.context_window;
     let advertised = window.advertised_context_window.max(effective);
@@ -468,14 +467,10 @@ pub fn codex_context_session_note(model_id: &str, window: &CodexContextWindow) -
 
 /// The deliberate conservative working window for a Codex model.
 ///
-/// This is octet's budgeting cap, not the provider's advertised maximum. It is
-/// 372K for `gpt-5.6-luna` and 272K for every other family.
-pub fn working_context_window(model_id: &str) -> u64 {
-    if model_id == CODEX_LUNA_MODEL_ID {
-        CODEX_5_6_CONTEXT_WINDOW
-    } else {
-        CODEX_CONTEXT_WINDOW_CAP
-    }
+/// This is octet's budgeting cap, not the provider's advertised maximum.
+/// Every model uses 272K so an above-standard-tier window always needs consent.
+pub fn working_context_window(_model_id: &str) -> u64 {
+    CODEX_CONTEXT_WINDOW_CAP
 }
 
 /// The `(default, advertised maximum)` context windows for a known Codex family.
@@ -484,12 +479,14 @@ pub fn working_context_window(model_id: &str) -> u64 {
 /// response remains authoritative for plan-specific advertised limits, and the
 /// advertised maximum is what bounds the explicit override.
 pub fn entitled_context_windows(model_id: &str) -> (u64, u64) {
-    if codex_gpt_6_model(model_id) {
+    if model_id == "gpt-6.1-terra" {
+        (500_000, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
+    } else if codex_gpt_6_model(model_id) || model_id == "codex-auto-review" {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
-    } else if model_id == "gpt-5.4" || model_id == "codex-auto-review" {
+    } else if model_id == "gpt-5.4" {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_PRO_CONTEXT_WINDOW)
     } else if model_id.starts_with("gpt-5.6-") {
-        (CODEX_5_6_CONTEXT_WINDOW, CODEX_5_6_CONTEXT_WINDOW)
+        (CODEX_5_6_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
     } else {
         (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_LEGACY_CONTEXT_WINDOW)
     }

@@ -734,12 +734,25 @@ aliases on other routes gain no public API authority. These are contract
 observations and deterministic tests, not live inference/cache-hit evidence.
 
 The current [Codex model guide](https://developers.openai.com/codex/models)
-reports **500,000** as GPT-6.1 Sol's default in Codex/ChatGPT Work, superseding the
-historical bundled default above. Octet retains account discovery defaults
-separately from maximums and its deliberate 272K working cap. The existing
+reports **500,000** as GPT-6.1 Sol's default in Codex/ChatGPT Work. The bundled
+catalog still lists Sol at 272K and assigns 500K to Terra instead; account
+discovery is authoritative when sources disagree. Octet retains account discovery
+defaults separately from maximums and its deliberate 272K working cap. The existing
 acknowledged, entitlement-checked override remains opt-in; neither the guide nor
 API context/pricing establishes an account's entitlement or subscription price.
 See [context policy](../../../docs/codex-context.md).
+
+## Codex context catalog refresh
+
+The [pinned catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
+adds `gpt-6.1-terra`: 500K default / 872K maximum, low default reasoning with
+low through Ultra, text/image input and V2. Its offline fallback strips Ultra/V2.
+GPT-5.6 sol/terra/luna and `codex-auto-review` advertise 272K/872K. The window
+projection is pinned in `tests/codex_context_window.rs` in the coding-agent crate.
+All default working budgets now stop at 272K, removing Luna's 372K exception;
+every above-272K override requires entitlement and explicit acknowledgement.
+Public API prices, legacy model availability and subscription pricing are
+unchanged. This is bundled metadata evidence, not live account or inference QA.
 
 ## Reasoning contract supplement (2026-09-05)
 

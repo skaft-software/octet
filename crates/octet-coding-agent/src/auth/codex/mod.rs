@@ -53,6 +53,7 @@ pub const ENDPOINT_ID: &str = "openai-codex";
 /// so account-specific and newly released models are not gated on this list.
 pub const MODELS: &[&str] = &[
     "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",

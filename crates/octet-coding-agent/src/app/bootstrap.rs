@@ -2597,10 +2597,7 @@ fn has_model_id(catalog: &ModelCatalog, id: &str) -> bool {
 }
 
 pub(crate) fn known_gpt_6_model(id: &str) -> bool {
-    matches!(
-        id,
-        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
-    )
+    crate::codex_context::codex_gpt_6_model(id)
 }
 
 fn gpt_6_family_model(id: &str) -> bool {
@@ -2612,7 +2609,7 @@ fn gpt_6_family_model(id: &str) -> bool {
 /// Sparse public OpenAI inventory entries may use the documented GPT-6 family
 /// fallback. Other compatible providers must supply capability metadata.
 fn public_openai_gpt_6_model(declaration: &ProviderDeclaration, id: &str) -> bool {
-    declaration.id == "openai" && (known_gpt_6_model(id) || id == "gpt-6.1-terra")
+    declaration.id == "openai" && known_gpt_6_model(id)
 }
 
 fn anthropic_budget_capability() -> ReasoningCapability {
@@ -6337,12 +6334,12 @@ pub(crate) fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<
 // Codex's checked-in defaults are only a discovery fallback. The authenticated
 // `/models` response is authoritative for plan-specific advertised limits; octet
 // then applies the bounded working-window policy implemented by
-// `crate::codex_context` (the deliberate 272K cap with its `gpt-5.6-luna` 372K
-// exception, the per-family entitlement ceiling, the explicit opt-in override,
-// and the clamp notice), so frontends and bootstrap share one definition.
+// `crate::codex_context` (the deliberate 272K cap, the per-family entitlement
+// ceiling, the explicit opt-in override, and the clamp notice), so frontends
+// and bootstrap share one definition.
 /// Codex retains the provider-advertised maximum as discovery metadata, while
-/// octet budgets ordinary Codex families against Pi's 272K working window. GPT-5.6
-/// Luna uses its 372K default; smaller advertised windows remain authoritative.
+/// octet budgets every Codex family against a 272K working window. Smaller
+/// advertised windows remain authoritative.
 const CODEX_MODEL_CACHE_VERSION: u8 = 11;
 const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 // This is the Codex `/models` schema compatibility version octet implements,
@@ -6432,11 +6429,11 @@ fn positive_u64(entry: &serde_json::Value, names: &[&str]) -> Option<u64> {
 
 fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::ReasoningOptions {
     // Sparse Codex metadata cannot establish Off or Ultra for generic fallback
-    // models. Bundled 6.1 Sol advertises Ultra, but it is only usable when the
+    // models. Bundled 6.1 Sol/Terra advertise Ultra, but it is only usable when the
     // account inventory also positively advertises V2; offline fallback strips it.
     let floor = codex_min_effort(model_id);
     let ceiling = codex_max_effort(model_id);
-    let candidates: &[&str] = if model_id == "gpt-6.1-sol" {
+    let candidates: &[&str] = if matches!(model_id, "gpt-6.1-sol" | "gpt-6.1-terra") {
         &["low", "medium", "high", "xhigh", "max", "ultra"]
     } else if model_id == "gpt-5.6-luna" {
         &["none", "low", "medium", "high", "xhigh", "max"]
@@ -6451,16 +6448,16 @@ fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::Reasonin
             Some(ReasoningConfig::Effort(effort)) => {
                 effort >= floor
                     && (effort <= ceiling
-                        || (model_id == "gpt-6.1-sol"
+                        || (matches!(model_id, "gpt-6.1-sol" | "gpt-6.1-terra")
                             && effort == octet_ai::ReasoningEffort::Ultra))
             }
             _ => false,
         })
         .map(str::to_owned)
         .collect();
-    // Defaults follow the bundled Codex catalog (rust-v0.159.1).
+    // Defaults follow the bundled Codex catalog.
     let default = match model_id {
-        "gpt-6.1-sol" => Some("low"),
+        "gpt-6.1-sol" | "gpt-6.1-terra" => Some("low"),
         "gpt-6-sol" | "gpt-6-luna" => Some("medium"),
         _ => None,
     };
@@ -10167,18 +10164,18 @@ mod codex_context_note_regression_tests {
     /// window is the deliberate cap itself.
     ///
     /// A "reduced" route is one whose effective window is below what the plan
-    /// advertises, or above the 272K standard tier (`gpt-5.6-luna`). On a Plus
-    /// plan the backend applies its own default window, so the GPT-6 models
-    /// (`gpt-6.1-sol`, `gpt-6-astra`) are not reduced even though their
-    /// entitlement ceiling is 872K; on a Pro plan the advertised window is
-    /// raised and every 872K/1M family is reduced.
+    /// advertises. Terra's 500K default is reduced even on Plus; on a Pro plan
+    /// every 872K/1M family is reduced.
     #[test]
     fn registration_records_one_note_per_reduced_model_and_none_for_an_unreduced_route() {
         for (plan, reduced, plain) in [
             (
                 "plus",
-                &["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"][..],
+                &["gpt-6.1-terra"][..],
                 &[
+                    "gpt-5.6-luna",
+                    "gpt-5.6-sol",
+                    "gpt-5.6-terra",
                     "gpt-6.1-sol",
                     "gpt-6-astra",
                     "gpt-6-sol",
@@ -10192,6 +10189,7 @@ mod codex_context_note_regression_tests {
                 "pro",
                 &[
                     "gpt-6.1-sol",
+                    "gpt-6.1-terra",
                     "gpt-6-astra",
                     "gpt-6-sol",
                     "gpt-6-luna",
@@ -10274,7 +10272,7 @@ mod codex_context_note_regression_tests {
         // effective-model boundary returns one note for a reduced Codex route
         // and nothing for any other model. The process-boundary test in
         // `tests/parity_cli.rs` asserts the same through the real CLI.
-        let effective = catalog_id(&catalog, "gpt-5.6-sol");
+        let effective = catalog_id(&catalog, "gpt-6.1-terra");
         let note = notes
             .note_for(&effective)
             .expect("a reduced Codex model has one note")
@@ -10291,13 +10289,14 @@ mod codex_context_note_regression_tests {
         let (catalog, notes) = registered_notes("plus");
         let directory = tempfile::tempdir().unwrap();
 
-        // `gpt-5.6-luna`'s documented 372K working window is above the tier.
+        // An explicitly raised route still records sticky above-tier exposure.
         let luna_id = catalog_id(&catalog, "gpt-5.6-luna");
-        let luna = catalog.resolve(&luna_id).unwrap();
-        assert!(
-            notes.note_for(&luna_id).is_some(),
-            "an above-tier route carries the one session note"
-        );
+        let mut luna = catalog.resolve(&luna_id).unwrap();
+        assert_eq!(codex_context_uncertainty_operation(&luna), None);
+        assert!(notes.note_for(&luna_id).is_none());
+        std::sync::Arc::make_mut(&mut luna.spec)
+            .limits
+            .context_window = 372_000;
         assert_eq!(
             codex_context_uncertainty_operation(&luna),
             Some(crate::codex_context::CODEX_ABOVE_STANDARD_TIER_OPERATION)
@@ -10351,16 +10350,16 @@ mod codex_context_note_regression_tests {
         let luna = codex_discovered_model(
             "gpt-5.6-luna",
             crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
-            crate::codex_context::CODEX_5_6_CONTEXT_WINDOW,
+            crate::codex_context::CODEX_ASTRA_MAX_CONTEXT_WINDOW,
             128_000,
         );
         let resolution = codex_context_resolve_for_registration(
             &luna,
-            CodexContextTier::Default,
+            CodexContextTier::Extended,
             CodexContextOverride::NONE,
         );
         let note = codex_context_session_note("gpt-5.6-luna", &resolution).unwrap();
-        assert!(note.contains("effective 372K"), "{note}");
+        assert!(note.contains("effective 272K"), "{note}");
         let mut notes = CodexContextNotes::default();
         codex_context_record_note(
             &mut notes,
@@ -10379,7 +10378,7 @@ mod codex_context_note_regression_tests {
     #[test]
     fn the_codex_context_note_is_delivered_lazily_and_at_most_once() {
         let (catalog, notes) = registered_notes("plus");
-        let effective = catalog_id(&catalog, "gpt-5.6-sol");
+        let effective = catalog_id(&catalog, "gpt-6.1-terra");
         let expected = notes
             .note_for(&effective)
             .expect("a reduced Codex route has one note")

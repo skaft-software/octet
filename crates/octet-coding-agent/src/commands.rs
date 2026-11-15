@@ -649,7 +649,7 @@ impl CodexContextSurface {
         if !codex_responses_endpoint(model) {
             return None;
         }
-        let model_id = model.spec.id.0.clone();
+        let model_id = model.spec.api_name.clone();
         let (fallback_default, entitled_max_window) =
             crate::codex_context::entitled_context_windows(&model_id);
         let advertised_window =

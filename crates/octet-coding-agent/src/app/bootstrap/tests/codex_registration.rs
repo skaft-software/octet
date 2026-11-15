@@ -178,7 +178,10 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
         // Subscription pricing is reviewed only where it was observed.
         assert_eq!(
             model.spec.pricing.is_some(),
-            !matches!(*model_id, "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna")
+            !matches!(
+                *model_id,
+                "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna"
+            )
         );
         if *model_id == "gpt-6-astra" {
             assert!(model
@@ -689,14 +692,7 @@ fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
             assert!(sol || model.id == "gpt-5.6-luna");
             assert_eq!(model.default_context_window, 272_000);
             assert_eq!(model.max_context_window, 872_000);
-            assert_eq!(
-                model.context_window,
-                if !sol && plan == "pro" {
-                    372_000
-                } else {
-                    272_000
-                }
-            );
+            assert_eq!(model.context_window, 272_000);
             assert_eq!(model.max_output_tokens, CODEX_MAX_OUTPUT_TOKENS);
             assert_eq!(model.min_effort, octet_ai::ReasoningEffort::Low);
             assert_eq!(
@@ -751,7 +747,13 @@ fn codex_observed_sol_luna_inventory_preserves_exact_ids_and_oauth_routes() {
 /// octet has a contract for, with the same reasoning choices as discovery.
 #[test]
 fn codex_offline_fallback_covers_every_known_gpt6_model() {
-    for id in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+    for id in [
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+    ] {
         assert!(known_gpt_6_model(id), "{id}");
         assert!(
             crate::auth::codex::MODELS.contains(&id),
@@ -1423,7 +1425,97 @@ fn codex_discovery_caps_default_and_max_plan_windows_at_272k() {
 }
 
 #[test]
-fn codex_discovery_uses_372k_window_for_luna() {
+fn codex_terra_catalog_contract_survives_discovery_and_fallback() {
+    // Model-only projection of openai/codex 126a0ee92e, not live account QA.
+    let body = serde_json::json!({"models": [{
+        "slug": "gpt-6.1-terra", "context_window": 500_000,
+        "max_context_window": 872_000, "default_reasoning_level": "low",
+        "supported_reasoning_levels": [
+            {"effort":"low"}, {"effort":"medium"}, {"effort":"high"},
+            {"effort":"xhigh"}, {"effort":"max"}, {"effort":"ultra"}
+        ],
+        "input_modalities": ["text", "image"], "multi_agent_version": "v2"
+    }]});
+    let directory = tempfile::tempdir().unwrap();
+    for plan in ["plus", "pro"] {
+        let path = directory.path().join(format!("{plan}.json"));
+        write_codex_credential(&path, false, plan);
+        let store = crate::auth::codex::CredentialStore::new(path);
+        let claims = crate::auth::codex::usable_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let models = codex_models_from_response(&body, claims.plan.as_ref()).unwrap();
+        let terra = &models[0];
+        assert_eq!(terra.default_context_window, 500_000);
+        assert_eq!(terra.max_context_window, 872_000);
+        assert_eq!(terra.context_window, 272_000);
+        assert_eq!(terra.reasoning_options.default.as_deref(), Some("low"));
+        assert_eq!(terra.max_effort, octet_ai::ReasoningEffort::Ultra);
+        save_codex_model_cache(&store, &CodexDiscovery { claims, models }).unwrap();
+        for cached in [true, false] {
+            let store = if cached {
+                store.clone()
+            } else {
+                let path = directory.path().join(format!("{plan}-fallback.json"));
+                write_codex_credential(&path, false, plan);
+                crate::auth::codex::CredentialStore::new(path)
+            };
+            let mut catalog = ModelCatalog::default();
+            register_openai_codex(&mut catalog, store.clone(), true).unwrap();
+            let model = catalog
+                .resolve(&ModelId("codex/gpt-6.1-terra".into()))
+                .unwrap();
+            assert_eq!(model.spec.limits.context_window, 272_000);
+            assert_eq!(model.spec.limits.max_output_tokens, 128_000);
+            assert!(model.spec.pricing.is_none());
+            let options = model
+                .spec
+                .capabilities
+                .reasoning
+                .as_ref()
+                .unwrap()
+                .options
+                .as_ref()
+                .unwrap();
+            assert_eq!(options.values, ["low", "medium", "high", "xhigh", "max"]);
+            assert_eq!(options.default.as_deref(), Some("low"));
+            assert_eq!(model.spec.capabilities.agent_delegation, None);
+        }
+    }
+}
+
+#[test]
+fn codex_current_schema_cache_reclamps_the_historical_luna_working_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "pro");
+    let store = crate::auth::codex::CredentialStore::new(path);
+    let claims = crate::auth::codex::usable_subscription_claims(&store)
+        .unwrap()
+        .unwrap();
+    let mut luna = codex_discovered_model("gpt-5.6-luna", 272_000, 872_000, 128_000);
+    luna.context_window = 372_000;
+    save_codex_model_cache(
+        &store,
+        &CodexDiscovery {
+            claims: claims.clone(),
+            models: vec![luna],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        load_codex_model_cache(&store, &claims).unwrap().unwrap()[0].context_window,
+        372_000
+    );
+    let mut catalog = ModelCatalog::default();
+    register_openai_codex(&mut catalog, store, true).unwrap();
+    let model = catalog.resolve(&ModelId("gpt-5.6-luna".into())).unwrap();
+    assert_eq!(model.spec.limits.context_window, 272_000);
+    assert_eq!(codex_context_uncertainty_operation(&model), None);
+}
+
+#[test]
+fn codex_discovery_keeps_luna_below_the_cost_cliff() {
     let body = serde_json::json!({
         "models": [{
             "slug": "gpt-5.6-luna",

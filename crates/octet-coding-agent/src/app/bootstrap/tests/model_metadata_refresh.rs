@@ -15,7 +15,7 @@ fn codex_refresh_entry(id: &str) -> serde_json::Value {
 #[test]
 fn codex_refresh_keeps_modalities_and_exact_thinking_without_a_model_patch() {
     for id in ["gpt-6.1-terra", "future-account-model"] {
-        assert!(!codex_supports_image_input(id));
+        assert_eq!(codex_supports_image_input(id), id == "gpt-6.1-terra");
         let models = codex_models_from_response(
             &serde_json::json!({"models":[codex_refresh_entry(id)]}),
             None,

@@ -56,11 +56,11 @@ fn gpt_6_capability_fallback_is_limited_to_public_openai() {
 }
 
 #[test]
-fn terra_public_contract_does_not_expand_codex_or_other_provider_fallbacks() {
+fn terra_public_and_codex_contracts_do_not_leak_to_other_providers() {
     let openai = &crate::providers::OPENAI;
     assert!(public_openai_gpt_6_model(openai, "gpt-6.1-terra"));
-    assert!(!known_gpt_6_model("gpt-6.1-terra"));
-    assert!(!crate::auth::codex::MODELS.contains(&"gpt-6.1-terra"));
+    assert!(known_gpt_6_model("gpt-6.1-terra"));
+    assert!(crate::auth::codex::MODELS.contains(&"gpt-6.1-terra"));
     for declaration in [
         &crate::providers::CODEX,
         &crate::providers::OPENCODE,
@@ -81,7 +81,7 @@ fn terra_public_contract_does_not_expand_codex_or_other_provider_fallbacks() {
         assert!(sparse_route_reasoning(openai, Protocol::OpenAiResponses, id).is_none());
     }
     assert!(sparse_route_reasoning(openai, Protocol::OpenAiChat, "gpt-6.1-terra").is_none());
-    assert!(!codex_supports_image_input("gpt-6.1-terra"));
+    assert!(codex_supports_image_input("gpt-6.1-terra"));
 }
 
 #[test]

@@ -21,29 +21,31 @@ resolution, notice). Bootstrap application:
 * usage above 272K is **double-priced** (guidance: about 2x input / 1.5x output
   for the *whole* request, not only the excess).
 
-octet therefore keeps the cap by default. `gpt-5.6-luna` is the one documented
-exception: its conservative working window is 372K. The websocket drop-protection
-work itself lives in `crates/octet-ai` and is owned separately; this document
+octet therefore keeps the 272K cap by default for every model, including
+`gpt-5.6-luna`; larger windows always require the explicit opt-in below. The
+websocket drop-protection work itself lives in `crates/octet-ai` and is owned
+separately; this document
 only records the budgeting policy and the notice that references it.
 
-The current [official model guide](https://developers.openai.com/codex/models)
-reports a **500,000-token default** for GPT-6.1 Sol in Codex and ChatGPT Work.
-This is a provider default, not octet's working policy or an account entitlement.
-Discovery retains that default separately from the maximum (historically 872K)
-and still applies the 272K cap. A larger provider default alone does not remove
-the consent/entitlement gates below, and a public API context window or tariff
+The [bundled catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
+lists a **500,000-token default** for `gpt-6.1-terra`, and 272K for `gpt-6.1-sol`,
+with an 872K maximum for both. The public model guide names Sol for the 500K
+default instead; account discovery remains authoritative rather than inferring
+one model's contract from that prose. Discovery retains defaults separately from
+maximums and still applies the 272K cap. A larger provider default alone does not
+remove the consent/entitlement gates below, and a public API context window or tariff
 cannot establish a subscription contract. Changing the deliberate cap remains
 a separate product decision, not a metadata-freshness correction.
 
 ## 2. Working window and entitlement table
 
-| Model (`api_name`) | Working window octet budgets | Advertised/entitled ceiling |
-| --- | --- | --- |
-| `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-luna` | 272,000 | 872,000 |
-| `gpt-5.4`, `codex-auto-review` | 272,000 | 1,000,000 |
-| `gpt-5.6-luna` | 372,000 | 372,000 (family default) |
-| `gpt-5.6-*` (sol, terra, ...) | 272,000 | 372,000 |
-| any other/legacy Codex id | 272,000 | 272,000 |
+| Model (`api_name`) | Provider default fallback | Working cap | Advertised/entitled ceiling |
+| --- | --- | --- | --- |
+| `gpt-6.1-terra` | 500,000 | 272,000 | 872,000 |
+| `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-luna` | 272,000 | 272,000 | 872,000 |
+| `gpt-5.6-*` (sol, terra, luna), `codex-auto-review` | 272,000 | 272,000 | 872,000 |
+| `gpt-5.4` (legacy) | 272,000 | 272,000 | 1,000,000 |
+| any other/legacy Codex id | 272,000 | 272,000 | 272,000 |
 
 * **Working window** = `working_context_window(model_id)`; what octet actually
   budgets requests against.
@@ -109,8 +111,7 @@ not a clamp either: only a deliberate reduction is reported.
 an *effective* Codex session model. It returns `None` unless that model's window is
 reduced by the deliberate cap or above the 272K standard tier, and its wording is
 plain user language: no internal API name, no operation id, and the effective
-window is identical in the clamp and above-standard-tier variants (so the 372K
-`gpt-5.6-luna` window never reads as a clamp to 272K).
+window is identical in the clamp and above-standard-tier variants.
 
 Startup renders **nothing**: no note, no "starting extensions", no phase text.
 Catalog construction only *records* notes (`CodexContextNotes`, one per model that
@@ -197,8 +198,7 @@ the acknowledgement flag:
 
 Above the standard 272K tier the whole request is priced differently, so octet
 must not present an exact-looking cost. `CodexContextWindow::has_uncertain_usage`
-is `true` whenever the effective window exceeds 272K (including a granted
-override, and `gpt-5.6-luna`'s documented 372K working window).
+is `true` whenever an explicit override raises the effective window above 272K.
 `CodexContextWindow::uncertain_usage_operation()` returns the operation id
 `codex-context-above-272k` (`CODEX_ABOVE_STANDARD_TIER_OPERATION`) to pass to
 `Session::record_usage_uncertainty(endpoint, model, operation)`, which keeps
@@ -234,7 +234,12 @@ compaction threshold; provider-side enforcement is unchanged.
 * `c29103fb ... Codex Luna context support (#398)` added the per-model
   `codex_context_window_cap` (372K for `gpt-5.6-luna`, 272K otherwise) and applied
   it on top of the plan gate, plus the `gpt-6-astra` 872K advertised envelope.
-* The gap this change closes was **observability and consent**: the cap was
+* The catalog refresh removes Luna's historical 372K working-cap exception:
+  all default budgets stay at or below 272K, and even a 272,001-token override
+  requires entitlement and acknowledgement. GPT-5.6 maxima are now 872K;
+  Terra's 500K default is metadata, not an automatic budget increase. Existing
+  normalized caches are re-resolved at registration, so no schema bump is needed.
+* The gap the original notice change closed was **observability and consent**: the cap was
   silent (a session simply compacted at 272K with no explanation), there was no
   opt-in way to raise it, and nothing marked usage above 272K as uncertain. The
   budget values themselves are unchanged.
@@ -300,8 +305,9 @@ else is deferred to `Bootstrap::enrich_catalog`.
   Pro overrides reach 872K/1M, above-entitlement and unacknowledged requests fail
   closed, above-272K marks usage uncertain, output never exceeds the window, the
   notice fires once per transition and never without a clamp, the single session
-  note is absent for an unreduced legacy route, luna's 372K is consistent in every
-  variant, and no note names an internal API or operation id.
+  note is absent for an unreduced route, Luna requires consent immediately above
+  272K, catalog fallbacks match the pinned source, and no note names an internal
+  API or operation id.
 * `crates/octet-coding-agent/src/app/bootstrap.rs`
   (`codex_context_note_regression_tests`) — registration records one note per
   reduced model and none for an unreduced route (table-driven for Plus and Pro),

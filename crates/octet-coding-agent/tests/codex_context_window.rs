@@ -13,32 +13,16 @@ use octet_sdk::codex_context::{
     working_context_window, CodexContextClamp, CodexContextClampReporter, CodexContextOverride,
     CodexContextTier, CodexContextWindow, CodexContextWindowError, CODEX_5_6_CONTEXT_WINDOW,
     CODEX_ABOVE_STANDARD_TIER_OPERATION, CODEX_ASTRA_MAX_CONTEXT_WINDOW,
-    CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING, CODEX_CONTEXT_WINDOW_CAP, CODEX_LEGACY_CONTEXT_WINDOW,
-    CODEX_MAX_OUTPUT_TOKENS, CODEX_PRO_CONTEXT_WINDOW,
+    CODEX_CONTEXT_ACKNOWLEDGEMENT_WORDING, CODEX_CONTEXT_WINDOW_CAP, CODEX_MAX_OUTPUT_TOKENS,
+    CODEX_PRO_CONTEXT_WINDOW,
 };
-
-/// The checked-in discovery fallback windows for a Codex model.
-fn fallback(model_id: &str) -> (u64, u64) {
-    if matches!(
-        model_id,
-        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
-    ) {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
-    } else if model_id == "gpt-5.4" || model_id == "codex-auto-review" {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_PRO_CONTEXT_WINDOW)
-    } else if model_id.starts_with("gpt-5.6-") {
-        (CODEX_5_6_CONTEXT_WINDOW, CODEX_5_6_CONTEXT_WINDOW)
-    } else {
-        (CODEX_LEGACY_CONTEXT_WINDOW, CODEX_LEGACY_CONTEXT_WINDOW)
-    }
-}
 
 fn resolve(
     model_id: &str,
     tier: CodexContextTier,
     user_override: CodexContextOverride,
 ) -> Result<CodexContextWindow, CodexContextWindowError> {
-    let (default_context_window, max_context_window) = fallback(model_id);
+    let (default_context_window, max_context_window) = entitled_context_windows(model_id);
     resolve_codex_context_window(
         model_id,
         tier,
@@ -65,6 +49,82 @@ fn extended_tier(model_id: &str) -> CodexContextWindow {
         CodexContextOverride::NONE,
     )
     .unwrap()
+}
+
+// Model-window projection of openai/codex 126a0ee92ed2c5e73cd8a8f7e37563e8527552d7,
+// codex-rs/models-manager/models.json. Not account entitlement or pricing evidence.
+#[test]
+fn current_codex_catalog_windows_keep_standard_tier_defaults() {
+    for (id, default, maximum) in [
+        ("gpt-6-astra", 272_000, 872_000),
+        ("gpt-6.1-sol", 272_000, 872_000),
+        ("gpt-6.1-terra", 500_000, 872_000),
+        ("gpt-6-sol", 272_000, 872_000),
+        ("gpt-6-luna", 272_000, 872_000),
+        ("gpt-5.6-sol", 272_000, 872_000),
+        ("gpt-5.6-terra", 272_000, 872_000),
+        ("gpt-5.6-luna", 272_000, 872_000),
+        ("gpt-5.5", 272_000, 272_000),
+        ("codex-auto-review", 272_000, 872_000),
+    ] {
+        assert_eq!(entitled_context_windows(id), (default, maximum), "{id}");
+        if maximum > CODEX_CONTEXT_WINDOW_CAP {
+            let raised = resolve(
+                id,
+                CodexContextTier::Extended,
+                CodexContextOverride::raising(maximum, true),
+            )
+            .unwrap();
+            assert_eq!(raised.context_window, maximum, "{id}");
+            assert!(raised.has_uncertain_usage, "{id}");
+            assert!(
+                matches!(
+                    resolve(
+                        id,
+                        CodexContextTier::Extended,
+                        CodexContextOverride::raising(maximum + 1, true)
+                    ),
+                    Err(CodexContextWindowError::OverrideAboveEntitlement { .. })
+                ),
+                "{id}"
+            );
+        }
+        for tier in [CodexContextTier::Default, CodexContextTier::Extended] {
+            let resolved = resolve_codex_context_window(
+                id,
+                tier,
+                default,
+                maximum,
+                None,
+                CodexContextOverride::NONE,
+            )
+            .unwrap();
+            assert_eq!(resolved.context_window, 272_000, "{id}/{tier:?}");
+            assert!(!resolved.has_uncertain_usage, "{id}/{tier:?}");
+        }
+    }
+}
+
+#[test]
+fn luna_requires_consent_immediately_above_the_standard_tier() {
+    for requested in [272_001, 300_000, 372_000] {
+        assert!(matches!(
+            resolve(
+                "gpt-5.6-luna",
+                CodexContextTier::Default,
+                CodexContextOverride::raising(requested, true)
+            ),
+            Err(CodexContextWindowError::OverrideRequiresEntitlement { .. })
+        ));
+        assert!(matches!(
+            resolve(
+                "gpt-5.6-luna",
+                CodexContextTier::Extended,
+                CodexContextOverride::raising(requested, false)
+            ),
+            Err(CodexContextWindowError::OverrideRequiresAcknowledgement { .. })
+        ));
+    }
 }
 
 #[test]
@@ -100,6 +160,8 @@ fn deliberate_cap_holds_for_every_family_even_on_a_pro_plan() {
     for model_id in [
         "gpt-6-astra",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-5.6-luna",
         "gpt-5.4",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -297,14 +359,11 @@ fn above_the_standard_tier_accounting_is_uncertain() {
         None
     );
 
-    // Luna's documented 372K working window is above the standard tier too.
+    // Luna no longer enters the higher-priced tier without an override.
     let luna = extended_tier("gpt-5.6-luna");
-    assert_eq!(luna.context_window, CODEX_5_6_CONTEXT_WINDOW);
-    assert!(luna.has_uncertain_usage);
-    assert_eq!(
-        luna.clamp, None,
-        "372K luna is the documented window, not a clamp"
-    );
+    assert_eq!(luna.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    assert!(!luna.has_uncertain_usage);
+    assert!(luna.clamp.is_some());
 }
 
 #[test]
@@ -434,26 +493,23 @@ fn one_session_note_per_effective_model_and_none_for_an_unclamped_legacy_route()
     );
 }
 
-/// The 372K `gpt-5.6-luna` window is above the standard tier but is not a clamp.
-/// Every note variant must state the same effective window.
+/// A deliberately raised Luna window still reports consistent facts.
 #[test]
-fn the_luna_note_states_372k_consistently_and_never_reads_as_a_cap_to_272k() {
+fn the_luna_note_distinguishes_standard_defaults_from_explicit_raises() {
     let luna = default_tier("gpt-5.6-luna");
-    let note = codex_context_session_note("gpt-5.6-luna", &luna).expect("372K is above the tier");
-    assert!(note.contains("advertised 372K"), "{note}");
-    assert!(note.contains("entitled 372K"), "{note}");
-    assert!(note.contains("effective 372K"), "{note}");
-    assert!(
-        note.contains("above the 272K standard tier"),
-        "the note must say why it exists: {note}"
-    );
-    assert!(
-        !note.contains("reduces the advertised window"),
-        "372K luna is the documented window, not a reduction: {note}"
-    );
+    assert_eq!(codex_context_session_note("gpt-5.6-luna", &luna), None);
+    let raised = resolve(
+        "gpt-5.6-luna",
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(872_000, true),
+    )
+    .unwrap();
+    let note = codex_context_session_note("gpt-5.6-luna", &raised).unwrap();
+    assert!(note.contains("entitled 872K"), "{note}");
+    assert!(note.contains("effective 872K"), "{note}");
+    assert!(note.contains("above the 272K standard tier"), "{note}");
+    assert!(!note.contains("reduces the advertised window"), "{note}");
 
-    // A luna route that a smaller provider window does reduce still reports the
-    // same effective window in both facts, never a contradiction.
     let reduced = resolve_codex_context_window(
         "gpt-5.6-luna",
         CodexContextTier::Extended,
@@ -463,14 +519,14 @@ fn the_luna_note_states_372k_consistently_and_never_reads_as_a_cap_to_272k() {
         CodexContextOverride::NONE,
     )
     .unwrap();
-    assert_eq!(reduced.context_window, CODEX_5_6_CONTEXT_WINDOW);
-    let note = codex_context_session_note("gpt-5.6-luna", &reduced).expect("still above the tier");
-    assert!(note.contains("effective 372K"), "{note}");
+    assert_eq!(reduced.context_window, CODEX_CONTEXT_WINDOW_CAP);
+    let note = codex_context_session_note("gpt-5.6-luna", &reduced).unwrap();
+    assert!(note.contains("effective 272K"), "{note}");
     assert!(
-        note.contains("reduces the advertised window by 128K"),
+        note.contains("reduces the advertised window by 228K"),
         "{note}"
     );
-    assert!(note.contains("above the 272K standard tier"), "{note}");
+    assert!(!reduced.has_uncertain_usage);
 }
 
 /// The note is user-facing prose: no internal Rust API and no internal operation
@@ -479,7 +535,7 @@ fn the_luna_note_states_372k_consistently_and_never_reads_as_a_cap_to_272k() {
 fn the_session_note_never_names_an_internal_api_or_operation() {
     let mut variants = vec![
         codex_context_session_note("gpt-6-astra", &extended_tier("gpt-6-astra")).unwrap(),
-        codex_context_session_note("gpt-5.6-luna", &default_tier("gpt-5.6-luna")).unwrap(),
+        codex_context_session_note("gpt-5.6-luna", &extended_tier("gpt-5.6-luna")).unwrap(),
         extended_tier("gpt-6-astra").clamp.unwrap().message(),
         extended_tier("gpt-5.4").clamp.unwrap().message(),
     ];
@@ -577,12 +633,15 @@ fn the_above_standard_tier_operation_id_is_stable() {
         "codex-context-above-272k"
     );
 
-    // The documented 372K luna window is above the standard tier without any
-    // override, so its accounting is uncertain too — and it is not a clamp.
-    let luna = default_tier("gpt-5.6-luna");
-    assert_eq!(working_context_window("gpt-5.6-luna"), luna.context_window);
-    assert_eq!(luna.context_window, CODEX_5_6_CONTEXT_WINDOW);
-    assert!(!luna.override_applied);
+    // An explicitly raised Luna window retains the stable uncertainty marker.
+    let luna = resolve(
+        "gpt-5.6-luna",
+        CodexContextTier::Extended,
+        CodexContextOverride::raising(372_000, true),
+    )
+    .unwrap();
+    assert_eq!(luna.context_window, 372_000);
+    assert!(luna.override_applied);
     assert!(luna.has_uncertain_usage);
     assert_eq!(
         luna.uncertain_usage_operation(),
@@ -602,12 +661,13 @@ fn the_above_standard_tier_operation_id_is_stable() {
 }
 
 #[test]
-fn the_deliberate_cap_and_its_luna_exception_are_documented_values() {
+fn every_family_uses_the_documented_standard_cap() {
     assert_eq!(CODEX_CONTEXT_WINDOW_CAP, 272_000);
     assert_eq!(working_context_window("gpt-6-astra"), 272_000);
     assert_eq!(working_context_window("gpt-5.4"), 272_000);
     assert_eq!(working_context_window("legacy-codex"), 272_000);
-    assert_eq!(working_context_window("gpt-5.6-luna"), 372_000);
+    assert_eq!(working_context_window("gpt-5.6-luna"), 272_000);
+    assert_eq!(CODEX_5_6_CONTEXT_WINDOW, 272_000);
     // The public notice type is constructible by every frontend.
     let notice = CodexContextClamp {
         model_id: "gpt-6-astra".to_owned(),

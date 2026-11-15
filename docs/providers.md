@@ -232,9 +232,10 @@ Responses Lite; the inventory observation is retained without selecting that
 serial wire contract. If the metadata is missing or unusable, octet falls back to
 the more limited behavior. If the live inventory omits a model, no corresponding
 GPT-6 Codex route is injected. When
-advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6-astra`, `codex/gpt-6-sol`
-or `codex/gpt-6-luna`. These stay namespaced separately from direct OpenAI
-presets. When discovery is unreachable, 6.1 Sol leads the fallback suggestions.
+advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6.1-terra`, `codex/gpt-6-astra`,
+`codex/gpt-6-sol` or `codex/gpt-6-luna`. These stay namespaced separately from
+direct OpenAI presets. When discovery is unreachable, 6.1 Sol leads the fallback
+suggestions.
 
 Account-advertised input/output modalities and exact thinking choices/defaults
 survive discovery and its normalized cache, including newly named models such as
@@ -278,11 +279,14 @@ version while Codex 0.159.2 listed it for the same account. Discovery therefore
 sends 0.159.2, and cache schema 10 refreshes older inventories. Its subscription
 price stays unknown.
 
-The current [Codex model guide](https://developers.openai.com/codex/models)
-reports a **500,000-token default** for GPT-6.1 Sol in Codex and ChatGPT Work.
-That supersedes the historical bundled default above, not octet's deliberate
-272K working policy. Discovery retains the backend default separately from its
-maximum; neither the public guide nor a public API window grants an account a
+The [bundled catalog](https://github.com/openai/codex/blob/126a0ee92ed2c5e73cd8a8f7e37563e8527552d7/codex-rs/models-manager/models.json)
+adds GPT-6.1 Terra with a **500,000-token default** and 872K maximum. It keeps
+6.1 Sol at 272K/872K, whereas the public model guide names Sol for the 500K
+default. Account discovery wins over either fallback. All models, including
+GPT-5.6 Luna, keep octet's deliberate 272K working cap; GPT-5.6 maxima are 872K.
+Terra's conservative fallback uses low through max, default low, without Ultra/V2
+or an invented subscription price. Discovery retains the backend default
+separately from its maximum; neither the public guide nor a public API window grants an account a
 larger working window. The entitlement-checked, acknowledged override remains
 opt-in; see [Codex context policy](codex-context.md).
 

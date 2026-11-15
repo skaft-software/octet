@@ -946,6 +946,7 @@ fn codex_route(model_id: &str, context_window: u64) -> octet_ai::Model {
     let mut model = app.model.clone();
     std::sync::Arc::make_mut(&mut model.spec).protocol = octet_ai::Protocol::OpenAiResponses;
     std::sync::Arc::make_mut(&mut model.spec).id = octet_ai::ModelId(model_id.into());
+    std::sync::Arc::make_mut(&mut model.spec).api_name = model_id.into();
     std::sync::Arc::make_mut(&mut model.spec)
         .limits
         .context_window = context_window;
@@ -953,6 +954,21 @@ fn codex_route(model_id: &str, context_window: u64) -> octet_ai::Model {
         .runtime
         .responses_profile = octet_ai::ResponsesRuntimeProfile::Codex;
     model
+}
+
+#[test]
+fn namespaced_terra_context_surface_uses_the_provider_model_id() {
+    let mut model = codex_route("gpt-6.1-terra", 272_000);
+    std::sync::Arc::make_mut(&mut model.spec).id = octet_ai::ModelId("codex/gpt-6.1-terra".into());
+    let surface = CodexContextSurface::capture(&model, false).unwrap();
+    let summary = surface.summary_lines().join("\n");
+    assert!(summary.contains("advertised 500K"), "{summary}");
+    assert!(summary.contains("entitled 872K"), "{summary}");
+    assert!(summary.contains("effective 272K"), "{summary}");
+    let pro = CodexContextSurface::capture(&model, true).unwrap();
+    assert_eq!(pro.raise_target(), Some(872_000));
+    assert!(pro.raise(872_000, false).is_err());
+    assert_eq!(pro.raise(872_000, true), Ok(872_000));
 }
 
 #[test]
@@ -1038,7 +1054,7 @@ fn the_effort_menu_summary_never_renders_internal_identifiers() {
 
 #[test]
 fn above_the_standard_tier_cost_is_uncertain_never_an_exact_figure() {
-    // `gpt-5.6-luna` is the documented 372K family.
+    // An explicitly raised window, not Luna's default.
     let surface = CodexContextSurface::capture(&codex_route("gpt-5.6-luna", 372_000), true)
         .expect("Codex route");
     assert!(surface.has_uncertain_usage());
