@@ -168,6 +168,18 @@ test('model-end synchronous private append awaits the actual leaf receipt before
   await peer.close();
 });
 
+test('a refused observer append remains authoritative and is never retried', async t => {
+  const peer = launch(t, [factory], { hold: ['session/append_entry'] }); await peer.init(['session_entries']); await peer.start();
+  const request = peer.request('hook/run', params(peer, end(), 'append'));
+  const append = await peer.wait(frame => frame.method === 'session/append_entry');
+  peer.send({ jsonrpc: '2.0', id: append.id, error: { code: -32006, message: 'private persistence refusal' } });
+  assert.equal((await request.response).error.code, -32002);
+  assert.equal(peer.seen.filter(frame => frame.method === 'session/append_entry').length, 1);
+  assert.equal(peer.seen.some(frame => frame.method === 'notification' && frame.params.message.startsWith('model-end:')), false);
+  assert.equal(peer.seen.some(issueNotice), false, 'host write failures are not skipped callbacks');
+  await peer.close();
+});
+
 test('turn observations ignore results and report problems once per extension/event; a missing leaf consumer is refused', async t => {
   const peer = launch(t, [factory]); await peer.init(['session_entries']); await peer.start();
   // Pi's emit ignores an observation handler's return value.

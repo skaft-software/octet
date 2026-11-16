@@ -207,7 +207,9 @@ test('observation failures report the factory and continue without weakening vet
   assert.doesNotMatch(errors[0].message, /private text|ctx\.missing/);
   runtime.events.set('tool_call', handlers);
   await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === failure);
-  handlers[0].handler = () => { throw Object.assign(new Error('owner lost'), { code: -32002 }); };
+  // A genuine host owner refusal carries host provenance; a callback's own
+  // numeric code is isolated, as the dedicated turn-observer regression checks.
+  handlers[0].handler = () => { throw rpcError(-32002, 'owner lost'); };
   await assert.rejects(runtime.runEvent('turn_start', {}, store), /owner lost/);
   handlers[0].handler = () => { store.controller.abort(); throw new Error('ordinary error'); };
   await assert.rejects(runtime.runEvent('turn_start', {}, store), /abort/i);

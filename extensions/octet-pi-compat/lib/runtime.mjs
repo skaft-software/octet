@@ -7,7 +7,7 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, re
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { bounded, facade, fields, invalid, namedAPI, ownerKey, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
+import { bounded, facade, fields, invalid, isHostError, namedAPI, ownerKey, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { createAPI, createContext, extensionDisplayName, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
 import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent, validateToolContent } from './tools.mjs';
@@ -862,10 +862,11 @@ export class Runtime {
           result = run.value;
         } catch (error) {
           store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
-          // Pi's ExtensionRunner.emit reports a failing handler and runs the
-          // next one. Vetoes, cancellation, owner refusals and tracked host
-          // mutations still propagate; a skipped callback is never a host receipt.
-          if (veto || error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+          // Pi's packages/coding-agent/src/core/extensions/runner.ts:1096-1123
+          // reports a throwing observer and continues. A callback's own code
+          // is not a host outcome. Preserve genuine cancellation/owner refusals
+          // and tracked mutations; never retry the callback or its effects.
+          if (veto || isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
           this.reportCallbackError(event, entry.factory, error);
           continue;
         }

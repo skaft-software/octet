@@ -145,6 +145,25 @@ test('unsupported callback fields have a plain reason without echoing a private 
   assert.doesNotMatch(JSON.stringify([frames, diagnostics]), new RegExp(secret + '|unsupported_feature'));
 });
 
+test('turn observers isolate callback-owned authority-like codes and retain later handlers', async t => {
+  const { runtime, store, frames, diagnostics } = harness(t);
+  let kept = 0, effects = 0;
+  for (const event of ['turn_start', 'turn_end']) {
+    for (const code of [-32002, -32800, -32602]) {
+      runtime.events.set(event, [
+        { factory: 0, handler() { effects++; throw Object.assign(new Error(secret), { code }); } },
+        { factory: 1, handler() { kept++; } },
+      ]);
+      assert.deepEqual(await runtime.runEvent(event, { type: event }, store), { action: 'continue' });
+    }
+  }
+  assert.equal(effects, 6, 'failed callbacks are not retried');
+  assert.equal(kept, 6, 'each later handler runs at its boundary');
+  assert.equal(frames.length, 2, 'one warning per factory and stage');
+  assert.ok(frames.every(issueNotice));
+  assert.doesNotMatch(JSON.stringify([frames, diagnostics]), new RegExp(secret));
+});
+
 test('tool-result callback failures are redacted and deduplicated while later transformations still run', async t => {
   const { runtime, store, frames, diagnostics } = harness(t);
   runtime.events.set('tool_result', [
@@ -166,7 +185,7 @@ test('veto, cancellation, owner fences, and tracked host mutations still fail cl
   const veto = new Error('permission callback failed');
   runtime.events.set('tool_call', [{ factory: 0, handler: () => { throw veto; } }]);
   await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === veto);
-  for (const event of ['agent_end', 'tool_result']) {
+  for (const event of ['agent_end', 'turn_start', 'turn_end', 'tool_result']) {
     for (const code of [-32800, -32002]) {
       const refusal = rpcError(code, 'refused');
       runtime.events.set(event, [{ factory: 0, handler: () => { throw refusal; } }]);

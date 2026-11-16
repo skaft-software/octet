@@ -101,7 +101,10 @@ without substituting model-family colors. This is palette projection, not copied
 Pi renderer geometry or full original-package qualification.
 
 Failing lifecycle observation callbacks are reported with their factory and event
-while later callbacks continue. Permission/veto hooks and owner fences continue
+while later callbacks continue. Callback-owned numeric error codes, including
+those used by native owner/cancellation refusals, stay local to the failing
+observer. Model-turn callbacks retain acknowledged appends and are never retried;
+later factories and subsequent turns still run. Permission/veto hooks and owner fences continue
 to fail closed; cancellation remains enforced. A later callback timeout does not
 discard host-operation failures already recorded at the live boundary, but an
 operation failure arriving after that boundary settles cannot retroactively

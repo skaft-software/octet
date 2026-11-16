@@ -259,6 +259,9 @@ impl SessionOperationHook for ExtensionProcess {
 }
 
 #[cfg(test)]
+mod process_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
