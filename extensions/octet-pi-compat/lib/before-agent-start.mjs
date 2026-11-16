@@ -67,9 +67,30 @@ export async function beforeAgentStart(runtime, payload, store) {
       }
       store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
       if (result !== undefined) {
-        fields(result, ['systemPrompt', 'message'], 'before_agent_start result');
-        if (result.message !== undefined) messages.push(customMessage(result.message));
-        if (result.systemPrompt !== undefined) prompt.options.forceSystemPrompt = system(result.systemPrompt);
+        let snapshot;
+        try { snapshot = structuredClone(result); }
+        catch (error) {
+          store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
+          if (isHostError(error) || store.errors.includes(error)) throw error;
+          runtime.reportCallbackError('before_agent_start', entry.factory, error);
+          await runtime.flush(child);
+          continue;
+        }
+        let message, replacement;
+        try {
+          fields(snapshot, ['systemPrompt', 'message'], 'before_agent_start result');
+          if (snapshot.message !== undefined) message = customMessage(snapshot.message);
+          if (snapshot.systemPrompt !== undefined) replacement = system(snapshot.systemPrompt);
+        } catch (error) {
+          store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
+          runtime.reportCallbackError('before_agent_start', entry.factory, error);
+          await runtime.flush(child);
+          continue;
+        }
+        // Pi 1.5.0 dist/core/extensions/runner.js:1121-1162 chains successful
+        // results and reports a throwing handler without stopping later handlers.
+        if (message !== undefined) messages.push(message);
+        if (replacement !== undefined) prompt.options.forceSystemPrompt = replacement;
       }
       await runtime.flush(child);
     }

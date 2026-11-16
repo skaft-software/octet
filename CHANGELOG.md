@@ -35,6 +35,7 @@
 - Extension activation and trust flags preserve following subcommands. ([#734](https://github.com/skaft-software/octet/pull/734) by [@gafiatulin](https://github.com/gafiatulin))
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Pi prompt hooks preserve valid results around malformed prompt replacements.
 
 ## [0.10.4] - 2026-11-12
 

@@ -167,3 +167,14 @@ test('MCP transport and feature failure is a background error, not session_start
   assert.equal(errors.some(error => error.message.includes('SECRET')), false);
   assert.equal(api.getMcpServers().length, 1);
 });
+
+test('malformed before_agent_start results do not discard earlier or later results', async () => {
+  const f = promptFixture([
+    () => ({ systemPrompt: 'first' }),
+    () => ({ systemPrompt: 'bad\0prompt', message: { customType: 'bad', content: 'discard', display: false } }),
+    event => ({ systemPrompt: event.systemPrompt + ' later' }),
+  ]);
+  assert.deepEqual(await f.run(), { systemPrompt: 'first later', messages: [] });
+  assert.equal(f.errors.length, 1);
+  assert.equal(f.errors[0][0], 'before_agent_start');
+});

@@ -474,3 +474,20 @@ test('process context validates opaque reasoning before callbacks and permits or
   }
   await peer.close();
 });
+
+test('malformed context result preserves previous projection and later handlers', async () => {
+  const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  const reports = []; runtime.reportCallbackError = (...args) => reports.push(args);
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  runtime.events.set('context', [
+    { factory: 0, handler: () => ({ messages: [{ role: 'user', content: 'good' }] }) },
+    { factory: 0, handler: e => { e.messages[0].content = 'poison'; return { messages: 'invalid' }; } },
+    { factory: 0, handler: e => { e.messages.push({ role: 'user', content: 'later' }); } },
+  ]);
+  const result = await projectContext(runtime, params, store);
+  assert.deepEqual(result.provider_context.messages, [user('good'), user('later')]);
+  assert.equal(reports.length, 1); assert.equal(reports[0][0], 'context');
+});

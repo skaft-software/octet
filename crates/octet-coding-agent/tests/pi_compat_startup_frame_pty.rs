@@ -268,6 +268,10 @@ impl Fixture {
     /// A disposable HOME/workspace plus a real reviewed adapter around one
     /// fixture factory (only when `with_fixture`).
     fn new(with_fixture: bool, api: Option<&str>) -> Self {
+        Self::with_source(with_fixture, api, SLOW_FACTORY)
+    }
+
+    fn with_source(with_fixture: bool, api: Option<&str>, source: &str) -> Self {
         let root = tempfile::tempdir().expect("fixture tempdir");
         let canonical = root.path().canonicalize().expect("canonical fixture root");
         let home = canonical.join("home");
@@ -303,7 +307,7 @@ impl Fixture {
             let entry = canonical.join("slow-factory.mjs");
             fs::write(
                 &entry,
-                SLOW_FACTORY
+                source
                     .replace(
                         "ENTERED_PATH",
                         &serde_json::to_string(&factory_entered).unwrap(),
@@ -628,4 +632,40 @@ fn slow_fixture_factory_never_blocks_the_first_frame_and_hook_order_holds() {
         settled > frame_ready,
         "extensions.settled ({settled}us) must follow the frame ({frame_ready}us)"
     );
+}
+
+#[test]
+fn malformed_pi_prompt_hooks_preserve_provider_request() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let provider = MockProvider::start();
+    let source = r#"import { writeFileSync } from 'node:fs';
+export default pi => {
+  writeFileSync(ENTERED_PATH, 'entered');
+  pi.on('input', () => { throw Object.assign(new Error('private'), {code: -32002}); });
+  pi.on('input', () => ({action: 'transform', text: 'invalid', images: [{}]}));
+  pi.on('input', event => ({action: 'transform', text: event.text + ' transformed'}));
+  pi.on('before_agent_start', () => ({systemPrompt: 'bad\0prompt'}));
+  pi.on('before_agent_start', event => ({systemPrompt: event.systemPrompt + '\nHOOK_MARKER_TEXT'}));
+};
+"#;
+    let fixture = Fixture::with_source(true, Some(&provider.url), source);
+    let mut octet = OctetRun::spawn(&fixture, true);
+    octet.await_phase("frame.ready", FRAME_BUDGET);
+    octet.pty.write_input(b"input fault probe\r");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while provider.user_prompts().is_empty() && Instant::now() < deadline {
+        octet.pty.read_available();
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        provider.user_prompts(),
+        vec!["input fault probe transformed".to_owned()]
+    );
+    assert!(provider
+        .system_prompts()
+        .iter()
+        .any(|system| system.contains(HOOK_MARKER)));
+    octet.shutdown();
 }

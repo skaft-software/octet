@@ -356,10 +356,22 @@ export async function projectContext(runtime, params, store) {
         continue;
       }
       live();
-      if (result !== undefined) { record(result, ['messages'], 'context result'); if (result.messages !== undefined) messages = array(result.messages, 'context result messages'); else messages = visible; }
-      else messages = visible;
+      let candidate = visible;
+      if (result !== undefined) {
+        record(result, ['messages'], 'context result');
+        const replacement = result.messages;
+        if (replacement !== undefined) {
+          try { candidate = array(replacement, 'context result messages'); }
+          catch (error) {
+            live(); if (store.errors.includes(error)) throw error;
+            runtime.reportCallbackError('context', entry.factory, error, store.state);
+            continue;
+          }
+        }
+      }
       // Refuse unsupported mutations before exposing them to another callback.
-      piToCanonical(messages);
+      piToCanonical(candidate);
+      messages = candidate;
     }
     contextBudget.finish();
     if (runtime.events.has('context_with_system')) {

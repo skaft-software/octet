@@ -15,7 +15,8 @@ test('before_agent_start maps actual base and ordered replacements, including em
   const custom = await peer.request('hook/run', params(peer, 'unsupported')).response;
   assert.ok(!custom.error, JSON.stringify(custom.error));
   assert.deepEqual(custom.result.custom_messages, [{ custom_type: 'not-bound', content: 'not dropped', display: false }]);
-  assert.ok((await peer.request('hook/run', params(peer, 'nul')).response).error);
+  // A NUL replacement is malformed and is skipped; the native prompt remains.
+  assert.ok((await peer.request('hook/run', params(peer, 'nul')).response).result);
   await peer.close();
 });
 test('before_agent_start requires native feature and configure records actual system_prompt permission', async t => {
