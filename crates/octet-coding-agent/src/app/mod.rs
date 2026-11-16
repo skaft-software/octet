@@ -658,6 +658,7 @@ impl App {
         &mut self,
     ) -> anyhow::Result<crate::extensions::DeferredStartupProgress> {
         let service_available = self.executable_extensions.has_agent_session_service();
+        let was_pending = self.executable_extensions.startup_pending();
         let (host, session) = self.agent.extension_host_and_session();
         let mut progress = self
             .executable_extensions
@@ -669,6 +670,9 @@ impl App {
             progress
                 .notices
                 .extend(self.synchronize_extension_provider_catalog());
+        }
+        if was_pending && !self.executable_extensions.startup_pending() {
+            self.executable_extensions.complete_provider_reload(None);
         }
         self.activate_resource_paths_consumer();
         if !service_available && self.executable_extensions.has_agent_session_service() {
@@ -688,6 +692,7 @@ impl App {
     pub(crate) async fn await_extension_prompt_hooks(&mut self) -> anyhow::Result<Vec<String>> {
         let service_available = self.executable_extensions.has_agent_session_service();
         let attached = self.executable_extensions.attached_count();
+        let was_pending = self.executable_extensions.startup_pending();
         let (host, session) = self.agent.extension_host_and_session();
         let result = self
             .executable_extensions
@@ -704,6 +709,9 @@ impl App {
         if !service_available && self.executable_extensions.has_agent_session_service() {
             self.executable_extensions
                 .bind_agent_sessions(&self.agent)?;
+        }
+        if was_pending && !self.executable_extensions.startup_pending() {
+            self.executable_extensions.complete_provider_reload(None);
         }
         result.map(|()| notices)
     }

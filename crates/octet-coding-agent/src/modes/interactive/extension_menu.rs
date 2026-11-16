@@ -2029,6 +2029,7 @@ async fn set_extension_enabled_fenced(
     currently_enabled: bool,
     fence: Option<&Fence>,
 ) -> anyhow::Result<(App, bool)> {
+    crate::app::bootstrap::startup_phase("extensions.toggle.requested");
     let authoritative = match crate::cli::extension_activation_menu_authoritative(&app.config) {
         Ok(authoritative) => authoritative,
         Err(error) => {
@@ -2121,7 +2122,10 @@ async fn set_extension_enabled_fenced(
     // one) and it may still contain a name the user switched off. Apply the
     // toggle to this one extension and keep every other source intact.
     crate::cli::apply_extension_toggle(&mut app.config, name, enabled);
-    app = match reload_resources(app, shell, input).await {
+    shell.notice(format!("{name}: activation saved; applying…"));
+    shell.render();
+    crate::app::bootstrap::startup_phase("extensions.toggle.acknowledged");
+    app = match reload_resources_after_toggle(app, shell, input).await {
         Ok((app, _)) => app,
         Err(error) => {
             let rollback =

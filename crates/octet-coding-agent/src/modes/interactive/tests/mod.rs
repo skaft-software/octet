@@ -46,6 +46,7 @@ mod pi_native_editor_service_tests;
 mod pi_original_clm_tests;
 mod pi_renderers_tests;
 mod pi_session_replacement_tests;
+mod pi_toggle_tests;
 mod pi_tool_hooks_tests;
 mod pi_tools_surface_tests;
 mod pi_ui_contract_tests;

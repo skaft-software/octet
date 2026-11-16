@@ -263,7 +263,16 @@ Automatic-mirror registration capture runs asynchronously without blocking the
 native branded input frame. While the explicitly enabled adapter prepares and
 attaches, the native input pump keeps typing in the draft and handles resize.
 First-frame readiness is not full extension-UI readiness or a claim that cold
-startup matches Pi.
+startup matches Pi. Enabling the adapter in `/extensions` acknowledges the saved
+activation before rebuilding, then returns editable/cancellable native control
+while factories attach. “Loading your Pi setup” stays visible until the idle
+pump settles initialization; startup failures name the extension. Submission
+still waits for its hooks, and disabling or closing retires pending activation.
+With `OCTET_STARTUP_TRACE=1`, `extensions.toggle.acknowledged`,
+`extensions.toggle.control-returned` and `extensions.hooks-settled` mark separate
+boundaries in microseconds from the process trace origin. The last boundary
+means initialization settled, not that a failed extension became ready; check
+its startup diagnostics. These timings never include draft text.
 **Continue without a provider** opens the native session and loads normally enabled,
 admitted extensions, including their commands and UI. The current model and context
 usage remain unavailable. Prompts and model-dependent operations stay disabled;

@@ -8548,11 +8548,19 @@ pub fn rebuild_app(
         new_reasoning_mode,
         selection,
         session_start_reason,
+        crate::extensions::ExtensionStartupTiming::Synchronous,
     )
 }
 
 pub fn rebuild_app_for_reload(app: App) -> anyhow::Result<App> {
-    rebuild_app_with_start_reason(app, None, None, None, None, "reload")
+    rebuild_app_for_reload_with_timing(app, crate::extensions::ExtensionStartupTiming::Synchronous)
+}
+
+pub(crate) fn rebuild_app_for_reload_with_timing(
+    app: App,
+    timing: crate::extensions::ExtensionStartupTiming,
+) -> anyhow::Result<App> {
+    rebuild_app_with_start_reason(app, None, None, None, None, "reload", timing)
 }
 
 fn rebuild_app_with_start_reason(
@@ -8562,6 +8570,7 @@ fn rebuild_app_with_start_reason(
     new_reasoning_mode: Option<ReasoningMode>,
     selection: Option<SessionSelection>,
     session_start_reason: &'static str,
+    extension_startup_timing: crate::extensions::ExtensionStartupTiming,
 ) -> anyhow::Result<App> {
     app.synchronize_extension_provider_catalog();
     let resource_consumer = app.resource_paths.capability;
@@ -8772,9 +8781,8 @@ fn rebuild_app_with_start_reason(
         provider_runtime,
         resource_consumer,
         session_start_reason,
-        // A rebuild replaces the fleet the caller already holds: it must be
-        // complete before the new App is published, never attached later.
-        crate::extensions::ExtensionStartupTiming::Synchronous,
+        // Only a foreground input pump may publish a still-starting fleet.
+        extension_startup_timing,
     )?;
     complete_delegation_catalog(
         executable_extensions.has_agent_session_service(),
@@ -8793,12 +8801,15 @@ fn rebuild_app_with_start_reason(
         resource_consumer,
     );
     let definitions = extensions.tool_definitions();
-    if session_start_reason == "reload" && same_session {
+    if session_start_reason == "reload" && same_session && !executable_extensions.startup_pending()
+    {
         executable_extensions.complete_provider_reload(None);
     }
+    let service_pending = executable_extensions.pending_agent_session_service();
     let service_available = executable_extensions.has_agent_session_service();
-    let subagents_available = service_available
-        && subagents_surface_available(&executable_extensions, &definitions, &model);
+    let subagents_available = executable_extensions.pending_subagents_service()
+        || (service_available
+            && subagents_surface_available(&executable_extensions, &definitions, &model));
     let (reasoning, reasoning_mode, migration_diagnostic) =
         normalize_reasoning_selection_for_model_with_subagents(
             &requested_reasoning,
@@ -8828,7 +8839,8 @@ fn rebuild_app_with_start_reason(
         &config,
         &definitions,
         &model,
-        executable_extensions.has_dynamic_tool_provider(),
+        executable_extensions.has_dynamic_tool_provider()
+            || executable_extensions.startup_pending(),
     )?;
     let mut agent = Agent::new(AgentConfig {
         client: client.clone(),
@@ -8865,7 +8877,12 @@ fn rebuild_app_with_start_reason(
             super::delegation_models::CodingAgentModelResolver::new(catalog.clone()),
         ));
     }
-    configure_v2_delegation(&mut agent, &model, &reasoning, service_available)?;
+    configure_v2_delegation(
+        &mut agent,
+        &model,
+        &reasoning,
+        service_available || service_pending,
+    )?;
     executable_extensions.bind_agent_sessions(&agent)?;
     if agent.reasoning() != &reasoning {
         // Construction restores durable effort. Install and bind observation

@@ -582,6 +582,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         price_display,
         reasoning,
         run_label,
+        extension_loading_status,
         verbose_tools,
         thinking_disclosure,
         size,

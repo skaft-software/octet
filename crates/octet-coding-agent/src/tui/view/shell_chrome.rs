@@ -85,11 +85,26 @@ pub(super) fn responsive_identity(state: &ShellState, width: u16) -> String {
 
 fn render_shell_header(state: &ShellState, width: u16) -> Vec<String> {
     let layout = state.theme.layout_for_width(width);
-    if layout.show_header {
+    let mut lines = if layout.show_header {
         vec![responsive_identity(state, width)]
     } else {
         Vec::new()
+    };
+    // Deferred activation status is local; painting never queries the host.
+    if let Some(status) = state
+        .extension_loading_status
+        .as_ref()
+        .filter(|_| state.panel.is_none())
+    {
+        let label = state.theme.dim(&sanitize_for_terminal(status));
+        if let Some(identity) = lines.first_mut() {
+            // Reuse a configured identity row rather than moving the draft.
+            *identity = fit_line(&format!("{label} · {identity}"), width);
+        } else {
+            lines.push(fit_line(&label, width));
+        }
     }
+    lines
 }
 
 fn render_extension_line(state: &ShellState, text: &str, role: Option<&str>, width: u16) -> String {

@@ -71,6 +71,7 @@
 - Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
 - Pi dispatcher liveness preserves user waits, isolates stalled callbacks and factory failures, and reports disconnects without replay.
 - Model labels consistently show full IDs and distinct display names across the footer, picker, splash and session views.
+- Enabling Pi compatibility returns editable control while factories load with a visible status and hook-readiness tracing.
 
 ## [0.10.4] - 2026-11-12
 

@@ -2000,6 +2000,7 @@ pub(crate) struct ShellState {
     /// Non-agent work such as compaction or sign-in. Agent runs never use this
     /// field; their phase always comes from `run`.
     pub(crate) run_label: String,
+    pub(crate) extension_loading_status: Option<String>,
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
     /// Thinking disclosure chosen with Ctrl+T or `/verbose`. `None` follows the
@@ -2383,6 +2384,7 @@ impl ShellState {
             reasoning: Default::default(),
             session_name: Default::default(),
             run_label: Default::default(),
+            extension_loading_status: None,
             verbose_tools: Default::default(),
             thinking_disclosure: Default::default(),
             size: Default::default(),
@@ -6632,6 +6634,10 @@ impl InteractiveShell {
 
     pub fn status_detail(&self) -> String {
         self.state.borrow().status_detail.clone()
+    }
+
+    pub(crate) fn set_extension_loading_status(&mut self, label: Option<String>) {
+        self.state.borrow_mut().extension_loading_status = label;
     }
 
     pub fn set_run_label(&mut self, label: &str) {

@@ -29,8 +29,8 @@ use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::app::bootstrap::{
     build_app_first_frame_first, effective_compaction_threshold_fraction, estimate_text_tokens,
-    open_launch_session, rebuild_app_for_reload, resolve_launch_interactive,
-    terminal_goal_session_id, Bootstrap, SessionSelection,
+    open_launch_session, resolve_launch_interactive, terminal_goal_session_id, Bootstrap,
+    SessionSelection,
 };
 #[cfg(test)]
 use crate::app::bootstrap::{build_app_with_resource_consumer as build_app, rebuild_app};
@@ -5734,10 +5734,54 @@ where
 /// for a reload somebody asked for (`/reload`), never for routine passes such
 /// as the file watcher or an extension toggle.
 async fn reload_resources_announcing<S>(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+    announce_success: bool,
+) -> anyhow::Result<(App, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    Box::pin(reload_resources_with_timing(
+        app,
+        shell,
+        input,
+        announce_success,
+        crate::extensions::ExtensionStartupTiming::Synchronous,
+    ))
+    .await
+}
+
+/// Activation uses the same owned deferred fleet as first-frame startup. Only
+/// the native host can do this: the adapter cannot release Rust's input owner.
+/// Pi keeps rendering across reload and restores focus before session_start:
+/// packages/coding-agent/src/modes/interactive/interactive-mode.ts:6558-6585;
+/// packages/coding-agent/src/core/agent-session.ts:3776 awaits session_start.
+/// Native input remains editable meanwhile, but submission still awaits hooks.
+async fn reload_resources_after_toggle<S>(
+    app: App,
+    shell: &mut InteractiveShell,
+    input: &mut S,
+) -> anyhow::Result<(App, bool)>
+where
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    Box::pin(reload_resources_with_timing(
+        app,
+        shell,
+        input,
+        false,
+        crate::extensions::ExtensionStartupTiming::AfterFirstFrame,
+    ))
+    .await
+}
+
+async fn reload_resources_with_timing<S>(
     mut app: App,
     shell: &mut InteractiveShell,
     input: &mut S,
     announce_success: bool,
+    timing: crate::extensions::ExtensionStartupTiming,
 ) -> anyhow::Result<(App, bool)>
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
@@ -5760,15 +5804,20 @@ where
         let mut app = app;
         app.system = compose_instructions(&app.config)?;
         app.system_tokens = estimate_text_tokens(&app.system);
-        let mut app = rebuild_app_for_reload(app)?;
+        let mut app = crate::app::bootstrap::rebuild_app_for_reload_with_timing(app, timing)?;
         app.mark_resource_paths_reload();
         Ok(app)
     })
     .await?;
     app.executable_extensions
         .activate_session_lifecycle_driver();
-    let mut problems =
-        resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?;
+    let mut problems = if app.executable_extensions.startup_pending() {
+        // The idle pump owns hook/resource readiness; returning this App is
+        // editable control, not permission to submit without its hooks.
+        Vec::new()
+    } else {
+        resource_paths::refresh_resource_paths_reporting(&mut app, shell, input).await?
+    };
     let (theme, problem) = crate::tui::theme::retain_invalid_file_theme(
         &app.config,
         &current_theme,
@@ -5792,6 +5841,14 @@ where
     // After hydration: it rebuilds the transcript, which would drop the note.
     shell.report_reload_outcome(&problems, announce_success);
     update_status(shell, &app);
+    if app.executable_extensions.startup_pending() {
+        shell.set_run_label(&pending_extension_label(&app));
+        shell.set_extension_loading_status(Some(pending_extension_label(&app)));
+    }
+    shell.render();
+    if timing == crate::extensions::ExtensionStartupTiming::AfterFirstFrame {
+        crate::app::bootstrap::startup_phase("extensions.toggle.control-returned");
+    }
     Ok((app, true))
 }
 
@@ -13335,6 +13392,7 @@ async fn run_interactive_once(
     // clears as soon as the last handshake settles.
     if app.executable_extensions.startup_pending() {
         shell.set_run_label(&pending_extension_label(&app));
+        shell.set_extension_loading_status(Some(pending_extension_label(&app)));
     }
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
@@ -13366,8 +13424,13 @@ async fn run_interactive_once(
     reload_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Owns the idle "extensions loading" status: cleared only when this loop
     // set it, never over a run or compaction label it did not write.
-    let mut extension_status_shown = false;
+    let mut extension_status_shown = app.executable_extensions.startup_pending();
     'interactive: loop {
+        if app.executable_extensions.startup_pending() {
+            shell.set_run_label(&pending_extension_label(&app));
+            shell.set_extension_loading_status(Some(pending_extension_label(&app)));
+            extension_status_shown = true;
+        }
         if shell.close_requested() {
             shutdown_for_exit(&mut app, &mut shell).await;
             break;
@@ -13402,12 +13465,15 @@ async fn run_interactive_once(
         }
         if app.executable_extensions.startup_pending() {
             shell.set_run_label(&pending_extension_label(&app));
+            shell.set_extension_loading_status(Some(pending_extension_label(&app)));
             extension_status_shown = true;
         } else if extension_status_shown {
             // The fleet this loop was reporting on has settled: clear the
             // status. A label written by a run, compaction, or command is not
             // ours to clear.
             shell.set_run_label("idle");
+            shell.set_extension_loading_status(None);
+            crate::app::bootstrap::startup_phase("extensions.hooks-settled");
             extension_status_shown = false;
         }
         let thinking_input = if startup_input.is_none() {
@@ -13697,6 +13763,7 @@ async fn run_interactive_once(
                     .await;
                     if app.executable_extensions.startup_pending() {
                         shell.set_run_label(&pending_extension_label(&app));
+                        shell.set_extension_loading_status(Some(pending_extension_label(&app)));
                     } else {
                         shell.set_run_label("idle");
                     }
