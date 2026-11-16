@@ -84,7 +84,7 @@
 - Plain-mode outcomes use compact durations with explicit completion, failure and interruption labels.
 - Pi turn observers isolate coded callback faults, preserve durable appends and continue later handlers.
 - Authenticated frontend model discovery keeps API keys within the requested HTTP origin.
-- Ctrl+D exits restore terminal attributes under tmux, including after extension reload and resize.
+- Ctrl+D exits preserve starting terminal settings under tmux after native input readiness, extension reload and resize.
 - Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
 - Pi dispatcher liveness preserves user waits, isolates stalled callbacks and factory failures, and reports disconnects without replay.
 - Model labels consistently show full IDs and distinct display names across the footer, picker, splash and session views.

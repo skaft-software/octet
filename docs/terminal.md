@@ -83,6 +83,10 @@ the session or model changed meanwhile. Setup prompts, errors, and cancel or
 shutdown diagnostics stay visible. Fresh sessions skip the replay worker
 entirely, and resumed sessions still restore their history. `--models` inventory
 discovery also runs after the shell owns input, not before the first paint.
+With `OCTET_STARTUP_TRACE=1`, stderr's `frame.ready` marks resolved native
+session/input ownership independently of splash and footer labels; it does not
+mean extension startup has settled. Ctrl+D restores the starting terminal
+settings, including under tmux after extension reload and resize.
 
 An extension's custom editor, footer, header, or widgets that appear during
 startup (for example a Pi extension's `setEditorComponent` in `session_start`)

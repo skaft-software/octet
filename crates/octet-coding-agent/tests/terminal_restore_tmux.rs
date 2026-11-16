@@ -182,10 +182,14 @@ fn ctrl_d_under_tmux_restores_starting_terminal_attributes() {
         ]);
         assert!(started.status.success(), "tmux new-session: {started:?}");
         wait_for(
-            "the first frame",
-            // Model resolution proves the composer is ready without depending
-            // on optional welcome-card help text.
-            || tmux.screen(&session).contains("custom/probe"),
+            "native input readiness",
+            // The startup trace marks resolved session/input ownership. Footer
+            // model labels may omit the provider, and splash text is optional.
+            || {
+                std::fs::read_to_string(run.join("stderr"))
+                    .unwrap_or_default()
+                    .contains("octet-startup: frame.ready ")
+            },
             &tmux,
             &session,
         );
