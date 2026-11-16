@@ -49,7 +49,9 @@ remain uncertain. Cancellation is not revocation or permission to replay.
 The declaration manifest/generator, static presets, compatibility and pricing
 now live under `octet_ai::providers`. The frontend reuses those owners and the
 pure `inventory_metadata` and Codex decoders. Existing catalogs and filtering
-remain intact. `providers::codex::CodexCatalog::fallback` and `from_inventory`
+remain intact. Frontend discovery registration passes model identity, capabilities,
+limits, pricing and audio provenance together as `DiscoveredModelMetadata` to the
+declaration-selected route. `providers::codex::CodexCatalog::fallback` and `from_inventory`
 construct immutable credential-free snapshots without any I/O. Supplied
 inventory must come from the caller's trusted account/endpoint; parsing alone
 does not authenticate it. `load_local` explicitly reads private storage and

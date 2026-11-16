@@ -26,7 +26,7 @@ use crate::providers::auth::EnvironmentCredential;
 use crate::providers::catalog::{
     register_discovered_model, register_dynamic_endpoints_at_base_url,
     register_environment_endpoints_at_base_url, register_private_endpoints_at_base_url,
-    register_static_models,
+    register_static_models, DiscoveredModelMetadata,
 };
 use crate::providers::contract::*;
 
@@ -604,15 +604,17 @@ fn register_fixture_model(
         "configured" | "discovered" => register_discovered_model(
             &mut catalog,
             declaration,
-            &fixture.model_id,
-            None,
-            fixture_capabilities(),
-            ModelLimits {
-                context_window: 1_024,
-                max_output_tokens: 256,
+            DiscoveredModelMetadata {
+                api_name: &fixture.model_id,
+                display_name: None,
+                capabilities: fixture_capabilities(),
+                limits: ModelLimits {
+                    context_window: 1_024,
+                    max_output_tokens: 256,
+                },
+                pricing: None,
+                audio_input_source: None,
             },
-            None,
-            None,
         )
         .unwrap_or_else(|error| panic!("{fixture_id}: model registration failed: {error}")),
         other => panic!("{fixture_id}: unknown fixture registration {other}"),

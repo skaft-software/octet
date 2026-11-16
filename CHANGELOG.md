@@ -73,6 +73,7 @@
 - Pi dispatcher liveness preserves user waits, isolates stalled callbacks and factory failures, and reports disconnects without replay.
 - Model labels consistently show full IDs and distinct display names across the footer, picker, splash and session views.
 - Enabling Pi compatibility returns editable control while factories load with a visible status and hook-readiness tracing.
+- Model discovery keeps capability, pricing and audio provenance together during route registration.
 
 ## [0.10.4] - 2026-11-12
 

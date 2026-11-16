@@ -510,9 +510,6 @@ fn strict_env(name: &str) -> anyhow::Result<Option<String>> {
     strict_env_value(name, octet_ai::auth::read_bounded_env(name))
 }
 
-#[cfg(test)]
-use octet_ai::providers::codex::discovery_http_client as discovery_client;
-
 fn blocking_discovery_client(timeout: Duration) -> reqwest::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -2701,45 +2698,47 @@ pub(crate) fn register_openai_compatible_models_from_response(
         crate::providers::register_discovered_model(
             catalog,
             declaration,
-            api_name,
-            model
-                .display_name
-                .clone()
-                .or_else(|| {
-                    (public_gpt_6 && api_name == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".into())
-                })
-                .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
-            Capabilities {
-                input_modalities,
-                output_modalities: conversation_output_modalities(
-                    protocol,
-                    model.output_modalities,
-                ),
-                tools: model.tools,
-                parallel_tool_calls: model.tools
-                    && model
-                        .parallel_tool_calls
+            crate::providers::DiscoveredModelMetadata {
+                api_name,
+                display_name: model
+                    .display_name
+                    .clone()
+                    .or_else(|| {
+                        (public_gpt_6 && api_name == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".into())
+                    })
+                    .or_else(|| direct_grok_4_7.then(|| "Grok 4.7".into())),
+                capabilities: Capabilities {
+                    input_modalities,
+                    output_modalities: conversation_output_modalities(
+                        protocol,
+                        model.output_modalities,
+                    ),
+                    tools: model.tools,
+                    parallel_tool_calls: model.tools
+                        && model
+                            .parallel_tool_calls
+                            .unwrap_or(protocol != Protocol::OpenAiChat),
+                    reasoning,
+                    responses_lite: false,
+                    agent_delegation: None,
+                    structured_output: model
+                        .structured_output
                         .unwrap_or(protocol != Protocol::OpenAiChat),
-                reasoning,
-                responses_lite: false,
-                agent_delegation: None,
-                structured_output: model
-                    .structured_output
-                    .unwrap_or(protocol != Protocol::OpenAiChat),
-                deferred_tool_loading: false,
-                responses_features: octet_ai::ResponsesFeatures {
-                    async_tools: public_gpt_6 && model.tools,
-                    steering: public_gpt_6,
-                    reasoning_effort_updates: public_gpt_6,
-                    compact_reasoning_effort_updates: false,
+                    deferred_tool_loading: false,
+                    responses_features: octet_ai::ResponsesFeatures {
+                        async_tools: public_gpt_6 && model.tools,
+                        steering: public_gpt_6,
+                        reasoning_effort_updates: public_gpt_6,
+                        compact_reasoning_effort_updates: false,
+                    },
                 },
+                limits: ModelLimits {
+                    context_window,
+                    max_output_tokens,
+                },
+                pricing: current_direct_model_pricing(declaration.id, api_name),
+                audio_input_source: Some(model.audio_source),
             },
-            ModelLimits {
-                context_window,
-                max_output_tokens,
-            },
-            current_direct_model_pricing(declaration.id, api_name),
-            Some(model.audio_source),
         )?;
     }
     Ok(())
@@ -2805,46 +2804,48 @@ pub(crate) fn register_anthropic_compatible_models_from_response(
         crate::providers::register_discovered_model(
             catalog,
             declaration,
-            api_name,
-            model
-                .display_name
-                .clone()
-                .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
-            Capabilities {
-                input_modalities,
-                output_modalities: conversation_output_modalities(
-                    route.protocol,
-                    model.output_modalities,
-                ),
-                tools: model.tools,
-                parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(true),
-                // Only a separately declared native contract is a fallback;
-                // a source boolean cannot invent adaptive-thinking support.
-                reasoning: discovered_reasoning_capability(
-                    declaration,
-                    route.protocol,
-                    api_name,
-                    &model.reasoning_metadata,
-                )
-                .filter(|capability| {
-                    // Leave at least one output token beyond the largest native
-                    // thinking budget so an answer can still be generated.
-                    capability
-                        .effort_budgets
-                        .is_none_or(|budgets| budgets.max < max_output_tokens)
-                }),
-                responses_lite: false,
-                agent_delegation: None,
-                structured_output: model.structured_output.unwrap_or(true),
-                deferred_tool_loading: false,
-                responses_features: Default::default(),
+            crate::providers::DiscoveredModelMetadata {
+                api_name,
+                display_name: model
+                    .display_name
+                    .clone()
+                    .or_else(|| direct_opus_5_5.then(|| "Claude Opus 5.5".into())),
+                capabilities: Capabilities {
+                    input_modalities,
+                    output_modalities: conversation_output_modalities(
+                        route.protocol,
+                        model.output_modalities,
+                    ),
+                    tools: model.tools,
+                    parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(true),
+                    // Only a separately declared native contract is a fallback;
+                    // a source boolean cannot invent adaptive-thinking support.
+                    reasoning: discovered_reasoning_capability(
+                        declaration,
+                        route.protocol,
+                        api_name,
+                        &model.reasoning_metadata,
+                    )
+                    .filter(|capability| {
+                        // Leave at least one output token beyond the largest native
+                        // thinking budget so an answer can still be generated.
+                        capability
+                            .effort_budgets
+                            .is_none_or(|budgets| budgets.max < max_output_tokens)
+                    }),
+                    responses_lite: false,
+                    agent_delegation: None,
+                    structured_output: model.structured_output.unwrap_or(true),
+                    deferred_tool_loading: false,
+                    responses_features: Default::default(),
+                },
+                limits: ModelLimits {
+                    context_window,
+                    max_output_tokens,
+                },
+                pricing: current_direct_model_pricing(declaration.id, api_name),
+                audio_input_source: Some(model.audio_source),
             },
-            ModelLimits {
-                context_window,
-                max_output_tokens,
-            },
-            current_direct_model_pricing(declaration.id, api_name),
-            Some(model.audio_source),
         )?;
     }
     Ok(())
@@ -3050,31 +3051,33 @@ fn register_deepseek_models_from_response(
         crate::providers::register_discovered_model(
             catalog,
             declaration,
-            api_name,
-            model.display_name.clone(),
-            Capabilities {
-                input_modalities: model.input_modalities(route.protocol),
-                output_modalities: conversation_output_modalities(
-                    route.protocol,
-                    model.output_modalities,
-                ),
-                tools: model.tools,
-                parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(false),
-                reasoning,
-                responses_lite: false,
-                agent_delegation: None,
-                structured_output: model.structured_output.unwrap_or(false),
+            crate::providers::DiscoveredModelMetadata {
+                api_name,
+                display_name: model.display_name.clone(),
+                capabilities: Capabilities {
+                    input_modalities: model.input_modalities(route.protocol),
+                    output_modalities: conversation_output_modalities(
+                        route.protocol,
+                        model.output_modalities,
+                    ),
+                    tools: model.tools,
+                    parallel_tool_calls: model.tools && model.parallel_tool_calls.unwrap_or(false),
+                    reasoning,
+                    responses_lite: false,
+                    agent_delegation: None,
+                    structured_output: model.structured_output.unwrap_or(false),
 
-                deferred_tool_loading: false,
+                    deferred_tool_loading: false,
 
-                responses_features: Default::default(),
+                    responses_features: Default::default(),
+                },
+                limits: ModelLimits {
+                    context_window,
+                    max_output_tokens,
+                },
+                pricing: None,
+                audio_input_source: Some(model.audio_source),
             },
-            ModelLimits {
-                context_window,
-                max_output_tokens,
-            },
-            None,
-            Some(model.audio_source),
         )?;
     }
     Ok(())
@@ -3476,26 +3479,28 @@ fn register_azure_openai(
     crate::providers::register_discovered_model(
         catalog,
         declaration,
-        &deployment,
-        Some(format!("Azure OpenAI: {deployment}")),
-        Capabilities {
-            input_modalities: ModalitySet::none().with(octet_ai::Modality::Image),
-            output_modalities: ModalitySet::none(),
-            tools: true,
-            parallel_tool_calls: true,
-            reasoning: sparse_route_reasoning(declaration, route.protocol, &deployment),
-            responses_lite: false,
-            agent_delegation: None,
-            structured_output: true,
-            deferred_tool_loading: false,
-            responses_features: Default::default(),
+        crate::providers::DiscoveredModelMetadata {
+            api_name: &deployment,
+            display_name: Some(format!("Azure OpenAI: {deployment}")),
+            capabilities: Capabilities {
+                input_modalities: ModalitySet::none().with(octet_ai::Modality::Image),
+                output_modalities: ModalitySet::none(),
+                tools: true,
+                parallel_tool_calls: true,
+                reasoning: sparse_route_reasoning(declaration, route.protocol, &deployment),
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: true,
+                deferred_tool_loading: false,
+                responses_features: Default::default(),
+            },
+            limits: ModelLimits {
+                context_window: 128_000,
+                max_output_tokens: 16_384,
+            },
+            pricing: None,
+            audio_input_source: None,
         },
-        ModelLimits {
-            context_window: 128_000,
-            max_output_tokens: 16_384,
-        },
-        None,
-        None,
     )
 }
 
@@ -6002,10 +6007,7 @@ use octet_ai::providers::codex::codex_fallback_reasoning_options;
 
 /// The decoded models alone; tests that do not inspect skipped entries use it.
 #[cfg(test)]
-#[cfg(test)]
 use octet_ai::providers::codex::codex_models_from_response;
-
-/// A decoded Codex inventory plus the entries it had to leave out.
 
 /// Decode an inventory, failing closed per model: an entry with malformed or
 /// unusable reasoning metadata is left out, never registered with guessed
@@ -6030,8 +6032,6 @@ fn report_skipped_codex_models(skipped: &[String]) {
         true,
     );
 }
-
-/// Reviewed offline fallback windows; authenticated inventory takes precedence.
 
 #[cfg(test)]
 use octet_ai::providers::codex::codex_min_effort;
@@ -6645,29 +6645,31 @@ fn register_pinned_requested_model(
     crate::providers::register_discovered_model(
         catalog,
         declaration,
-        api_name,
-        discovered_display_name(&snapshot, api_name)
-            .or_else(|| octet_ai::model_metadata::model_display_name(&requested.0)),
-        Capabilities {
-            input_modalities: input_modalities_from_entry(&snapshot),
-            output_modalities: ModalitySet::none(),
-            tools: asserted_capability(&snapshot, &["tool_call", "tools", "supports_tools"])
-                .unwrap_or(true),
-            parallel_tool_calls: false,
-            reasoning,
-            responses_lite: false,
-            agent_delegation: None,
-            structured_output: asserted_capability(&snapshot, &["structured_output"])
-                .unwrap_or(false),
-            deferred_tool_loading: false,
-            responses_features: Default::default(),
+        crate::providers::DiscoveredModelMetadata {
+            api_name,
+            display_name: discovered_display_name(&snapshot, api_name)
+                .or_else(|| octet_ai::model_metadata::model_display_name(&requested.0)),
+            capabilities: Capabilities {
+                input_modalities: input_modalities_from_entry(&snapshot),
+                output_modalities: ModalitySet::none(),
+                tools: asserted_capability(&snapshot, &["tool_call", "tools", "supports_tools"])
+                    .unwrap_or(true),
+                parallel_tool_calls: false,
+                reasoning,
+                responses_lite: false,
+                agent_delegation: None,
+                structured_output: asserted_capability(&snapshot, &["structured_output"])
+                    .unwrap_or(false),
+                deferred_tool_loading: false,
+                responses_features: Default::default(),
+            },
+            limits: ModelLimits {
+                context_window,
+                max_output_tokens,
+            },
+            pricing: None,
+            audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Catalog),
         },
-        ModelLimits {
-            context_window,
-            max_output_tokens,
-        },
-        None,
-        Some(octet_ai::model_metadata::AudioInputSource::Catalog),
     )
 }
 

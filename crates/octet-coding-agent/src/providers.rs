@@ -39,7 +39,7 @@ pub(crate) use catalog::{
     public_headers, register_discovered_model, register_discovered_model_at_route,
     register_dynamic_endpoints_at_base_url, register_environment_endpoints,
     register_environment_endpoints_at_base_url, register_private_endpoints_at_base_url,
-    register_static_models,
+    register_static_models, DiscoveredModelMetadata,
 };
 pub(crate) use compatibility::cache_compatibility;
 #[cfg(test)]

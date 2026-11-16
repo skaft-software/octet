@@ -1925,7 +1925,14 @@ async fn opencode_go_muse_contributors_construct_chat_requests_for_declared_effo
             .resolve(&ModelId(format!("opencode-go/{id}")))
             .unwrap();
         assert_eq!(model.spec.protocol, Protocol::OpenAiChat);
-        assert_eq!(model.spec.preset, octet_ai::ModelPreset::default());
+        assert_eq!(
+            model.spec.preset,
+            octet_ai::ModelPreset {
+                audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Catalog),
+                ..Default::default()
+            },
+            "catalog provenance adds no request overrides"
+        );
         let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
         for effort in efforts {
             assert!(reasoning.supports(&ReasoningConfig::from_provider_value(effort).unwrap()));

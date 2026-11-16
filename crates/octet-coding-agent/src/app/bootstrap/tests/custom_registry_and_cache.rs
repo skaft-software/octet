@@ -175,7 +175,13 @@ async fn custom_model_preset_registry_discovery_cache_and_wire_preserve_only_con
             "sampling_params": {"temperature": 0.25, "top_p": 0.7}, "vllm_priority": -3
         }}]
     })).unwrap();
-    let expected_preset = provider.credential.models[0].preset.clone();
+    // Catalog resolution adds provenance, not request overrides. Configured
+    // sampling and headers stay authoritative (Pi source:
+    // packages/coding-agent/src/core/provider-composer.ts:201-203,518-532).
+    let expected_preset = octet_ai::ModelPreset {
+        audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Absent),
+        ..provider.credential.models[0].preset.clone()
+    };
     let store =
         crate::auth::custom::CredentialStore::new(directory.path().join("credentials/custom.json"));
     store
@@ -206,7 +212,10 @@ async fn custom_model_preset_registry_discovery_cache_and_wire_preserve_only_con
             .unwrap()
             .spec
             .preset,
-        octet_ai::ModelPreset::default(),
+        octet_ai::ModelPreset {
+            audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Absent),
+            ..Default::default()
+        },
         "provider inventory cannot grant request overrides"
     );
     let public = serde_json::to_string(&*model.spec).unwrap();

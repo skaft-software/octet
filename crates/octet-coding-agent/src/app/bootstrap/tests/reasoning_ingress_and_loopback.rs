@@ -196,15 +196,17 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
     crate::providers::register_discovered_model(
         &mut catalog,
         declaration,
-        &discovered.id,
-        None,
-        caps,
-        ModelLimits {
-            context_window: 32768,
-            max_output_tokens: 4096,
+        crate::providers::DiscoveredModelMetadata {
+            api_name: &discovered.id,
+            display_name: None,
+            capabilities: caps,
+            limits: ModelLimits {
+                context_window: 32768,
+                max_output_tokens: 4096,
+            },
+            pricing: None,
+            audio_input_source: None,
         },
-        None,
-        None,
     )
     .unwrap();
     let model = catalog

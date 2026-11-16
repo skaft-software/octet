@@ -79,7 +79,9 @@ request fits the provider's total request limit.
   metadata; only silence allows a catalog fallback. Catalog entries retain the
   decision's source: declaration, catalog, absent evidence or unsupported protocol.
   Custom Chat models can set `preset.audio_input: true` (or `false` to deny);
-  normalized caches preserve the assertion.
+  normalized caches preserve the assertion. Resolved `preset.audio_input_source`
+  records capability provenance even when no request overrides are configured;
+  it adds no headers, sampling defaults or reasoning controls to provider requests.
   The selected protocol further limits the audio formats actually available. A
   model listing audio by itself does not make an unsupported wire format available.
 - Google `generateContent` encodes supported audio and PDF input as base64

@@ -200,13 +200,11 @@ async fn recorded_audio_attachment_and_read_replay_identical_bytes_through_resum
                 vec![attachment.clone(), expected.clone()]
             );
             let serialized = second.to_string();
-            assert!(serialized
-                .find(if protocol == Protocol::OpenAiChat {
-                    "\"role\":\"tool\""
-                } else {
-                    "functionResponse"
-                })
-                .is_some());
+            assert!(serialized.contains(if protocol == Protocol::OpenAiChat {
+                "\"role\":\"tool\""
+            } else {
+                "functionResponse"
+            }));
             std::fs::write(&path, b"changed after read").unwrap();
             active.complete("next turn").await.unwrap();
             drop(active);

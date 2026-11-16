@@ -270,29 +270,12 @@ fn register_static_model(
 pub(crate) fn register_discovered_model(
     catalog: &mut ModelCatalog,
     declaration: &ProviderDeclaration,
-    api_name: &str,
-    display_name: Option<String>,
-    capabilities: Capabilities,
-    limits: ModelLimits,
-    pricing: Option<octet_ai::Pricing>,
-    audio_input_source: Option<octet_ai::model_metadata::AudioInputSource>,
+    metadata: DiscoveredModelMetadata<'_>,
 ) -> anyhow::Result<()> {
-    let Some(route) = declaration.route_for_model(api_name) else {
+    let Some(route) = declaration.route_for_model(metadata.api_name) else {
         return Ok(());
     };
-    register_discovered_model_at_route(
-        catalog,
-        declaration,
-        route,
-        DiscoveredModelMetadata {
-            api_name,
-            display_name,
-            capabilities,
-            limits,
-            pricing,
-            audio_input_source,
-        },
-    )
+    register_discovered_model_at_route(catalog, declaration, route, metadata)
 }
 
 /// Register discovery-produced metadata using an explicitly selected declared
@@ -814,12 +797,14 @@ mod tests {
             register_discovered_model(
                 &mut catalog,
                 &ANTHROPIC,
-                "claude-new-model",
-                None,
-                capabilities.clone(),
-                limits,
-                None,
-                None,
+                DiscoveredModelMetadata {
+                    api_name: "claude-new-model",
+                    display_name: None,
+                    capabilities: capabilities.clone(),
+                    limits,
+                    pricing: None,
+                    audio_input_source: None,
+                },
             )
             .unwrap();
             let id = ModelId("anthropic/claude-new-model".into());
@@ -838,12 +823,14 @@ mod tests {
             register_discovered_model(
                 &mut catalog,
                 &ANTHROPIC,
-                "claude-new-model",
-                None,
-                capabilities,
-                limits,
-                None,
-                None,
+                DiscoveredModelMetadata {
+                    api_name: "claude-new-model",
+                    display_name: None,
+                    capabilities,
+                    limits,
+                    pricing: None,
+                    audio_input_source: None,
+                },
             )
             .unwrap();
             assert_eq!(
@@ -878,26 +865,28 @@ mod tests {
                 register_discovered_model(
                     &mut catalog,
                     provider,
-                    id,
-                    None,
-                    Capabilities {
-                        input_modalities: ModalitySet::none(),
-                        output_modalities: ModalitySet::none(),
-                        tools: false,
-                        parallel_tool_calls: false,
-                        reasoning: None,
-                        responses_lite: false,
-                        agent_delegation: None,
-                        structured_output: false,
-                        deferred_tool_loading: false,
-                        responses_features: Default::default(),
+                    DiscoveredModelMetadata {
+                        api_name: id,
+                        display_name: None,
+                        capabilities: Capabilities {
+                            input_modalities: ModalitySet::none(),
+                            output_modalities: ModalitySet::none(),
+                            tools: false,
+                            parallel_tool_calls: false,
+                            reasoning: None,
+                            responses_lite: false,
+                            agent_delegation: None,
+                            structured_output: false,
+                            deferred_tool_loading: false,
+                            responses_features: Default::default(),
+                        },
+                        limits: ModelLimits {
+                            context_window: 128_000,
+                            max_output_tokens: 16_000,
+                        },
+                        pricing: None,
+                        audio_input_source: None,
                     },
-                    ModelLimits {
-                        context_window: 128_000,
-                        max_output_tokens: 16_000,
-                    },
-                    None,
-                    None,
                 )
                 .unwrap();
                 let model = catalog
@@ -945,15 +934,17 @@ mod tests {
         register_discovered_model(
             &mut catalog,
             &META,
-            "muse-spark-1.3",
-            Some("Muse Spark 1.3".into()),
-            conservative,
-            ModelLimits {
-                context_window: 128_000,
-                max_output_tokens: 32_768,
+            DiscoveredModelMetadata {
+                api_name: "muse-spark-1.3",
+                display_name: Some("Muse Spark 1.3".into()),
+                capabilities: conservative,
+                limits: ModelLimits {
+                    context_window: 128_000,
+                    max_output_tokens: 32_768,
+                },
+                pricing: None,
+                audio_input_source: None,
             },
-            None,
-            None,
         )
         .unwrap();
         let model = catalog
@@ -1221,12 +1212,14 @@ mod tests {
             register_discovered_model(
                 &mut catalog,
                 declaration,
-                api_name,
-                None,
-                capabilities(),
-                limits,
-                None,
-                None,
+                DiscoveredModelMetadata {
+                    api_name,
+                    display_name: None,
+                    capabilities: capabilities(),
+                    limits,
+                    pricing: None,
+                    audio_input_source: None,
+                },
             )
             .unwrap();
             let model = catalog
@@ -1244,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_models_without_reasoning_keep_an_empty_preset() {
+    fn discovered_models_without_reasoning_keep_only_audio_provenance() {
         use crate::providers::contract::BASETEN;
 
         let credential = EnvironmentCredential::for_test("TEST_PROVIDER_KEY", "test-value");
@@ -1254,32 +1247,41 @@ mod tests {
         register_discovered_model(
             &mut catalog,
             &BASETEN,
-            "text-only-model",
-            None,
-            Capabilities {
-                input_modalities: ModalitySet::none(),
-                output_modalities: ModalitySet::none(),
-                tools: true,
-                parallel_tool_calls: false,
-                reasoning: None,
-                responses_lite: false,
-                agent_delegation: None,
-                structured_output: false,
-                deferred_tool_loading: false,
-                responses_features: Default::default(),
+            DiscoveredModelMetadata {
+                api_name: "text-only-model",
+                display_name: None,
+                capabilities: Capabilities {
+                    input_modalities: ModalitySet::none(),
+                    output_modalities: ModalitySet::none(),
+                    tools: true,
+                    parallel_tool_calls: false,
+                    reasoning: None,
+                    responses_lite: false,
+                    agent_delegation: None,
+                    structured_output: false,
+                    deferred_tool_loading: false,
+                    responses_features: Default::default(),
+                },
+                limits: ModelLimits {
+                    context_window: 32_768,
+                    max_output_tokens: 8_192,
+                },
+                pricing: None,
+                audio_input_source: None,
             },
-            ModelLimits {
-                context_window: 32_768,
-                max_output_tokens: 8_192,
-            },
-            None,
-            None,
         )
         .unwrap();
         let model = catalog
             .resolve(&ModelId("baseten/text-only-model".into()))
             .expect("discovered model");
-        assert_eq!(model.spec.preset, octet_ai::ModelPreset::default());
+        assert_eq!(
+            model.spec.preset,
+            octet_ai::ModelPreset {
+                audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Declaration),
+                ..Default::default()
+            },
+            "resolved audio provenance adds no reasoning or request controls"
+        );
     }
 
     #[test]
@@ -1388,12 +1390,14 @@ mod openrouter_attribution_tests {
         register_discovered_model(
             &mut catalog,
             decl,
-            api_name,
-            None,
-            capabilities,
-            limits,
-            None,
-            None,
+            DiscoveredModelMetadata {
+                api_name,
+                display_name: None,
+                capabilities,
+                limits,
+                pricing: None,
+                audio_input_source: None,
+            },
         )
         .unwrap();
         catalog
