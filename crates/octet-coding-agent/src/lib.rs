@@ -337,7 +337,8 @@ enum AuthCommand {
 async fn run_auth_command(provider: &str, command: AuthCommand) -> anyhow::Result<()> {
     match provider {
         "codex" | "openai-codex" | "openai" => {
-            let store = auth::codex::CredentialStore::new(auth::codex::default_path());
+            let store = auth::codex::CredentialStore::new(auth::codex::default_path())
+                .with_default_legacy_import();
             match command {
                 AuthCommand::Login { headless } => auth::codex::login(&store, headless).await,
                 AuthCommand::Logout => auth::codex::logout(&store).await,

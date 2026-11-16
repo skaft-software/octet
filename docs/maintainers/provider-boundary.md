@@ -24,3 +24,22 @@ The separation reference is Pi source at
 interaction; `packages/ai/src/auth/resolve.ts:105–155` retains refresh/persistence
 ownership after cancellation. This is a responsibility model, not a change to
 Octet credential precedence, storage format or provider wire contracts.
+
+## Shared authentication (item 30)
+
+`octet_ai::provider_auth::codex` owns `CredentialStore::memory`, explicit
+`CredentialStore::new(path)`, `CodexResolver`, and `login_with_interaction`.
+`LoginInteraction` receives presentation facts and decides whether to open a
+browser. The AI package never reads stdin, prints, opens browsers or installs
+signals. The CLI/TUI supplies those operations. Existing credential JSON, private
+filesystem rules and bounded cross-process locking are retained by moving their
+implementation, including the platform backends and regression tests. This
+necessarily moves the filesystem primitive; the agent public path re-exports it.
+
+Construction is inert. `is_signed_in` reads local state without importing or
+refreshing. Legacy import is an explicit frontend opt-in, not a library default.
+Only explicit login, logout, refresh and cache publication mutate storage.
+A resolver owns a started refresh task through rotation persistence even if its
+request waiter is dropped. Keep the Tokio runtime alive until such bounded work
+finishes; process termination/runtime shutdown and ambiguous remote exchanges
+remain uncertain. Cancellation is not revocation or permission to replay.

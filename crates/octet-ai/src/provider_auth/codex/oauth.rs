@@ -26,7 +26,7 @@ pub struct Tokens {
 /// ChatGPT account plan carried by the OAuth JWT. Keep unknown values intact so
 /// a newly introduced plan never gets mistaken for a known entitlement tier.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ChatGptPlan {
+pub enum ChatGptPlan {
     Free,
     Go,
     Plus,
@@ -63,7 +63,7 @@ impl ChatGptPlan {
         })
     }
 
-    pub(crate) fn raw_value(&self) -> &str {
+    pub fn raw_value(&self) -> &str {
         match self {
             Self::Free => "free",
             Self::Go => "go",
@@ -84,7 +84,7 @@ impl ChatGptPlan {
 /// Routing and entitlement claims derived from a subscription JWT. Account
 /// identity is redacted from diagnostics.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SubscriptionClaims {
+pub struct SubscriptionClaims {
     pub account_id: String,
     pub plan: Option<ChatGptPlan>,
 }

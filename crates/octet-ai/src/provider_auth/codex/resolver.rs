@@ -3,14 +3,15 @@
 //! The per-request credential resolver. Fast in the common (unexpired) case;
 //! refreshes under a double-checked lock when the token is near expiry.
 
+use crate::{AuthError, CredentialResolver, CredentialScheme, ResolvedCredential, Secret};
 use anyhow::{anyhow, Context, Result};
-use octet_ai::{AuthError, CredentialResolver, CredentialScheme, ResolvedCredential, Secret};
 use tokio::sync::Mutex;
 
 use super::store::{CredentialFile, CredentialStore, Tokens};
 use super::{now_unix, oauth, REFRESH_SKEW_SECS, TOKEN_URL};
 
 /// Resolves a Codex bearer token and the Codex-specific dynamic headers.
+#[derive(Clone)]
 pub struct CodexResolver {
     store: CredentialStore,
     http: reqwest::Client,
@@ -18,7 +19,7 @@ pub struct CodexResolver {
     token_url: String,
     /// Serializes token refreshes so racing requests don't stampede the token
     /// endpoint (the inner re-check makes it a proper double-checked lock).
-    refresh_lock: Mutex<()>,
+    refresh_lock: std::sync::Arc<Mutex<()>>,
     /// Bound on the cross-process refresh-lock wait, shared with the store's
     /// non-blocking acquisition. It is a field so tests can inject a short wait
     /// instead of depending on a production deadline.
@@ -31,13 +32,12 @@ impl CodexResolver {
             store,
             http: super::http_client(),
             token_url: TOKEN_URL.to_owned(),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: std::sync::Arc::new(Mutex::new(())),
             refresh_lock_wait: super::store::REFRESH_LOCK_WAIT,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_refresh_lock_wait(
+    pub fn with_refresh_lock_wait(
         store: CredentialStore,
         refresh_lock_wait: std::time::Duration,
     ) -> Self {
@@ -49,6 +49,13 @@ impl CodexResolver {
 
     /// Load a non-expired credential, refreshing if necessary.
     async fn load_valid(&self) -> Result<CredentialFile> {
+        let worker = self.clone();
+        tokio::spawn(async move { worker.load_valid_owned().await })
+            .await
+            .context("credential worker failed")?
+    }
+
+    async fn load_valid_owned(&self) -> Result<CredentialFile> {
         let cred = self
             .store
             .load()?
@@ -110,9 +117,7 @@ impl CodexResolver {
     ///
     /// Discovery runs before the normal AI client exists, but it must still use
     /// the same refresh, account routing, and plan detection as inference.
-    pub(crate) async fn discovery_headers(
-        &self,
-    ) -> Result<(http::HeaderMap, oauth::SubscriptionClaims)> {
+    pub async fn discovery_headers(&self) -> Result<(http::HeaderMap, oauth::SubscriptionClaims)> {
         let cred = self.load_valid().await?;
         let claims = oauth::subscription_claims(&cred.tokens.access_token)?;
         let mut headers = http::HeaderMap::new();
@@ -183,6 +188,12 @@ impl CredentialResolver for CodexResolver {
     }
 }
 
+impl std::fmt::Debug for CodexResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexResolver").finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +212,61 @@ mod tests {
             })
             .unwrap();
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn memory_store_keeps_credentials_opaque_and_logout_clears_them() {
+        let store = CredentialStore::memory();
+        store
+            .save(&CredentialFile {
+                tokens: Tokens {
+                    access_token: jwt_with_account("memory-account"),
+                    refresh_token: "memory-secret".into(),
+                    account_id: "memory-account".into(),
+                },
+                expires_at: now_unix() + 3600,
+            })
+            .unwrap();
+        assert!(store.is_signed_in().unwrap());
+        let resolver = CodexResolver::new(store.clone());
+        assert!(resolver.resolve().await.is_ok());
+        assert!(!format!("{store:?} {resolver:?}").contains("memory-secret"));
+        store.delete_async().await.unwrap();
+        assert!(!store.is_signed_in().unwrap());
+        assert!(resolver.resolve().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_abandon_rotated_credentials() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let started = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let notify = started.clone();
+        Mock::given(method("POST")).respond_with(move |_: &wiremock::Request| {
+            notify.add_permits(1);
+            ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(50)).set_body_json(serde_json::json!({
+                "access_token": jwt_with_account("acct_9"), "refresh_token": "rotated-after-cancel", "expires_in": 3600
+            }))
+        }).expect(1).mount(&server).await;
+        let (_dir, store) = store_with(0);
+        let mut resolver = CodexResolver::new(store.clone());
+        resolver.token_url = format!("{}/token", server.uri());
+        let waiter = tokio::spawn(async move { resolver.resolve().await });
+        started.acquire().await.unwrap().forget();
+        waiter.abort();
+        assert!(waiter.await.err().unwrap().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if store.load().unwrap().unwrap().tokens.refresh_token == "rotated-after-cancel" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned refresh persists after waiter cancellation");
+        server.verify().await;
     }
 
     #[test]

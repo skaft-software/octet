@@ -93,7 +93,6 @@ pub(super) fn open_regular_file_for_read(_path: &Path) -> Result<std::fs::File, 
     unsupported()
 }
 
-#[cfg(test)]
 pub(super) fn open_regular_file_for_read_in(
     _path: &Path,
     _expected: &PrivateDirectoryIdentity,

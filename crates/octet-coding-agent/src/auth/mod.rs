@@ -4,8 +4,8 @@
 //!
 //! OpenAI Codex ("Sign in with ChatGPT"), GitHub Copilot device OAuth, the
 //! shared [`subscription`] login framework, and custom OpenAI-compatible
-//! endpoint credentials. Authentication stays in the product crate behind public
-//! credential/provider seams; `octet-ai` is not touched.
+//! endpoint credentials. Codex delegates authentication and storage to `octet-ai`;
+//! this module retains frontend presentation and other provider integrations.
 
 pub mod codex;
 pub mod copilot;
@@ -15,13 +15,6 @@ pub(crate) mod meta;
 pub(crate) mod openrouter;
 pub(crate) mod subscription;
 pub(crate) mod xai;
-
-pub(crate) fn read_bounded_regular(
-    path: &std::path::Path,
-    limit: usize,
-) -> anyhow::Result<Option<Vec<u8>>> {
-    read_optional(path, limit, false)
-}
 
 pub(crate) fn read_bounded_private(
     path: &std::path::Path,

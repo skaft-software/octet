@@ -772,7 +772,6 @@ pub(super) fn open_regular_file_for_read(path: &Path) -> Result<std::fs::File, S
     open_regular_at(&parent, &name)
 }
 
-#[cfg(test)]
 pub(super) fn open_regular_file_for_read_in(
     path: &Path,
     expected: &PrivateDirectoryIdentity,

@@ -542,7 +542,7 @@ where
         result = async {
             match &subscription {
                 Subscription::ChatGpt => {
-                    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+                    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path()).with_default_legacy_import();
                     crate::auth::codex::login_without_prompt(&store).await
                 }
                 Subscription::Copilot => {

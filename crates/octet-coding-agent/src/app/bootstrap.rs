@@ -7991,7 +7991,8 @@ fn register_codex_catalog(
     // locally authenticated Codex endpoint, but never discovers or refreshes
     // its inventory over the network.
     if !cfg!(test) {
-        let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+        let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path())
+            .with_default_legacy_import();
         // Non-fatal: a stale or malformed OAuth file must never block octet startup.
         let _ = bootstrap_check(
             "codex-registration",

@@ -111,6 +111,7 @@ pub(super) async fn delete_entry(kind: &Removable) -> anyhow::Result<Option<Stri
     match kind {
         Removable::Codex => {
             crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path())
+                .with_default_legacy_import()
                 .delete_async()
                 .await?;
             Ok(None)

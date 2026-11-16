@@ -1079,7 +1079,6 @@ pub(super) fn open_regular_file_for_read(path: &Path) -> Result<File, SecureFile
     Ok(file)
 }
 
-#[cfg(test)]
 pub(super) fn open_regular_file_for_read_in(
     path: &Path,
     expected: &PrivateDirectoryIdentity,

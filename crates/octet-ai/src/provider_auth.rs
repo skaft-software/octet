@@ -1,0 +1,116 @@
+//! Explicit provider login and private storage, independent of application startup.
+#![allow(missing_docs)]
+
+pub mod codex;
+
+pub(crate) fn read_bounded_regular(
+    path: &std::path::Path,
+    limit: usize,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    read_optional(path, limit, false)
+}
+
+pub(crate) fn read_bounded_private(
+    path: &std::path::Path,
+    limit: usize,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    read_optional(path, limit, true)
+}
+
+fn read_optional(
+    path: &std::path::Path,
+    limit: usize,
+    private: bool,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let result = if private {
+        crate::secure_fs::read_private_file_bounded(path, limit)
+    } else {
+        crate::secure_fs::read_regular_file_bounded(path, limit)
+    };
+    match result {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(crate::secure_fs::SecureFileError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(anyhow::anyhow!("refusing {}: {error}", path.display())),
+    }
+}
+
+/// Bounded attempts for last-writer-wins model metadata caches.
+const MODEL_CACHE_WRITE_ATTEMPTS: u32 = 6;
+
+/// Persist a last-writer-wins model metadata cache with owner-only guarantees.
+///
+/// Concurrent octet processes (a foreground launch, a background refresh or a
+/// delegated child) may publish the same cache at once. The secure writer
+/// rejects a target that changed underneath it, and on filesystems where a
+/// new file is published through a hard link it can briefly observe the
+/// sibling's second link. Both are transient, so retry briefly; every attempt
+/// re-validates the target from scratch. If siblings keep winning, their
+/// publication supersedes this one. A link or ownership problem that persists
+/// through every attempt is still returned, as is any other refusal.
+/// Credentials must keep using the strict writer.
+pub(crate) fn write_private_model_cache(
+    path: &std::path::Path,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<(), crate::secure_fs::SecureFileError> {
+    use crate::secure_fs::SecureFileError;
+    let mut attempt = 1;
+    loop {
+        match crate::secure_fs::write_private_atomic(path, bytes, limit) {
+            Err(SecureFileError::Changed | SecureFileError::InsecurePrivateObject(_))
+                if attempt < MODEL_CACHE_WRITE_ATTEMPTS =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt)));
+                attempt += 1;
+            }
+            Err(SecureFileError::Changed) => return Ok(()),
+            result => return result,
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod model_cache_write_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn concurrent_model_cache_writers_publish_without_spurious_change_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("models");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = std::sync::Arc::new(dir.join("models.json"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let writers = (0..8)
+            .map(|writer| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..40)
+                        .map(|round| {
+                            let body = format!("{{\"writer\":{writer},\"round\":{round}}}");
+                            super::write_private_model_cache(&path, body.as_bytes(), 4096)
+                                .map_err(|error| error.to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        let published = std::fs::read_to_string(&*path).unwrap();
+        assert!(published.starts_with("{\"writer\":"), "{published}");
+        let mode = std::fs::metadata(&*path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let alias = dir.join("alias.json");
+        std::os::unix::fs::symlink(&*path, &alias).unwrap();
+        assert!(super::write_private_model_cache(&alias, b"{}", 4096).is_err());
+    }
+}

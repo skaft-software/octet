@@ -22,7 +22,7 @@ const MIGRATION_MARKER_BYTES: &[u8] = b"legacy-import-v1\n";
 /// waiting on a token endpoint, and none of that belongs in *this* process's
 /// readiness path. The wait is therefore deliberately short, the acquisition is
 /// never blocking, and the failure is explicit and actionable.
-pub(crate) const REFRESH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+pub const REFRESH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Retry cadence while waiting for the refresh lock. The uncontended path does
 /// not sleep at all: the first attempt either takes the lock or the deadline has
 /// already passed.
@@ -82,6 +82,14 @@ pub fn default_path() -> PathBuf {
 pub struct CredentialStore {
     path: PathBuf,
     legacy_home: Option<PathBuf>,
+    memory: Option<std::sync::Arc<MemoryStorage>>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryStorage {
+    credential: std::sync::RwLock<Option<CredentialFile>>,
+    cache: std::sync::RwLock<Option<(std::time::SystemTime, Vec<u8>)>>,
+    locked: std::sync::atomic::AtomicBool,
 }
 
 /// Cross-process refresh serialization guard. On Unix the lock is held on
@@ -90,8 +98,9 @@ pub struct CredentialStore {
 /// fails on directory handles (`ERROR_INVALID_PARAMETER`), so the lock is
 /// held on a dedicated lock file inside that directory instead.
 #[must_use = "the refresh lock must be retained until the protected operation completes"]
-pub(crate) struct RefreshLock {
-    directory: std::fs::File,
+pub struct RefreshLock {
+    directory: Option<std::fs::File>,
+    memory: Option<std::sync::Arc<MemoryStorage>>,
     path: PathBuf,
     locked: bool,
 }
@@ -115,11 +124,17 @@ impl RefreshLock {
         if !std::mem::replace(&mut self.locked, false) {
             return Ok(());
         }
-        fs2::FileExt::unlock(&self.directory)
+        if let Some(memory) = &self.memory {
+            memory
+                .locked
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Ok(());
+        }
+        fs2::FileExt::unlock(self.directory.as_ref().expect("file lock"))
             .with_context(|| format!("unlocking refresh state {}", self.path.display()))
     }
 
-    pub(crate) fn finish(mut self) -> Result<()> {
+    pub fn finish(mut self) -> Result<()> {
         self.release()
     }
 
@@ -143,12 +158,28 @@ impl Drop for RefreshLock {
 impl CredentialStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let legacy_home = if path == default_path() {
-            dirs::home_dir().filter(|home| home.is_absolute())
-        } else {
-            None
-        };
-        Self { path, legacy_home }
+        Self {
+            path,
+            legacy_home: None,
+            memory: None,
+        }
+    }
+
+    /// In-memory credentials and model cache. Construction has no effects.
+    pub fn memory() -> Self {
+        Self {
+            path: PathBuf::new(),
+            legacy_home: None,
+            memory: Some(Default::default()),
+        }
+    }
+
+    /// Opt in to the frontend's one-time legacy import policy.
+    pub fn with_default_legacy_import(mut self) -> Self {
+        if self.path == default_path() {
+            self.legacy_home = dirs::home_dir().filter(|home| home.is_absolute());
+        }
+        self
     }
 
     #[cfg(test)]
@@ -156,7 +187,13 @@ impl CredentialStore {
         Self {
             path: path.into(),
             legacy_home: Some(home.into()),
+            memory: None,
         }
+    }
+
+    /// Local availability only: never imports, refreshes, or writes.
+    pub fn is_signed_in(&self) -> Result<bool> {
+        Ok(self.load_octet_credential()?.is_some())
     }
 
     fn model_cache_path(&self) -> PathBuf {
@@ -170,9 +207,9 @@ impl CredentialStore {
 
     fn open_model_cache(&self) -> Result<Option<std::fs::File>> {
         let path = self.model_cache_path();
-        match octet_agent::secure_fs::open_private_file_for_read(&path) {
+        match crate::secure_fs::open_private_file_for_read(&path) {
             Ok(file) => Ok(Some(file)),
-            Err(octet_agent::secure_fs::SecureFileError::Io(error))
+            Err(crate::secure_fs::SecureFileError::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
                 Ok(None)
@@ -217,15 +254,40 @@ impl CredentialStore {
     /// (it never acquired the lock), so it cannot leave a phantom holder or a
     /// blocked lock worker behind; the caller's own `RefreshLock` guard, when it
     /// exists, still releases exactly as before.
-    pub(crate) fn lock_refresh_within(&self, wait: std::time::Duration) -> Result<RefreshLock> {
+    pub fn lock_refresh_within(&self, wait: std::time::Duration) -> Result<RefreshLock> {
+        if let Some(memory) = &self.memory {
+            let deadline = std::time::Instant::now() + wait;
+            loop {
+                if memory
+                    .locked
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::Acquire,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    return Ok(RefreshLock {
+                        directory: None,
+                        path: PathBuf::new(),
+                        locked: true,
+                        memory: Some(memory.clone()),
+                    });
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                anyhow::ensure!(!remaining.is_zero(), "credential lock wait expired");
+                std::thread::sleep(REFRESH_LOCK_POLL.min(remaining));
+            }
+        }
         let path = self.refresh_lock_directory()?;
         #[cfg(unix)]
-        let directory = octet_agent::secure_fs::open_private_directory_for_lock(&path)
+        let directory = crate::secure_fs::open_private_directory_for_lock(&path)
             .with_context(|| format!("opening refresh lock directory {}", path.display()))?;
         #[cfg(not(unix))]
         let directory = {
             let lock_path = path.join(REFRESH_LOCK_FILE_NAME);
-            octet_agent::secure_fs::open_private_lock_file(&lock_path)
+            crate::secure_fs::open_private_lock_file(&lock_path)
                 .with_context(|| format!("opening refresh lock file {}", lock_path.display()))?
         };
         let deadline = std::time::Instant::now() + wait;
@@ -233,7 +295,8 @@ impl CredentialStore {
             match fs2::FileExt::try_lock_exclusive(&directory) {
                 Ok(()) => {
                     return Ok(RefreshLock {
-                        directory,
+                        directory: Some(directory),
+                        memory: None,
                         path,
                         locked: true,
                     });
@@ -260,7 +323,7 @@ impl CredentialStore {
     /// Load the credential, or `None` if neither octet nor the third-party
     /// Codex CLI store contains one. A default store imports at most once while holding
     /// the same cross-process lock used for token rotation.
-    pub fn load(&self) -> Result<Option<CredentialFile>> {
+    pub(crate) fn load(&self) -> Result<Option<CredentialFile>> {
         if let Some(credential) = self.load_octet_credential()? {
             return Ok(Some(credential));
         }
@@ -297,8 +360,12 @@ impl CredentialStore {
     }
 
     fn load_octet_credential(&self) -> Result<Option<CredentialFile>> {
-        let Some(bytes) = crate::auth::read_bounded_private(&self.path, MAX_CREDENTIAL_BYTES)
-            .with_context(|| format!("reading {}", self.path.display()))?
+        if let Some(memory) = &self.memory {
+            return Ok(memory.credential.read().unwrap().clone());
+        }
+        let Some(bytes) =
+            crate::provider_auth::read_bounded_private(&self.path, MAX_CREDENTIAL_BYTES)
+                .with_context(|| format!("reading {}", self.path.display()))?
         else {
             return Ok(None);
         };
@@ -317,7 +384,7 @@ impl CredentialStore {
 
     fn migration_marker_exists(&self) -> Result<bool> {
         let path = self.migration_marker_path();
-        Ok(crate::auth::read_bounded_private(&path, 1024)
+        Ok(crate::provider_auth::read_bounded_private(&path, 1024)
             .with_context(|| format!("reading migration marker {}", path.display()))?
             .is_some())
     }
@@ -330,18 +397,32 @@ impl CredentialStore {
     }
 
     /// Persist account-scoped model metadata with owner-only permissions.
-    pub(crate) fn save_model_cache(&self, bytes: &[u8]) -> Result<()> {
+    pub fn save_model_cache(&self, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            bytes.len() <= MAX_MODEL_CACHE_BYTES,
+            "model cache is too large"
+        );
+        if let Some(memory) = &self.memory {
+            *memory.cache.write().unwrap() = Some((std::time::SystemTime::now(), bytes.to_vec()));
+            return Ok(());
+        }
         let path = self.model_cache_path();
         prepare_private_parent(&path)?;
-        crate::auth::write_private_model_cache(&path, bytes, MAX_MODEL_CACHE_BYTES)
+        crate::provider_auth::write_private_model_cache(&path, bytes, MAX_MODEL_CACHE_BYTES)
             .with_context(|| format!("writing {}", path.display()))
     }
 
     /// Load model metadata only when the exact descriptor being read is fresh.
-    pub(crate) fn load_fresh_model_cache(
-        &self,
-        max_age: std::time::Duration,
-    ) -> Result<Option<Vec<u8>>> {
+    pub fn load_fresh_model_cache(&self, max_age: std::time::Duration) -> Result<Option<Vec<u8>>> {
+        if let Some(memory) = &self.memory {
+            return Ok(memory
+                .cache
+                .read()
+                .unwrap()
+                .as_ref()
+                .filter(|(modified, _)| !cache_modified_is_stale(*modified, max_age))
+                .map(|(_, bytes)| bytes.clone()));
+        }
         let path = self.model_cache_path();
         let Some(mut file) = self.open_model_cache()? else {
             return Ok(None);
@@ -381,7 +462,8 @@ impl CredentialStore {
     /// `0600` *before* the secret bytes are written, so there is never a window
     /// where the tokens are world-readable. Credential replacement is
     /// serialized with refresh-token rotation across octet processes.
-    pub fn save(&self, cred: &CredentialFile) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn save(&self, cred: &CredentialFile) -> Result<()> {
         let refresh_lock = self.lock_refresh()?;
         let result = self.save_while_refresh_locked(cred, &refresh_lock);
         refresh_lock.finish_with(result)
@@ -393,6 +475,10 @@ impl CredentialStore {
         cred: &CredentialFile,
         _refresh_lock: &RefreshLock,
     ) -> Result<()> {
+        if let Some(memory) = &self.memory {
+            *memory.credential.write().unwrap() = Some(cred.clone());
+            return Ok(());
+        }
         prepare_private_parent(&self.path)?;
         let bytes = serde_json::to_vec_pretty(cred)?;
         write_private(&self.path, &bytes)
@@ -403,6 +489,11 @@ impl CredentialStore {
     pub fn delete(&self) -> Result<()> {
         let refresh_lock = self.lock_refresh()?;
         let result = (|| {
+            if let Some(memory) = &self.memory {
+                *memory.credential.write().unwrap() = None;
+                *memory.cache.write().unwrap() = None;
+                return Ok(());
+            }
             if self.legacy_home.is_some() {
                 // Logout permanently suppresses automatic legacy re-import. The
                 // source files remain byte-for-byte untouched.
@@ -414,7 +505,7 @@ impl CredentialStore {
         refresh_lock.finish_with(result)
     }
 
-    pub(crate) async fn delete_async(&self) -> Result<()> {
+    pub async fn delete_async(&self) -> Result<()> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.delete())
             .await
@@ -438,7 +529,7 @@ fn import_legacy_from_home(home: &Path) -> Result<Option<CredentialFile>> {
 }
 
 fn read_legacy_json(path: &Path) -> Result<Option<serde_json::Value>> {
-    let Some(bytes) = crate::auth::read_bounded_regular(path, MAX_CREDENTIAL_BYTES)
+    let Some(bytes) = crate::provider_auth::read_bounded_regular(path, MAX_CREDENTIAL_BYTES)
         .with_context(|| format!("reading legacy credential {}", path.display()))?
     else {
         return Ok(None);
@@ -546,7 +637,7 @@ fn prepare_private_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("credential path has no parent"))?;
-    octet_agent::secure_fs::create_private_directory_all(parent)
+    crate::secure_fs::create_private_directory_all(parent)
         .with_context(|| format!("preparing {}", parent.display()))
 }
 
@@ -559,7 +650,7 @@ fn remove_if_present(path: &Path) -> Result<()> {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    octet_agent::secure_fs::write_private_atomic(path, bytes, MAX_MODEL_CACHE_BYTES)
+    crate::secure_fs::write_private_atomic(path, bytes, MAX_MODEL_CACHE_BYTES)
         .map_err(std::io::Error::other)
 }
 
@@ -696,8 +787,7 @@ mod tests {
         let store = CredentialStore::new(path.clone());
         prepare_private_parent(&path).unwrap();
         let lock_directory = store.refresh_lock_directory().unwrap();
-        let blocker =
-            octet_agent::secure_fs::open_private_directory_for_lock(&lock_directory).unwrap();
+        let blocker = crate::secure_fs::open_private_directory_for_lock(&lock_directory).unwrap();
         fs2::FileExt::lock_exclusive(&blocker).unwrap();
 
         let contender = store.clone();
@@ -751,7 +841,7 @@ mod tests {
         store.save(&sample()).unwrap();
         let guard = store.lock_refresh().unwrap();
 
-        octet_agent::secure_fs::write_private_atomic(&path, br#"{"rotated":true}"#, 1024).unwrap();
+        crate::secure_fs::write_private_atomic(&path, br#"{"rotated":true}"#, 1024).unwrap();
 
         let contender = store.clone();
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);

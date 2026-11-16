@@ -2152,7 +2152,8 @@ async fn login_codex_catalog<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path())
+        .with_default_legacy_import();
     let (sender, progress) = crate::auth::codex::login_progress_channel();
     match await_codex_login(
         shell,
@@ -2312,7 +2313,8 @@ async fn logout_codex(
         app = transition(app, shell, input, Reconfig::Model(model)).await?;
     }
 
-    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path());
+    let store = crate::auth::codex::CredentialStore::new(crate::auth::codex::default_path())
+        .with_default_legacy_import();
     if let Err(error) = store.delete_async().await {
         shell.error(format!("ChatGPT logout failed: {error:#}"));
         return Ok(app);

@@ -122,14 +122,19 @@ pub(super) async fn serve(
     redirect_uri: &str,
     authorization: &Authorization,
 ) -> Result<BrowserSignIn> {
-    tokio::select! {
-        result = tokio::time::timeout(CALLBACK_TIMEOUT, serve_callbacks(listener, store, http, token_url, redirect_uri, authorization)) => {
-            result.context("browser sign-in timed out after 5 minutes")?
-        }
-        _ = crate::tui::terminal::wait_for_shutdown_signal() => {
-            anyhow::bail!("browser sign-in cancelled")
-        }
-    }
+    tokio::time::timeout(
+        CALLBACK_TIMEOUT,
+        serve_callbacks(
+            listener,
+            store,
+            http,
+            token_url,
+            redirect_uri,
+            authorization,
+        ),
+    )
+    .await
+    .context("browser sign-in timed out after 5 minutes")?
 }
 
 async fn serve_callbacks(
@@ -389,8 +394,10 @@ mod tests {
         assert_eq!(authorize_url(&redirect_uri(1455), verifier, &state), format!(
             "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&scope=openid+profile+email+offline_access&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state={state}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=octet"
         ));
-        let declarations: serde_json::Value =
-            serde_json::from_str(include_str!("../../providers/declarations.json")).unwrap();
+        let declarations: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../octet-coding-agent/src/providers/declarations.json"
+        ))
+        .unwrap();
         let codex = declarations["providers"]
             .as_array()
             .unwrap()

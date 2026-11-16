@@ -346,3 +346,8 @@ pub enum CompatibilityMode {
     /// complete bare-JSON content stream to recognize a textual tool envelope.
     Lossy,
 }
+
+/// UI-neutral provider authentication and explicit storage adapters.
+pub mod provider_auth;
+/// Descriptor-bound private storage primitives.
+pub mod secure_fs;
