@@ -148,3 +148,55 @@ test('copied history never acquires native opaque replay provenance', () => {
     assert.deepEqual(piToCanonical([message])[0].Assistant.content, [{ Reasoning: { text: 'visible', state: null } }]);
   }
 });
+
+test('unchanged indexed reads and one-entry append maintenance stay flat as history grows', t => {
+  const work = [];
+  for (const count of [16, 160, 1600]) {
+    let reads = 0;
+    const entries = Array.from({ length: count }, (_, i) => {
+      const entry = user(`e${i}`, i ? `e${i - 1}` : null), value = entry.value;
+      Object.defineProperty(entry, 'value', { enumerable: true, get() { reads++; return value; } });
+      return entry;
+    });
+    sessionEntryCopy(entries, 'actual', `e${count - 1}`); // bootstrap
+    reads = 0;
+    // A lookup of the first ID must not mask a linear .find lookup of later IDs.
+    let idReads = 0;
+    const first = sessionEntryCopies(entries, 'actual');
+    for (const entry of entries) {
+      const id = entry.id;
+      Object.defineProperty(entry, 'id', { enumerable: true, get() { idReads++; return id; } });
+    }
+    let searched = 0;
+    const find = Array.prototype.find;
+    Array.prototype.find = function (predicate, thisArg) { return find.call(this, (...args) => { searched++; return predicate.apply(thisArg, args); }); };
+    try {
+      for (let i = 0; i < 10; i++) assert.equal(sessionEntryCopy(entries, 'actual', `e${count - 1}`).id, `e${count - 1}`);
+    } finally { Array.prototype.find = find; }
+    assert.equal(searched, 0, 'single-entry lookups use the index, not a translation scan');
+    entries.push(user('new', `e${count - 1}`));
+    assert.equal(sessionEntryCopy(entries, 'actual', 'new').id, 'new');
+    assert.equal(first.length, count, 'retained copies do not grow');
+    t.diagnostic(`${count} entries: old value reads=${reads} old ID reads=${idReads}`);
+    work.push(reads + idReads);
+  }
+  assert.ok(work.every(reads => reads < 40), `old history revisited: ${work}`);
+});
+
+test('append cache preserves nearest tool names, forks, namespaces and replacement arrays', () => {
+  const entries = [assistant('call', null, ['root']), result('result', 'call')];
+  sessionEntryCopy(entries, 'actual', 'result');
+  entries.push(assistant('near', 'result', ['near-first', 'near-second']), result('near-result', 'near'));
+  assert.equal(sessionEntryCopy(entries, 'actual', 'near-result').message.toolName, 'near-first');
+  entries.push(result('fork', 'call'));
+  assert.equal(sessionEntryCopy(entries, 'actual', 'fork').message.toolName, 'root');
+  const privateEntry = { id: 'private', parent: 'fork', value: { type: 'extension' }, metadata: { extension_metadata: {
+    actual: { provenance: { extension: 'actual' }, value: { entry_type: 'memo', data: { kept: true } } },
+  } } };
+  entries.push(privateEntry);
+  assert.equal(sessionEntryCopy(entries, 'actual', 'private').type, 'custom');
+  assert.equal(sessionEntryCopy(entries, 'other', 'private').type, 'octet_native');
+  const replacement = [user('call', null, [{ Text: 'replacement' }])];
+  assert.equal(sessionEntryCopy(replacement, 'actual', 'call').message.role, 'user');
+  assert.equal(sessionEntryCopy(entries, 'actual', 'call').message.role, 'assistant');
+});

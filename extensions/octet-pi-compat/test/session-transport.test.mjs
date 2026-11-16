@@ -336,3 +336,23 @@ export default pi => pi.on('session_start', (_, ctx) => {
   await peer.wait(f => f.method === 'ui/frame' && f.params.lines.includes('view:2'));
   await peer.close();
 });
+
+test('receipt append checks only new IDs, independent of pinned history length', t => {
+  const work = [];
+  for (const count of [16, 160, 1600]) {
+    const entries = Array.from({ length: count }, (_, i) => message(`e${i}`, i ? `e${i - 1}` : null, 'old'));
+    const document = history(entries), transport = new SessionTransport({ namespace: 'actual' }, profile, 1048576);
+    const descriptor = { owner, view_revision: 1, head: document.head, bytes: Buffer.byteLength(JSON.stringify(document)), entry_count: count, branch_count: count };
+    const view = transport.history({ descriptor, document, refs: 1, release: transport.reserve(descriptor) });
+    let reads = 0;
+    for (const entry of entries) { const id = entry.id; Object.defineProperty(entry, 'id', { enumerable: true, get() { reads++; return id; } }); }
+    const key = ownerKey(owner), store = { state: { key, host: {} } };
+    transport.current.set(key, { revision: 1, view });
+    const entry = message('new', document.head, 'new');
+    transport.append(store, { previous_head: document.head, previous_revision: 1, view_revision: 2, entry_id: 'new', entry, head: 'new' }, null, null);
+    t.diagnostic(`${count} entries: append old ID reads=${reads}`); work.push(reads);
+    transport.drop(view);
+    assert.deepEqual([transport.bytes, transport.records, transport.views], [0, 0, 0]);
+  }
+  assert.ok(work.every(reads => reads === 0), `append rescans history: ${work}`);
+});

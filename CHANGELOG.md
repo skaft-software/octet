@@ -46,6 +46,7 @@
 - Pi context, tool-result and session-operation hooks preserve accepted results when a sibling returns malformed data.
 - Pi streaming observations account for new deltas and share immutable text while preserving retained event snapshots.
 - Model discovery and custom audio declarations retain capability provenance through catalog registration and cached inventories.
+- Pi session mirrors index single-entry reads and maintain ordinary appends without rescanning earlier history.
 
 ## [0.10.4] - 2026-11-12
 

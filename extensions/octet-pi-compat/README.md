@@ -599,9 +599,15 @@ History translation indexes tool names in one iterative ancestry walk, retaining
 the nearest actual call across forks and out-of-order snapshots. Message ancestry
 cycles and duplicate entry IDs still refuse. Identical linear history/branch views
 share the internal translation input; getters copy mutable containers while sharing
-only immutable strings. Admitted appends invalidate the cached translation and
-extend each internal array once. This is not support for arbitrary history rewrites,
-and copied observations gain no authority to replay opaque native continuations.
+only immutable strings. Single-entry getters use an ID index. Ordinary admitted
+appends translate only the new suffix and update transport ID indexes without
+scanning old entries. Unchanged observations perform constant cache bookkeeping;
+full-history getters still copy the requested history. Caches are weakly held by
+the native view array and bounded by namespace/limit identity. Bootstrap, branch
+changes and replacement views rebuild ancestry; retained invocation views keep
+their original revision. Copied observations gain no authority to replay opaque
+native continuations. The matched 16/160/1600-entry work-count fixtures live in
+`test/session-mirror-large.test.mjs` and `test/session-transport.test.mjs`.
 
 Negotiated API 0.4 `session_append_receipts_v1` requires `session_entries` and
 both `session_snapshot_transport_v1`/`session_owner_routes_v1`. Grant-less appends
@@ -1067,7 +1073,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The isolated working-candidate adapter run is **1616 tests: 1583 passed, 0
+The isolated working-candidate adapter run is **1619 tests: 1586 passed, 0
 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped

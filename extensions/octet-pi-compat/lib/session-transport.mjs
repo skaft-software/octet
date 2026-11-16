@@ -81,7 +81,13 @@ export class SessionTransport {
     finally { this.transfers--; }
   }
   retain(view) { view.refs++; return view; }
-  drop(view) { if (view && --view.refs === 0) { view.document = undefined; view.host = undefined; view.release(); } }
+  drop(view) {
+    if (view && --view.refs === 0) {
+      view.document = undefined; view.host = undefined; view.byId = undefined;
+      this.bytes -= view.appendedBytes ?? 0; this.records -= view.appendedRecords ?? 0;
+      view.release();
+    }
+  }
   history(view) {
     const d = view.descriptor, h = view.document;
     exact(h, ['entries', 'branch_ids', 'head', 'file', 'header', 'labels'], 'session history');
@@ -96,6 +102,7 @@ export class SessionTransport {
       // A foreign namespace must already have been filtered by the native host.
       for (const [namespace, metadata] of Object.entries(entry.metadata?.extension_metadata ?? {})) if (namespace !== this.runtime.namespace && metadata.public !== true) invalid('foreign private session metadata');
     }
+    view.byId = byId;
     let previous = null;
     const branch = h.branch_ids.map(id => { const entry = byId.get(id); if (!entry || entry.parent !== previous) invalid('session history ancestry'); previous = id; return entry; });
     if (previous !== h.head) invalid('session history head');
@@ -251,15 +258,16 @@ export class SessionTransport {
     const gap = receipt.gap ?? [];
     if (!Array.isArray(gap) || gap.length > 16 || receipt.gap !== undefined && !gap.length) invalid('session append view receipt gap');
     let parent = receipt.previous_head;
-    const ids = new Set(view?.document?.entries.map(entry => entry.id));
+    const ids = view?.byId;
+    const addedIds = new Set();
     for (const entry of gap) {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || ids.has(entry.id)
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || ids?.has(entry.id) || addedIds.has(entry.id)
           || entry.parent !== parent || !entry.value || entry.value.type !== 'config' || entry.metadata?.extension_metadata !== undefined && Object.keys(entry.metadata.extension_metadata).length) invalid('session append view receipt gap');
-      ids.add(entry.id); parent = entry.id;
+      addedIds.add(entry.id); parent = entry.id;
     }
     if (!d || receipt.previous_revision !== d.view_revision || receipt.previous_head !== d.head
         || !integer(receipt.view_revision, 1) || receipt.view_revision <= d.view_revision
-        || receipt.entry?.id !== receipt.entry_id || ids.has(receipt.entry_id) || receipt.entry?.parent !== parent) invalid('session append view receipt');
+        || receipt.entry?.id !== receipt.entry_id || ids.has(receipt.entry_id) || addedIds.has(receipt.entry_id) || receipt.entry?.parent !== parent) invalid('session append view receipt');
     const h = view.document, p = this.profile, added = [...gap, receipt.entry];
     // These are the exact changes to the compact six-field history document.
     let delta = jsonBytes(receipt.head, p.snapshot_bytes) - jsonBytes(h.head, p.snapshot_bytes);
@@ -271,8 +279,10 @@ export class SessionTransport {
     if (delta < 0 || d.bytes + delta > p.snapshot_bytes || this.bytes + delta > p.generation_bytes
         || d.entry_count + added.length > p.view_entries || d.branch_count + added.length > p.view_entries || this.records + records > p.generation_entries) throw unavailable();
     this.bytes += delta; this.records += records;
-    const release = view.release; view.release = () => { this.bytes -= delta; this.records -= records; release(); };
+    view.appendedBytes = (view.appendedBytes ?? 0) + delta;
+    view.appendedRecords = (view.appendedRecords ?? 0) + records;
     for (const entry of added) {
+      ids.set(entry.id, entry);
       h.entries.push(entry); h.branch_ids.push(entry.id);
       if (view.host.session_branch !== h.entries) view.host.session_branch.push(entry);
     }

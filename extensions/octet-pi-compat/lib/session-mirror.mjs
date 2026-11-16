@@ -5,18 +5,68 @@ import { assistantMetadata } from './model-turns.mjs';
 import { assistantObservation } from './run-messages.mjs';
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
 
-// A host view is translated once per namespace and limits. Views only grow by
-// append, so the length detects a stale translation. Callers get copies and
-// never share mutable entries.
+// Native transport arrays are append-only within a revision lineage. Replacement,
+// rewind and fork publications have their own arrays and therefore their own
+// weakly held cache. Limits and namespace remain part of the translation identity.
 const translations = new WeakMap();
 function cachedTranslation(entries, namespace) {
-  if (!Array.isArray(entries)) return translateSessionEntries(entries, namespace);
+  if (!Array.isArray(entries) || entries.length > historyItems()) invalid('session entries snapshot');
   const key = `${namespace}\0${historyItems()}\0${contextBytes()}`;
   let byKey = translations.get(entries);
   if (!byKey) translations.set(entries, byKey = new Map());
   let cached = byKey.get(key);
-  if (cached?.length !== entries.length) byKey.set(key, cached = { length: entries.length, result: translateSessionEntries(entries, namespace) });
-  return cached.result;
+  if (cached?.length === entries.length) return cached;
+  if (cached && entries.length < cached.length) cached = undefined;
+  try {
+    if (cached && entries.length > cached.length) {
+      for (let i = cached.length; i < entries.length; i++) {
+        const entry = entries[i];
+        // A branch change needs an ancestry reconstruction, not the old tip's
+        // active tool names. Ordinary receipt appends take only the new suffix.
+        if (entry.parent !== cached.tip) { cached = undefined; break; }
+        if (cached.native.has(entry.id)) invalid('duplicate session entry id');
+        const names = resultToolNames(entry, cached.calls);
+        const translated = translateEntry(entry, namespace, { names: new Map([[entry.id, names]]), visited: new Set([entry.id]) });
+        cached.result.push(translated); cached.byId.set(entry.id, translated);
+        cached.native.set(entry.id, entry); cached.tip = entry.id;
+        addToolNames(entry, cached.calls);
+      }
+      if (cached) cached.length = entries.length;
+    }
+    if (!cached) {
+      const result = translateSessionEntries(entries, namespace);
+      const native = new Map(entries.map(entry => [entry.id, entry]));
+      const calls = new Map(), chain = [];
+      let cyclic = false;
+      for (let entry = entries.at(-1); entry; entry = native.get(entry.parent)) {
+        chain.push(entry);
+        // Non-message marker cycles are observable, but not a usable call scope.
+        if (chain.length > entries.length) { cyclic = true; break; }
+      }
+      for (let i = chain.length - 1; i >= 0; i--) addToolNames(chain[i], calls);
+      cached = { length: entries.length, result, byId: new Map(result.map(entry => [entry.id, entry])), native, calls, tip: cyclic ? undefined : entries.at(-1)?.id ?? null };
+    }
+    // At most eight namespace/limit identities per admitted array. Eviction only
+    // affects reuse, never the immutable observations already handed to callers.
+    if (!byKey.has(key) && byKey.size >= 8) byKey.delete(byKey.keys().next().value);
+    byKey.set(key, cached);
+    return cached;
+  } catch (error) { byKey.delete(key); throw error; }
+}
+function addToolNames(entry, calls) {
+  const local = new Set();
+  for (const part of entry.value?.Assistant?.content ?? []) {
+    const call = part.ToolCall;
+    if (call && !local.has(call.id)) { local.add(call.id); calls.set(call.id, call.name); }
+  }
+}
+function resultToolNames(entry, calls) {
+  const names = new Map();
+  for (const part of entry.value?.User?.content ?? []) {
+    const id = part.ToolResult?.tool_call_id;
+    if (id !== undefined && calls.has(id)) names.set(id, calls.get(id));
+  }
+  return names;
 }
 function observedEntry(entry) {
   if (entry.type === 'message' && entry.message?.role === 'assistant') {
@@ -38,9 +88,10 @@ function copySessionData(value) {
   }
   return copy;
 }
-export const sessionEntryCopies = (entries, namespace) => copySessionData(cachedTranslation(entries, namespace)).map(observedEntry);
+export const sessionEntryCopies = (entries, namespace) => copySessionData(cachedTranslation(entries, namespace).result).map(observedEntry);
 export function sessionEntryCopy(entries, namespace, id) {
-  const entry = cachedTranslation(entries, namespace).find(candidate => candidate.id === id);
+  // Pi packages/coding-agent/src/core/session-manager.ts:1423-1425 uses byId.
+  const entry = cachedTranslation(entries, namespace).byId.get(id);
   return entry === undefined ? undefined : observedEntry(copySessionData(entry));
 }
 
@@ -99,7 +150,9 @@ export function translateSessionEntries(entries, namespace) {
   const byId = new Map(entries.map(entry => [entry.id, entry]));
   if (byId.size !== entries.length) invalid('duplicate session entry id');
   const indexed = indexToolNames(entries, byId);
-  return entries.map(entry => {
+  return entries.map(entry => translateEntry(entry, namespace, indexed));
+}
+function translateEntry(entry, namespace, indexed) {
     if (!entry?.value) return plainJSON(entry, 'Pi session entry', contextBytes());
     const id = bounded(entry.id, 'session entry id', 256), parentId = entry.parent;
     if (parentId !== null) bounded(parentId, 'session parent id', 256);
@@ -163,7 +216,6 @@ export function translateSessionEntries(entries, namespace) {
     // not Pi custom entries and cannot become extension-private state or roles.
     // Never publish another extension's private data / opaque provider sidecars.
     return { ...base, type: 'octet_native', nativeType: bounded(value.type, 'native entry type', 128) };
-  });
 }
 export function translateHostSnapshot(host, namespace) {
   const translated = { ...host };
