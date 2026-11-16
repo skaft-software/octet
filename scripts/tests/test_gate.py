@@ -121,6 +121,24 @@ else:
                         if line.startswith("TEST:"):
                             self.assertIn("--profile ci-test --locked --no-fail-fast", line)
 
+    def test_scratch_honors_tmpdir_and_keeps_test_paths_under_home(self):
+        with tempfile.TemporaryDirectory(prefix="octet-gate-parent-") as directory:
+            result = self.shell('''
+export TMPDIR="$1"
+cargo() { printf 'PATHS:%s|%s|%s\\n' "$HOME" "$TMPDIR" "$RUNNER_TEMP"; }
+quick_tests() { cargo; }
+main --quick
+''', directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            paths = re.findall(r"^PATHS:(.+)$", result.stdout, re.MULTILINE)
+            self.assertEqual(len(paths), 3, result.stdout)
+            for paths_line in paths:
+                home, temporary, runner = map(Path, paths_line.split("|"))
+                self.assertTrue(home.is_relative_to(directory), paths_line)
+                self.assertTrue(temporary.is_relative_to(home), paths_line)
+                self.assertTrue(runner.is_relative_to(home), paths_line)
+                self.assertFalse(home.exists(), "the exit trap must clean scratch state")
+
     def test_modes_and_exit_status_without_running_builds(self):
         # Exercise main's control flow, without installing dependencies or compiling.
         mocks = '''

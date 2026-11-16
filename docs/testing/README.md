@@ -32,7 +32,10 @@ Use CI's Rust 1.89.0 with rustfmt and clippy, Rust 1.90.0 for packaging, Node
 setup from `.github/workflows/ci.yml`; keep it and its contract test in sync when
 CI changes. Full mode runs CI's npm installs. Cache dependencies first for an
 offline run. It does not install toolchains. Tests use temporary HOME and TMPDIR
-outside the checkout, while retaining Cargo and rustup caches.
+outside the checkout, while retaining Cargo and rustup caches. Set `TMPDIR` before
+running the gate to choose its scratch parent (for example, a disk-backed path
+instead of a small `/tmp` tmpfs). Temporary workspaces sit beneath the isolated
+HOME so workspace discovery stops before any surrounding dotfiles repository.
 
 For iteration only:
 
