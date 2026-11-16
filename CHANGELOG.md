@@ -130,6 +130,7 @@
 - RPC resource reloads and subsequent provider turns fit the default thread stack in debug builds.
 - Early Pi submissions wait for their hooks, and cancellation preserves the still-loading setup for later prompts.
 - Auto theme detection applies late terminal replies through ordinary input without delaying the first submission.
+- Pi compatibility restores validated composer and footer templates at first paint while the live setup loads.
 
 ## [0.10.4] - 2026-11-12
 

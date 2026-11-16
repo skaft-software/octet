@@ -583,6 +583,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         reasoning,
         run_label,
         extension_loading_status,
+        pi_chrome,
         verbose_tools,
         thinking_disclosure,
         size,

@@ -76,6 +76,9 @@ pub(super) fn shell_chrome(
         };
     }
     let mut chrome = builtin_shell_chrome::shell_chrome(state, width, now);
+    if super::pi_chrome::apply(state, width, &mut chrome) {
+        return chrome;
+    }
     if state.startup_pending || state.panel.is_some() || state.tool_input_prompt.is_some() {
         return chrome;
     }

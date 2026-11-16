@@ -183,3 +183,36 @@ typeable is close to its full UI; octet draws first. The sentinel's position in 
 decides how many other `session_start` handlers have finished when it fires. Pi's built-in
 extensions (`mcp`, codemode, ...) are not part of the command comparison. Only the interactive TUI
 path is covered; RPC/print modes are not.
+
+## First chrome and early submission
+
+`first_chrome.py` uses the locked `scripts/fixtures/pi-reference` Pi 1.5.0 CLI,
+the actual octet binary, PTYs and a loopback scripted provider. It installs
+nothing and never reads the user's Pi setup or credentials. The small profile
+loads a synthetic custom editor/footer; the heavy profile uses synthetic local
+packages matching the names, versions and autoload flags in
+`maintainer_fixture.py`, with 150 ms asynchronous factory initialization. These
+are startup/ordering fixtures, not qualification of those packages' actual code.
+
+```sh
+python3 -B scripts/pi-eval/first_chrome.py \
+  --octet /absolute/path/to/built/octet \
+  --out /absolute/new/private-evidence
+```
+
+Each target gets its own isolated HOME/workspace/TMPDIR. Cold means no adapter
+or Node caches; warm reuses that exact home and geometry after the first run.
+`chrome_s` observes the configured footer, `typing_s` observes an actual edit,
+`submit_s` records the one Enter sent after that edit, and `acceptance_s` observes
+the prompt leaving the bottom composer. Pi's submit waits 50 ms beyond its custom footer to avoid its startup refusal; octet's is sent
+immediately. `provider_s` is completion of the locally scripted reply, not early
+submission admission. Actual requests must contain both the input transform and
+`before_agent_start` system marker. No provider dispatch can bypass those hooks.
+
+`capture.ansi`, separate `OCTET_STARTUP_TRACE` stderr, `frames.json` (every completed
+synchronized frame) and `result.json` are retained per leg. Warm octet legs assert
+Pi chrome on the first frame, no intervening footer disappearance, and invariant
+composer/footer rows through live reconciliation. Timings on a shared host are
+single observations, not stable benchmark medians. The owner should additionally check their real terminal,
+custom fonts/theme, multi-line typing, resize, toggle-off/on and Escape/Ctrl+D
+while their full extension set loads.

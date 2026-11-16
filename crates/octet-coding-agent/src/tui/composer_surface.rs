@@ -101,7 +101,7 @@ pub(crate) struct ComposerEditorProjection {
 }
 
 impl ComposerEditorProjection {
-    fn new(source: &str, source_cursor: usize, text_width: usize) -> Self {
+    pub(crate) fn new(source: &str, source_cursor: usize, text_width: usize) -> Self {
         let display = EditorDisplayMap::from_source(source);
         let display_cursor = display.source_to_display(source_cursor);
         let projection =

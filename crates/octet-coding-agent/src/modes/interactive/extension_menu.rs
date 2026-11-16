@@ -2122,6 +2122,8 @@ async fn set_extension_enabled_fenced(
     // one) and it may still contain a name the user switched off. Apply the
     // toggle to this one extension and keep every other source intact.
     crate::cli::apply_extension_toggle(&mut app.config, name, enabled);
+    // Install/withdraw the validated local chrome before rebuilding processes.
+    shell.set_runtime_config(app.config.clone());
     shell.notice(format!("{name}: activation saved; applying…"));
     shell.render();
     crate::app::bootstrap::startup_phase("extensions.toggle.acknowledged");

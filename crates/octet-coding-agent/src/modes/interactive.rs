@@ -13226,10 +13226,11 @@ async fn run_interactive_once(
     // Published before the frontend starts: the renderer thread and the shared
     // input filter both read the resolved policy, and neither carries Config.
     crate::tui::view::tern::set_policy(config.tern);
-    let mut shell = InteractiveShell::enter_with_mouse(
+    let mut shell = InteractiveShell::enter_with_startup_chrome(
         theme,
         size,
         config.mouse.captures_mouse_on(crate::cli::tui_mode()),
+        Some(&config),
     )?;
     shell.set_tui_fullscreen(crate::cli::tui_mode() == crate::config::TuiMode::Fullscreen)?;
     shell.set_runtime_config(config.clone());

@@ -257,14 +257,43 @@ commands](extensions.md). Alternatively use octet's interactive
 extension manager. Keep the Node package at its configured absolute path;
 the generated manifest references it. Node dependencies are extension-local.
 
+## Cached Pi chrome at first paint
+
+Automatic mirroring learns a small, versioned chrome template after the live Pi
+editor/footer render. On the next launch, or toggle-on, the admitted adapter's
+validated template is installed before native painting starts; Node and factory
+loading remain asynchronous. Editing stays native and submission waits for the
+same hook gates described below. Once both cached placements have live frames,
+the renderer reveals them together rather than clearing a slot when it opens.
+
+The private `chrome-*.json` cache sits beside the adapter's compile cache
+(`~/.cache/octet-pi-compat` by default). It retains structural editor borders,
+padding/wrapping geometry, safe SGR palette styles and footer field templates.
+Configured model/provider metadata can initialize those fields; numeric session
+usage starts at zero until the live footer arrives. Drafts, session titles,
+notifications, history and credentials are not saved. Unrecognized footer text
+or decorated/non-facade editors are not cached as opaque screenshots.
+
+Every read validates the schema, size, terminal geometry, workspace and native
+trust/activation decision. Hashes cover Pi settings, keybindings, package locks
+and versions, reviewed sources, discovered palettes and directory membership.
+Edits during loading cannot bless old chrome with a new identity. A missing,
+corrupt, over-budget or changed cache uses native chrome until live components
+arrive. Explicit native theme overrides also keep native first paint. Disabling
+Pi compatibility withdraws the template; a cache never grants extension authority.
+
+Offline reproduction and frame evidence: `scripts/pi-eval/first_chrome.py` (see
+[the evaluation guide](../scripts/pi-eval/README.md#first-chrome-and-early-submission)).
+These reduced synthetic fixtures do not qualify every installed footer/editor.
+
 ## Slow or stalled extensions
 
 Automatic-mirror registration capture runs asynchronously without blocking the
 native branded input frame. While the explicitly enabled adapter prepares and
 attaches, the native input pump keeps typing in the draft and handles resize.
-First-frame readiness is not full extension-UI readiness or a claim that cold
-startup matches Pi. Enabling the adapter in `/extensions` acknowledges the saved
-activation before rebuilding, then returns editable/cancellable native control
+A validated cached chrome template can supply the first frame; without one,
+first-frame readiness is not full extension-UI readiness. Enabling the adapter in
+`/extensions` acknowledges the saved activation before rebuilding, then returns editable/cancellable native control
 while factories attach. “Loading your Pi setup” stays visible until the idle
 pump settles initialization; startup failures name the extension. Submission
 still waits for its hooks, and disabling or closing retires pending activation.

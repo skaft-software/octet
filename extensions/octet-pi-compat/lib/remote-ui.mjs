@@ -7,6 +7,7 @@ import { piPosition } from './autocomplete-edits.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 import { isKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
 import { inRender } from './ui-delivery.mjs';
+import { ChromeSnapshot } from './chrome-snapshot.mjs';
 
 import { resolveFakeCursors } from './fake-cursor.mjs';
 const CURSOR_MARKER = '\x1b_pi:c\x07';
@@ -303,7 +304,7 @@ export class RemoteTUI {
 }
 
 export class RemoteUI {
-  constructor(runtime) { this.runtime = runtime; this.surfaces = new Map(); this.slots = new Map(); this.counter = 0; }
+  constructor(runtime) { this.runtime = runtime; this.chromeSnapshot = new ChromeSnapshot(runtime); this.surfaces = new Map(); this.slots = new Map(); this.counter = 0; }
   async mount(store, placement, title, factory, { done, reject, slot, overlayOptions, onHandle } = {}) {
     this.runtime.require('remote_ui'); this.runtime.assertOwner(store);
     if (this.surfaces.size >= 16) throw rpcError(-32012, 'bounds_exceeded remote surfaces');
@@ -559,6 +560,7 @@ export class RemoteUI {
     const checkpoint = surface.editor?.tail;
     await checkpoint;
     if (surface.closed || !surface.store.state.alive || columns !== surface.columns || rows !== surface.rows) return;
+    this.chromeSnapshot.capture(surface, lines);
     await this.runtime.transport.notify('ui/frame', {
       resource_owner: surface.store.state.owner, surface_id: surface.id,
       revision: surface.revision++, columns, rows, lines,

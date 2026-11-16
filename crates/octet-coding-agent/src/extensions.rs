@@ -9,6 +9,7 @@
 
 mod autocomplete;
 mod mutation_resources;
+pub(crate) mod pi_chrome;
 mod pi_mirror;
 pub(crate) mod remote_ui;
 pub(crate) mod resource_paths;

@@ -398,6 +398,7 @@ export class Runtime {
       // admits project factories, never bridge enablement or Pi trust files.
       if (!this.config.registrations || !this.config.entrypoint_sources) invalid('mirror static registrations require review; configure again');
       const setup = discoverPiSetup({ agentDir: this.config.pi_agent_dir, env: process.env, cwd: this.workspace, projectTrusted: this.host.project_trusted === true });
+      this.ui.chromeSnapshot.prepare(this.workspace, this.host.project_trusted === true, setup.themesPaths);
       for (const diagnostic of setup.diagnostics.slice(0, 32)) this.diagnostic(`mirror ${diagnostic}`);
       for (const skipped of setup.unsupportedPackages) this.diagnostic(skipped.line);
       this.commandSourceInfos = setup.sourceInfos;

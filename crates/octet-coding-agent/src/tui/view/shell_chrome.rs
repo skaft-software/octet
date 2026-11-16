@@ -430,6 +430,7 @@ pub(super) fn render_startup_surface(
     application_viewport: bool,
 ) -> Vec<String> {
     let (mut chrome, composer_rows) = shell_chrome_with_composer_rows(state, width, Instant::now());
+    super::pi_chrome::apply(state, width, &mut chrome);
     if !application_viewport
         && state.panel.is_none()
         && state.overlay.is_none()

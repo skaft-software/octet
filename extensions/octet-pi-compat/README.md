@@ -70,6 +70,21 @@ startup hooks. `OCTET_PI_COMPAT_CACHE` explicitly overrides the location; keep i
 outside watched extension/resource trees. Generated manifests pin capture's cache
 location for runtime reuse.
 
+Automatic mirrors also retain a data-only `octet.pi-chrome/v1` startup template,
+at most 128 KiB, in that same private cache. `lib/chrome-snapshot.mjs` compiles
+structural native-facade editor geometry and safe footer fields from rendered
+frames; it never stores arbitrary frame text or the draft. Known configuration
+model/provider metadata and SGR palette styles are retained, while session
+numbers become zero fields. Unsupported content keeps native first paint.
+Identity hashes include settings, package versions/locks, source closures,
+palettes and directory membership, captured before factories run and checked
+again before writing. Rust revalidates those inputs and native activation/trust
+before first paint, then paints the current native draft through the declarative
+template without starting Node or issuing render RPCs. Geometry changes, invalid
+caches and explicit native theme overrides use native fallback. Opening a mount
+alone does not retire the template: both represented live placements need frames.
+See [cached first paint](../../docs/pi-compatibility.md#cached-pi-chrome-at-first-paint).
+
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
 with safe `pi-*` native selectors. Enabling this reviewed bridge contributes these
 regular themes to `/theme` and makes Pi's selected palette the session startup
@@ -1122,9 +1137,10 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The isolated rebased-candidate adapter run, with two test files in parallel, is
+The recorded base adapter run, with two test files in parallel, is
 **1653 tests: 1620 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
-and the pinned Pi provider fixture.
+and the pinned Pi provider fixture. The two additional startup-chrome regressions
+are exercised separately in `test/chrome-snapshot.test.mjs`.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing

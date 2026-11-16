@@ -118,6 +118,8 @@ use crate::presentation::tool_display::is_subagent_tool;
 #[cfg(test)]
 mod fullscreen_work_tests;
 
+mod pi_chrome;
+
 /// Maximum physical rows retained in a collapsed command-output tail.
 const COMPACT_EXEC_OUTPUT_ROWS: usize = 5;
 /// Maximum physical rows one inline tool image can reserve inside its tool card.
@@ -2003,6 +2005,7 @@ pub(crate) struct ShellState {
     /// field; their phase always comes from `run`.
     pub(crate) run_label: String,
     pub(crate) extension_loading_status: Option<String>,
+    pi_chrome: Option<Arc<crate::extensions::pi_chrome::Snapshot>>,
     /// Global transcript disclosure mode. Ctrl+O and `/verbose` toggle this.
     pub(crate) verbose_tools: bool,
     /// Thinking disclosure chosen with Ctrl+T or `/verbose`. `None` follows the
@@ -2387,6 +2390,7 @@ impl ShellState {
             session_name: Default::default(),
             run_label: Default::default(),
             extension_loading_status: None,
+            pi_chrome: None,
             verbose_tools: Default::default(),
             thinking_disclosure: Default::default(),
             size: Default::default(),
@@ -4362,10 +4366,20 @@ pub struct InteractiveShell {
 impl InteractiveShell {
     /// Enter with explicit mouse ownership. The terminal still supports every
     /// keyboard transcript action when mouse reporting is disabled.
+    #[cfg(test)]
     pub fn enter_with_mouse(
         theme: OctetTheme,
         size: TerminalSize,
         capture_mouse: bool,
+    ) -> Result<Self> {
+        Self::enter_with_startup_chrome(theme, size, capture_mouse, None)
+    }
+
+    pub(crate) fn enter_with_startup_chrome(
+        theme: OctetTheme,
+        size: TerminalSize,
+        capture_mouse: bool,
+        config: Option<&Config>,
     ) -> Result<Self> {
         if !theme.capabilities().interactive {
             anyhow::bail!("interactive terminal capabilities are unavailable");
@@ -4383,6 +4397,11 @@ impl InteractiveShell {
             follow_tail: true,
             application_viewport_requested: capture_mouse,
             startup_pending: true,
+            pi_chrome: config.and_then(crate::extensions::pi_chrome::load),
+            model: config
+                .and_then(|config| config.model.as_ref())
+                .map(|id| id.0.clone())
+                .unwrap_or_default(),
             image_rendering: ToolImageRendering {
                 enabled: false,
                 capabilities: image_capabilities,
@@ -6731,7 +6750,9 @@ impl InteractiveShell {
 
     pub fn set_runtime_config(&mut self, config: Config) {
         let show_images = config.show_images;
+        let snapshot = crate::extensions::pi_chrome::load(&config);
         let mut state = self.state.borrow_mut();
+        state.pi_chrome = snapshot;
         state.safe_mode = config.effect_policy != octet_agent::EffectPolicy::UnsafeHost;
         state.max_session_cost_microdollars = config.max_cost_microdollars;
         state.show_cache_miss_notices = config.show_cache_miss_notices;

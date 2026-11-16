@@ -163,6 +163,8 @@ export class Editor {
   renderBottomBorder(width, hidden) { return this.borderColor(hidden ? scrollBorder('↓', hidden, width) : '─'.repeat(width)); }
   render(width) {
     const frame = this.#request({op: 'render', width, rows: this.tui.terminal.rows});
+    this.startupPadding = frame.padding;
+    this.startupRows = frame.lines.length;
     const pad = ' '.repeat(frame.padding);
     const lines = frame.lines.map(row => {
       const text = row.text ?? (row.before + (this.focused ? CURSOR_MARKER : '') + '\x1b[7m' + row.cursor + '\x1b[0m' + row.after);
