@@ -820,6 +820,20 @@ impl InteractiveShell {
     /// true when the query or a rendered navigation control consumed the event.
     /// translate_input also invokes it as the common dispatch fallback.
     pub fn intercept_transcript_input(&mut self, event: &Event) -> bool {
+        if let Event::Mouse(mouse) = event {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && mouse.modifiers.is_empty()
+                && super::builtin_welcome_card::click_mark(
+                    &mut self.state.borrow_mut(),
+                    mouse.column,
+                    mouse.row,
+                    Instant::now(),
+                )
+            {
+                self.render();
+                return true;
+            }
+        }
         if !matches!(
             event,
             Event::Mouse(mouse) if matches!(

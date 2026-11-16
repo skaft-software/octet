@@ -79,7 +79,7 @@ and atomic ready chrome. These tests qualify projections, not desktop paint.
 `real_octet_compact_welcome_survives_narrow_resize` checks both fullscreen and
 inline startup, then resizes through 80, 40, 37, 36, 24 and back to 80 columns.
 Composed VT cells must retain one exact 8×2 byte mark and one version label;
-permissions, the changelog command and exit help must remain readable as details
+permissions and the changelog command must remain readable as details
 move below the mark. Shutdown must restore termios and balance synchronized
 frames. These are offline real-binary checks, not native Tern pixel acceptance.
 
@@ -211,3 +211,13 @@ unrelated to the rendering fixes (synchronized resize frames, restoration,
 alternate-screen policy, and mouse policy) to remain compatible. Startup
 clear/stale-row correction intentionally differs from the old baseline;
 structural resize retains canonical saved-line clear/replay.
+
+## Native mark click regression
+
+`real_octet_mark_click_blinks_then_settles_without_replay` clicks the default
+mark in a truecolor fullscreen PTY, observes the blink glyph, and verifies the
+canonical settled mark, unchanged cursor, no history clear, and no continued
+animation frames. Unit tests cover bounded repeated-click rainbow strength,
+settlement, stale resize geometry, reduced motion, lower colour capabilities,
+and preservation of explicitly themed hues. These are terminal-byte/VT checks,
+not attended visual acceptance.

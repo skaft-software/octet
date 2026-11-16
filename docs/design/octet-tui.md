@@ -72,14 +72,13 @@ An existing `--session-id` keeps its saved model unless a model is explicitly
 selected; scope order alone does not overwrite it.
 
 The working directory appears only in the footer, not again in the splash.
-The splash keeps its byte-aligned spacing, version, changelog/update hints,
-permissions, and exit help. Its compiled-default mark occupies 8×2 cells,
-including on wide terminals, with eight contiguous columns and the `01101111`
-silhouette. Compact custom themes use the same small mark. Details stack beneath
-it when fewer than 24 text cells remain alongside; optional permission prefixes
-shorten before the access-mode text. Placeholder and painted rows share this
-width decision and reserve the entire text column, not only the logo height.
-The name remains prominent while discovery and exit hints use muted text.
+The compiled-default splash places `octet  v<version>` beside the canonical
+8×2 byte mark, with `<access> · /changelog` directly below. It omits exit help
+and duplicate “what's new” copy. Narrow layouts stack bounded details below the
+mark; very short panes retain identity and permission state without a logo.
+Custom themes retain their geometry and styling; a custom header replaces the
+entire splash, including its click target. Placeholder and painted rows share
+the same width and height decisions.
 The footer, not the splash, owns the current model/reasoning row. Full access is a
 warning-class permission mode, not an ordinary failure.
 
@@ -93,10 +92,20 @@ cards prioritize identity, setup, and permission state. The budget changes on
 resize, not draft edits. The terminal background remains unchanged.
 User-customized ANSI16 palettes can still affect actual contrast.
 
+The compact native mark is quiet at rest. In captured application viewports,
+a left click briefly blinks its two short bars and starts the existing 2.2-second
+highlight sweep. Rapid clicks build a bounded rainbow blend which fades back to
+the normal palette; explicitly themed splash colours keep their hue. This is
+truecolor, animation-enabled decoration only, never an idle loop. The renderer's
+existing scheduler owns its clock. Painted-frame geometry fences clicks; hidden,
+replaced, resized or historical marks stop animating. Terminal-owned uncaptured
+inline output and native Tern retain static marks. No extension animation API
+is introduced.
+
 Interactive startup performs one best-effort newer-stable-release check outside
 the input and renderer loops, skipped in offline mode and cancelled on exit.
-A newer release replaces the changelog hint in the splash's right-hand version
-column without adding a row:
+A newer release replaces the changelog hint beside the access label in the
+compiled-default splash, without adding a row:
 `↑ v<VERSION> available · run` followed by `octet update` rendered as Markdown
 inline code. Both hints use bounded compact/ASCII fallbacks; neither occupies a
 full-width footer beneath the logo. If conversation history has already frozen

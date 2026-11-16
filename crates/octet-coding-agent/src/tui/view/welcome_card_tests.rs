@@ -3,21 +3,14 @@ use crate::tui::view::InteractiveShell;
 use sexy_tui_rs::strip_terminal_sequences;
 
 #[test]
-fn default_welcome_keeps_exit_help_quieter_than_identity() {
+fn default_welcome_omits_duplicate_help_across_layouts() {
     let shell = InteractiveShell::test_shell();
     let state = shell.state.borrow();
     for width in [24, 36, 37, 80] {
         for budget in [3, 7, 10] {
-            let rows = render_welcome_content(&state, width, budget);
-            let hint = rows.iter().find(|row| row.contains("Ctrl+C")).unwrap();
-            assert!(hint.contains(&state.theme.dim("Ctrl+C / Ctrl+D to exit")));
-            assert!(
-                !hint.contains("\x1b[1m"),
-                "help must not compete with identity: {hint:?}"
-            );
-            assert!(rows
-                .iter()
-                .any(|row| row.contains(&state.theme.bold("octet"))));
+            let rows = render_welcome_content(&state, width, budget).join("\n");
+            assert!(!rows.contains("Ctrl+C"));
+            assert!(!rows.contains("what's new"));
         }
     }
 }
@@ -229,9 +222,9 @@ fn changelog_splash_tip_stays_bounded_without_moving_the_byte() {
                     if width >= 46 && height >= 8 {
                         assert!(
                             plain.contains(if unicode {
-                                "/changelog · what's new"
+                                "full access · /changelog"
                             } else {
-                                "/changelog - what's new"
+                                "full access - /changelog"
                             }),
                             "missing exact splash tip at {width}x{height}: {plain}"
                         );
@@ -264,7 +257,8 @@ fn welcome_exit_hint_includes_ctrl_c_across_layouts() {
             let rows = render_welcome_content(&shell.state.borrow(), width, budget);
             let plain = strip_terminal_sequences(&rows.join("\n"));
             assert!(
-                plain.contains("Ctrl+C / Ctrl+D to exit"),
+                plain.contains("Ctrl+C / Ctrl+D to exit")
+                    == !shell.state.borrow().theme.is_compiled_default(),
                 "{width}/{budget}: {plain}"
             );
             assert!(rows
@@ -358,7 +352,7 @@ fn short_welcome_keeps_permissions_at_current_version_width_breakpoints() {
                     let identity = strip_terminal_sequences(&rows[0]);
                     assert_eq!(identity, expected, "width={width} budget={budget}");
                     assert!(identity.contains(access), "{identity}");
-                    assert_eq!(rows.len(), budget.min(3));
+                    assert_eq!(rows.len(), budget.min(2));
                     assert_eq!(welcome_content_rows(&state, width, budget), rows.len());
                     assert!(rows
                         .iter()
@@ -414,7 +408,7 @@ fn narrow_welcome_stacks_before_permissions_or_exit_help_would_clip() {
                 } else {
                     "full access"
                 };
-                for detail in [access, "Ctrl+C / Ctrl+D to exit", "/changelog"] {
+                for detail in [access, "/changelog"] {
                     assert!(
                         plain.contains(detail),
                         "width={width}, missing {detail}: {plain}"
@@ -529,7 +523,11 @@ fn assert_welcome_logo_geometry(widths: &[(u16, usize)]) {
                     10,
                     started + Duration::from_secs_f32(elapsed),
                 );
-                assert_eq!(rendered.len(), 6, "compact welcome layout at {width}");
+                assert_eq!(
+                    rendered.len(),
+                    if width < 37 { 5 } else { 4 },
+                    "compact welcome layout at {width}"
+                );
                 let plain = strip_terminal_sequences(&rendered.join("\n"));
                 assert!(
                     !plain.contains("Claude Sonnet"),
@@ -748,7 +746,7 @@ fn welcome_card_shows_access_mode_and_safe_mode_hint() {
     shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
     let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now()).join("\n");
     let rendered = strip_terminal_sequences(&rendered);
-    assert!(rendered.contains("permissions: full access"), "{rendered}");
+    assert!(rendered.contains("full access · /changelog"), "{rendered}");
     assert!(
         rendered.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
         "{rendered}"
@@ -760,7 +758,7 @@ fn welcome_card_shows_access_mode_and_safe_mode_hint() {
     let rendered =
         render_welcome_card(&safe_shell.state.borrow(), 80, 10, Instant::now()).join("\n");
     let rendered = strip_terminal_sequences(&rendered);
-    assert!(rendered.contains("permissions: safe mode"), "{rendered}");
+    assert!(rendered.contains("safe mode · /changelog"), "{rendered}");
 }
 
 #[test]
@@ -801,4 +799,74 @@ fn narrow_welcome_card_keeps_a_bounded_identity_fallback() {
             .map(|line| strip_terminal_sequences(line))
             .any(|line| line.contains('o') || line.contains('#')));
     }
+}
+
+fn paint_mark(shell: &InteractiveShell) -> (u16, u16) {
+    use crate::tui::view::renderer_geometry::{GeometryFence, RenderedGeometry};
+    let mut state = shell.state.borrow_mut();
+    state.rendered_transcript(state.size.0);
+    let geometry = RenderedGeometry::capture(&state, GeometryFence::capture(&state));
+    let (x, y) = geometry.welcome_mark.expect("visible mark");
+    state.render_geometry = Some(std::sync::Arc::new(geometry));
+    (x, y as u16)
+}
+
+#[test]
+fn click_reaction_is_local_bounded_and_stops() {
+    let shell = InteractiveShell::test_shell();
+    {
+        let mut state = shell.state.borrow_mut();
+        state.size = (80, 24);
+        state.startup_card_started_at = Some(Instant::now());
+        state.application_viewport_requested = true;
+    }
+    let (x, y) = paint_mark(&shell);
+    let now = Instant::now();
+    let mut state = shell.state.borrow_mut();
+    assert!(!click_mark(&mut state, x + 8, y, now));
+    assert!(click_mark(&mut state, x, y, now));
+    assert_eq!(state.welcome_reaction.unwrap().strength, 0.0);
+    for n in 1..20 {
+        assert!(click_mark(
+            &mut state,
+            x,
+            y,
+            now + std::time::Duration::from_millis(n * 50)
+        ));
+    }
+    assert!(state.welcome_reaction.unwrap().strength > 0.9);
+    assert!(state.welcome_reaction.unwrap().strength <= 1.0);
+    advance_reaction(&mut state, now + std::time::Duration::from_secs(4));
+    assert!(state.welcome_reaction.is_none());
+    assert!(click_mark(&mut state, x, y, now));
+    state.size.0 = 40;
+    assert!(!click_mark(&mut state, x, y, now));
+    advance_reaction(&mut state, now);
+    assert!(state.welcome_reaction.is_none());
+}
+
+#[test]
+fn mark_reaction_respects_capabilities_and_replacement() {
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    for (animation, color) in [
+        (false, ColorDepth::TrueColor),
+        (true, ColorDepth::Ansi16),
+        (true, ColorDepth::None),
+    ] {
+        let mut caps = TerminalCapabilities::test(true, true, color);
+        caps.animation = animation;
+        let shell =
+            InteractiveShell::test_shell_with_theme(crate::tui::theme::test_theme_with(caps));
+        let mut state = shell.state.borrow_mut();
+        state.startup_card_started_at = Some(Instant::now());
+        state.application_viewport_requested = true;
+        assert!(mark_rect(&state).is_none());
+        assert!(!click_mark(&mut state, 2, 1, Instant::now()));
+    }
+    let shell = InteractiveShell::test_shell();
+    let mut state = shell.state.borrow_mut();
+    state.startup_card_started_at = Some(Instant::now());
+    state.application_viewport_requested = true;
+    state.overlay = Some(super::super::ShellOverlay::Text("replacement".into()));
+    assert!(mark_rect(&state).is_none());
 }

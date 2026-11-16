@@ -240,6 +240,7 @@ pub(super) struct RenderedGeometry {
     pub(super) panel: Option<PanelRenderReceipt>,
     pub(super) report: Option<ReportRenderReceipt>,
     pub(super) navigation_frame: Option<super::transcript_navigation::NavigationFrame>,
+    pub(super) welcome_mark: Option<(u16, usize)>,
     pub(super) generation: u64,
     pub(super) total_rows: usize,
     pub(super) visible_start: usize,
@@ -313,6 +314,9 @@ impl RenderedGeometry {
             panel: PanelRenderReceipt::capture(state, &chrome.panel),
             report: ReportRenderReceipt::capture(state),
             navigation_frame: state.transcript_navigation.borrow().rendered_frame(),
+            welcome_mark: super::builtin_welcome_card::mark_rect(state).and_then(|(x, y)| {
+                (y >= start && y + 2 <= end).then_some((x, y.saturating_sub(start)))
+            }),
             generation: cache.generation,
             total_rows,
             visible_start: start,

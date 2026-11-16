@@ -65,7 +65,7 @@ fn first_branded_frame_waits_for_identity_workspace_and_appearance() {
             "setup rows are not a retained prefix"
         );
         let text = plain(&update.replacement);
-        assert!(text.contains("octet v"), "{text}");
+        assert!(text.contains("octet  v"), "{text}");
         assert!(text.contains("full access"), "{text}");
         assert!(text.contains("cerebras/gemma-4-31b"), "{text}");
         assert!(text.contains("/startup-fixture/workspace"), "{text}");
@@ -240,14 +240,11 @@ fn readiness_inserts_one_welcome_prefix_into_a_warm_cache() {
     let rendered = state.rendered_transcript(96);
     let text = plain(&rendered);
     assert_eq!(text.matches("retained setup notice").count(), 1, "{text}");
-    assert_eq!(text.matches("octet v").count(), 1, "{text}");
-    assert!(
-        text.contains("no configured model · setup needed"),
-        "{text}"
-    );
+    assert_eq!(text.matches("octet  v").count(), 1, "{text}");
+    assert!(text.contains("full access · /changelog"), "{text}");
     assert!(!text.contains("selecting model"), "{text}");
     assert_eq!(state.transcript_cache.borrow().last_update_start, 0);
-    assert_eq!(state.transcript_cache.borrow().block_starts, [6]);
+    assert_eq!(state.transcript_cache.borrow().block_starts, [4]);
 }
 
 #[test]
@@ -265,8 +262,8 @@ fn renderer_reconstruction_preserves_pending_and_ready_startup_state() {
     for application_viewport in [false, true] {
         let component = ShellComponent::new(shell.state.clone(), application_viewport);
         let text = plain(&component.render(96));
-        assert_eq!(text.matches("octet v").count(), 1, "{text}");
-        assert!(text.contains("setup needed"), "{text}");
+        assert_eq!(text.matches("octet  v").count(), 1, "{text}");
+        assert!(text.contains("full access · /changelog"), "{text}");
         assert_eq!(shell.state.borrow().startup_card_started_at, started);
     }
 }
@@ -404,7 +401,7 @@ fn silent_startup_keeps_an_unframed_editable_composer_in_both_viewport_modes() {
         let ready = component.render_update(96).unwrap();
         assert_eq!(ready.stable_prefix, 0);
         assert_eq!(composer_rules(&ready.replacement, 96), 2);
-        for expected in ["octet v", "full access", "custom/probe", "editable draft"] {
+        for expected in ["octet  v", "full access", "custom/probe", "editable draft"] {
             assert!(plain(&ready.replacement).contains(expected));
         }
     }

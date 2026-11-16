@@ -588,6 +588,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         resize_epoch,
         startup_pending,
         startup_card_started_at,
+        welcome_reaction,
     );
     if target.editor.text() != source.editor.text() {
         target.editor.set_text(source.editor.text());

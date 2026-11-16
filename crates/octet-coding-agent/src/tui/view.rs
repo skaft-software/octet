@@ -2018,6 +2018,7 @@ pub(crate) struct ShellState {
     /// than terminal construction or time spent in onboarding. It remains
     /// mutable until the first real conversation block.
     startup_card_started_at: Option<Instant>,
+    welcome_reaction: Option<builtin_welcome_card::MarkReaction>,
 }
 
 impl Default for ShellState {
@@ -2358,6 +2359,7 @@ impl ShellState {
             resize_epoch: Default::default(),
             startup_pending: Default::default(),
             startup_card_started_at: Default::default(),
+            welcome_reaction: None,
         }
     }
 

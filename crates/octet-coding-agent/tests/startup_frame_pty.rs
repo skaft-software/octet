@@ -1363,7 +1363,10 @@ fn real_octet_startup_frame_pty_contract() {
 
 fn assert_unbranded_startup(parser: &vt100::Parser, columns: u16) {
     let text = screen_text(parser, columns);
-    assert!(!text.contains("octet v"), "premature branded frame\n{text}");
+    assert!(
+        !text.contains("octet  v"),
+        "premature branded frame\n{text}"
+    );
     assert!(!text.contains('█'), "premature byte mark\n{text}");
     assert!(!text.contains("selecting model"), "{text}");
     assert!(!text.contains("workspace unavailable"), "{text}");
@@ -1481,7 +1484,7 @@ fn real_octet_first_branded_frame_has_resolved_gemma_workspace_and_accent() {
         for frame in frame_ranges(&octet.pty.output) {
             parser.process(&octet.pty.output[consumed..frame.end]);
             consumed = frame.end;
-            if !branded && !parser.screen().contents().contains("octet v") {
+            if !branded && !parser.screen().contents().contains("octet  v") {
                 assert_unbranded_startup(&parser, INITIAL_COLUMNS);
                 assert_eq!(composer_rule_rows(&parser), 0, "half-loaded composer rails");
             } else {
@@ -1590,7 +1593,7 @@ fn assert_model_switch_welcome(diagnostics: bool) {
         for frame in frame_ranges(output) {
             parser.process(&output[consumed..frame.end]);
             consumed = frame.end;
-            if !branded && !parser.screen().contents().contains("octet v") {
+            if !branded && !parser.screen().contents().contains("octet  v") {
                 continue;
             }
             branded = true;
@@ -1754,7 +1757,8 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
         let readiness_start = consumed;
         octet.pty.write_input(b"Continue without\r");
         octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-            synchronized_frame_end_containing(&bytes[readiness_start..], b"setup needed").is_some()
+            synchronized_frame_end_containing(&bytes[readiness_start..], b"prompts are disabled.")
+                .is_some()
         });
         octet.pty.drain_for(DRAIN_TIME);
         let mut branded = false;
@@ -1763,14 +1767,14 @@ fn real_octet_setup_surfaces_work_before_modeless_startup_readiness() {
             parser.process(&octet.pty.output[consumed..end]);
             consumed = end;
             let text = screen_text(&parser, INITIAL_COLUMNS);
-            if !branded && !text.contains("octet v") {
+            if !branded && !text.contains("octet  v") {
                 assert_unbranded_startup(&parser, INITIAL_COLUMNS);
                 continue;
             }
             branded = true;
             assert_single_welcome(&parser, INITIAL_COLUMNS, "model-less ready");
             assert!(
-                text.contains("no configured model · setup needed"),
+                text.contains("No configured model. Use /setup or /model; prompts are disabled."),
                 "{text}"
             );
             assert!(text.contains("~/workspace"), "{text}");
@@ -1941,7 +1945,7 @@ fn real_octet_model_discovery_keeps_startup_editable() {
                     2,
                     "incomplete ready chrome\n{text}"
                 );
-                for together in ["octet v", "full access", "startup draft pasted"] {
+                for together in ["octet  v", "full access", "startup draft pasted"] {
                     assert!(
                         text.contains(together),
                         "ready frame omitted {together}\n{text}"
@@ -2088,7 +2092,7 @@ fn real_octet_compact_welcome_survives_narrow_resize() {
             let label = format!("compact-welcome fullscreen={fullscreen} width={columns}");
             assert_single_welcome(&parser, columns, &label);
             let text = screen_text(&parser, columns);
-            for detail in ["full access", "Ctrl+C / Ctrl+D to exit", "/changelog"] {
+            for detail in ["full access", "/changelog"] {
                 assert!(text.contains(detail), "{label}: missing {detail}\n{text}");
             }
             eprintln!("{label}\n{text}");
@@ -2870,7 +2874,11 @@ fn visible_bytes(bytes: &[u8]) -> String {
 /// differential frames repeat the current brand, but must never accumulate it.
 fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
     let text = screen_text(parser, columns);
-    let version = format!("octet v{}", env!("CARGO_PKG_VERSION"));
+    let version = format!(
+        "octet{}v{}",
+        if columns < 37 { " " } else { "  " },
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
         !text.contains("selecting model"),
         "{label}: provisional model\n{text}"
@@ -2941,7 +2949,11 @@ fn check_welcome_frames(
         .unwrap();
     }
     let start = *consumed;
-    let version = format!("octet v{}", env!("CARGO_PKG_VERSION"));
+    let version = format!(
+        "octet{}v{}",
+        if columns < 37 { " " } else { "  " },
+        env!("CARGO_PKG_VERSION")
+    );
     let mut branded = parser.screen().contents().contains(&version);
     for frame in frame_ranges(&octet.pty.output[start..]) {
         let end = start + frame.end;
@@ -3502,6 +3514,48 @@ fn real_octet_initial_changelog_without_model_preserves_setup_choice() {
         .join("home/.octet/credentials/custom.json")
         .exists());
     assert!(changelog_session_bytes(&octet).is_empty());
+    let capture = octet.shutdown();
+    assert!(capture.status.success());
+    assert!(capture.termios_restored);
+}
+
+#[test]
+fn real_octet_mark_click_blinks_then_settles_without_replay() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut octet = PtyOctet::spawn_at_with_appearance_and_mode(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        MouseMode::Auto,
+        None,
+        (true, false),
+        (80, 18),
+        (2, false, false),
+        (StartupFixture::Model("probe"), Some(true)),
+    );
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+    });
+    octet.pty.drain_for(Duration::from_millis(150));
+    let mut parser = vt100::Parser::new(18, 80, 0);
+    parser.process(&octet.pty.output);
+    let cursor = parser.screen().cursor_position();
+    let start = octet.pty.output.len();
+    // First short bar, in the second logo row. SGR coordinates are one-based.
+    octet.pty.write_input(b"\x1b[<0;3;3M\x1b[<0;3;3m");
+    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+        bytes[start..]
+            .windows("▁".len())
+            .any(|s| s == "▁".as_bytes())
+    });
+    octet.pty.drain_for(Duration::from_millis(2400));
+    parser.process(&octet.pty.output[start..]);
+    assert_single_welcome(&parser, 80, "settled click");
+    assert_eq!(parser.screen().cursor_position(), cursor);
+    assert_eq!(count_bytes(&octet.pty.output[start..], b"\x1b[3J"), 0);
+    let settled = octet.pty.output.len();
+    octet.pty.drain_for(Duration::from_millis(250));
+    assert_eq!(count_bytes(&octet.pty.output[settled..], FRAME_BEGIN), 0);
     let capture = octet.shutdown();
     assert!(capture.status.success());
     assert!(capture.termios_restored);

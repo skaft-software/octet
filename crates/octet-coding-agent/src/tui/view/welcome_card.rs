@@ -7,14 +7,16 @@ use crate::tui::layout::PresentationLayout;
 
 // Fixed semantic text columns, not overall card heights. The materializer's
 // arrays use these sizes so geometry cannot drift from their row cardinality.
-const DEFAULT_TEXT_ROWS: usize = 4;
+const DEFAULT_TEXT_ROWS: usize = 2;
 const FILE_TEXT_ROWS: usize = 6;
 const PI_STARTUP_ROWS: usize = 6;
-// Keep permissions and the exit shortcut intact beside the mark.
+// Keep the complete access label and changelog command beside the mark.
 const MIN_SPLASH_TEXT_WIDTH: u16 = 24;
 
 fn changelog_hint(state: &ShellState, width: u16) -> String {
-    let tip = if state.theme.unicode() {
+    let tip = if state.theme.is_compiled_default() {
+        "/changelog"
+    } else if state.theme.unicode() {
         "/changelog · what's new"
     } else {
         "/changelog - what's new"
@@ -25,6 +27,96 @@ fn changelog_hint(state: &ShellState, width: u16) -> String {
         "/changelog"
     };
     fit_line(&state.theme.dim(tip), width)
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct MarkReaction {
+    started: Instant,
+    strength: f32,
+}
+
+/// Only a visible native compact mark owns this interaction. Remote headers
+/// replace it completely; immutable conversation history never animates.
+fn interactive_mark(state: &ShellState) -> bool {
+    use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+    let caps = state.theme.capabilities();
+    welcome_is_mutable(state)
+        && !state.startup_pending
+        && state.panel.is_none()
+        && state.overlay.is_none()
+        && state.tool_input_prompt.is_none()
+        && !state.transcript_search_active()
+        && state.application_viewport_requested
+        && caps.interactive
+        && caps.animation
+        && caps.color == crate::tui::terminal::ColorDepth::TrueColor
+        && !pi_startup(state)
+        && state.extension_ui.remote.mount(Placement::Header).is_none()
+        && splash_geometry(state, state.size.0).0 == 2
+}
+
+/// Coordinates belong to the rendered transcript, before viewport translation.
+pub(super) fn mark_rect(state: &ShellState) -> Option<(u16, usize)> {
+    if !interactive_mark(state) {
+        return None;
+    }
+    let width = state.transcript_content_width(state.size.0);
+    let layout = PresentationLayout::new(&state.theme, width);
+    let budget = welcome_row_budget(state, state.size.0);
+    if budget < 7 || layout.content_width < 8 {
+        return None;
+    }
+    let (_, _, text_width) = splash_geometry(state, layout.content_width);
+    let stacked = text_width < MIN_SPLASH_TEXT_WIDTH || budget < splash_card_rows(state);
+    let framed = state.theme.role_rgb("splash_box").is_some();
+    Some((
+        layout.inset + if stacked { 0 } else { 2 + u16::from(framed) },
+        usize::from(!stacked),
+    ))
+}
+
+pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Instant) -> bool {
+    if !interactive_mark(state) {
+        return false;
+    }
+    let hit = state.pointer_render_geometry().is_some_and(|geometry| {
+        geometry.welcome_mark.is_some_and(|(x, y)| {
+            column >= x && column < x + 8 && usize::from(row) >= y && usize::from(row) < y + 2
+        })
+    });
+    if !hit {
+        return false;
+    }
+    let strength = state.welcome_reaction.map_or(0.0, |previous| {
+        let gap = now.duration_since(previous.started).as_secs_f32();
+        (previous.strength * (1.0 - gap / 0.8).max(0.0) + (1.0 - gap / 0.6).max(0.0) * 0.45)
+            .min(1.0)
+    });
+    state.welcome_reaction = Some(MarkReaction {
+        started: now,
+        strength,
+    });
+    state.invalidate_transcript();
+    true
+}
+
+pub(super) fn reaction_active(state: &ShellState) -> bool {
+    state.welcome_reaction.is_some()
+        && interactive_mark(state)
+        && state
+            .pointer_render_geometry()
+            .is_some_and(|g| g.welcome_mark.is_some())
+}
+
+pub(super) fn advance_reaction(state: &mut ShellState, now: Instant) {
+    if let Some(reaction) = state.welcome_reaction {
+        if !reaction_active(state)
+            || now.duration_since(reaction.started).as_secs_f32() >= crate::tui::splash::DURATION
+        {
+            state.welcome_reaction = None;
+        }
+        state.invalidate_transcript();
+    }
 }
 
 fn welcome_is_mutable(state: &ShellState) -> bool {
@@ -139,18 +231,25 @@ fn welcome_content_rows(state: &ShellState, width: u16, max_rows: usize) -> usiz
         return 0;
     }
     if max_rows < 7 {
-        // Identity/permissions, setup or release hint, exit help.
-        return max_rows.min(3);
+        // Identity/permissions and setup or release hint; custom themes keep help.
+        return max_rows.min(if state.theme.is_compiled_default() {
+            2
+        } else {
+            3
+        });
     }
     if pi_startup(state) {
         return PI_STARTUP_ROWS.min(max_rows);
     }
     let (_, _, text_width) = splash_geometry(state, width);
     if text_width < MIN_SPLASH_TEXT_WIDTH || max_rows < splash_card_rows(state) {
-        // One wordmark or two logo rows, identity, hint, permissions and exit.
+        // One wordmark or two logo rows, identity, hint and permissions.
         // File themes additionally retain the model/reasoning identity row.
-        return (1 + usize::from(width >= 8) + 4 + usize::from(!state.theme.is_compiled_default()))
-            .min(max_rows);
+        return (1
+            + usize::from(width >= 8)
+            + 3
+            + 2 * usize::from(!state.theme.is_compiled_default()))
+        .min(max_rows);
     }
     splash_card_rows(state)
 }
@@ -282,7 +381,11 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             },
         ]
         .into_iter()
-        .take(max_rows)
+        .take(max_rows.min(if state.theme.is_compiled_default() {
+            2
+        } else {
+            3
+        }))
         .map(|line| fit_line(&line, width))
         .collect();
     }
@@ -297,8 +400,8 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
     // geometry with `splash_compact = true`. Everything else keeps the
     // larger file-theme presentation.
     let (rows, logo_width, text_width) = splash_geometry(state, width);
-    // Startup identity is static for every theme. Working/Thinking retain their
-    // own liveness clocks; optional welcome colours never mutate native history.
+    // Startup identity is static unless its visible mark was clicked.
+    // Historical prefixes never acquire a decorative clock.
     let elapsed = crate::tui::splash::DURATION;
     // A theme can also keep the default's model-adaptive splash with
     // `splash_model_adaptive = true`. It owns the whole splash: the byte-mark
@@ -317,7 +420,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
     let splash_color = (!model_adaptive_splash)
         .then(|| state.theme.role_rgb("splash"))
         .flatten();
-    let logo = crate::tui::splash::render_logo(
+    let mut logo = crate::tui::splash::render_logo(
         &state.theme,
         logo_width,
         rows,
@@ -325,6 +428,17 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         adaptive_accent,
         splash_color,
     );
+    if interactive_mark(state) {
+        if let Some(reaction) = state.welcome_reaction {
+            logo = crate::tui::splash::render_reaction(
+                &state.theme,
+                reaction.started.elapsed().as_secs_f32(),
+                reaction.strength,
+                adaptive_accent,
+                splash_color,
+            );
+        }
+    }
     let splash_text = |text: &str| {
         splash_color
             .map(|_| state.theme.fg("splash", text))
@@ -354,14 +468,18 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         // bounded identity instead of silently dropping the startup surface.
         let mut compact = Vec::with_capacity(7);
         if width >= 8 {
-            let logo = crate::tui::splash::render_logo(
-                &state.theme,
-                8,
-                2,
-                elapsed,
-                adaptive_accent,
-                splash_color,
-            );
+            let logo = if rows == 2 {
+                logo
+            } else {
+                crate::tui::splash::render_logo(
+                    &state.theme,
+                    8,
+                    2,
+                    elapsed,
+                    adaptive_accent,
+                    splash_color,
+                )
+            };
             compact.extend(logo.into_iter().map(|line| fit_line(&line, width)));
         } else {
             compact.push(fit_line(&splash_bold("octet"), width));
@@ -415,7 +533,9 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
                 splash_text("to exit")
             )
         };
-        compact.push(fit_line(&exit, width));
+        if !compiled_default {
+            compact.push(fit_line(&exit, width));
+        }
         // The update action and setup/permission state outrank the changelog
         // hint when a short viewport cannot fit the entire compact card.
         if compact.len() > max_rows {
@@ -428,30 +548,29 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         return compact;
     }
     let mut text = if state.theme.is_compiled_default() {
-        let mut text: [String; DEFAULT_TEXT_ROWS] = [
+        let access = state.theme.bold(&state.theme.fg(
+            if state.safe_mode { "accent" } else { "warning" },
+            if state.safe_mode {
+                "safe mode"
+            } else {
+                "full access"
+            },
+        ));
+        let separator = state
+            .theme
+            .dim(if state.theme.unicode() { " · " } else { " - " });
+        let hint_width =
+            text_width.saturating_sub((sexy_tui_rs::visible_width(&access) + 3) as u16);
+        let hint = super::startup_update::update_hint(state, hint_width)
+            .unwrap_or_else(|| state.theme.dim("/changelog"));
+        let text: [String; DEFAULT_TEXT_ROWS] = [
             format!(
-                "{} {}",
+                "{}  {}",
                 state.theme.bold("octet"),
                 state.theme.dim(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             ),
-            changelog_hint(state, text_width),
-            format!(
-                "{} {}",
-                state.theme.dim("permissions:"),
-                state.theme.bold(&state.theme.fg(
-                    if state.safe_mode { "accent" } else { "warning" },
-                    if state.safe_mode {
-                        "safe mode"
-                    } else {
-                        "full access"
-                    },
-                )),
-            ),
-            state.theme.dim("Ctrl+C / Ctrl+D to exit"),
+            format!("{access}{separator}{hint}"),
         ];
-        if model.trim().is_empty() {
-            text[1] = state.theme.fg("warning", &identity);
-        }
         Vec::from(text)
     } else if splash_color.is_some() {
         let text: [String; FILE_TEXT_ROWS] = [
@@ -516,13 +635,12 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         Vec::from(text)
     };
 
-    if !state.theme.is_compiled_default() || !model.trim().is_empty() {
+    if !state.theme.is_compiled_default() {
         if let Some(hint) = super::startup_update::update_hint(state, text_width) {
             text[1] = hint;
         }
     }
     // A release hint replaces the changelog row instead of moving the composer.
-    let mut logo = logo;
     logo.resize(text.len(), " ".repeat(logo_width));
     if let Some(color) = box_color {
         let inner_width = usize::from(width).saturating_sub(2);

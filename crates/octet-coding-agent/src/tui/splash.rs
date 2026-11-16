@@ -27,6 +27,49 @@ pub(crate) fn render_logo(
     model_accent: Option<(u8, u8, u8)>,
     solid_color: Option<(u8, u8, u8)>,
 ) -> Vec<String> {
+    render_mark(
+        theme,
+        width,
+        symbol_rows,
+        elapsed,
+        model_accent,
+        solid_color,
+        0.0,
+        false,
+    )
+}
+
+/// Click-only decoration; the ordinary renderer remains the canonical static mark.
+pub(crate) fn render_reaction(
+    theme: &OctetTheme,
+    elapsed: f32,
+    strength: f32,
+    model_accent: Option<(u8, u8, u8)>,
+    solid_color: Option<(u8, u8, u8)>,
+) -> Vec<String> {
+    render_mark(
+        theme,
+        8,
+        2,
+        elapsed,
+        model_accent,
+        solid_color,
+        strength,
+        (0.08..0.24).contains(&elapsed),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_mark(
+    theme: &OctetTheme,
+    width: usize,
+    symbol_rows: usize,
+    elapsed: f32,
+    model_accent: Option<(u8, u8, u8)>,
+    solid_color: Option<(u8, u8, u8)>,
+    rainbow: f32,
+    blink: bool,
+) -> Vec<String> {
     let width = width.min(42);
     let rows = symbol_rows.min(21);
     if width < BYTE.len() || rows < 2 {
@@ -83,7 +126,26 @@ pub(crate) fn render_logo(
                     let lift = (1.0 - distance / 0.2).max(0.0) * 0.2;
                     color = mix(color, (255, 255, 255), lift);
                 }
-                line.push_str(&theme.rgb_fg(color, &filled));
+                if rainbow > 0.0 && solid_color.is_none() {
+                    const RAINBOW: [(u8, u8, u8); 6] = [
+                        (255, 80, 100),
+                        (255, 185, 60),
+                        (170, 240, 65),
+                        (50, 220, 190),
+                        (80, 140, 255),
+                        (210, 90, 240),
+                    ];
+                    let phase = (column as f32 * 0.75 + elapsed * 2.0) % 6.0;
+                    let index = phase as usize;
+                    let hue = mix(RAINBOW[index], RAINBOW[(index + 1) % 6], phase.fract());
+                    color = mix(
+                        color,
+                        hue,
+                        rainbow * (1.0 - elapsed / DURATION).clamp(0.0, 1.0),
+                    );
+                }
+                let eye = blink && *bit == b'0' && theme.unicode();
+                line.push_str(&theme.rgb_fg(color, if eye { "▁" } else { &filled }));
             }
             line.push_str(&" ".repeat(right_pad));
             line
@@ -466,6 +528,33 @@ mod tests {
         assert_eq!(
             flat,
             render_logo(&reduced, 8, 2, DURATION, None, Some((217, 119, 87)))
+        );
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+    #[test]
+    fn blink_and_rainbow_settle_without_moving_the_mark() {
+        let theme = crate::tui::theme::test_theme();
+        let plain = |rows: Vec<String>| {
+            rows.into_iter()
+                .map(|s| sexy_tui_rs::strip_terminal_sequences(&s))
+                .collect::<Vec<_>>()
+        };
+        let blink = plain(render_reaction(&theme, 0.16, 0.0, None, None));
+        assert_eq!(blink, [" ██ ████", "▁██▁████"]);
+        let normal = render_logo(&theme, 8, 2, DURATION, None, None);
+        assert_eq!(render_reaction(&theme, DURATION, 1.0, None, None), normal);
+        let sweep = render_reaction(&theme, 0.4, 0.0, None, None);
+        let rainbow = render_reaction(&theme, 0.4, 1.0, None, None);
+        assert_ne!(sweep, rainbow);
+        assert_eq!(plain(sweep), plain(rainbow));
+        let solid = Some((217, 119, 87));
+        assert_eq!(
+            render_reaction(&theme, 0.4, 0.0, None, solid),
+            render_reaction(&theme, 0.4, 1.0, None, solid)
         );
     }
 }

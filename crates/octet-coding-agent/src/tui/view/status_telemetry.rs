@@ -483,7 +483,7 @@ mod tests {
             "both composer rails appear in the ready frame"
         );
         for expected in [
-            "octet v",
+            "octet  v",
             "full access",
             "cerebras/gemma-4-31b",
             "/startup-fixture/workspace",

@@ -380,19 +380,31 @@ splash_box = "#d97757"
                             })
                             .unwrap()
                     };
-                    let title = locate(&format!("octet v{}", env!("CARGO_PKG_VERSION")));
+                    let title = locate(&format!(
+                        "octet{}v{}",
+                        if framed { " " } else { "  " },
+                        env!("CARGO_PKG_VERSION")
+                    ));
+                    let hint_column = title.1
+                        + if framed {
+                            0
+                        } else {
+                            "full access · ".chars().count()
+                        };
                     if update {
                         let (row, _) = locate(UPDATE_COMMAND);
                         let prefix = if plain[row].contains('↑') {
                             "↑"
-                        } else {
+                        } else if plain[row].contains("Update:") {
                             "Update:"
+                        } else {
+                            UPDATE_COMMAND
                         };
-                        assert_eq!(locate(prefix), (title.0 + 1, title.1));
+                        assert_eq!(locate(prefix), (title.0 + 1, hint_column));
                         assert!(!plain.join("\n").contains("/changelog"));
                         assert_eq!(Some(rows.len()), initial_rows, "update added a row");
                     } else {
-                        assert_eq!(locate("/changelog"), (title.0 + 1, title.1));
+                        assert_eq!(locate("/changelog"), (title.0 + 1, hint_column));
                         assert!(!plain.join("\n").contains(UPDATE_COMMAND));
                         initial_rows = Some(rows.len());
                     }

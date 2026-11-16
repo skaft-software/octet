@@ -377,9 +377,9 @@ work without interrupting the run or adding notes to the conversation.
 <details>
 <summary>Where the changelog hint appears</summary>
 
-The muted `/changelog · what's new` hint sits directly below the splash version,
-with a shorter fallback in narrow terminals. When startup finds a newer stable
-release, an accent update hint follows it, and `octet update` uses rich Markdown
+The muted `/changelog` hint sits beside the access label below the splash
+version. Narrow terminals stack the details. When startup finds a newer stable
+release, an accent update hint replaces the changelog hint, and `octet update` uses rich Markdown
 inline-code styling rather than visible backticks. A late result appears once as
 a UI-only notice with the same rich action, instead of repainting historical
 splash rows. Release notes are compiled into the binary, so no network fetch,

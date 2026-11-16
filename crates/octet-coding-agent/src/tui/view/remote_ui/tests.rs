@@ -290,6 +290,15 @@ fn remote_ui_header_replaces_welcome_and_hides_wrong_geometry() {
         ..ShellState::default()
     };
     state.extension_ui.remote = projection(state.size, &[(Placement::Header, "remote header")]);
+    state.startup_card_started_at = Some(Instant::now());
+    state.application_viewport_requested = true;
+    assert!(super::super::builtin_welcome_card::mark_rect(&state).is_none());
+    assert!(!super::super::builtin_welcome_card::click_mark(
+        &mut state,
+        2,
+        1,
+        Instant::now()
+    ));
     assert!(render_welcome_card(&state, 79, 20, Instant::now())
         .join("\n")
         .contains("remote header"));

@@ -16,10 +16,12 @@
   customize the `tool_duration` text or hide it with an empty string; timing stays
   out of copied output.
 
-- The default startup splash uses a smaller 8×2 byte mark and quieter help text;
-  compact themes also use the small mark. Narrow panes stack details to keep
-  permissions and exit help readable; short panes keep the welcome within the
-  space above the composer.
+- The default splash pairs the canonical 8×2 mark with `octet  v<version>`
+  and `<access> · /changelog`, without duplicate discovery or exit help.
+  Narrow/custom layouts and full custom-header replacement remain supported.
+  Clicking the native compact mark blinks its eyes and sweeps a highlight;
+  rapid clicks build rainbow colour that settles back to the normal palette.
+  Explicit splash colours, reduced motion and lower-colour terminals are respected.
 
 ### Fixed
 

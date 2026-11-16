@@ -345,6 +345,7 @@ struct AnimationSchedule {
     status: AnimationClock,
     event_dot: AnimationClock,
     timer: AnimationClock,
+    welcome: AnimationClock,
 }
 
 impl AnimationSchedule {
@@ -353,6 +354,7 @@ impl AnimationSchedule {
             status: AnimationClock::new(STATUS_ANIMATION_INTERVAL),
             event_dot: AnimationClock::new(EVENT_DOT_TOGGLE_INTERVAL),
             timer: AnimationClock::new(STATUS_TIMER_INTERVAL),
+            welcome: AnimationClock::new(Duration::from_millis(40)),
         }
     }
 
@@ -376,10 +378,12 @@ impl AnimationSchedule {
         }
         self.event_dot.set_active(event_dot_animating(state), now);
         self.timer.set_active(status_timer_active(state), now);
+        self.welcome
+            .set_active(state.welcome_reaction.is_some(), now);
     }
 
     fn remaining(&self, now: Instant) -> Duration {
-        [&self.status, &self.event_dot, &self.timer]
+        [&self.status, &self.event_dot, &self.timer, &self.welcome]
             .into_iter()
             .filter_map(|clock| clock.remaining(now))
             .fold(RESIZE_POLL_INTERVAL, Duration::min)
@@ -389,6 +393,9 @@ impl AnimationSchedule {
         // Semantic state may have changed during coalescing or lock acquisition.
         // Never advance an old status, or use a pre-coalescing due flag.
         self.observe(state, now);
+        if self.welcome.take_ticks(now) > 0 {
+            super::builtin_welcome_card::advance_reaction(state, now);
+        }
         let event_ticks = self.event_dot.take_ticks(now);
         if event_ticks > 0 {
             state.advance_event_dot_animation_by(event_ticks);
