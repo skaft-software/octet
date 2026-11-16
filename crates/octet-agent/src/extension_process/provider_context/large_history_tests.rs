@@ -95,27 +95,28 @@ export default pi => pi.on('context', event => ({ messages: [
     })
     .unwrap();
     assert_eq!(agent.complete("continue").await.unwrap().text, "answer");
-    let captures = captures.lock().unwrap();
-    assert_eq!(captures.len(), 1);
-    let input = captures[0]
-        .responses
-        .as_ref()
-        .unwrap()
-        .input
-        .as_ref()
-        .unwrap();
-    assert!(input
-        .items()
-        .iter()
-        .any(|item| item.as_json()["encrypted_content"] == "opaque-fixture"));
-    assert_eq!(
-        input.items().last().unwrap().as_json()["content"][0]["text"],
-        "transient pi context"
-    );
-    assert!(!serde_json::to_string(&agent.session().context().unwrap())
-        .unwrap()
-        .contains("transient pi context"));
-    drop(captures);
+    {
+        let captures = captures.lock().unwrap();
+        assert_eq!(captures.len(), 1);
+        let input = captures[0]
+            .responses
+            .as_ref()
+            .unwrap()
+            .input
+            .as_ref()
+            .unwrap();
+        assert!(input
+            .items()
+            .iter()
+            .any(|item| item.as_json()["encrypted_content"] == "opaque-fixture"));
+        assert_eq!(
+            input.items().last().unwrap().as_json()["content"][0]["text"],
+            "transient pi context"
+        );
+        assert!(!serde_json::to_string(&agent.session().context().unwrap())
+            .unwrap()
+            .contains("transient pi context"));
+    }
     drop(agent);
     assert!(process.shutdown().await);
 }

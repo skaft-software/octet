@@ -42,7 +42,7 @@ pub fn format_token_rate_value(rate: TokenRate) -> String {
 pub fn compact_context_limit(value: u64) -> String {
     if value >= 1_000_000 {
         let tenths = (u128::from(value) * 10 + 500_000) / 1_000_000;
-        if tenths % 10 == 0 {
+        if tenths.is_multiple_of(10) {
             format!("{}M", tenths / 10)
         } else {
             format!("{}.{:01}M", tenths / 10, tenths % 10)
@@ -131,7 +131,7 @@ pub fn format_duration(duration: Duration) -> String {
         if fraction == 0 {
             return format!("{integer}{suffix}");
         }
-        while fraction % 10 == 0 {
+        while fraction.is_multiple_of(10) {
             fraction /= 10;
             width -= 1;
         }
