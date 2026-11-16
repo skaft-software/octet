@@ -223,11 +223,15 @@ composer; they retain their existing behavior when no editor is mounted.
 The host resolves the authoritative owner at admission and rechecks foreground
 ownership, process generation, live surface, mount identity, input/checkpoint
 revisions, native composer revision, and input focus **at the shell mutation**.
-A valid queued request can still be refused if rescue, replacement, a native edit,
-or another input owner intervenes. The commit updates the hidden native composer
-and its acknowledgement synchronously. Retired mounts cannot write into a later
-native draft or a replacement editor; even same-text native mutations change the
-native revision and prevent an old checkpoint from overwriting them.
+Input issued before a native panel took focus may finish checkpointing its recovery
+draft and caret behind that panel, without acquiring focus. This requires an input
+revision newer than the last acknowledgement and an unchanged native draft revision.
+Unchanged receipts and the expected host clear can also acknowledge without focus;
+unsolicited draft changes still require focus. A valid queued request is refused if
+rescue, replacement or a newer native edit intervenes. The commit updates the hidden
+native composer and its acknowledgement synchronously. Retired mounts cannot write
+into a later native draft or a replacement editor; even same-text native mutations
+change the native revision and prevent an old checkpoint from overwriting them.
 
 Extensions must finish each input handler before acknowledging that input,
 including release events and keys that do not change the text. A mid-handler
@@ -251,12 +255,14 @@ completed checkpoint. Later keys/pastes keep their order in a mount-bound buffer
 of at most 128 events and 256 KiB paste bytes; overflow is reported without
 admitting that event. Clear, cancel and close bypass the wait. Retirement drops
 the buffer; an explicit fullscreen view never receives buffered composer events.
+Native panels keep their own input lease even after a checkpoint completes: buffered
+composer events resume only when the panel releases focus, in their original order.
 
 An accepted submission clears the native draft and sends a `ui/editor-text`
 replacement to the component. Completion and restored drafts use the same seam.
 The answering checkpoint is an ordinary, exact-pair `composer/set` receipt;
-only the acknowledged empty clear may answer while a command's panel owns focus.
-That receipt does not grant general panel writes.
+the acknowledged empty clear may answer while a command's panel owns focus.
+That receipt does not grant general panel writes or revive stale input.
 
 ### `composer/history` — native prompt-history seed
 

@@ -91,6 +91,11 @@ impl ExecutableExtensions {
         shell: &mut InteractiveShell,
     ) -> Option<Event> {
         self.sync_remote_ui(shell);
+        // A completed checkpoint releases the editor's queue, not the panel's
+        // input lease. Keep these mount-bound events until the composer resumes.
+        if shell.remote_ui_input_blocked() {
+            return None;
+        }
         self.remote_ui.take_ready_composer_event()
     }
 

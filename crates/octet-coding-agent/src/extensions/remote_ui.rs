@@ -863,14 +863,22 @@ impl RemoteUi {
             && editor.expected_clear
             && checkpoint.input_revision == editor.acknowledged_input_revision
             && checkpoint.checkpoint_revision > editor.checkpoint_revision;
-        // A completed no-op/release can arrive after a native panel takes
-        // focus. Acknowledge only the unchanged recovery snapshot, without
-        // moving text, caret or focus. Pi retains editor text across dialogs:
-        // packages/coding-agent/src/modes/interactive/interactive-mode.ts:2938-2957;
-        // packages/tui/src/tui.ts:1153-1158 routes new input only to current focus.
-        // Rust must distinguish a receipt from a write across the process boundary.
-        let unchanged_receipt = !snapshot.focused && text == snapshot.text;
-        if (!snapshot.focused && !admitted_clear && !unchanged_receipt)
+        // Pi handles input synchronously before changing focus, and retains the
+        // same editor through dialogs: packages/tui/src/tui.ts:1153-1161;
+        // packages/coding-agent/src/modes/interactive/interactive-mode.ts:2792-2813.
+        // Across our process boundary, input issued before a native panel opened
+        // can finish afterwards. Its checkpoint still owns the recovery draft,
+        // not panel focus, provided no newer native decision changed that draft.
+        let completing_input = checkpoint.input_revision > editor.acknowledged_input_revision;
+        let cursor = mount
+            .editors
+            .composer_snapshot()
+            .filter(|native| native.text == text)
+            .map(|native| native.cursor);
+        let unchanged_receipt = !snapshot.focused
+            && text == snapshot.text
+            && (!completing_input || cursor.is_none_or(|cursor| cursor == snapshot.cursor));
+        if (!snapshot.focused && !admitted_clear && !unchanged_receipt && !completing_input)
             || snapshot.revision != editor.composer_revision
         {
             return Err(invalid(
@@ -885,12 +893,7 @@ impl RemoteUi {
             // acquire text/caret authority from its component's local state.
             snapshot
         } else {
-            let cursor = mount
-                .editors
-                .composer_snapshot()
-                .filter(|snapshot| snapshot.text == text)
-                .map(|snapshot| snapshot.cursor);
-            shell.extension_set_editor_at(text, cursor)
+            shell.extension_checkpoint_editor_at(text, cursor)
         };
         editor.composer_revision = committed.revision;
         editor.acknowledged_input_revision = checkpoint.input_revision;

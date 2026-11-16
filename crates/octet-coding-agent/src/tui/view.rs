@@ -6894,11 +6894,24 @@ impl InteractiveShell {
         text: String,
         cursor: Option<usize>,
     ) -> ShellEditorSnapshot {
+        if !normal_editor_focused(&self.state.borrow()) {
+            return self.extension_editor_snapshot();
+        }
+        self.extension_checkpoint_editor_at(text, cursor)
+    }
+
+    /// Commit an owner/mount/input/revision-fenced checkpoint to the recovery
+    /// draft, including input issued before a panel took focus. This never
+    /// changes focus; only RemoteUi's checkpoint arbiter grants this authority.
+    pub(crate) fn extension_checkpoint_editor_at(
+        &mut self,
+        text: String,
+        cursor: Option<usize>,
+    ) -> ShellEditorSnapshot {
         let mut state = self.state.borrow_mut();
-        if normal_editor_focused(&state)
-            && !(cursor.is_some()
-                && state.editor.text() == text
-                && cursor == Some(state.editor.cursor()))
+        if !(cursor.is_some()
+            && state.editor.text() == text
+            && cursor == Some(state.editor.cursor()))
         {
             state.editor.set_text(text);
             if let Some(cursor) = cursor {

@@ -358,6 +358,111 @@ async fn remote_editor_completed_noop_can_ack_after_panel_takes_focus() {
 }
 
 #[tokio::test]
+async fn remote_editor_pending_edit_can_finish_behind_panel_but_cannot_write_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["editor"]).await;
+    input(&mut extensions, &mut frontend, 'a');
+    let (owner, ack) = checkpoint(&extensions, 1, 1);
+    frontend
+        .shell
+        .show_overlay_text("Extension management".into());
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &ack, "completed edit".into(), &mut frontend.shell)
+        .expect("a panel does not revoke input already issued to this editor");
+    let committed = frontend.shell.extension_editor_snapshot();
+    assert_eq!(committed.text, "completed edit");
+    assert!(!committed.focused);
+    let mut next = ack.clone();
+    next.checkpoint_revision += 1;
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(
+            &owner,
+            &next,
+            "unsolicited panel write".into(),
+            &mut frontend.shell,
+        )
+        .is_err());
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &ack, "duplicate".into(), &mut frontend.shell,)
+        .is_err());
+    next.input_revision = 0;
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &next, committed.text.clone(), &mut frontend.shell,)
+        .is_err());
+    next.input_revision = 2;
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &next, "unissued".into(), &mut frontend.shell,)
+        .is_err());
+    // A newer native decision still beats genuinely stale in-flight input.
+    frontend.shell.close_overlay();
+    input(&mut extensions, &mut frontend, 'b');
+    frontend
+        .shell
+        .extension_set_editor("new native draft".into());
+    frontend.shell.show_overlay_text("Another panel".into());
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(
+            &owner,
+            &next,
+            "stale pending edit".into(),
+            &mut frontend.shell,
+        )
+        .is_err());
+    assert_eq!(frontend.shell.pending(), "new native draft");
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn remote_editor_buffered_input_waits_for_panel_to_release_focus() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["editor"]).await;
+    input(&mut extensions, &mut frontend, 'a');
+    let enter = key(KeyCode::Enter, KeyEventKind::Press, KeyModifiers::NONE);
+    let later = key(KeyCode::Char('b'), KeyEventKind::Press, KeyModifiers::NONE);
+    for event in [&enter, &later] {
+        assert!(extensions.route_remote_ui_event(&mut frontend.shell, event, false));
+    }
+    let (owner, ack) = checkpoint(&extensions, 1, 1);
+    frontend
+        .shell
+        .show_overlay_text("Extension management".into());
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &ack, "completed edit".into(), &mut frontend.shell)
+        .unwrap();
+    assert!(
+        extensions
+            .take_ready_composer_event(&mut frontend.shell)
+            .is_none(),
+        "buffered Enter must not confirm a native panel, or later typing edit its filter"
+    );
+    frontend.shell.close_overlay();
+    assert_eq!(
+        extensions.take_ready_composer_event(&mut frontend.shell),
+        Some(enter.clone())
+    );
+    assert!(!extensions.route_remote_ui_event(&mut frontend.shell, &enter, false));
+    assert_eq!(
+        extensions.take_ready_composer_event(&mut frontend.shell),
+        Some(later)
+    );
+    assert!(extensions
+        .take_ready_composer_event(&mut frontend.shell)
+        .is_none());
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
 async fn remote_editor_noop_and_release_checkpoints_are_not_lost_edit_claims() {
     let temp = tempfile::tempdir().unwrap();
     let (mut extensions, _) = fixture(&temp).await;

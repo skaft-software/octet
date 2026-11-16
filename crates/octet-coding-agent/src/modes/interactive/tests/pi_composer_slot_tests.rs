@@ -264,6 +264,107 @@ async fn native_pi_custom_editor_keeps_octet_chrome_and_one_slash_popup() {
     app.executable_extensions.shutdown().await;
 }
 
+/// Opening the real /extensions root must not revoke input already issued to
+/// the Pi component. No host drain occurs between the key and the panel opening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_pending_edit_survives_extensions_panel() {
+    let (_directory, mut app, mut shell) = live_slot_app().await;
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    type_into_slot(&mut app, &mut shell, "before").await;
+    for character in "雪!".chars() {
+        assert!(app.executable_extensions.route_remote_ui_event(
+            &mut shell,
+            &key(KeyCode::Char(character), KeyModifiers::NONE),
+            false,
+        ));
+    }
+    let mut menu = extension_menu::State::default();
+    menu.open(extension_menu::Snapshot::capture(&app), &mut shell);
+    assert!(shell.has_panel());
+    assert!(!shell.extension_editor_snapshot().focused);
+    pump_until(&mut app, &mut shell, |frame| frame.contains("before雪!")).await;
+    assert_eq!(shell.pending(), "before雪!");
+    assert!(shell.has_panel(), "checkpoint must not dismiss /extensions");
+    assert!(!shell.extension_editor_snapshot().focused);
+    assert!(!app.executable_extensions.route_remote_ui_event(
+        &mut shell,
+        &key(KeyCode::Char('x'), KeyModifiers::NONE),
+        false,
+    ));
+    menu.back(&mut shell);
+    assert!(!shell.has_panel());
+    type_into_slot(&mut app, &mut shell, "after").await;
+    assert_eq!(shell.pending(), "before雪!after");
+    assert!(shell.extension_editor_owns_composer());
+    let frame = rendered(&mut shell).await;
+    assert!(frame.contains("NATIVE-SLOT-EDITOR"), "{frame}");
+    assert!(!shell.debug_snapshot().contains("Pi compatibility error"));
+    assert!(!shell.debug_snapshot().contains("were not acknowledged"));
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_custom_editor_pending_paste_and_caret_survive_native_report() {
+    for (event, expected, cursor, continued) in [
+        (
+            Event::Paste("雪\npaste".into()),
+            "before雪\npaste",
+            "before雪\npaste".len(),
+            "before雪\npaste!",
+        ),
+        (
+            key(KeyCode::Left, KeyModifiers::NONE),
+            "before",
+            5,
+            "befor!e",
+        ),
+    ] {
+        let (_directory, mut app, mut shell) = live_slot_app().await;
+        pump_until(&mut app, &mut shell, |frame| {
+            frame.contains("NATIVE-SLOT-EDITOR")
+        })
+        .await;
+        type_into_slot(&mut app, &mut shell, "before").await;
+        assert!(app
+            .executable_extensions
+            .route_remote_ui_event(&mut shell, &event, false));
+        // The same report path used by /extensions status and native slash commands.
+        shell.show_overlay_text(app.executable_extensions.inspect_text());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                for notice in app.executable_extensions.drain_events_for_shell(&mut shell) {
+                    assert!(!notice.contains("Pi compatibility error"), "{notice}");
+                }
+                let snapshot = shell.extension_editor_snapshot();
+                if snapshot.text == expected && snapshot.cursor == cursor {
+                    assert!(!snapshot.focused);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("issued paste/caret checkpoint must complete behind the report");
+        shell.close_overlay();
+        assert!(app.executable_extensions.route_remote_ui_event(
+            &mut shell,
+            &key(KeyCode::Char('!'), KeyModifiers::NONE),
+            false,
+        ));
+        pump_until(&mut app, &mut shell, |frame| {
+            continued.lines().all(|line| frame.contains(line))
+        })
+        .await;
+        assert_eq!(shell.pending(), continued);
+        assert!(shell.extension_editor_owns_composer());
+        assert!(!shell.debug_snapshot().contains("were not acknowledged"));
+        app.executable_extensions.shutdown().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_pi_custom_editor_admits_commands_and_text_through_the_slot() {
     let (_directory, mut app, mut shell) = live_slot_app().await;
