@@ -1400,6 +1400,7 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
     match shell.translate_input(Some(event), true) {
         InputAction::Abort | InputAction::DispatchQueued => {
             shell.cancel_wait_submissions("interrupted");
+            shell.render();
             return true;
         }
         InputAction::Closed => {

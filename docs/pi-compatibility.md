@@ -314,9 +314,14 @@ A callback returning does not itself certify a host mutation. A later callback
 timeout does not discard host-operation failures already recorded at the live
 boundary, including failures from an earlier callback. A failure arriving after
 that boundary settles cannot retroactively change its response. A prompt sent
-while its extension hooks or Pi setup capture are still starting waits up to
-30 s. If they remain unavailable, the prompt is refused for retry rather than
-running without those hooks. A factory's own setup (the work its default export does
+while its extension hooks or Pi setup capture are still starting stays queued
+until those owners settle, without a separate submission deadline. Escape or
+Ctrl+C cancels that submission and preserves its draft without retiring startup;
+Ctrl+D closes the session. Later input remains editable and Enter is latched
+by the bounded native wait queue (one submitted prompt, with later text kept
+as the next draft). Enter also latches before the initial session is bound;
+Escape cancels it and restores the draft. No provider request bypasses `input` or
+`before_agent_start` readiness. A factory's own setup (the work its default export does
 before it returns) gets 10 s, and 20 s across all factories; one that is still
 going is left out of the mirror, named in `[Extension issues]`, and tried again
 the next time octet starts. A factory that throws during live load or reload is

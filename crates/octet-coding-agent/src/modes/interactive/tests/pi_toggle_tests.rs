@@ -88,6 +88,18 @@ export default async pi => {
         sexy_tui_rs::strip_terminal_sequences(&frame).contains("Loading your Pi setup"),
         "{frame}"
     );
+    // Cancelling an early submission must not retire its still-starting hooks.
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        app.await_extension_prompt_hooks(),
+    )
+    .await
+    .is_err());
+    assert!(app.executable_extensions.startup_pending());
+    assert_eq!(
+        app.executable_extensions.pending_prompt_hook_names(),
+        ["octet-pi-compat"]
+    );
     // The draft was editable and the pending status painted with the gate shut.
     std::fs::remove_file(&gate).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -108,6 +120,21 @@ export default async pi => {
         .command_owner("toggle-ready")
         .is_some());
     assert_eq!(shell.pending(), "user draft-editable");
+    let mut events = futures_util::stream::pending::<std::io::Result<Event>>();
+    let mut frontend = ShellPromptFrontend::new(&mut shell, &mut events);
+    let processed = app
+        .executable_extensions
+        .process_input_with_frontend(
+            "first".into(),
+            None,
+            "interactive",
+            None,
+            Some(&mut frontend),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(processed.text, "first-hooked");
     // A second activation stays gated through close: shutdown retires the
     // pending process instead of waiting for the factory or replaying input.
     std::fs::write(&gate, "hold").unwrap();

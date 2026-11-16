@@ -1915,8 +1915,26 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             synchronized_frame_end_containing(&bytes[resized_start..], b"startup draft pasted")
                 .is_some()
         });
-        // Enter during bootstrap must not submit or silently consume the draft.
+        // Enter during bootstrap queues once without bypassing readiness.
+        // Escape cancels that queue and restores the exact editable draft.
         octet.pty.write_input(b"\r");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "Loading setup · prompt queued",
+            Duration::from_millis(500),
+        );
+        assert!(!parser.screen().contents().contains("startup draft pasted"));
+        assert!(api.requests.lock().unwrap().is_empty());
+        octet.pty.write_input(b"\x1b");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "startup draft pasted",
+            Duration::from_millis(500),
+        );
         octet.pty.drain_for(DRAIN_TIME);
         parser.process(&octet.pty.output[consumed..]);
         consumed = octet.pty.output.len();

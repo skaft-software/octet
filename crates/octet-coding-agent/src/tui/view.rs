@@ -9591,9 +9591,11 @@ impl InteractiveShell {
         }
         state.invalidate_transcript();
         drop(state);
-        // A branch switch/rebind must not carry an old Enter into the newly
-        // hydrated conversation, even if its model and effort are unchanged.
-        self.cancel_thinking_submission("session view changed");
+        // Initial hydration binds the startup Enter to its first conversation.
+        // Later branch switches/rebinds must not carry an old Enter across.
+        if !self.state.borrow().startup_pending {
+            self.cancel_thinking_submission("session view changed");
+        }
         Ok(())
     }
 

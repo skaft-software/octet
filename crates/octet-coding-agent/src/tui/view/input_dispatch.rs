@@ -17,6 +17,8 @@ pub(super) struct InputDispatch {
     thinking_cycle: Option<ThinkingCycle>,
     thinking_wait: bool,
     thinking_submission: Option<ThinkingSubmission>,
+    // One Enter before the first session/route exists. Bound once at launch.
+    startup_submission: Option<ComposedInput>,
     wait_command: Option<WaitCommand>,
 }
 
@@ -57,6 +59,7 @@ impl InputDispatch {
             thinking_cycle: None,
             thinking_wait: false,
             thinking_submission: None,
+            startup_submission: None,
             wait_command: None,
         }
     }
@@ -77,6 +80,7 @@ impl InteractiveShell {
     /// Whether a prompt or a command is already latched for the end of a wait.
     pub(crate) fn thinking_submission_pending(&self) -> bool {
         self.input_dispatch.thinking_submission.is_some()
+            || self.input_dispatch.startup_submission.is_some()
             || self.input_dispatch.wait_command.is_some()
     }
 
@@ -136,7 +140,19 @@ impl InteractiveShell {
             return false;
         }
         let Some(cycle) = self.input_dispatch.thinking_cycle.as_ref() else {
-            return false;
+            if !self.state.borrow().startup_pending {
+                return false;
+            }
+            // Pi restores the draft during startup (interactive-mode.ts:3255-3258).
+            // Native early control instead latches Enter once, without letting
+            // it bypass the first turn's input/before_agent_start hook gate.
+            let composed = self.drain_composed();
+            if !composed.is_empty() {
+                self.input_dispatch.startup_submission = Some(composed);
+                self.notice("queued · waiting for setup");
+                self.set_run_label("Loading setup · prompt queued");
+            }
+            return true;
         };
         let owner = cycle.owner.clone();
         let reasoning = cycle.selected.clone();
@@ -153,6 +169,11 @@ impl InteractiveShell {
     }
 
     pub(crate) fn cancel_thinking_submission(&mut self, reason: &str) {
+        if let Some(composed) = self.input_dispatch.startup_submission.take() {
+            self.set_run_label("idle");
+            self.restore_composed(composed);
+            self.error(format!("{reason} · prompt not sent; draft restored"));
+        }
         if let Some(pending) = self.input_dispatch.thinking_submission.take() {
             self.restore_composed(pending.composed);
             self.error(format!("{reason} · prompt not sent; draft restored"));
@@ -197,6 +218,13 @@ impl InteractiveShell {
         choices: Vec<octet_ai::ReasoningConfig>,
         selected: &octet_ai::ReasoningConfig,
     ) {
+        if let Some(composed) = self.input_dispatch.startup_submission.take() {
+            self.input_dispatch.thinking_submission = Some(ThinkingSubmission {
+                owner: owner.clone(),
+                reasoning: selected.clone(),
+                composed,
+            });
+        }
         match self.input_dispatch.thinking_cycle.as_mut() {
             Some(cycle) if cycle.owner == owner => {
                 cycle.choices = choices;
@@ -881,6 +909,39 @@ mod tests {
         );
         shell.begin_thinking_wait();
         shell
+    }
+
+    #[test]
+    fn startup_enter_latches_before_session_binding_and_cancel_keeps_draft() {
+        let mut shell = InteractiveShell::test_shell();
+        shell.state.borrow_mut().startup_pending = true;
+        shell.prefill_editor("first prompt".into());
+        assert!(shell.queue_thinking_submission());
+        shell.prefill_editor("later draft".into());
+        assert!(!shell.queue_thinking_submission());
+        let directory = tempfile::tempdir().unwrap();
+        let session = Session::create(directory.path().join("session.jsonl")).unwrap();
+        shell.hydrate(&session).unwrap();
+        shell.set_thinking_cycle(
+            "first-owner".into(),
+            vec![],
+            &octet_ai::ReasoningConfig::Off,
+        );
+        let composed = shell
+            .take_thinking_submission("first-owner", &octet_ai::ReasoningConfig::Off)
+            .unwrap();
+        assert_eq!(composed.model_text, "first prompt");
+        assert_eq!(shell.pending(), "later draft");
+        let mut cancelled = InteractiveShell::test_shell();
+        cancelled.state.borrow_mut().startup_pending = true;
+        cancelled.prefill_editor("cancel me".into());
+        assert!(cancelled.queue_thinking_submission());
+        cancelled.cancel_wait_submissions("interrupted");
+        assert_eq!(cancelled.pending(), "cancel me");
+        cancelled.set_thinking_cycle("owner".into(), vec![], &octet_ai::ReasoningConfig::Off);
+        assert!(cancelled
+            .take_thinking_submission("owner", &octet_ai::ReasoningConfig::Off)
+            .is_none());
     }
 
     #[test]

@@ -127,6 +127,7 @@
 - Pi custom editors retain pending edits and resume ordered input when native panels such as `/extensions` close.
 - Fast terminal startup paints screen entry, resolved chrome, title and cursor together while slow initialization keeps editing responsive.
 - RPC resource reloads and subsequent provider turns fit the default thread stack in debug builds.
+- Early Pi submissions wait for their hooks, and cancellation preserves the still-loading setup for later prompts.
 
 ## [0.10.4] - 2026-11-12
 

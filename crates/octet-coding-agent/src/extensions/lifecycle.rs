@@ -771,37 +771,23 @@ impl ExecutableExtensions {
         }
     }
 
-    /// Waits until every pending extension that declares the native
-    /// `before_prompt` hook has settled.
-    ///
-    /// Correctness is per hook: an extension that registered `before_prompt`
-    /// must see a submitted prompt even while it is still loading, while an
-    /// unrelated extension is never waited for. The wait is bounded because the
-    /// runtime manager already bounds each activation with its startup budget;
-    /// when that budget expires the failure is reported, the remaining
-    /// extensions stay deferred for the ordinary pump, and the submission
-    /// proceeds with the hooks that did attach.
+    /// Wait for the prompt owners without taking their fleet across a wait.
+    /// Pi awaits input and before_agent_start before starting the first turn:
+    /// packages/coding-agent/src/core/agent-session.ts:1956,2072. Its prompt
+    /// hooks have no deadline; cancellation belongs to the native input owner.
+    /// Activation itself retains its existing process/factory supervision.
     pub(crate) async fn await_pending_prompt_hooks(
         &mut self,
         host: &mut octet_agent::ExtensionHost,
         session: &Session,
     ) -> anyhow::Result<()> {
-        const PROMPT_HOOK_WAIT: Duration = Duration::from_secs(30);
-        let deadline = tokio::time::Instant::now() + PROMPT_HOOK_WAIT;
         loop {
             if let Some(preparation) = self
                 .deferred_startup
                 .as_mut()
                 .and_then(|deferred| deferred.pi_preparation.as_mut())
             {
-                if tokio::time::timeout_at(deadline, preparation.wait())
-                    .await
-                    .is_err()
-                {
-                    anyhow::bail!(
-                        "Pi setup mirror is still preparing; retry after startup completes"
-                    );
-                }
+                preparation.wait().await;
             }
             let Some(mut deferred) = self.deferred_startup.take() else {
                 return Ok(());
@@ -810,45 +796,27 @@ impl ExecutableExtensions {
                 self.finish_deferred_pi_preparation(&mut deferred).await;
             }
             let starts = drain_deferred_activations(&mut deferred);
+            let descriptors = deferred.descriptors.clone();
+            let tool_clashes = deferred.tool_clashes.clone();
+            let ready = deferred.pending_prompt_hooks.is_empty();
+            if deferred.pending.is_empty() {
+                finish_deferred_startup(&mut deferred);
+            } else {
+                self.deferred_startup = Some(deferred);
+            }
             if !starts.is_empty() {
                 self.publish_host_state_to_starts(&starts, session);
-                self.install_activations(
-                    host,
-                    &deferred.descriptors,
-                    starts,
-                    &deferred.tool_clashes,
-                )
-                .await;
+                self.install_activations(host, &descriptors, starts, &tool_clashes)
+                    .await;
             }
-            if deferred.pending_prompt_hooks.is_empty() {
-                if deferred.pending.is_empty() {
-                    finish_deferred_startup(&mut deferred);
-                } else {
-                    self.deferred_startup = Some(deferred);
-                }
+            if ready {
                 return Ok(());
             }
-            let waited = tokio::time::timeout_at(deadline, deferred.completions.recv()).await;
-            match waited {
-                Err(_) => {
-                    let names = deferred
-                        .pending_prompt_hooks
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.deferred_startup = Some(deferred);
-                    anyhow::bail!(
-                        "prompt hooks are unavailable: {names} did not finish starting within {PROMPT_HOOK_WAIT:?}"
-                    );
-                }
-                Ok(None) => {
-                    // Every task has reported; the next pump settles the rest.
-                    self.deferred_startup = Some(deferred);
-                }
-                Ok(Some(activation)) => {
-                    queue_deferred_activation(&mut deferred, activation);
-                    self.deferred_startup = Some(deferred);
+            // recv is cancellation-safe. Keep workers and queued completions in
+            // self so Escape/Ctrl-C cancels only this submission, not startup.
+            if let Some(deferred) = self.deferred_startup.as_mut() {
+                if let Some(activation) = deferred.completions.recv().await {
+                    queue_deferred_activation(deferred, activation);
                 }
             }
         }
