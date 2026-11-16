@@ -549,6 +549,9 @@ fn user_audio_is_replayable(audio: &crate::types::AudioMedia, target: &Model) ->
             audio.payload,
             AudioPayload::Inline(_) | AudioPayload::InlineWithProviderRef { .. }
         )
+        || (target.spec.supports_audio_input(audio.format)
+            && target.spec.protocol == Protocol::GoogleGenerativeAi
+            && matches!(&audio.payload, AudioPayload::ProviderRef(reference) if crate::google_files::usable(reference)))
 }
 
 fn assistant_audio_is_replayable(audio: &crate::types::AudioMedia, target: &Model) -> bool {

@@ -502,6 +502,7 @@ fn decode_response_inner(
             })?;
 
         content.push(AssistantPart::Media(Media::Audio(AudioMedia {
+            preparation: Default::default(),
             payload: AudioPayload::InlineWithProviderRef {
                 data: bytes::Bytes::from(decoded_data),
                 reference: ProviderMediaRef {

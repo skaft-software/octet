@@ -450,6 +450,7 @@ fn image_media(block: &Value) -> Result<Media, String> {
         .parse::<mime::Mime>()
         .map_err(|_| "message:image-mime".to_owned())?;
     Ok(Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(data.into()),
         media_type: Some(media_type),
         detail: None,

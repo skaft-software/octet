@@ -104,6 +104,7 @@ fn unsupported_google_audio_is_rejected_or_diagnosed_and_omitted() {
                 content: vec![
                     UserPart::Text("listen".into()),
                     UserPart::Media(Media::Audio(AudioMedia {
+                        preparation: Default::default(),
                         payload,
                         format,
                         transcript: None,

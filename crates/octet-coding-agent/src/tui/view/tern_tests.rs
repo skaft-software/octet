@@ -1939,6 +1939,7 @@ fn welcome_uploads_identical_hashed_bytes_once_and_replays_after_eviction() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     // Exercise the existing independent image decoder through its public media boundary.
     let image = octet_ai::types::ImageMedia {
+        preparation: Default::default(),
         source: octet_ai::types::ImageSource::Inline(bytes::Bytes::from(bytes.clone())),
         media_type: Some(mime::IMAGE_PNG),
         detail: None,

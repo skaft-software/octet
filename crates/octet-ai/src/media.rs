@@ -131,6 +131,7 @@ pub fn prepare_user_image(
             .map_err(|_| ImageInputError::InvalidImage)?;
         if output.get_ref().len() <= output_limit {
             return Ok(ImageMedia {
+                preparation: Default::default(),
                 source: ImageSource::Inline(Bytes::from(output.into_inner())),
                 media_type: Some(mime::IMAGE_PNG),
                 detail: image.detail,

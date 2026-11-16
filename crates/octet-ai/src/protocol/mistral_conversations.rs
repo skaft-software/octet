@@ -25,6 +25,7 @@ use crate::types::{
 /// the supplied entries into a new, non-stored conversation; never interpret a
 /// cache session ID as a provider conversation ID.
 pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestParts, AiError> {
+    crate::recorded_audio::check_media_budget(model, req)?;
     // Conversations credentials may only leave over TLS. Literal loopback HTTP
     // remains usable for local fixtures; the generic endpoint contract also
     // serves custom LAN endpoints and therefore cannot enforce this route rule.
@@ -248,9 +249,7 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     Ok(HttpRequestParts {
         url: crate::protocol::endpoint_url(&model.endpoint.base_url, "conversations")?,
         headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| DecodeError::Json("cannot encode Mistral Conversations request".into()))?
-            .into(),
+        body: crate::recorded_audio::encode(model, &body)?.into(),
         streaming: true,
         diagnostics,
     })

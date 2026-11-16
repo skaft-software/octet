@@ -500,6 +500,16 @@ pub enum AuthError {
 /// Request/conversation semantic validation failures.
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
+    /// A bounded request cannot contain the accumulated encoded media/text.
+    #[error("provider {provider} model {model}: encoded request exceeds {limit} bytes; start a fresh session with fewer or smaller attachments, or use a provider file reference")]
+    RequestBytes {
+        /// Selected endpoint.
+        provider: String,
+        /// Wire model.
+        model: String,
+        /// Encoded request ceiling.
+        limit: usize,
+    },
     /// Tool result was sent with no matching tool call.
     #[error("Orphan tool result for call ID {0:?}")]
     OrphanToolResult(crate::types::ToolCallId),

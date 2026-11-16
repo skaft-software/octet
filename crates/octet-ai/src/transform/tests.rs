@@ -156,6 +156,7 @@ fn same_model_reasoning_state_is_preserved() {
 #[test]
 fn unsupported_user_and_tool_images_become_visible_placeholders() {
     let image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from_static(b"image")),
         media_type: Some(mime::IMAGE_PNG),
         detail: None,
@@ -189,16 +190,19 @@ fn unsupported_user_and_tool_images_become_visible_placeholders() {
 #[test]
 fn audio_transcripts_replace_unreplayable_user_tool_and_assistant_media() {
     let user_audio = Media::Audio(AudioMedia {
+        preparation: Default::default(),
         payload: AudioPayload::Inline(bytes::Bytes::from_static(b"wav")),
         format: AudioFormat::Wav,
         transcript: Some("user said hello".into()),
     });
     let tool_audio = Media::Audio(AudioMedia {
+        preparation: Default::default(),
         payload: AudioPayload::Inline(bytes::Bytes::from_static(b"wav")),
         format: AudioFormat::Wav,
         transcript: Some("tool heard a warning".into()),
     });
     let assistant_audio = Media::Audio(AudioMedia {
+        preparation: Default::default(),
         payload: AudioPayload::ProviderRef(ProviderMediaRef {
             protocol: Protocol::OpenAiChat,
             id: "expired-audio".into(),
@@ -269,6 +273,7 @@ fn google_audio_history_survives_borrowed_and_owned_request_transforms() {
                 .iter()
                 .map(|format| {
                     UserPart::Media(Media::Audio(AudioMedia {
+                        preparation: Default::default(),
                         payload: AudioPayload::Inline(bytes::Bytes::from_static(b"audio")),
                         format: *format,
                         transcript: None,
@@ -296,6 +301,7 @@ fn google_audio_history_survives_borrowed_and_owned_request_transforms() {
 #[test]
 fn request_transform_preserves_pending_media_but_normalizes_history() {
     let image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from_static(b"image")),
         media_type: Some(mime::IMAGE_PNG),
         detail: None,

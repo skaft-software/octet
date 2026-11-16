@@ -6,7 +6,7 @@
 //! process, which is a different failure model from the decode half: no
 //! response parsing, no stream state, and no fixture is needed to exercise it.
 
-use crate::error::{AiError, ConfigError, DecodeError};
+use crate::error::{AiError, ConfigError};
 use crate::protocol::{
     cache_session_id, cache_session_id_for, prompt_cache_key, prompt_cache_key_for,
     HttpRequestParts,
@@ -396,6 +396,7 @@ pub(crate) fn build_request(
     model: &crate::catalog::Model,
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
+    crate::recorded_audio::check_media_budget(model, req)?;
     // 1. Normalize model-gated reasoning, then run validation.
     let defaults = crate::protocol::preset::request_defaults(model, req)?;
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
@@ -602,8 +603,7 @@ pub(crate) fn build_request(
 
     let mut body = responses_req.into_json()?;
     crate::protocol::preset::sampling(model, &req, &mut body)?;
-    let body_bytes =
-        serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let body_bytes = crate::recorded_audio::encode(model, &body)?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "responses")?;
 

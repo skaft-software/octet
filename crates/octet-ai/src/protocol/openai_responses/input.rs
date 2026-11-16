@@ -236,6 +236,7 @@ pub(super) fn map_user_input(
                             Some(WireImageUrl::Inline {
                                 media_type: media_type.to_string(),
                                 data: bytes.clone(),
+                                encoded: image.preparation.encode(bytes),
                             }),
                             None,
                         )
@@ -279,6 +280,7 @@ pub(super) fn map_user_input(
                     file_data: WireImageUrl::Inline {
                         media_type: document.media_type.to_string(),
                         data: document.data.clone(),
+                        encoded: document.preparation.encode(&document.data),
                     },
                 });
             }
@@ -309,6 +311,7 @@ pub(super) fn map_user_input(
                                         image_url: Some(WireImageUrl::Inline {
                                             media_type: media_type.to_string(),
                                             data: bytes.clone(),
+                                            encoded: image.preparation.encode(bytes),
                                         }),
                                         file_id: None,
                                     });

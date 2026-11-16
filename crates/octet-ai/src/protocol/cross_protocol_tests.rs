@@ -88,6 +88,7 @@ fn test_cross_protocol_canonical_immutability() {
     let model = make_model(Protocol::OpenAiChat, true, true, false, true);
 
     let image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from(vec![1, 2, 3])),
         media_type: Some(mime::IMAGE_PNG),
         detail: None,

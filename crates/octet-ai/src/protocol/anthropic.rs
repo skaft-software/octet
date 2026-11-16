@@ -501,6 +501,7 @@ pub(crate) fn build_request(
     model: &crate::catalog::Model,
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
+    crate::recorded_audio::check_media_budget(model, req)?;
     // 1. Normalize model-gated reasoning, then run validation.
     let req = normalize_request_reasoning(req, &model.spec.capabilities);
     let diagnostics = crate::protocol::route_validation(
@@ -559,7 +560,7 @@ pub(crate) fn build_request(
                                     };
                                     AnthropicImageSource::Base64 {
                                         media_type,
-                                        data: Base64Bytes::from(bytes),
+                                        data: Base64Bytes(image.preparation.encode(bytes)),
                                     }
                                 }
                                 ImageSource::Url(url) => AnthropicImageSource::Url {
@@ -585,7 +586,7 @@ pub(crate) fn build_request(
                             blocks.push(AnthropicContentBlock::Document {
                                 source: AnthropicImageSource::Base64 {
                                     media_type: document.media_type.to_string(),
-                                    data: Base64Bytes::from(&document.data),
+                                    data: Base64Bytes(document.preparation.encode(&document.data)),
                                 },
                                 title: document.name.clone(),
                                 cache_control: None,
@@ -610,7 +611,9 @@ pub(crate) fn build_request(
                                                 anthropic_image_media_type(image).map(
                                                     |media_type| AnthropicImageSource::Base64 {
                                                         media_type,
-                                                        data: Base64Bytes::from(bytes),
+                                                        data: Base64Bytes(
+                                                            image.preparation.encode(bytes),
+                                                        ),
                                                     },
                                                 )
                                             }
@@ -986,8 +989,7 @@ pub(crate) fn build_request(
         stream: true,
     };
 
-    let body_bytes = serde_json::to_vec(&anth_req)
-        .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let body_bytes = crate::recorded_audio::encode(model, &anth_req)?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "messages")?;
 

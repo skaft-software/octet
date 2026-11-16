@@ -224,6 +224,7 @@ fn native_pi_messages_image_fixture_decodes_strictly() {
         .decode(MESSAGE_PNG)
         .unwrap();
     let image = octet_ai::ImageMedia {
+        preparation: Default::default(),
         source: octet_ai::ImageSource::Inline(bytes.clone().into()),
         media_type: Some("image/png".parse().unwrap()),
         detail: None,
@@ -243,6 +244,7 @@ fn native_pi_messages_image_fixture_decodes_strictly() {
     let mut corrupt = bytes;
     corrupt[52] ^= 1; // IDAT CRC: a valid header/base64 alone must not pass admission.
     let invalid = octet_ai::ImageMedia {
+        preparation: Default::default(),
         source: octet_ai::ImageSource::Inline(corrupt.into()),
         ..image
     };

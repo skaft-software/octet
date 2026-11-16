@@ -1127,6 +1127,7 @@ mod tests {
     fn serialization_preserves_audio_transcripts_for_every_message_role() {
         let audio = |transcript: &str| {
             Media::Audio(AudioMedia {
+                preparation: Default::default(),
                 payload: AudioPayload::Inline(bytes::Bytes::from_static(b"audio")),
                 format: AudioFormat::Wav,
                 transcript: Some(transcript.into()),

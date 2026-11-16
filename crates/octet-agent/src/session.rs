@@ -507,6 +507,7 @@ impl CustomMessagePart {
             ));
         }
         Ok(Some(octet_ai::ImageMedia {
+            preparation: Default::default(),
             source: octet_ai::ImageSource::Inline(bytes.into()),
             media_type: Some(mime_type.parse().expect("validated image MIME")),
             detail: None,

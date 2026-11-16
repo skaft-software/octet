@@ -29,6 +29,7 @@ pub(crate) fn build_request(
     model: &crate::catalog::Model,
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
+    crate::recorded_audio::check_media_budget(model, req)?;
     let req = normalize_request_reasoning(req, &model.spec.capabilities);
     let diagnostics = crate::protocol::route_validation(
         model,
@@ -69,8 +70,7 @@ pub(crate) fn build_request(
         );
     }
 
-    let body = serde_json::to_vec(&Value::Object(root))
-        .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
+    let body = crate::recorded_audio::encode(model, &Value::Object(root))?;
     // `api_name` is validated as a single safe path segment when the model is
     // registered. It cannot alter the configured endpoint authority or path.
     let url = model
@@ -144,10 +144,7 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                 parts.push(serde_json::json!({
                                     "inlineData": {
                                         "mimeType": document.media_type.as_ref(),
-                                        "data": base64::Engine::encode(
-                                            &base64::engine::general_purpose::STANDARD,
-                                            &document.data,
-                                        ),
+                                        "data": document.preparation.encode(&document.data).as_ref(),
                                     }
                                 }));
                             }
@@ -315,7 +312,7 @@ fn google_inline_image_part(image: &crate::types::ImageMedia) -> Option<Value> {
         return None;
     };
     let mime_type = image.media_type.as_ref()?.to_string();
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+    let encoded = image.preparation.encode(data).to_string();
     let mut inline_data = Map::new();
     inline_data.insert("mimeType".to_owned(), Value::String(mime_type));
     inline_data.insert("data".to_owned(), Value::String(encoded));
@@ -326,7 +323,14 @@ fn google_inline_image_part(image: &crate::types::ImageMedia) -> Option<Value> {
 
 fn google_inline_audio_part(audio: &crate::types::AudioMedia) -> Option<Value> {
     use crate::types::{AudioFormat, AudioPayload};
-    let AudioPayload::Inline(data) = &audio.payload else {
+    if let AudioPayload::ProviderRef(reference) = &audio.payload {
+        return crate::google_files::usable(reference).then(|| {
+            serde_json::json!({
+                "fileData": {"mimeType": audio.mime_type(), "fileUri": reference.id}
+            })
+        });
+    }
+    let AudioPayload::Inline(_) = &audio.payload else {
         return None;
     };
     let mime_type = match audio.format {
@@ -341,7 +345,7 @@ fn google_inline_audio_part(audio: &crate::types::AudioMedia) -> Option<Value> {
     Some(serde_json::json!({
         "inlineData": {
             "mimeType": mime_type,
-            "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data),
+            "data": audio.encoded()?.as_ref(),
         }
     }))
 }

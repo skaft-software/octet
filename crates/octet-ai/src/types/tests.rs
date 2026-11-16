@@ -265,6 +265,7 @@ fn test_message_serde_round_trip() {
         content: vec![
             AssistantPart::Text("Here is your speech".to_string()),
             AssistantPart::Media(Media::Audio(AudioMedia {
+                preparation: Default::default(),
                 payload: AudioPayload::InlineWithProviderRef {
                     data: bytes::Bytes::from("speech_bytes"),
                     reference: ProviderMediaRef {

@@ -48,6 +48,7 @@ async fn test_response_builder_full() {
         .on_event(&StreamEvent::MediaCompleted {
             index: 1,
             media: Media::Audio(AudioMedia {
+                preparation: Default::default(),
                 payload: AudioPayload::Inline(bytes::Bytes::from("voice")),
                 format: AudioFormat::Wav,
                 transcript: Some("hello".to_string()),

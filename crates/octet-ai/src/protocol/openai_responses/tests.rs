@@ -295,6 +295,7 @@ fn responses_lite_disables_parallel_calls_without_tools_and_strips_image_detail(
 
     let req = user_req(
         vec![UserPart::Media(Media::Image(ImageMedia {
+            preparation: Default::default(),
             source: ImageSource::Url(url::Url::parse("https://example.com/image.png").unwrap()),
             media_type: None,
             detail: Some(crate::types::ImageDetail::High),
@@ -1066,12 +1067,14 @@ fn test_build_request_image_input() {
     let model = make_test_model(false);
 
     let inline_image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from(vec![0x47, 0x49, 0x46])),
         media_type: Some(mime::IMAGE_GIF),
         detail: Some(crate::types::ImageDetail::Low),
     });
 
     let url_image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Url(url::Url::parse("https://example.com/test.png").unwrap()),
         media_type: None,
         detail: None,
@@ -1150,6 +1153,7 @@ fn lossy_structured_output_downgrade_omits_text_format() {
 fn lossy_expired_provider_ref_is_dropped() {
     let model = make_test_model(false);
     let expired = UserPart::Media(Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::ProviderRef(ProviderMediaRef {
             protocol: Protocol::OpenAiResponses,
             id: "file_expired".to_string(),
@@ -1178,6 +1182,7 @@ fn lossy_expired_provider_ref_is_dropped() {
 fn lossy_inline_image_without_media_type_is_dropped() {
     let model = make_test_model(false);
     let img = UserPart::Media(Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from(vec![1, 2, 3])),
         media_type: None,
         detail: None,
@@ -1382,6 +1387,7 @@ fn computer_call_history_replays_as_computer_call_and_output() {
         computer_tool_result(
             "call_comp_1",
             Some(Media::Image(ImageMedia {
+                preparation: Default::default(),
                 source: ImageSource::Inline(bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n")),
                 media_type: Some(mime::IMAGE_PNG),
                 detail: None,
@@ -1452,6 +1458,7 @@ fn oversized_inline_screenshot_is_not_forwarded() {
         computer_tool_result(
             "call_comp_1",
             Some(Media::Image(ImageMedia {
+                preparation: Default::default(),
                 source: ImageSource::Inline(bytes::Bytes::from(vec![
                     0_u8;
                     MAX_COMPUTER_SCREENSHOT_BYTES

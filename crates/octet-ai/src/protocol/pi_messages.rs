@@ -137,10 +137,7 @@ fn image_content(media: &crate::types::ImageMedia) -> Result<Value, AiError> {
                 .ok_or_else(|| malformed("inline image has no declared media type"))?;
             Ok(json!({
                 "type": "image",
-                "data": base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &data[..],
-                ),
+                "data": media.preparation.encode(data).as_ref(),
                 "mimeType": media_type.as_ref(),
             }))
         }
@@ -390,6 +387,7 @@ fn pi_thinking_level(effort: crate::types::ReasoningEffort) -> &'static str {
 /// formats, audio output, token-budget reasoning) fail closed in Strict mode
 /// and are dropped with a diagnostic in Lossy mode.
 pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestParts, AiError> {
+    crate::recorded_audio::check_media_budget(model, req)?;
     // Credentials for this route are presented as a bearer token. Like the
     // other native codecs, TLS is required except for literal loopback HTTP.
     let base = &model.endpoint.base_url;
@@ -541,9 +539,7 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     Ok(HttpRequestParts {
         url: crate::protocol::endpoint_url(&model.endpoint.base_url, "messages")?,
         headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| DecodeError::Json("cannot encode pi-messages request".into()))?
-            .into(),
+        body: crate::recorded_audio::encode(model, &body)?.into(),
         streaming: true,
         diagnostics,
     })

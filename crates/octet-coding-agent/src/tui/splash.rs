@@ -324,6 +324,7 @@ mod tests {
         // Also use the independent image decoder already behind octet's media
         // boundary, rather than validating only against our chunk parser.
         let image = ImageMedia {
+            preparation: Default::default(),
             source: ImageSource::Inline(bytes::Bytes::from(png.clone())),
             media_type: Some(mime::IMAGE_PNG),
             detail: None,

@@ -1391,6 +1391,7 @@ impl ProviderContextHook for OpaqueProjection {
             "empty" => messages.push(Message::User(UserMessage { content: vec![] })),
             "media" => messages.push(Message::User(UserMessage {
                 content: vec![UserPart::Media(Media::Image(octet_ai::ImageMedia {
+                    preparation: Default::default(),
                     source: ImageSource::Url("https://example.test/image.png".parse().unwrap()),
                     media_type: Some("image/png".parse().unwrap()),
                     detail: None,

@@ -301,6 +301,7 @@ pub(crate) fn build_request(
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     // 1. Normalize model-gated reasoning, then run validation.
+    crate::recorded_audio::check_media_budget(model, req)?;
     let defaults = crate::protocol::preset::request_defaults(model, req)?;
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
     let diagnostics = crate::protocol::route_validation(
@@ -419,6 +420,7 @@ pub(crate) fn build_request(
                                     WireImageUrl::Inline {
                                         media_type: media_type.to_string(),
                                         data: bytes.clone(),
+                                        encoded: image.preparation.encode(bytes),
                                     }
                                 }
                                 ImageSource::ProviderRef(_) => continue,
@@ -450,13 +452,10 @@ pub(crate) fn build_request(
                                 _ => continue,
                             };
 
-                            let data = match &audio.payload {
-                                AudioPayload::Inline(bytes) => Base64Bytes::from(bytes),
-                                AudioPayload::InlineWithProviderRef { data, .. } => {
-                                    Base64Bytes::from(data)
-                                }
-                                AudioPayload::ProviderRef(_) => continue,
+                            let Some(encoded) = audio.encoded() else {
+                                continue;
                             };
+                            let data = Base64Bytes(encoded);
 
                             parts.push(ChatContentPart::InputAudio {
                                 input_audio: ChatInputAudio {
@@ -480,6 +479,7 @@ pub(crate) fn build_request(
                                     file_data: WireImageUrl::Inline {
                                         media_type: document.media_type.to_string(),
                                         data: document.data.clone(),
+                                        encoded: document.preparation.encode(&document.data),
                                     },
                                 },
                             });
@@ -958,8 +958,7 @@ pub(crate) fn build_request(
     let mut body = serde_json::to_value(&chat_req)
         .map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
     crate::protocol::preset::chat(model, &req, &mut body)?;
-    let body_bytes =
-        serde_json::to_vec(&body).map_err(|e| AiError::Decode(DecodeError::Json(e.to_string())))?;
+    let body_bytes = crate::recorded_audio::encode(model, &body)?;
 
     let url = crate::protocol::endpoint_url(&model.endpoint.base_url, "chat/completions")?;
 

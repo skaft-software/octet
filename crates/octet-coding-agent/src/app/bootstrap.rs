@@ -457,6 +457,7 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // recording each limit's provenance so a cached inventory re-merges to the same
 // effective limit on the next start. Version 12 adds provenance-scoped native
 // metadata, including separate maximum and loaded-instance context values.
+// Version 13 preserves explicit audio assertions through normalized inventories.
 const CUSTOM_MODEL_CACHE_VERSION: u8 = 13;
 /// Provider inventory caches share the private-metadata write ceiling.
 const PROVIDER_INVENTORY_CACHE_WRITE_LIMIT: usize = 256 * 1024 * 1024;

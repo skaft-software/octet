@@ -54,7 +54,8 @@ as `inlineData`; OpenRouter keeps its Chat WAV/MP3 format contract. Responses
 and Anthropic aren't native-audio routes, and an arbitrary OpenAI-compatible
 endpoint does not establish audio support. Raw PCM16 is not supported on Google
 because the canonical format lacks required sample-rate metadata. Google audio
-output and provider file references are not implemented. There's no automatic
+output is not implemented. Gemini Files and Vertex GCS audio references use
+`fileData`; other Google-compatible routes retain their inline contract. There's no automatic
 transcription or transcoding, and a provider may still reject a file octet
 accepted. The raw-byte safety cap is not a guarantee that a base64-encoded
 request fits the provider's total request limit.
@@ -89,6 +90,33 @@ request fits the provider's total request limit.
   `input_audio`. OpenAI Responses does not implement native audio input here;
   it does support PDF `input_file`. These are octet's implemented wire paths,
   not a guarantee that every model or compatible endpoint accepts them.
+
+### Durable recorded media
+
+Admitted image, audio and PDF bytes are stored in the session JSONL, not as paths
+that must be re-read. Replacing or deleting the original file does not change a
+later turn, branch or resumed session. Terminal summaries/previews never trim
+model-visible audio. Model switching derives a compatible request without
+rewriting that durable input.
+
+Clones share immutable-byte base64 preparation; each clip/image/PDF is encoded
+once per process unless its bytes change. Resume reconstructs preparation from
+the stored bytes once. Constructing the final HTTP body still copies the bytes
+that must go over the wire. Preflight bounds encoded media at **64 MiB**, and a
+bounded JSON writer includes escaped text and schemas in the **64 MiB** request
+ceiling (**20 MB** for Google). Gemini Files preparation admits at most **256 MiB**
+of estimated encoded source media before replacing audio with references. A
+limit error names the provider/model and suggests smaller batches; nothing is
+silently truncated. Payload hooks are also subject to the final body ceiling.
+
+Gemini upload reuse is process-local, tied to the actual credential and endpoint,
+and refreshed after 15 minutes. A resumed session uploads from its durable bytes
+again when necessary. Files have Google's documented 48-hour remote retention;
+octet does not silently delete provider files or store credential material in the
+session. Upload and file-state failures preserve local history and report the
+preparation stage. Review [Gemini Files](https://ai.google.dev/gemini-api/docs/files)
+and [Vertex audio fileData](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/audio-understanding)
+before authorizing provider checks.
 
 ### PDFs
 
@@ -129,7 +157,13 @@ octet's cap may therefore still exceed the provider's limit.
 
 Earlier audio reads remain in history and are re-sent: an album can exceed the
 request-byte limit even when every track fits individually and token context
-remains. On HTTP **413**, octet reports the provider/model, status and available
+remains. On the built-in Gemini Developer API route, an estimated 16 MB of
+encoded media triggers the documented resumable Files API before constructing
+`generateContent`. Audio uploads finalize, wait for `ACTIVE` within a bounded
+60-second preparation deadline, and become `fileData` parts in their original
+positions. Vertex can use explicitly supplied `gs://bucket/object` audio
+references; octet does not provision GCS buckets or upload to Vertex/OpenCode on
+the authority of a Gemini API credential. OpenRouter remains inline-only. On HTTP **413**, octet reports the provider/model, status and available
 request ID, with advice to start a fresh session with fewer or smaller
 attachments. A larger token context window may not raise the request-byte limit.
 A generic `request_too_large` rejection does **not** trigger token compaction or
@@ -157,8 +191,8 @@ ffmpeg -n -i input.wav -vn -c:a libmp3lame -b:a 192k input-inline.mp3
 
 Check the output size and use a model/route that supports its format. Leave
 room for base64 and the rest of the request. octet does not automatically
-transcode or upload oversized files; large-file API support is tracked in
-[#593](https://github.com/skaft-software/octet/issues/593).
+transcode or upload files above the raw 20 MiB safety cap. Gemini Files avoids
+the smaller whole-request inline ceiling for admitted clips, not this raw cap.
 
 Context capacity checks are estimates, not provider tokenization. Inline media
 you attached counts as a fixed allowance per image, audio clip or document page,

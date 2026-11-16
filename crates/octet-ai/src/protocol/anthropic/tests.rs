@@ -646,12 +646,14 @@ fn test_build_request_image_input() {
     let model = make_test_model(false);
 
     let inline_image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from(vec![0x47, 0x49, 0x46])),
         media_type: Some(mime::IMAGE_GIF),
         detail: None,
     });
 
     let url_image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Url(url::Url::parse("https://example.com/test.png").unwrap()),
         media_type: None,
         detail: None,

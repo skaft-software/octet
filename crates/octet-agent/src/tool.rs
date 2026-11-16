@@ -1836,6 +1836,7 @@ impl ToolOutput {
             // Detach accepted slices: cloning Bytes could retain an arbitrarily
             // larger transport allocation despite the visible-length budgets.
             let owned = Media::Image(octet_ai::ImageMedia {
+                preparation: Default::default(),
                 source: octet_ai::ImageSource::Inline(bytes::Bytes::copy_from_slice(bytes)),
                 media_type: image.media_type.clone(),
                 detail: image.detail,

@@ -1400,6 +1400,7 @@ fn test_build_request_audio_input() {
     let model = make_test_model(false, true, false, false, false, false);
     let audio_payload = bytes::Bytes::from(vec![0x00, 0x01, 0x02, 0x03]);
     let audio_media = crate::types::AudioMedia {
+        preparation: Default::default(),
         payload: crate::types::AudioPayload::Inline(audio_payload),
         format: AudioFormat::Wav,
         transcript: None,
@@ -1435,12 +1436,14 @@ fn test_build_request_image_input() {
     let model = make_test_model(true, false, false, false, false, false);
 
     let inline_image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from(vec![0x47, 0x49, 0x46])),
         media_type: Some(mime::IMAGE_GIF),
         detail: Some(ImageDetail::High),
     });
 
     let url_image = Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Url(url::Url::parse("https://example.com/test.png").unwrap()),
         media_type: None,
         detail: None,

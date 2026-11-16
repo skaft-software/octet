@@ -880,6 +880,7 @@ impl Media {
     /// neutral name when it is absent.
     pub fn pdf_bytes(data: bytes::Bytes, name: Option<String>) -> Self {
         Self::Document(DocumentMedia {
+            preparation: Default::default(),
             data,
             media_type: mime::APPLICATION_PDF,
             name,
@@ -889,6 +890,7 @@ impl Media {
     /// Creates an image media from a URL.
     pub fn image_url(url: url::Url, media_type: Option<mime::Mime>) -> Self {
         Self::Image(ImageMedia {
+            preparation: Default::default(),
             source: ImageSource::Url(url),
             media_type,
             detail: None,
@@ -898,6 +900,7 @@ impl Media {
     /// Creates an image media from inline bytes.
     pub fn image_bytes(data: bytes::Bytes, media_type: mime::Mime) -> Self {
         Self::Image(ImageMedia {
+            preparation: Default::default(),
             source: ImageSource::Inline(data),
             media_type: Some(media_type),
             detail: None,
@@ -907,6 +910,7 @@ impl Media {
     /// Creates an audio media from inline bytes (input).
     pub fn audio_bytes(data: bytes::Bytes, format: AudioFormat) -> Self {
         Self::Audio(AudioMedia {
+            preparation: Default::default(),
             payload: AudioPayload::Inline(data),
             format,
             transcript: None,
@@ -916,6 +920,7 @@ impl Media {
     /// Creates an audio media from a provider reference (reuse).
     pub fn audio_ref(reference: ProviderMediaRef, format: AudioFormat) -> Self {
         Self::Audio(AudioMedia {
+            preparation: Default::default(),
             payload: AudioPayload::ProviderRef(reference),
             format,
             transcript: None,
@@ -924,8 +929,11 @@ impl Media {
 }
 
 /// Document media container. Only `application/pdf` is constructed.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DocumentMedia {
+    /// Shared request preparation, rebuilt from durable bytes on resume.
+    #[serde(skip)]
+    pub preparation: MediaPreparation,
     /// Inline document bytes.
     #[serde(with = "base64_bytes")]
     pub data: bytes::Bytes,
@@ -981,8 +989,11 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Image media container.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ImageMedia {
+    /// Shared request preparation, rebuilt from durable bytes on resume.
+    #[serde(skip)]
+    pub preparation: MediaPreparation,
     /// Source of the image.
     pub source: ImageSource,
     /// MIME type of the image.
@@ -1015,8 +1026,11 @@ pub enum ImageDetail {
 }
 
 /// Audio media container.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct AudioMedia {
+    /// Shared request preparation, recreated from the durable bytes on resume.
+    #[serde(skip)]
+    pub preparation: MediaPreparation,
     /// Payload containing the audio data or reference.
     pub payload: AudioPayload,
     /// Audio coding format.
@@ -1527,18 +1541,8 @@ mod base64_bytes {
 
 mod optional_mime {
     use super::*;
-    use serde::{Deserializer, Serializer};
+    use serde::Deserializer;
     use std::str::FromStr;
-
-    pub fn serialize<S>(mime: &Option<mime::Mime>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match mime {
-            Some(ref m) => serializer.serialize_some(m.as_ref()),
-            None => serializer.serialize_none(),
-        }
-    }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<mime::Mime>, D::Error>
     where
@@ -1555,15 +1559,8 @@ mod optional_mime {
 }
 
 mod mime_string {
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer};
     use std::str::FromStr;
-
-    pub fn serialize<S>(mime: &mime::Mime, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(mime.as_ref())
-    }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<mime::Mime, D::Error>
     where
@@ -1931,3 +1928,148 @@ impl<'de> serde::Deserialize<'de> for StopReason {
 
 #[cfg(test)]
 mod tests;
+
+/// Shared, non-durable preparation cache for immutable recorded media.
+/// Pi compatibility retains content bytes rather than reopening source paths:
+/// pi-ref/packages/ai/src/types.ts:439-441 and
+/// pi-ref/packages/coding-agent/src/core/session-manager.ts:1188.
+/// Session serialization keeps original bytes, never this process-local cache.
+#[derive(Clone, Default)]
+pub struct MediaPreparation {
+    pub(crate) inner: std::sync::Arc<std::sync::Mutex<MediaPreparationState>>,
+}
+
+#[derive(Default)]
+pub(crate) struct MediaPreparationState {
+    pub(crate) encoded: Option<(bytes::Bytes, std::sync::Arc<str>)>,
+    pub(crate) files: Vec<([u8; 32], bytes::Bytes, ProviderMediaRef)>,
+}
+
+impl std::fmt::Debug for MediaPreparation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MediaPreparation(<opaque>)")
+    }
+}
+
+impl AudioMedia {
+    /// MIME type used by Google's recorded-audio wire contract.
+    pub fn mime_type(&self) -> &'static str {
+        match self.format {
+            AudioFormat::Wav => "audio/wav",
+            AudioFormat::Mp3 => "audio/mp3",
+            AudioFormat::Aac => "audio/aac",
+            AudioFormat::Flac => "audio/flac",
+            AudioFormat::Opus => "audio/ogg",
+            AudioFormat::Pcm16 => "audio/pcm",
+        }
+    }
+
+    /// Reuse the clip's base64 preparation across turns and cheap history clones.
+    pub(crate) fn encoded(&self) -> Option<std::sync::Arc<str>> {
+        let data = match &self.payload {
+            AudioPayload::Inline(data) | AudioPayload::InlineWithProviderRef { data, .. } => data,
+            AudioPayload::ProviderRef(_) => return None,
+        };
+        Some(self.preparation.encode(data))
+    }
+}
+
+impl Serialize for AudioMedia {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeStruct, SerializeStructVariant};
+        struct Payload<'a>(&'a AudioMedia);
+        impl Serialize for Payload<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                match &self.0.payload {
+                    AudioPayload::Inline(_) => serializer.serialize_newtype_variant(
+                        "AudioPayload",
+                        0,
+                        "Inline",
+                        self.0.encoded().unwrap().as_ref(),
+                    ),
+                    AudioPayload::ProviderRef(reference) => serializer.serialize_newtype_variant(
+                        "AudioPayload",
+                        1,
+                        "ProviderRef",
+                        reference,
+                    ),
+                    AudioPayload::InlineWithProviderRef { reference, .. } => {
+                        let mut state = serializer.serialize_struct_variant(
+                            "AudioPayload",
+                            2,
+                            "InlineWithProviderRef",
+                            2,
+                        )?;
+                        state.serialize_field("data", self.0.encoded().unwrap().as_ref())?;
+                        state.serialize_field("reference", reference)?;
+                        state.end()
+                    }
+                }
+            }
+        }
+        let mut state = serializer.serialize_struct("AudioMedia", 3)?;
+        state.serialize_field("payload", &Payload(self))?;
+        state.serialize_field("format", &self.format)?;
+        state.serialize_field("transcript", &self.transcript)?;
+        state.end()
+    }
+}
+
+impl MediaPreparation {
+    pub(crate) fn encode(&self, data: &bytes::Bytes) -> std::sync::Arc<str> {
+        use base64::Engine as _;
+        let mut cache = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((original, encoded)) = &cache.encoded {
+            if original.as_ptr() == data.as_ptr() && original.len() == data.len() {
+                return encoded.clone();
+            }
+        }
+        let encoded: std::sync::Arc<str> = base64::engine::general_purpose::STANDARD
+            .encode(data)
+            .into();
+        cache.encoded = Some((data.clone(), encoded.clone()));
+        encoded
+    }
+}
+
+impl Serialize for ImageMedia {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        struct Source<'a>(&'a ImageMedia);
+        impl Serialize for Source<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                if let ImageSource::Inline(data) = &self.0.source {
+                    serializer.serialize_newtype_variant(
+                        "ImageSource",
+                        1,
+                        "Inline",
+                        self.0.preparation.encode(data).as_ref(),
+                    )
+                } else {
+                    self.0.source.serialize(serializer)
+                }
+            }
+        }
+        let mut state = serializer.serialize_struct("ImageMedia", 3)?;
+        state.serialize_field("source", &Source(self))?;
+        state.serialize_field(
+            "media_type",
+            &self.media_type.as_ref().map(mime::Mime::as_ref),
+        )?;
+        state.serialize_field("detail", &self.detail)?;
+        state.end()
+    }
+}
+impl Serialize for DocumentMedia {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("DocumentMedia", 3)?;
+        state.serialize_field("data", self.preparation.encode(&self.data).as_ref())?;
+        state.serialize_field("media_type", self.media_type.as_ref())?;
+        state.serialize_field("name", &self.name)?;
+        state.end()
+    }
+}

@@ -490,6 +490,7 @@ pub(crate) fn validate_request(
 
                             if protocol == Protocol::GoogleGenerativeAi
                                 && !matches!(audio.payload, AudioPayload::Inline(_))
+                                && !matches!(&audio.payload, AudioPayload::ProviderRef(reference) if crate::google_files::usable(reference))
                             {
                                 if mode == CompatibilityMode::Strict {
                                     return Err(AiError::Unsupported(
@@ -625,7 +626,8 @@ pub(crate) fn validate_request(
                                             && protocol
                                                 .audio_input_formats()
                                                 .contains(&audio.format)
-                                            && matches!(audio.payload, AudioPayload::Inline(_))
+                                            && (matches!(audio.payload, AudioPayload::Inline(_))
+                                                || matches!(&audio.payload, AudioPayload::ProviderRef(reference) if crate::google_files::usable(reference)))
                                     }
                                 };
                                 if !supported {

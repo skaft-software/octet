@@ -10,6 +10,7 @@ fn owner_presentation_detaches_small_slices_from_large_backing_allocations() {
     let backing = bytes::Bytes::from(vec![42; 8 * 1024 * 1024]);
     let slice = backing.slice(1024..1032);
     let source = Media::Image(octet_ai::ImageMedia {
+        preparation: Default::default(),
         source: octet_ai::ImageSource::Inline(slice.clone()),
         media_type: Some("image/png".parse().unwrap()),
         detail: Some(octet_ai::ImageDetail::Low),

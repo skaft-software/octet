@@ -136,6 +136,7 @@ pub(crate) fn build_request(
     model: &crate::catalog::Model,
     request: &Request,
 ) -> Result<HttpRequestParts, AiError> {
+    crate::recorded_audio::check_media_budget(model, request)?;
     let request = normalize_request_reasoning(request, &model.spec.capabilities);
     let diagnostics = crate::protocol::route_validation(
         model,
@@ -179,7 +180,7 @@ pub(crate) fn build_request(
                             content.push(json!({
                                 "image": {
                                     "format": format,
-                                    "source": {"bytes": Base64Bytes::from(bytes)},
+                                    "source": {"bytes": Base64Bytes(image.preparation.encode(bytes))},
                                 }
                             }));
                         }
@@ -197,7 +198,7 @@ pub(crate) fn build_request(
                                 "document": {
                                     "format": "pdf",
                                     "name": bedrock_document_name(document.file_name()),
-                                    "source": {"bytes": Base64Bytes::from(&document.data)},
+                                    "source": {"bytes": Base64Bytes(document.preparation.encode(&document.data))},
                                 }
                             }));
                         }
@@ -445,10 +446,7 @@ pub(crate) fn build_request(
     Ok(HttpRequestParts {
         url,
         headers,
-        body: bytes::Bytes::from(
-            serde_json::to_vec(&Value::Object(body))
-                .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?,
-        ),
+        body: bytes::Bytes::from(crate::recorded_audio::encode(model, &Value::Object(body))?),
         streaming: true,
         diagnostics,
     })

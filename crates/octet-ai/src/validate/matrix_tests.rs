@@ -106,6 +106,7 @@ fn has_code(diags: &[crate::Diagnostic], code: &str) -> bool {
 fn image_without_capability() {
     let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Inline(bytes::Bytes::from_static(b"x")),
         media_type: Some("image/png".parse().unwrap()),
         detail: Some(ImageDetail::Auto),
@@ -670,6 +671,7 @@ fn tool_result_media_rejected() {
 fn provider_media_ref_mismatch_and_expiry() {
     let mut req = base_request();
     req.messages = vec![user(vec![UserPart::Media(Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::ProviderRef(ProviderMediaRef {
             protocol: Protocol::OpenAiResponses,
             id: "img_1".into(),
@@ -694,6 +696,7 @@ fn provider_media_ref_mismatch_and_expiry() {
     let mut req2 = base_request();
     req2.compatibility = Lossy;
     req2.messages = vec![user(vec![UserPart::Media(Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::ProviderRef(ProviderMediaRef {
             protocol: Protocol::OpenAiChat,
             id: "img_2".into(),

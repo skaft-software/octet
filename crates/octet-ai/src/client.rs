@@ -1188,6 +1188,21 @@ impl AiClient {
         // tool turns are normalized into valid canonical messages first.
         let mut req = req;
         req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
+        if let Some(upload) = crate::google_files::upload_base(model) {
+            if crate::recorded_audio::estimated_media_bytes(&req) >= 16_000_000 {
+                let mut headers = model.endpoint.default_headers.clone();
+                merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
+                let resolved = crate::auth::resolve_headers_with_api_key(
+                    &model.endpoint.auth,
+                    environment,
+                    host_options.api_key.as_ref(),
+                )
+                .await
+                .map_err(AiError::Auth)?;
+                headers.extend(resolved.headers);
+                crate::google_files::prepare(&self.http, model, &mut req, &upload, headers).await?;
+            }
+        }
         let tool_definitions = req.tools.clone();
         // Reject malformed schemas before a provider request can consume them.
         // The same immutable snapshot is retained by response assembly below.
@@ -1237,6 +1252,18 @@ impl AiClient {
         );
         if let Some(hooks) = &provider_hooks {
             parts.body = hooks.payload(parts.body).await?;
+        }
+
+        let request_byte_limit = if model.spec.protocol == Protocol::GoogleGenerativeAi {
+            crate::recorded_audio::GOOGLE_INLINE_BYTES
+        } else {
+            crate::recorded_audio::MAX_REQUEST_BYTES
+        };
+        if parts.body.len() > request_byte_limit {
+            return Err(crate::recorded_audio::limit_error(
+                model,
+                request_byte_limit,
+            ));
         }
 
         let proxy = self.request_proxy(&parts.url)?;

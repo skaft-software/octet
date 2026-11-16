@@ -727,6 +727,7 @@ async fn connector_usage_is_not_reclassified_as_model_or_cache_tokens() {
 
 fn private_image() -> Media {
     Media::Image(ImageMedia {
+        preparation: Default::default(),
         source: ImageSource::Url(
             url::Url::parse("https://invalid.example/request-private.png").unwrap(),
         ),
@@ -788,6 +789,7 @@ async fn unsupported_request_media_and_reasoning_are_explicit_not_replay_placeho
                     private_image()
                 } else {
                     Media::Audio(AudioMedia {
+                        preparation: Default::default(),
                         payload: AudioPayload::Inline(bytes::Bytes::from_static(b"private-audio")),
                         format: AudioFormat::Wav,
                         transcript: Some("request-private-transcript".into()),

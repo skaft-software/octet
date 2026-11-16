@@ -297,23 +297,10 @@ fn normalize_invalid_tool_call_id(id: &str) -> String {
     format!("{prefix}_{hash_hex}")
 }
 
-pub(crate) struct Base64Bytes(bytes::Bytes);
-
-impl From<&bytes::Bytes> for Base64Bytes {
-    fn from(value: &bytes::Bytes) -> Self {
-        Self(value.clone())
-    }
-}
-
+pub(crate) struct Base64Bytes(std::sync::Arc<str>);
 impl serde::Serialize for Base64Bytes {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.collect_str(&base64::display::Base64Display::new(
-            &self.0,
-            &base64::engine::general_purpose::STANDARD,
-        ))
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
     }
 }
 
@@ -323,6 +310,7 @@ pub(crate) enum WireImageUrl {
     Inline {
         media_type: String,
         data: bytes::Bytes,
+        encoded: std::sync::Arc<str>,
     },
 }
 
@@ -330,14 +318,11 @@ impl std::fmt::Display for WireImageUrl {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Url(url) => formatter.write_str(url),
-            Self::Inline { media_type, data } => write!(
-                formatter,
-                "data:{media_type};base64,{}",
-                base64::display::Base64Display::new(
-                    data,
-                    &base64::engine::general_purpose::STANDARD,
-                )
-            ),
+            Self::Inline {
+                media_type,
+                encoded,
+                ..
+            } => write!(formatter, "data:{media_type};base64,{encoded}"),
         }
     }
 }
