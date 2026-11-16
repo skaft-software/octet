@@ -12,6 +12,65 @@ use octet_ai::{
 use octet_tern::wire::{Kind, Node};
 use serde_json::{json, Value};
 
+// Real Pi chrome shares the native fullscreen placement owner. The adapter
+// never writes images or terminal frames directly (remote UI accepts SGR only).
+const GRAPHICS_CHROME_FACTORY: &str = r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+class GraphicsEditor extends CustomEditor {
+  render(width) { return [...super.render(width), 'GRAPHICS-PI-EDITOR']; }
+}
+export default pi => {
+  pi.on('session_start', (_, ctx) => {
+    ctx.ui.setEditorComponent((tui, theme, keys) => new GraphicsEditor(tui, theme, keys));
+    ctx.ui.setFooter(() => ({render: () => ['GRAPHICS-PI-FOOTER'], invalidate() {}}));
+  });
+};
+"#;
+
+async fn pi_kitty_graphics_case(streaming: bool) {
+    use crate::tui::view::tests::kitty_graphics_tests::{attach, exercise, seed};
+    let (_directory, mut app, mut shell) =
+        super::pi_contract_support::pi_ui_app(GRAPHICS_CHROME_FACTORY);
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    let problems = tokio::time::timeout(
+        Duration::from_secs(8),
+        resource_paths::refresh_resource_paths_reporting(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .expect("Pi chrome startup timed out")
+    .unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    shell.finish_startup();
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("GRAPHICS-PI-EDITOR") && frame.contains("GRAPHICS-PI-FOOTER")
+    })
+    .await;
+    let mut probe = attach(&mut shell);
+    // Resizing invalidates the width-fenced cached Pi slots. Wait for their
+    // genuine frames before seeding images and checking every subsequent paint.
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("GRAPHICS-PI-EDITOR") && frame.contains("GRAPHICS-PI-FOOTER")
+    })
+    .await;
+    probe.render(&mut shell);
+    seed(&mut shell);
+    exercise(&mut shell, &mut probe, streaming);
+    let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
+    assert!(frame.contains("GRAPHICS-PI-EDITOR"), "{frame}");
+    assert!(frame.contains("GRAPHICS-PI-FOOTER"), "{frame}");
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kitty_graphics_pi_chrome_idle_scroll_and_fast_wheel_bursts() {
+    pi_kitty_graphics_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kitty_graphics_pi_chrome_streaming_scroll_and_status_ticks() {
+    pi_kitty_graphics_case(true).await;
+}
+
 const CALL_ID: &str = "renderer-read-call";
 const READ_PATH: &str = "renderer-source.txt";
 const SOURCE_ASSISTANT: &str = "SOURCE_ASSISTANT **canonical Markdown**";

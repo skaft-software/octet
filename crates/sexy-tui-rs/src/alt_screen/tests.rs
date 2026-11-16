@@ -10,9 +10,13 @@
 
 use super::*;
 use crate::capabilities::TerminalCapabilities;
+use crate::images::{ImageAnchor, ImageProtocol};
 use crate::terminal::TerminalInput;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+#[path = "../../tests/support/kitty.rs"]
+mod kitty_model;
 
 struct RecordingTerminal {
     clear_on_write: Rc<Cell<bool>>,
@@ -395,4 +399,76 @@ fn leaving_the_alternate_screen_deletes_placed_images() {
 
 fn clear_writes(writes: &Rc<RefCell<String>>) {
     writes.borrow_mut().clear();
+}
+
+#[test]
+fn kitty_model_keeps_anonymous_placements_until_explicitly_deleted() {
+    let mut model = kitty_model::Kitty::new(10, 40);
+    let placement = kitty_model::Placement {
+        image: 7,
+        placement: None,
+        row: 0,
+        column: 0,
+        rows: 3,
+        columns: 20,
+    };
+    model.feed(b"\x1b_Ga=T,i=7,r=3,c=20,C=1;AA==\x1b\\");
+    model.feed(b"\x1b[2J\x1b[2Ktext\x1b[1;1H\x1b_Ga=T,i=7,r=3,c=20,C=1;AA==\x1b\\");
+    model.assert_placements(&[placement.clone(), placement]);
+    model.feed(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+    model.assert_placements(&[]);
+    model.feed(b"\x1b_Ga=T,i=7,p=1,r=3,c=20,C=1;AA==\x1b\\");
+    model.feed(b"\x1b[4;1H\x1b_Ga=T,i=7,p=1,r=3,c=20,C=1;AA==\x1b\\");
+    model.assert_placements(&[kitty_model::Placement {
+        image: 7,
+        placement: Some(1),
+        row: 3,
+        column: 0,
+        rows: 3,
+        columns: 20,
+    }]);
+    model.feed(b"\x1b[6;1H\x1b_Ga=T,i=7,p=2,r=2,c=20,C=1,m=1;AA\x1b\\\x1b_Gm=0;==\x1b\\");
+    model.feed(b"\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\");
+    model.assert_placements(&[kitty_model::Placement {
+        image: 7,
+        placement: Some(2),
+        row: 5,
+        column: 0,
+        rows: 2,
+        columns: 20,
+    }]);
+}
+
+#[test]
+fn kitty_graphics_plane_tracks_raw_image_scroll_and_status_frames() {
+    // Pi's encodeKitty shape: packages/tui/src/terminal-image.ts:237-278.
+    // Raw graphics rows are supported by TUI's image-line fast path as well as
+    // the native semantic anchors. Both must use the same fullscreen lifecycle.
+    let image = "\x1b_Ga=T,f=100,q=2,C=1,c=20,r=3,i=7;AA==\x1b\\";
+    let (mut terminal, writes, _) = recording((40, 10));
+    let mut session = AlternateScreen::new(options(true));
+    let mut model = kitty_model::Kitty::new(10, 40);
+    session.enter(&mut terminal);
+    model.feed(writes.borrow().as_bytes());
+    clear_writes(&writes);
+    for (index, row) in [1, 2, 2, 0, 4, 1, 5, 0, 3].into_iter().enumerate() {
+        let mut frame = vec![String::new(); 10];
+        frame[row] = image.to_owned();
+        frame[8] = format!("↑ 199 rows back · {index} new");
+        frame[9] = format!("composer / footer {index}");
+        session.paint(&mut terminal, &frame, 40, 10, None, false);
+        model.feed(writes.borrow().as_bytes());
+        model.assert_placements(&[kitty_model::Placement {
+            image: 7,
+            placement: None,
+            row: row as u16,
+            column: 0,
+            rows: 3,
+            columns: 20,
+        }]);
+        clear_writes(&writes);
+    }
+    session.paint(&mut terminal, &[], 40, 10, None, false);
+    model.feed(writes.borrow().as_bytes());
+    model.assert_placements(&[]);
 }

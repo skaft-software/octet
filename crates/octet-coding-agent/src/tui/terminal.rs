@@ -20,6 +20,8 @@ mod signal;
 #[cfg(windows)]
 mod windows_console;
 
+#[cfg(test)]
+pub(crate) use backend::graphics_tests;
 pub use backend::OctetTerminal;
 pub(crate) use backend::TerminalImageStore;
 pub use capabilities::{ColorDepth, ColorMode, TerminalCapabilities};

@@ -78,30 +78,35 @@ fn parse_kitty_image_headers(line: &str) -> Vec<KittyImageHeader> {
     headers
 }
 
-fn extract_kitty_image_ids(line: &str) -> Vec<u32> {
-    let mut ids = parse_kitty_image_headers(line)
-        .into_iter()
-        .flat_map(|header| header.ids)
-        .collect::<Vec<_>>();
-    ids.extend(
-        ImageAnchor::parse_all(line)
-            .into_iter()
-            .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
-            .map(|anchor| anchor.id().get()),
-    );
-    ids
-}
-
-fn extract_kitty_image_rows(line: &str) -> usize {
+/// Placement metadata shared by the primary and alternate-screen painters.
+/// Raw Pi graphics rows and native anchors must enter the same lifecycle;
+/// recognizing only anchors leaves raw placements behind when text scrolls.
+/// Pi likewise retires graphics before repainting image-bearing rows:
+/// packages/tui/src/tui-alt-screen.ts:1717-1766.
+pub(crate) fn kitty_image_placements(line: &str) -> Vec<(u32, usize)> {
     parse_kitty_image_headers(line)
         .into_iter()
-        .map(|header| header.rows)
+        .flat_map(|header| header.ids.into_iter().map(move |id| (id, header.rows)))
         .chain(
             ImageAnchor::parse_all(line)
                 .into_iter()
                 .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
-                .map(|anchor| usize::from(anchor.placed_rows())),
+                .map(|anchor| (anchor.id().get(), usize::from(anchor.placed_rows()))),
         )
+        .collect()
+}
+
+fn extract_kitty_image_ids(line: &str) -> Vec<u32> {
+    kitty_image_placements(line)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn extract_kitty_image_rows(line: &str) -> usize {
+    kitty_image_placements(line)
+        .into_iter()
+        .map(|(_, rows)| rows)
         .max()
         .unwrap_or(1)
 }

@@ -35,6 +35,7 @@ mod composer_geometry_and_steering_tests;
 mod document_panel_and_image_tests;
 mod footer_and_cost_tests;
 mod frame_repaint_and_viewport_tests;
+pub(crate) mod kitty_graphics_tests;
 mod markdown_colour_and_bash_tests;
 mod native_history_tests;
 mod overlay_and_completion_tests;

@@ -19,7 +19,6 @@
 //! [`Terminal`] the caller owns, and `enter` refuses a terminal that cannot
 //! address the cursor (the caller then stays on the primary screen).
 
-use crate::images::{ImageAnchor, ImageProtocol};
 use crate::terminal::Terminal;
 use crate::utils::slice_by_column;
 use std::collections::BTreeSet;
@@ -319,14 +318,9 @@ fn placements_in(rows: &[String]) -> Vec<Placement> {
     rows.iter()
         .enumerate()
         .flat_map(|(row, line)| {
-            ImageAnchor::parse_all(line)
+            crate::tui::kitty_image_placements(line)
                 .into_iter()
-                .filter(|anchor| anchor.protocol() == ImageProtocol::Kitty)
-                .map(move |anchor| Placement {
-                    row,
-                    id: anchor.id().get(),
-                    rows: usize::from(anchor.placed_rows()),
-                })
+                .map(move |(id, rows)| Placement { row, id, rows })
         })
         .collect()
 }

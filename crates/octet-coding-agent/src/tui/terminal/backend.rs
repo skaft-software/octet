@@ -847,3 +847,7 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
 #[cfg(test)]
 #[path = "backend_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "graphics_tests.rs"]
+pub(crate) mod graphics_tests;

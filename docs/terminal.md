@@ -400,8 +400,13 @@ consent](media.md#attach-explicitly). The model must still support the format.
 
 Fullscreen image crops keep the original tool gutter when their first row scrolls
 above the viewport. Only the visible image rows are placed, leaving the composer
-and footer outside the placement. Terminal-specific pixels still require separate
-qualification; protocol and retained-row tests are not Rex or Ghostty verification.
+and footer outside the placement. One fullscreen placement tracker handles native
+image anchors and raw Kitty graphics rows: scrolling, cropping and redraws retire
+old placements before emitting images at their current rows. Status updates away
+from an image leave its placement alone. Pi-compatible composer/footer components
+share this terminal painter; they do not write a separate graphics frame.
+Terminal-specific pixels still require separate qualification; protocol and
+retained-row tests are not Rex or Ghostty verification.
 
 Ctrl+O reveals compaction, subagent activity, bounded search, tool and shell
 output, and edit and write diffs; Ctrl+T reveals the reasoning traces.
