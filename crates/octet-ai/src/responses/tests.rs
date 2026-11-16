@@ -218,3 +218,95 @@ fn projection_replays_own_signed_reasoning_verbatim_when_assistant_text_is_edite
     assert_eq!(input.items()[0], reasoning);
     assert_eq!(input.items()[1].as_json()["content"][0]["text"], "edited");
 }
+
+#[test]
+fn projection_keeps_historical_and_current_reasoning_efforts() {
+    use crate::{AssistantPart, ModelCatalog, ModelId, ReasoningEffort};
+    let mut model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    std::sync::Arc::make_mut(&mut model.spec)
+        .capabilities
+        .responses_features
+        .reasoning_effort_updates = true;
+    std::sync::Arc::make_mut(&mut model.endpoint)
+        .runtime
+        .responses_features
+        .reasoning_effort_updates = true;
+    let user = |text: &str| {
+        Message::User(UserMessage {
+            content: vec![crate::UserPart::Text(text.into())],
+        })
+    };
+    let assistant = Message::Assistant(AssistantMessage {
+        model: model.spec.id.clone(),
+        protocol: model.spec.protocol,
+        content: vec![AssistantPart::Text("answer".into())],
+    });
+    let baseline = ReasoningConfig::Effort(ReasoningEffort::Low);
+    let earlier = ResponsesConfigurationUpdate {
+        reasoning: ReasoningConfig::Effort(ReasoningEffort::Medium),
+    };
+    let current = ResponsesConfigurationUpdate {
+        reasoning: ReasoningConfig::Effort(ReasoningEffort::High),
+    };
+    let output = ResponsesOutput::new(vec![ResponsesItem::new(serde_json::json!({
+        "type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"answer"}],
+    }))
+    .unwrap()]);
+    let original = vec![user("first"), assistant.clone(), user("next")];
+    let replay = vec![
+        ResponsesReplayItem::ConfigurationUpdate(earlier.clone()),
+        ResponsesReplayItem::User(match &original[0] {
+            Message::User(u) => u.clone(),
+            _ => unreachable!(),
+        }),
+        ResponsesReplayItem::Output(output.clone()),
+        ResponsesReplayItem::ConfigurationUpdate(current.clone()),
+        ResponsesReplayItem::User(match &original[2] {
+            Message::User(u) => u.clone(),
+            _ => unreachable!(),
+        }),
+    ];
+    for messages in [
+        original.clone(),
+        vec![user("edited first"), assistant, user("next")],
+    ] {
+        let input = encode_responses_projection(
+            &model,
+            Some("edited system"),
+            &messages,
+            &original,
+            &replay,
+        )
+        .unwrap();
+        validate_responses_input(&model, &input, &baseline, false).unwrap();
+        assert_eq!(
+            input.effective_reasoning(&baseline).unwrap(),
+            current.reasoning
+        );
+        let updates = input
+            .items()
+            .iter()
+            .filter(|i| i.as_json()["type"] == "configuration_update")
+            .collect::<Vec<_>>();
+        assert_eq!(updates, vec![&earlier.to_item(), &current.to_item()]);
+        let answer = input
+            .items()
+            .iter()
+            .position(|i| i == &output.items()[0])
+            .unwrap();
+        assert_eq!(input.items()[answer - 1], earlier.to_item());
+        assert_eq!(input.items().last().unwrap(), &current.to_item());
+    }
+    // Removing earlier replies cannot discard the effort for the next reply.
+    let input =
+        encode_responses_projection(&model, None, &[user("replacement")], &original, &replay)
+            .unwrap();
+    assert_eq!(
+        input.effective_reasoning(&baseline).unwrap(),
+        current.reasoning
+    );
+    assert_eq!(input.items().last().unwrap(), &current.to_item());
+}

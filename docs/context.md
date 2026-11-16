@@ -153,6 +153,9 @@ design](design/octet-agent.md#sessions).
   boundary exists. Provider-context hooks may append text-only user messages to
   opaque replay without dropping provider state; changes to the existing history
   or system prompt still fail closed when no authoritative projection is available.
+  Hook projections on qualified Responses routes retain recorded reasoning effort
+  before retained replies and the current effort after projected history, while
+  keeping the request's pinned baseline unchanged.
   Pi's `before_provider_request` transformation is separate: its encoded reply
   must fit the negotiated extension RPC frame, including the envelope. Larger
   replies are skipped with a warning rather than truncating provider input.

@@ -379,13 +379,24 @@ pub fn encode_responses_projection(
     // encodes the post-hook messages, replaying signed reasoning inside its own
     // assistant verbatim. Rust owns the wire codec and durable sidecar boundary;
     // the extension adapter cannot associate those opaque outputs itself.
+    // Pi compatibility: packages/ai/src/api/openai-responses-shared.ts:134-143,
+    // 402-408,430 applies recorded effort before each earlier reply and current
+    // effort at the end. Host-authored updates carry that same chronology here;
+    // never infer configuration authority from opaque provider output.
+    let mut current_effort = None;
+    let mut output_efforts = Vec::new();
     let outputs = replay
         .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                ResponsesReplayItem::Output(_) | ResponsesReplayItem::LocalAssistant(_)
-            )
+        .filter(|item| match item {
+            ResponsesReplayItem::ConfigurationUpdate(update) => {
+                current_effort = Some(update.clone());
+                false
+            }
+            ResponsesReplayItem::Output(_) | ResponsesReplayItem::LocalAssistant(_) => {
+                output_efforts.push(current_effort.clone());
+                true
+            }
+            _ => false,
         })
         .collect::<Vec<_>>();
     let assistants = original
@@ -397,12 +408,14 @@ pub fn encode_responses_projection(
         .collect::<Vec<_>>();
     // A native checkpoint replaces a prefix; its subsequent outputs correspond
     // to the suffix of canonical assistants, not to the compacted-away turns.
-    let mut by_message =
-        std::collections::HashMap::<Vec<u8>, std::collections::VecDeque<ResponsesOutput>>::new();
-    for (assistant, item) in assistants
+    let mut by_message = std::collections::HashMap::<
+        Vec<u8>,
+        std::collections::VecDeque<(ResponsesOutput, Option<ResponsesConfigurationUpdate>)>,
+    >::new();
+    for (assistant, (item, effort)) in assistants
         .iter()
         .rev()
-        .zip(outputs.iter().rev())
+        .zip(outputs.iter().zip(&output_efforts).rev())
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -411,23 +424,31 @@ pub fn encode_responses_projection(
             by_message
                 .entry(serde_json::to_vec(assistant).expect("assistant serializes"))
                 .or_default()
-                .push_back(output.clone());
+                .push_back((output.clone(), effort.clone()));
         }
     }
-    let projected = messages
-        .iter()
-        .map(|message| match message {
-            Message::User(user) => ResponsesReplayItem::User(user.clone()),
+    let mut projected = Vec::new();
+    for message in messages {
+        match message {
+            Message::User(user) => projected.push(ResponsesReplayItem::User(user.clone())),
             Message::Assistant(assistant) => {
                 let output = by_message
                     .get_mut(&serde_json::to_vec(assistant).expect("assistant serializes"))
                     .and_then(|outputs| outputs.pop_front());
-                output
-                    .map(ResponsesReplayItem::Output)
-                    .unwrap_or_else(|| ResponsesReplayItem::LocalAssistant(assistant.clone()))
+                if let Some((output, effort)) = output {
+                    if let Some(update) = effort {
+                        projected.push(ResponsesReplayItem::ConfigurationUpdate(update));
+                    }
+                    projected.push(ResponsesReplayItem::Output(output));
+                } else {
+                    projected.push(ResponsesReplayItem::LocalAssistant(assistant.clone()));
+                }
             }
-        })
-        .collect::<Vec<_>>();
+        }
+    }
+    if let Some(update) = current_effort {
+        projected.push(ResponsesReplayItem::ConfigurationUpdate(update));
+    }
     let mut input = encode_responses_replay(model, system, &projected)?.into_items();
     // Pi compatibility: openai-responses-shared.ts:334-339 replays the signed
     // reasoning item itself, not a summary rebuilt from readable thinking. A

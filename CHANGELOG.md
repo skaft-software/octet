@@ -79,6 +79,7 @@
 - Tool labels use available terminal width while keeping their selected values readable.
 - Pi input hooks skip coded callback faults and malformed transforms while preserving later handlers and native authority.
 - Responses sessions continue with hook-edited messages, instructions and media while keeping opaque reasoning attached to its assistant.
+- Responses context projections retain chronological reasoning-effort updates and the selected effort for the next reply.
 - Scrolling preserves the reader's position during streamed output and follows new output at the live tail.
 - Pi prompt hooks preserve valid results around malformed prompt replacements.
 - Static models use provider-scoped catalog audio metadata when their declarations are silent.

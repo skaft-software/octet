@@ -1949,3 +1949,83 @@ async fn no_projection_bookkeeping_stays_flat_with_growing_context() {
     .unwrap();
     assert!(serialize_conversation(&result.messages).contains("accepted edit"));
 }
+
+#[tokio::test]
+async fn rewritten_responses_context_keeps_pinned_baseline_and_effective_effort() {
+    use octet_ai::{ModelCatalog, ModelId, ReasoningEffort, ResponsesItem, ResponsesOutput};
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("effort-projection.jsonl")).unwrap();
+    let mut model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.spec)
+        .capabilities
+        .responses_features
+        .reasoning_effort_updates = true;
+    Arc::make_mut(&mut model.endpoint)
+        .runtime
+        .responses_features
+        .reasoning_effort_updates = true;
+    let baseline = ReasoningConfig::Effort(ReasoningEffort::Low);
+    let effective = ReasoningConfig::Effort(ReasoningEffort::High);
+    persist_reasoning_selection(&mut session, &model, &baseline).unwrap();
+    session
+        .append(EntryValue::Message(projected_user("earlier")))
+        .unwrap();
+    let assistant = session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: model.spec.protocol,
+            content: vec![AssistantPart::Text("answer".into())],
+        })))
+        .unwrap();
+    session.append_responses_turn(assistant, model.endpoint.id.clone(), model.spec.id.clone(),
+        ResponsesOutput::new(vec![ResponsesItem::new(serde_json::json!({
+            "type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"answer"}],
+        })).unwrap()])).unwrap();
+    persist_reasoning_selection(&mut session, &model, &effective).unwrap();
+    session
+        .append(EntryValue::Message(projected_user("next")))
+        .unwrap();
+    let mut canonical = request();
+    canonical.messages = session.context().unwrap();
+    canonical.responses =
+        durable_responses_options(&session, &model, "canonical system", None).unwrap();
+    canonical.reasoning =
+        request_reasoning_for_replay(&session, &model, canonical.responses.as_ref(), &effective)
+            .unwrap();
+    assert_eq!(canonical.reasoning, baseline);
+    let head = session.head();
+    let mut notices = Vec::new();
+    let projected = project_provider_context(
+        canonical,
+        &[Arc::new(Rewrite {
+            system: Some("edited system".into()),
+            text: "edited history".into(),
+            observations: Arc::default(),
+        })],
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    assert_eq!(projected.reasoning, baseline);
+    let input = projected
+        .responses
+        .as_ref()
+        .unwrap()
+        .input
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        input.effective_reasoning(&projected.reasoning).unwrap(),
+        effective
+    );
+    octet_ai::validate_provider_request(&model, &projected).unwrap();
+    assert_eq!(session.head(), head);
+    assert!(notices.is_empty());
+}
