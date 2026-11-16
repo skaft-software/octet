@@ -60,7 +60,8 @@ test('startup groups skipped factories and inert renderers into one actionable E
   const notices = peer.seen.filter(issueNotice);
   assert.deepEqual(notices.map(notice => notice.params.level), ['error', 'warning'], JSON.stringify(peer.seen) + '\n' + peer.stderr());
   const [blocking, degraded] = notices.map(notice => notice.params.message);
-  assert.match(degraded, /^Broken: factory failed during load and was skipped\. Check dependencies and settings, or disable\.$/m);
+  assert.match(blocking, /^Broken: skipped: failed while loading\. Check dependencies and settings, or disable\.$/m);
+  assert.doesNotMatch(degraded, /Broken:/);
   assert.match(blocking, /^Missing: skipped: a file is missing\. Reinstall, or remove from your Pi settings\.$/m);
   assert.match(degraded, /^Render: custom display not shown; the default view is used\. Disable if you need the custom display\.$/m);
   for (const message of [blocking, degraded]) {

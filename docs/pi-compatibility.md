@@ -315,8 +315,10 @@ running without those hooks. A factory's own setup (the work its default export 
 before it returns) gets 10 s, and 20 s across all factories; one that is still
 going is left out of the mirror, named in `[Extension issues]`, and tried again
 the next time octet starts. A factory that throws during live load or reload is
-marked failed, its registrations are removed, and an extension-and-factory warning
-is shown while sibling factories continue. Source-review and native authority
+marked failed and its registrations are removed. Skipped factories are grouped in
+an error notice naming each extension and an action to take (check dependencies
+and settings, or disable); warnings describe degraded but still available features.
+Sibling factories continue. Source-review and native authority
 refusals stay authoritative; review-only capture remains strict for a lone factory.
 
 To see which factory is slow, start octet with `OCTET_STARTUP_TRACE=1` and

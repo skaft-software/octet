@@ -73,7 +73,8 @@ test('a factory throwing during live load is failed even when it is the only fac
   assert.ok(initialized.protocol);
   assert.equal((await guard(peer).response).result.disposition.action, 'continue');
   const warning = await peer.wait(frame => frame.method === 'notification');
-  assert.match(warning.params.message, /failed|load|start/);
+  assert.equal(warning.params.level, 'error');
+  assert.match(warning.params.message, /skipped: failed while loading/);
   assert.ok(!warning.params.message.includes('PRIVATE'));
   await peer.close();
 });
@@ -86,8 +87,8 @@ test('factory throws on load and reload leave sibling callbacks working', async 
     await peer.init(['dispatcher_liveness_v1','lifecycle_events']);
     assert.equal((await guard(peer).response).result.disposition.reason, 'accepted sibling');
     const warning = await peer.wait(frame => frame.method === 'notification');
-    assert.equal(warning.params.level, 'warning');
-    assert.match(warning.params.message, /factory failed during load/);
+    assert.equal(warning.params.level, 'error');
+    assert.match(warning.params.message, /skipped: failed while loading/);
     assert.ok(!warning.params.message.includes('PRIVATE'));
     await peer.close();
   }
