@@ -262,7 +262,9 @@ With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad event
 three rows per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Each event keeps that fixed step: the terminal already applies
 its own acceleration, so octet does not add a second curve. Dragging the
-scrollbar keeps the pointer until you release it, and repeated selection-drag
+scrollbar keeps the pointer until you release it; wheel events still move the
+transcript over the track, scroll hint, and viewport edges during that press.
+Repeated selection-drag
 events at the top or bottom edge keep scrolling without losing the selection
 between paints. Click-drag highlights transcript text without Shift. Release
 copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under

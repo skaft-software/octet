@@ -150,6 +150,53 @@ fn fullscreen_unpainted_scroll_burst_preserves_every_navigation_step() {
 }
 
 #[test]
+fn fullscreen_single_row_navigation_round_trips_every_painted_row() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 24);
+    {
+        let mut state = shell.state.borrow_mut();
+        state.application_viewport_requested = true;
+        state.render_threaded = true;
+        let mut text = (0..40)
+            .map(|index| format!("row-{index:03}\n\nparagraph **bold** with `code`"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        text.push_str("\n\n| head | value |\n| --- | --- |\n");
+        for index in 0..40 {
+            text.push_str(&format!("| row-{index:03} | {index} |\n"));
+        }
+        state.push_block(TranscriptBlock::Assistant(Box::new(
+            AssistantBlock::finalized(text),
+        )));
+        for index in 0..40 {
+            state.push_block(TranscriptBlock::Notice(format!("notice-{index:03}")));
+        }
+    }
+    let component = ShellComponent::isolated(shell.state.clone(), true);
+    paint(&shell, &component);
+    let maximum = super::viewport::max_scroll_from_bottom(&shell.state.borrow(), 80);
+    for direction in [-1, 1] {
+        for step in 0..maximum {
+            let previous = shell.state.borrow().scroll_from_bottom.get();
+            let expected = if direction < 0 {
+                previous + 1
+            } else {
+                previous - 1
+            };
+            shell.scroll_lines(direction);
+            paint(&shell, &component);
+            assert_eq!(
+                shell.state.borrow().scroll_from_bottom.get(),
+                expected,
+                "step={step}, direction={direction}, previous={previous}, anchor={:?}",
+                shell.state.borrow().viewport_anchor.get()
+            );
+        }
+    }
+    assert!(shell.state.borrow().follow_tail);
+}
+
+#[test]
 fn fullscreen_edits_and_frames_skip_zero_height_history() {
     let mut samples = Vec::new();
     for hidden in [100, 1_000, 10_000] {

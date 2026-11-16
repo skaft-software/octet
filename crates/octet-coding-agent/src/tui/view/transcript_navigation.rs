@@ -994,6 +994,16 @@ impl InteractiveShell {
     }
 
     fn transcript_navigation_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> bool {
+        // Wheel input is independent of a captured scrollbar press, including
+        // over the hint and outside the track. Pi compatibility:
+        // packages/tui/src/tui-alt-screen.ts:719-733 routes wheels before its
+        // scrollbar gesture handler. Terminal dispatch belongs to this host.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            return false;
+        }
         let now = Instant::now();
         let mut state = self.state.borrow_mut();
         if !state.application_viewport_requested {
@@ -1984,6 +1994,61 @@ mod tests {
             .drag_offset
             .is_none());
         assert_eq!(shell.state.borrow().scroll_from_bottom.get(), 0);
+    }
+
+    #[test]
+    fn wheel_over_hint_and_edges_moves_content_while_scrollbar_is_captured() {
+        let mut shell = search_shell();
+        shell.state.borrow_mut().application_viewport_requested = true;
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
+        shell.isolate_native_test_renderer();
+        shell.render_written_test_frame();
+        let (column, rows, maximum) = threaded_bar(&shell);
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Down(MouseButton::Left), column, 4),
+        );
+        shell.render_written_test_frame();
+        let initial = shell.state.borrow().scroll_from_bottom.get();
+        assert!(
+            initial > 3 && initial + 3 < maximum,
+            "initial={initial}, maximum={maximum}"
+        );
+        let bottom = shell.state.borrow().size.1 - 1;
+        for row in [0, rows as u16, bottom] {
+            for col in [0, column] {
+                for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
+                    let before = shell.state.borrow().scroll_from_bottom.get();
+                    let action = dispatch(&mut shell, mouse(kind, col, row));
+                    assert!(
+                        matches!(action, InputAction::ScrollLines(_)),
+                        "wheel at ({col}, {row}) was swallowed: {action:?}"
+                    );
+                    shell.render_written_test_frame();
+                    let after = shell.state.borrow().scroll_from_bottom.get();
+                    assert_ne!(after, before, "wheel at ({col}, {row}) must move content");
+                }
+            }
+        }
+        assert_eq!(shell.state.borrow().scroll_from_bottom.get(), initial);
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_some());
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Up(MouseButton::Left), column, 4),
+        );
+        assert!(shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .drag_offset
+            .is_none());
     }
 
     #[test]
