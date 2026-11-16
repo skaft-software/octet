@@ -279,10 +279,10 @@ prompt, exact `HostProcess` calls from `ParallelProcess` tools: one
 self-contained shell command each, as Pi overlaps them. `HostRead`
 is eligible for these live waves but remains non-replayable. A wave holds up to
 one observation per CPU the process may use, at least four and at most the
-32-call turn limit (`Agent::set_parallel_read_wave_width` pins it); process
-calls wait on their own children, so only the turn limit bounds them, except
-that a width of one runs every call in turn. The width bounds resources, not
-safety: classification alone admits a call to a wave, and every other call
+32-call wave limit (`Agent::set_parallel_read_wave_width` pins the observation
+width); each wave contains at most 32 calls in total, including process calls.
+Later calls run in subsequent waves, and a width of one runs every call in
+turn. The width bounds resources, not safety: classification alone admits a call to a wave, and every other call
 (edits, writes, extensions, anything that could prompt) is a barrier, so a wider
 wave admits nothing a narrower one would refuse. A wave call's progress streams
 live with the same settlement, pacing and partial-output checkpoints as a
@@ -501,7 +501,7 @@ The path guard applies to explicit built-in paths. It is not process containment
 ## Resource limits
 
 - Local file read/edit/preview: 32 MiB per file.
-- Tool calls per assistant turn: 32.
+- Concurrent tool calls per wave: at most 32; assistant turns have no automatic call-count ceiling.
 - Default model-visible text per tool result: 50 KiB (host-configurable).
 - Delegation provenance text per task/message/status payload: 128 KiB; configurable teams remain capped at 32 concurrent, depth 8, and 256 total agents.
 - Progress: bounded messages and chunks.

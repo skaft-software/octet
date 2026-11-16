@@ -5111,7 +5111,7 @@ async fn marked_tool_output_remains_rich_across_lowering_events_and_session_reop
         .any(|part| matches!(part, octet_ai::ToolResultPart::Media(Media::Image(_)))));
 }
 
-fn assert_bounded_invocation_batch(path: &Path, expected_calls: usize, prefix: &str) {
+fn assert_complete_invocation_batch(path: &Path, expected_calls: usize, prefix: &str) {
     let records = std::fs::read_to_string(path)
         .unwrap()
         .lines()
@@ -5125,12 +5125,11 @@ fn assert_bounded_invocation_batch(path: &Path, expected_calls: usize, prefix: &
         })
         .collect::<Vec<_>>();
     assert!(!scopes.is_empty());
-    assert!(
-        scopes
-            .iter()
-            .all(|scope| scope.invocation_id().parse::<usize>().unwrap() < 32),
-        "refused calls must not allocate live-effect slots"
-    );
+    let indices = scopes
+        .iter()
+        .map(|scope| scope.invocation_id().parse::<usize>().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(indices, (0..expected_calls).collect());
     let reopened = Session::open_read_only(path).unwrap();
     let results = reopened
         .entries()
@@ -5150,12 +5149,12 @@ fn assert_bounded_invocation_batch(path: &Path, expected_calls: usize, prefix: &
     assert_eq!(results.len(), expected_calls);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(result.tool_call_id.0, format!("{prefix}{index}"));
-        assert_eq!(result.is_error, index >= 32);
+        assert!(!result.is_error, "unexpected failure for call {index}");
     }
 }
 
 #[tokio::test]
-async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
+async fn crash_recovery_executes_all_safe_tool_calls() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
@@ -5169,7 +5168,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
     let workspace_dir = tempfile::tempdir().unwrap();
     let session_dir = tempfile::tempdir().unwrap();
     let workspace = workspace_dir.path().canonicalize().unwrap();
-    let session_path = session_dir.path().join("recovery-cap.jsonl");
+    let session_path = session_dir.path().join("recovery-many.jsonl");
     let mut session = Session::create(&session_path).unwrap();
     session
         .append(EntryValue::Message(Message::User(UserMessage {
@@ -5223,7 +5222,7 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
 
     let output = agent.complete("continue").await.unwrap();
     assert_eq!(output.text, "recovered");
-    assert_eq!(calls.load(Ordering::SeqCst), 32);
+    assert_eq!(calls.load(Ordering::SeqCst), 65);
     let results = agent
         .session()
         .entries()
@@ -5245,13 +5244,9 @@ async fn crash_recovery_preserves_the_live_tool_call_execution_cap() {
             .iter()
             .find(|result| result.tool_call_id.0 == id)
             .unwrap();
-        assert!(result.is_error);
-        assert!(matches!(
-            result.content.first(),
-            Some(octet_ai::ToolResultPart::Text(text)) if text.contains("per-turn tool-call limit")
-        ));
+        assert!(!result.is_error, "recovery failed for {id}");
     }
-    assert_bounded_invocation_batch(&session_path, 65, "recover-");
+    assert_complete_invocation_batch(&session_path, 65, "recover-");
 }
 
 #[tokio::test]
@@ -7876,7 +7871,7 @@ async fn recon_bash_max_tokens_and_abort_never_execute() {
 }
 
 #[tokio::test]
-async fn recon_bash_obeys_per_turn_call_limit() {
+async fn recon_bash_executes_every_call_in_order() {
     let mut head = msg_start();
     for index in 0..65 {
         head += &tool_block(
@@ -7898,8 +7893,8 @@ async fn recon_bash_obeys_per_turn_call_limit() {
     server.finish();
     events.extend(collect(&mut run).await);
     drop(run);
-    assert_eq!(executions.load(Ordering::SeqCst), 32);
-    assert_eq!(effect_calls.load(Ordering::SeqCst), 32);
+    assert_eq!(executions.load(Ordering::SeqCst), 65);
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 65);
     let results: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -7910,21 +7905,13 @@ async fn recon_bash_obeys_per_turn_call_limit() {
     assert_eq!(results.len(), 65);
     for (index, (id, result)) in results.iter().enumerate() {
         assert_eq!(id.0, format!("call_{index}"));
-        if index < 32 {
-            assert!(result.is_ok());
-        } else {
-            assert!(result
-                .as_ref()
-                .unwrap_err()
-                .message
-                .contains("per-turn tool-call limit"));
-        }
+        assert!(result.is_ok(), "call {index} failed: {result:?}");
     }
     assert!(matches!(
         assert_single_run_finished(&events),
         FinishReason::Completed
     ));
-    assert_bounded_invocation_batch(&h.session_path, 65, "call_");
+    assert_complete_invocation_batch(&h.session_path, 65, "call_");
 }
 
 #[tokio::test]
@@ -12105,8 +12092,8 @@ async fn durable_memos_are_injected_into_sequential_and_parallel_calls() {
         );
         assert_eq!(agent.complete("observe").await.unwrap().text, "done");
         let handles = handles.lock().unwrap();
-        assert_eq!(handles.len(), width.min(32));
-        assert_bounded_invocation_batch(&path, width, "memo-");
+        assert_eq!(handles.len(), width);
+        assert_complete_invocation_batch(&path, width, "memo-");
         assert!(handles
             .iter()
             .all(|handle| handle.get_memo("step/read").is_err()));

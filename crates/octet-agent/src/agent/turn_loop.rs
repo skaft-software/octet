@@ -65,10 +65,6 @@ impl Agent {
                 Err(ToolError::new(
                     "indeterminate background call after restart; not automatically replayed",
                 ))
-            } else if call_index >= MAX_TOOL_CALLS_PER_TURN {
-                Err(ToolError::new(
-                    "tool call skipped: per-turn tool-call limit reached",
-                ))
             } else {
                 let partial_output = self.session.invocation_partial_output(call_index)?;
                 match tool_map.get(&call.name) {
@@ -2364,10 +2360,10 @@ impl Agent {
                     && max_session_tokens.is_none() && max_session_cost_microdollars.is_none()
                     && calls.len() <= parallel_read_wave_width
                     && !abort.is_set()
-                    && calls.iter().enumerate().all(|(index, call)| {
+                    && calls.iter().all(|call| {
                         call.async_execution
                             && request_tool_defs.iter().any(|definition| definition.name == call.name && definition.async_execution)
-                            && parallel_read_candidate(call, index, answer_only, output_truncated, &tool_map, &classification_context)
+                            && parallel_read_candidate(call, answer_only, output_truncated, &tool_map, &classification_context)
                     }) {
                     for (index, call) in calls.iter().enumerate() {
                         let invocation = match session.tool_invocation(index) {
@@ -2420,7 +2416,6 @@ impl Agent {
                             |index| {
                                 parallel_wave_member(
                                     &calls[index],
-                                    index,
                                     answer_only,
                                     output_truncated,
                                     &tool_map,
@@ -2434,7 +2429,7 @@ impl Agent {
                         // ordinary sequential path's hook/control behavior.
                         if wave_end - call_index > 1 {
                             // Only this admitted, bounded wave owns live slots.
-                            // Over-limit/static refusals never allocate handles.
+                            // Static refusals never allocate handles.
                             let invocation_handles = match (call_index..wave_end)
                                 .map(|index| session.tool_invocation(index))
                                 .collect::<Result<Vec<_>, _>>() {
@@ -2688,7 +2683,6 @@ impl Agent {
                         && preexecuted.is_none()
                         && !answer_only
                         && !output_truncated
-                        && call_index < MAX_TOOL_CALLS_PER_TURN
                         && !abort.is_set()
                         && tool_map.contains_key(&call.name)
                         && parsed.is_ok()
@@ -2785,10 +2779,6 @@ impl Agent {
                                 "tool call `{}` was not executed: the provider reached its output token limit, so the arguments may be truncated; re-issue the call with complete arguments",
                                 call.name
                             )))
-                        } else if call_index >= MAX_TOOL_CALLS_PER_TURN {
-                            Err(ToolError::new(
-                                "tool call skipped: per-turn tool-call limit reached",
-                            ))
                     } else if abort.is_set() {
                         cancellation_won = true;
                         Err(cancelled_tool_error())

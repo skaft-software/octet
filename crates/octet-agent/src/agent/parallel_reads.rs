@@ -73,14 +73,12 @@ pub(super) fn advertised_tool_definition(tool: &dyn Tool, model: &Model) -> Tool
 
 pub(super) fn parallel_read_candidate(
     call: &ToolCall,
-    call_index: usize,
     answer_only: bool,
     output_truncated: bool,
     tool_map: &HashMap<String, Arc<dyn Tool>>,
     context: &ToolContext<'_>,
 ) -> bool {
-    call_index < MAX_TOOL_CALLS_PER_TURN
-        && !answer_only
+    !answer_only
         && !output_truncated
         && call.argument_error.is_none()
         && call.arguments_value().is_ok_and(|arguments| {
@@ -98,18 +96,13 @@ pub(super) fn parallel_read_candidate(
 /// Background (async) dispatch keeps the stricter [`parallel_read_candidate`].
 pub(super) fn parallel_wave_member(
     call: &ToolCall,
-    call_index: usize,
     answer_only: bool,
     output_truncated: bool,
     tool_map: &HashMap<String, Arc<dyn Tool>>,
     context: &ToolContext<'_>,
     broker: &EffectBroker,
 ) -> Option<CallOverlap> {
-    if call_index >= MAX_TOOL_CALLS_PER_TURN
-        || answer_only
-        || output_truncated
-        || call.argument_error.is_some()
-    {
+    if answer_only || output_truncated || call.argument_error.is_some() {
         return None;
     }
     let arguments = call.arguments_value().ok()?;
@@ -123,8 +116,8 @@ pub(super) fn parallel_wave_member(
 
 /// Exclusive end of the overlapping wave that starts at `start`: its members
 /// are the contiguous run of overlappable calls. Observations share the read
-/// width; processes wait on their own children, so like Pi only the per-turn
-/// limit bounds them, unless a width of one asks for every call in turn.
+/// width; the total wave size also bounds concurrent processes. A width of one
+/// asks for every call in turn.
 pub(super) fn parallel_wave_end(
     start: usize,
     read_width: usize,
@@ -133,7 +126,7 @@ pub(super) fn parallel_wave_end(
 ) -> usize {
     let mut end = start;
     let mut observations = 0;
-    while end < calls {
+    while end < calls && end - start < MAX_PARALLEL_TOOL_CALLS_PER_WAVE {
         match member(end) {
             Some(CallOverlap::Observation) if observations < read_width => observations += 1,
             Some(CallOverlap::Process) if read_width > 1 || end == start => {}

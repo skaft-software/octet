@@ -45,7 +45,9 @@ A tool you turn off is never advertised to the model. Having a tool isn't
 permission to use it. When the model batches calls in one response, reads run
 together, and under full access independent `bash` commands run together with
 them. File changes, extension tools and anything that could ask for approval
-run one at a time, and results reach the model in the order it asked.
+run one at a time, and results reach the model in the order it asked. There is no
+automatic per-turn tool-call ceiling for the main agent or delegated workers;
+large batches run in bounded waves. Explicit turn and session budgets still apply.
 
 | To do this | Use |
 | --- | --- |

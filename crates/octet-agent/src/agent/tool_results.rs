@@ -45,7 +45,6 @@ pub(super) fn capture_tool_replay_safety(
     metadata.replay_safe_tool_calls = Some(
         calls
             .iter()
-            .take(MAX_TOOL_CALLS_PER_TURN)
             .enumerate()
             .filter_map(|(index, call)| {
                 tools

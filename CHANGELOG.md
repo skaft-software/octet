@@ -14,6 +14,7 @@
 - Completed shell-tool rows show their recorded duration; themes can restyle or hide it.
 - The default splash is a compact two-line mark with the version, access mode and `/changelog`.
 - Document audio input paths, capability sources and provider wire formats.
+- Agent and subagent turns handle large tool-call batches in bounded concurrent waves while preserving explicit budgets.
 
 ### Fixed
 

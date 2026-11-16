@@ -7124,3 +7124,145 @@ fn bounded_text_preserves_utf8_boundaries() {
     assert!(output.ends_with("...[truncated]"));
     assert!(output.is_char_boundary(output.len()));
 }
+
+mod uncapped_tool_calls {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Script(AtomicUsize, usize);
+    #[async_trait::async_trait]
+    impl octet_ai::HostStreamTransport for Script {
+        async fn stream(
+            &self,
+            model: octet_ai::HostStreamModel,
+            _: octet_ai::Request,
+            _: Vec<octet_ai::Diagnostic>,
+        ) -> Result<octet_ai::ResponseStream, octet_ai::AiError> {
+            let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+            let content = if first {
+                (0..self.1)
+                    .map(|i| {
+                        AssistantPart::ToolCall(octet_ai::ToolCall {
+                            id: octet_ai::ToolCallId(format!("call-{i}")),
+                            name: "read".into(),
+                            arguments_json: "{}".into(),
+                            argument_error: None,
+                            async_execution: false,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![AssistantPart::Text("done".into())]
+            };
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(octet_ai::StreamEvent::Started { response_id: None }),
+                Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
+                    message: octet_ai::AssistantMessage {
+                        content,
+                        model: model.id,
+                        protocol: model.protocol,
+                    },
+                    stop_reason: if first {
+                        octet_ai::StopReason::ToolUse
+                    } else {
+                        octet_ai::StopReason::EndTurn
+                    },
+                    usage: Usage::default(),
+                    cost: Some(Cost::default()),
+                    response_id: None,
+                    responses_output: None,
+                    deferred: None,
+                    inference: None,
+                    diagnostics: Vec::new(),
+                })),
+            ])))
+        }
+    }
+
+    #[derive(Default)]
+    struct Counts {
+        completed: AtomicUsize,
+        running: AtomicUsize,
+        peak: AtomicUsize,
+    }
+    struct Read(Arc<Counts>);
+    #[async_trait::async_trait]
+    impl Tool for Read {
+        fn definition(&self) -> ToolDef {
+            ToolDef {
+                name: "read".into(),
+                description: "read".into(),
+                parameters: json!({"type":"object","additionalProperties":false}),
+                constrained_sampling: None,
+                async_execution: false,
+            }
+        }
+        fn effect(&self, _: &Value, _: &ToolContext<'_>) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::WorkspaceRead)
+        }
+        fn concurrency(&self) -> crate::tool::ToolConcurrency {
+            crate::tool::ToolConcurrency::Parallel
+        }
+        async fn execute(&self, _: Value, _: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+            let n = self.0.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.0.peak.fetch_max(n, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            self.0.running.fetch_sub(1, Ordering::SeqCst);
+            self.0.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::new("ok"))
+        }
+    }
+
+    async fn run(count: usize) -> Arc<Counts> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = writable_manager(dir.path());
+        let counts = Arc::new(Counts::default());
+        let template = &mut Arc::get_mut(&mut manager).unwrap().template;
+        template.extensions.tool(Read(counts.clone()));
+        let model = template.model.read().unwrap().clone();
+        template.client.register_host_stream_transport(
+            model.endpoint.id.clone(),
+            Arc::new(Script(AtomicUsize::new(0), count)),
+        );
+        let identity = AgentIdentity {
+            id: "agent-test".into(),
+            path: "/root/test".into(),
+            depth: 1,
+        };
+        let session = Session::create(dir.path().join("child.jsonl")).unwrap();
+        let mut policy = test_extension_policy();
+        policy.max_tokens = None;
+        policy.max_cost_microdollars = None;
+        let mut child = manager
+            .build_child_agent(session, &identity, Some(&policy))
+            .unwrap();
+        child
+            .set_compaction_token_mode(AgentCompactionMode::Disabled, 0.9, 2)
+            .unwrap();
+        child.set_parallel_read_wave_width(4);
+        let mut events = child.prompt("run").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while let Some(event) = events.next().await {
+                if let AgentEvent::RunFinished { reason, .. } = event {
+                    assert!(matches!(reason, FinishReason::Completed), "{reason:?}");
+                }
+            }
+        })
+        .await
+        .unwrap();
+        counts
+    }
+
+    #[tokio::test]
+    async fn delegated_turn_executes_all_calls_above_32() {
+        let counts = run(40).await;
+        assert_eq!(counts.completed.load(Ordering::SeqCst), 40);
+    }
+
+    #[tokio::test]
+    async fn delegated_hundred_calls_keep_concurrency_bounded() {
+        let counts = run(100).await;
+        assert_eq!(counts.completed.load(Ordering::SeqCst), 100);
+        assert!(counts.peak.load(Ordering::SeqCst) <= 4);
+    }
+}

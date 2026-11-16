@@ -97,8 +97,9 @@ generation and negotiated features. The packaged skill is opt-in too:
   and extension policy. A shared filesystem is **not isolation**, so scope
   changes to owned paths. Task text can't relax host policy.
 - Omitted time, turn and cost ceilings inherit the parent's limits, including
-  unlimited. The explicit limits and output bounds are in the [safety
-  reference](REFERENCE.md#safety-model).
+  unlimited. Model turns have no automatic tool-call ceiling; calls run in
+  bounded concurrent waves. The explicit limits and output bounds are in the
+  [safety reference](REFERENCE.md#safety-model).
 
 ## Inspect the work
 

@@ -447,14 +447,13 @@ const DEFAULT_COMPACTION_RESERVE_TOKENS: u64 = 16 * 1024;
 /// Leave room for a visible answer after token-budget reasoning when the model
 /// advertises enough output capacity.
 const REASONING_ANSWER_RESERVE: u64 = 1024;
-/// Bound actual tool executions emitted in one assistant turn. Every excess
-/// call still receives a compact error result so provider pairing remains valid.
-const MAX_TOOL_CALLS_PER_TURN: usize = 32;
+/// Bound concurrent tool executions without limiting calls in a model turn.
+const MAX_PARALLEL_TOOL_CALLS_PER_WAVE: usize = 32;
 /// Smallest default read-wave width: the width on machines with fewer CPUs.
 const MIN_PARALLEL_READ_WAVE_WIDTH: usize = 4;
 
 /// Default width of one ordered read wave: one call per CPU this process may
-/// use, between [`MIN_PARALLEL_READ_WAVE_WIDTH`] and [`MAX_TOOL_CALLS_PER_TURN`].
+/// use, between [`MIN_PARALLEL_READ_WAVE_WIDTH`] and [`MAX_PARALLEL_TOOL_CALLS_PER_WAVE`].
 ///
 /// The width bounds resources, not safety. A call joins a wave only when its
 /// exact host classification makes it an independent observation or, while
@@ -466,7 +465,10 @@ const MIN_PARALLEL_READ_WAVE_WIDTH: usize = 4;
 fn default_parallel_read_wave_width() -> usize {
     std::thread::available_parallelism()
         .map_or(MIN_PARALLEL_READ_WAVE_WIDTH, std::num::NonZeroUsize::get)
-        .clamp(MIN_PARALLEL_READ_WAVE_WIDTH, MAX_TOOL_CALLS_PER_TURN)
+        .clamp(
+            MIN_PARALLEL_READ_WAVE_WIDTH,
+            MAX_PARALLEL_TOOL_CALLS_PER_WAVE,
+        )
 }
 /// Number of recent identical calls retained for the generic no-progress hint.
 const MAX_RECENT_TOOL_CALLS: usize = 16;
@@ -1214,7 +1216,7 @@ impl Agent {
     /// The default follows the CPUs this process may use, never below four.
     /// Classification, not the width, decides which calls may overlap.
     pub fn set_parallel_read_wave_width(&mut self, width: usize) {
-        self.parallel_read_wave_width = width.clamp(1, MAX_TOOL_CALLS_PER_TURN);
+        self.parallel_read_wave_width = width.clamp(1, MAX_PARALLEL_TOOL_CALLS_PER_WAVE);
     }
 
     /// How many independent observations one ordered read wave may run at once.

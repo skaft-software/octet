@@ -302,9 +302,9 @@ async fn run_to_completion(f: &mut Fixture) {
 }
 
 #[tokio::test]
-async fn process_calls_are_bound_by_the_turn_limit_not_the_read_width() {
-    // Processes wait on their own children, so like Pi a wide batch runs at
-    // once; the read width still bounds read observations.
+async fn process_calls_can_overlap_beyond_the_read_width() {
+    // The read width bounds observations; independent processes can overlap
+    // beyond it, subject to the total wave bound.
     let labels = ["a", "b", "c", "d", "e", "f"];
     let mut f = fixture("proc", &labels, EffectPolicy::UnsafeHost);
     f.agent.set_parallel_read_wave_width(3);
@@ -343,4 +343,21 @@ fn waves_bound_observations_by_the_read_width_and_stop_at_barriers() {
     assert_eq!(end(&mixed, 0, 3), 5);
     assert_eq!(end(&mixed, 6, 3), 7);
     assert_eq!(end(&[Some(R), Some(P)], 0, 1), 1);
+}
+
+#[tokio::test]
+async fn hundred_process_calls_run_in_bounded_waves() {
+    let labels = (0..100)
+        .map(|index| format!("item-{index}"))
+        .collect::<Vec<_>>();
+    let refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut f = fixture("proc", &refs, EffectPolicy::UnsafeHost);
+    run_to_completion(&mut f).await;
+    assert_eq!(f.gates.finished.lock().unwrap().len(), 100);
+    let peak = f.gates.max_running.load(Ordering::SeqCst);
+    assert!(
+        peak > 1 && peak <= MAX_PARALLEL_TOOL_CALLS_PER_WAVE,
+        "peak {peak}"
+    );
+    assert_eq!(result_ids(f.agent.session.entries()).len(), 100);
 }

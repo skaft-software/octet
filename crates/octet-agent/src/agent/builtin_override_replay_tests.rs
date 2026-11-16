@@ -97,3 +97,86 @@ fn builtin_override_replay_safety_is_per_call_and_uses_frozen_tools() {
     let metadata = capture_tool_replay_safety(&calls, &tools, None).unwrap();
     assert_eq!(metadata.replay_safe_tool_calls, Some(BTreeSet::from([1])));
 }
+
+#[test]
+fn replay_safety_captures_calls_beyond_the_first_wave() {
+    let tools = HashMap::from([(
+        "read".into(),
+        Arc::new(crate::tools::ReadTool) as Arc<dyn Tool>,
+    )]);
+    let calls = (0..100)
+        .map(|index| ToolCall {
+            async_execution: false,
+            id: octet_ai::ToolCallId(format!("read-{index}")),
+            name: "read".into(),
+            arguments_json: "{}".into(),
+            argument_error: None,
+        })
+        .collect::<Vec<_>>();
+    let metadata = capture_tool_replay_safety(&calls, &tools, None).unwrap();
+    assert_eq!(metadata.replay_safe_tool_calls, Some((0..100).collect()));
+}
+
+#[tokio::test]
+async fn recovery_replays_safe_calls_after_first_wave_and_refuses_unsafe_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("fixture.txt"), "replay bytes\n").unwrap();
+    let path = temp.path().join("replay-many.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let mut host = ExtensionHost::new();
+    host.load(&crate::tools::CoreTools);
+    host.tool(PromptTool {
+        name: "extension",
+        snippet: None,
+        guidelines: &[],
+    });
+    let mut calls = (0..40)
+        .map(|index| ToolCall {
+            async_execution: false,
+            id: octet_ai::ToolCallId(format!("read-{index}")),
+            name: "read".into(),
+            arguments_json: serde_json::json!({"path":"fixture.txt"}).to_string(),
+            argument_error: None,
+        })
+        .collect::<Vec<_>>();
+    calls.push(ToolCall {
+        async_execution: false,
+        id: octet_ai::ToolCallId("unsafe".into()),
+        name: "extension".into(),
+        arguments_json: "{}".into(),
+        argument_error: None,
+    });
+    let tools = host
+        .tool_snapshot()
+        .1
+        .into_iter()
+        .map(|tool| (tool.definition().name, tool))
+        .collect();
+    let metadata = capture_tool_replay_safety(&calls, &tools, None);
+    session
+        .append_assistant_turn_with_metadata(
+            AssistantMessage {
+                content: calls.into_iter().map(AssistantPart::ToolCall).collect(),
+                model: octet_ai::ModelId("test".into()),
+                protocol: Protocol::AnthropicMessages,
+            },
+            octet_ai::EndpointId("test".into()),
+            octet_ai::ModelId("test".into()),
+            Usage::default(),
+            None,
+            StopReason::ToolUse,
+            None,
+            metadata,
+        )
+        .unwrap();
+    drop(session);
+    let session = Session::open(&path).unwrap();
+    let mut agent = active_tool_test_agent(temp.path(), session, host);
+    agent.recover_pending_tools(false).await.unwrap();
+    let results = persisted_tool_result_texts(agent.session());
+    assert_eq!(results.len(), 41);
+    assert!(results[..40]
+        .iter()
+        .all(|text| text.contains("replay bytes")));
+    assert!(results[40].contains("not replayed"), "{}", results[40]);
+}
