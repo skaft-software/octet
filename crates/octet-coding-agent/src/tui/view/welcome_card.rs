@@ -33,6 +33,7 @@ fn changelog_hint(state: &ShellState, width: u16) -> String {
 pub(super) struct MarkReaction {
     started: Instant,
     strength: f32,
+    phase: f32,
 }
 
 /// Only a visible native compact mark owns this interaction. Remote headers
@@ -92,9 +93,18 @@ pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Ins
         (previous.strength * (1.0 - gap / 0.8).max(0.0) + (1.0 - gap / 0.6).max(0.0) * 0.45)
             .min(1.0)
     });
+    let phase = state.welcome_reaction.map_or(0.0, |previous| {
+        (previous.phase
+            + crate::tui::splash::rainbow_travel(
+                now.duration_since(previous.started).as_secs_f32(),
+                previous.strength,
+            ))
+        .rem_euclid(6.0)
+    });
     state.welcome_reaction = Some(MarkReaction {
         started: now,
         strength,
+        phase,
     });
     state.invalidate_transcript();
     true
@@ -434,6 +444,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
                 &state.theme,
                 reaction.started.elapsed().as_secs_f32(),
                 reaction.strength,
+                reaction.phase,
                 adaptive_accent,
                 splash_color,
             );

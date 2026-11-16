@@ -93,8 +93,11 @@ resize, not draft edits. The terminal background remains unchanged.
 User-customized ANSI16 palettes can still affect actual contrast.
 
 The compact native mark is quiet at rest. In captured application viewports,
-a left click briefly blinks its two short bars and starts the existing 2.2-second
-highlight sweep. Rapid clicks build a bounded rainbow blend which fades back to
+a left click raises its two short bars to full height twice: a quick squeeze
+then a softer blink, with damped reopening. The existing 2.2-second highlight
+sweep accompanies it. Rapid clicks build a left-to-right rainbow cycle; faster
+clicks increase colour intensity and cycling speed (at most two revolutions per
+second). Hue position is continuous across clicks, then slows and fades back to
 the normal palette; explicitly themed splash colours keep their hue. This is
 truecolor, animation-enabled decoration only, never an idle loop. The renderer's
 existing scheduler owns its clock. Painted-frame geometry fences clicks; hidden,

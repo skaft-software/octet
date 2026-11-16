@@ -3543,13 +3543,23 @@ fn real_octet_mark_click_blinks_then_settles_without_replay() {
     let start = octet.pty.output.len();
     // First short bar, in the second logo row. SGR coordinates are one-based.
     octet.pty.write_input(b"\x1b[<0;3;3M\x1b[<0;3;3m");
-    octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-        bytes[start..]
-            .windows("▁".len())
-            .any(|s| s == "▁".as_bytes())
-    });
-    octet.pty.drain_for(Duration::from_millis(2400));
-    parser.process(&octet.pty.output[start..]);
+    octet.pty.drain_for(Duration::from_millis(2600));
+    let mut closed = false;
+    let mut blinks = 0;
+    for frame in frame_ranges(&octet.pty.output[start..]) {
+        parser.process(&octet.pty.output[start + frame.start..start + frame.end]);
+        let eyes_closed = [2, 5]
+            .into_iter()
+            .all(|column| parser.screen().cell(1, column).unwrap().contents() == "█");
+        if eyes_closed && !closed {
+            blinks += 1;
+        }
+        closed = eyes_closed;
+        for column in 2..10 {
+            assert_eq!(parser.screen().cell(2, column).unwrap().contents(), "█");
+        }
+    }
+    assert_eq!(blinks, 2, "one click must raise the eyes twice");
     assert_single_welcome(&parser, 80, "settled click");
     assert_eq!(parser.screen().cursor_position(), cursor);
     assert_eq!(count_bytes(&octet.pty.output[start..], b"\x1b[3J"), 0);

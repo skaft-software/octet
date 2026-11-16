@@ -34,8 +34,8 @@ pub(crate) fn render_logo(
         elapsed,
         model_accent,
         solid_color,
+        (0.0, 0.0),
         0.0,
-        false,
     )
 }
 
@@ -44,6 +44,7 @@ pub(crate) fn render_reaction(
     theme: &OctetTheme,
     elapsed: f32,
     strength: f32,
+    phase: f32,
     model_accent: Option<(u8, u8, u8)>,
     solid_color: Option<(u8, u8, u8)>,
 ) -> Vec<String> {
@@ -54,9 +55,39 @@ pub(crate) fn render_reaction(
         elapsed,
         model_accent,
         solid_color,
-        strength,
-        (0.08..0.24).contains(&elapsed),
+        (strength, phase + rainbow_travel(elapsed, strength)),
+        blink_lift(elapsed),
     )
+}
+
+/// Integrated, decelerating hue travel in six-stop rainbow units. Keep the
+/// phase across clicks so accelerating never jumps back to the first colour.
+pub(crate) fn rainbow_travel(elapsed: f32, strength: f32) -> f32 {
+    let t = elapsed.min(DURATION);
+    1.5 * t + 10.5 * strength * (t - t * t / (2.0 * DURATION))
+}
+
+/// A quick squeeze, a breath, then a softer second blink. The reopening
+/// follows a normalized critically damped spring: fast release, gentle landing.
+/// Analytic time sampling skips missed frames without a simulation or backlog.
+fn blink_lift(elapsed: f32) -> f32 {
+    for (start, close, hold, reopen) in [(0.0, 0.08, 0.06, 0.16), (0.38, 0.10, 0.06, 0.24)] {
+        let t = elapsed - start;
+        if t < 0.0 || t >= close + hold + reopen {
+            continue;
+        }
+        if t < close {
+            let x = t / close;
+            return x * x * (3.0 - 2.0 * x);
+        }
+        if t < close + hold {
+            return 1.0;
+        }
+        let x = (t - close - hold) / reopen;
+        let end = 7.0 * (-6.0_f32).exp();
+        return (((1.0 + 6.0 * x) * (-6.0 * x).exp() - end) / (1.0 - end)).clamp(0.0, 1.0);
+    }
+    0.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -67,8 +98,8 @@ fn render_mark(
     elapsed: f32,
     model_accent: Option<(u8, u8, u8)>,
     solid_color: Option<(u8, u8, u8)>,
-    rainbow: f32,
-    blink: bool,
+    rainbow: (f32, f32),
+    blink: f32,
 ) -> Vec<String> {
     let width = width.min(42);
     let rows = symbol_rows.min(21);
@@ -107,7 +138,8 @@ fn render_mark(
             }
             let mut line = " ".repeat(left_pad);
             for (column, bit) in BYTE.iter().enumerate() {
-                if *bit == b'0' && row < top_pad + column_width {
+                let upper_eye = *bit == b'0' && row < top_pad + column_width;
+                if upper_eye && blink == 0.0 {
                     line.push_str(&blank);
                     continue;
                 }
@@ -126,7 +158,7 @@ fn render_mark(
                     let lift = (1.0 - distance / 0.2).max(0.0) * 0.2;
                     color = mix(color, (255, 255, 255), lift);
                 }
-                if rainbow > 0.0 && solid_color.is_none() {
+                if rainbow.0 > 0.0 && solid_color.is_none() {
                     const RAINBOW: [(u8, u8, u8); 6] = [
                         (255, 80, 100),
                         (255, 185, 60),
@@ -135,17 +167,24 @@ fn render_mark(
                         (80, 140, 255),
                         (210, 90, 240),
                     ];
-                    let phase = (column as f32 * 0.75 + elapsed * 2.0) % 6.0;
+                    let phase = (column as f32 * 0.75 - rainbow.1).rem_euclid(6.0);
                     let index = phase as usize;
                     let hue = mix(RAINBOW[index], RAINBOW[(index + 1) % 6], phase.fract());
                     color = mix(
                         color,
                         hue,
-                        rainbow * (1.0 - elapsed / DURATION).clamp(0.0, 1.0),
+                        rainbow.0 * (1.0 - elapsed / DURATION).clamp(0.0, 1.0),
                     );
                 }
-                let eye = blink && *bit == b'0' && theme.unicode();
-                line.push_str(&theme.rgb_fg(color, if eye { "▁" } else { &filled }));
+                // Fill the space above each short bar; never shrink its base.
+                let eye = if theme.unicode() {
+                    [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][(blink * 8.0).round() as usize]
+                } else if blink >= 0.5 {
+                    "#"
+                } else {
+                    " "
+                };
+                line.push_str(&theme.rgb_fg(color, if upper_eye { eye } else { &filled }));
             }
             line.push_str(&" ".repeat(right_pad));
             line
@@ -536,6 +575,34 @@ mod tests {
 mod reaction_tests {
     use super::*;
     #[test]
+    fn rainbow_moves_right_accelerates_with_energy_and_coasts_down() {
+        let theme = crate::tui::theme::test_theme();
+        let colors = |phase| {
+            render_reaction(&theme, 0.0, 1.0, phase, None, None)[1]
+                .split("\x1b[38;2;")
+                .skip(1)
+                .map(|part| part.split('m').next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let first = colors(0.0);
+        let moved = colors(0.75);
+        assert_eq!(first.len(), 8);
+        assert_eq!(
+            &first[..7],
+            &moved[1..],
+            "colours travel one bar to the right"
+        );
+        assert_eq!(colors(6.0), first, "rainbow wraps seamlessly");
+        assert!(rainbow_travel(0.1, 1.0) > rainbow_travel(0.1, 0.25));
+        let early = rainbow_travel(0.1, 1.0);
+        let late = rainbow_travel(1.1, 1.0) - rainbow_travel(1.0, 1.0);
+        assert!(
+            early > late && late > 0.0,
+            "release decelerates without reversing"
+        );
+    }
+
+    #[test]
     fn blink_and_rainbow_settle_without_moving_the_mark() {
         let theme = crate::tui::theme::test_theme();
         let plain = |rows: Vec<String>| {
@@ -543,18 +610,35 @@ mod reaction_tests {
                 .map(|s| sexy_tui_rs::strip_terminal_sequences(&s))
                 .collect::<Vec<_>>()
         };
-        let blink = plain(render_reaction(&theme, 0.16, 0.0, None, None));
-        assert_eq!(blink, [" ██ ████", "▁██▁████"]);
+        for elapsed in [0.10, 0.50] {
+            let blink = plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None));
+            assert_eq!(blink, ["████████", "████████"]);
+        }
+        for elapsed in [0.0, 0.34, 0.85] {
+            assert_eq!(
+                plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None)),
+                [" ██ ████", "████████"]
+            );
+        }
+        let closing = plain(render_reaction(&theme, 0.04, 0.0, 0.0, None, None));
+        assert_eq!(closing, ["▄██▄████", "████████"]);
+        for ms in 0..=1000 {
+            let lift = blink_lift(ms as f32 / 1000.0);
+            assert!((0.0..=1.0).contains(&lift));
+        }
         let normal = render_logo(&theme, 8, 2, DURATION, None, None);
-        assert_eq!(render_reaction(&theme, DURATION, 1.0, None, None), normal);
-        let sweep = render_reaction(&theme, 0.4, 0.0, None, None);
-        let rainbow = render_reaction(&theme, 0.4, 1.0, None, None);
+        assert_eq!(
+            render_reaction(&theme, DURATION, 1.0, 0.0, None, None),
+            normal
+        );
+        let sweep = render_reaction(&theme, 0.4, 0.0, 0.0, None, None);
+        let rainbow = render_reaction(&theme, 0.4, 1.0, 0.0, None, None);
         assert_ne!(sweep, rainbow);
         assert_eq!(plain(sweep), plain(rainbow));
         let solid = Some((217, 119, 87));
         assert_eq!(
-            render_reaction(&theme, 0.4, 0.0, None, solid),
-            render_reaction(&theme, 0.4, 1.0, None, solid)
+            render_reaction(&theme, 0.4, 0.0, 0.0, None, solid),
+            render_reaction(&theme, 0.4, 1.0, 0.0, None, solid)
         );
     }
 }

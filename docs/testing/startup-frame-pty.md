@@ -215,9 +215,19 @@ structural resize retains canonical saved-line clear/replay.
 ## Native mark click regression
 
 `real_octet_mark_click_blinks_then_settles_without_replay` clicks the default
-mark in a truecolor fullscreen PTY, observes the blink glyph, and verifies the
+mark in a truecolor fullscreen PTY, observes two full-height eye closures with
+an unchanged baseline, and verifies the
 canonical settled mark, unchanged cursor, no history clear, and no continued
 animation frames. Unit tests cover bounded repeated-click rainbow strength,
 settlement, stale resize geometry, reduced motion, lower colour capabilities,
 and preservation of explicitly themed hues. These are terminal-byte/VT checks,
 not attended visual acceptance.
+
+The double blink uses a quick eased squeeze and damped reopening, followed by
+a slightly slower second blink. Only the two short bars rise toward the `1`
+position; their lower cells and the other six bars never move.
+
+Rainbow regressions check left-to-right colour travel, seamless wrapping,
+phase continuity between clicks, faster cycling at higher click energy, and
+smooth deceleration after release. Cycling speed is bounded at two revolutions
+per second; no frame queue or physics runtime is used.

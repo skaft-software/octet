@@ -827,12 +827,21 @@ fn click_reaction_is_local_bounded_and_stops() {
     assert!(click_mark(&mut state, x, y, now));
     assert_eq!(state.welcome_reaction.unwrap().strength, 0.0);
     for n in 1..20 {
+        let previous = state.welcome_reaction.unwrap();
+        let next_time = now + std::time::Duration::from_millis(n * 50);
+        let expected_phase = (previous.phase
+            + crate::tui::splash::rainbow_travel(
+                next_time.duration_since(previous.started).as_secs_f32(),
+                previous.strength,
+            ))
+        .rem_euclid(6.0);
         assert!(click_mark(
             &mut state,
             x,
             y,
             now + std::time::Duration::from_millis(n * 50)
         ));
+        assert!((state.welcome_reaction.unwrap().phase - expected_phase).abs() < 0.0001);
     }
     assert!(state.welcome_reaction.unwrap().strength > 0.9);
     assert!(state.welcome_reaction.unwrap().strength <= 1.0);
