@@ -206,7 +206,7 @@ mod tests {
             );
         }
         let line = strip_terminal_sequences(&outcome_line(&with_warnings, None, &theme));
-        assert_eq!(line, "✓ completed · 1m23s");
+        assert_eq!(line, "✓ completed · 1.38min");
         assert!(!line.to_ascii_lowercase().contains("warning"), "{line}");
 
         // The success glyph and role are the ones the completed line uses; the
@@ -232,7 +232,7 @@ mod tests {
         };
         let plain = rendered(with_warnings);
         assert_eq!(plain, rendered(completed), "{plain:?}");
-        assert_eq!(plain, "✓ completed · 1m23s", "{plain:?}");
+        assert_eq!(plain, "✓ completed · 1.38min", "{plain:?}");
         assert!(!plain.to_ascii_lowercase().contains("warning"), "{plain:?}");
     }
 
@@ -271,12 +271,12 @@ mod tests {
 
         for block in [&completed, &with_warnings] {
             let idle = lines(block, false);
-            assert_eq!(idle, vec!["✓ completed · 1.0s"], "{idle:?}");
+            assert_eq!(idle, vec!["✓ completed · 1s"], "{idle:?}");
             let live = lines(block, true);
             assert_eq!(
                 live,
                 vec![
-                    "✓ completed · 1.0s",
+                    "✓ completed · 1s",
                     "  subagents are running; inspect or stop them from /subagents.",
                 ],
                 "{live:?}"
@@ -417,7 +417,7 @@ mod inference_tests {
             .map(|line| sexy_tui_rs::strip_terminal_sequences(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(text, "✓ completed · 9.0s · 50.0 tok/s");
+        assert_eq!(text, "✓ completed · 9s · 50.0 tok/s");
     }
 }
 
@@ -446,7 +446,7 @@ mod decode_estimate_tests {
             " · ",
             missing_block.generation.as_ref(),
         );
-        assert_eq!(missing, "completed · 1m00s");
+        assert_eq!(missing, "completed · 1min");
         for inference in [None, Some(metrics)] {
             assert_eq!(
                 super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(block(
@@ -472,7 +472,7 @@ mod decode_estimate_tests {
             " · ",
             estimated_block.generation.as_ref(),
         );
-        assert_eq!(text, "completed · 1m00s · ~50.0 tok/s (estimated tokens)");
+        assert_eq!(text, "completed · 1min · ~50.0 tok/s (estimated tokens)");
         assert_eq!(
             super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(estimated_block)),
             text

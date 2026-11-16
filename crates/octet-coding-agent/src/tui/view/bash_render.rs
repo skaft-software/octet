@@ -444,13 +444,13 @@ mod tests {
             for is_error in [false, true] {
                 panel.is_error = is_error;
                 let rows = project_compact_bash_output(&panel, &test_theme(), 80, expanded, "");
-                assert!(plain_rows(&rows.lines).join("\n").contains("Took 1.3s"));
+                assert!(plain_rows(&rows.lines).join("\n").contains("Took 1.25s"));
                 assert!(!rows.text.contains("Took"));
                 assert!(rows.copy_rows.last().unwrap().is_none());
             }
         }
         for (template, expected) in [
-            ("finished in {duration}", "finished in 1.3s"),
+            ("finished in {duration}", "finished in 1.25s"),
             ("", ""),
             ("  ", ""),
         ] {
@@ -463,7 +463,7 @@ mod tests {
             if !expected.is_empty() {
                 assert!(text.contains(expected), "{text}");
             } else {
-                assert!(!text.contains("1.3s"), "{text}");
+                assert!(!text.contains("1.25s"), "{text}");
             }
         }
         for (finished, duration) in [(false, panel.duration), (true, None)] {

@@ -140,7 +140,7 @@ fn provider_retry_network_wait_has_no_invented_retry_limit() {
     };
     assert_eq!(
         activity.label_at(now),
-        "Waiting for network · attempt 17 in 60s"
+        "Waiting for network · attempt 17 in 1min"
     );
     assert_eq!(
         activity.label_at(now + Duration::from_secs(61)),

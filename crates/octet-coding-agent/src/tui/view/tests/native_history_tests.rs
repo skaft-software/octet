@@ -150,7 +150,7 @@ fn native_canonical_transcript_snapshot_is_independent_of_wall_clock() {
     replay.shell.begin_run("openai");
     publish_workers(&mut replay, vec![worker("CLOCK-WORKER")]);
     replay.render(false);
-    assert!(replay.frame().contains("Working (0s • esc to interrupt)"));
+    assert!(replay.frame().contains("Working ("));
     std::thread::sleep(Duration::from_millis(1_100));
     replay.assert_canonical_transcript();
 }

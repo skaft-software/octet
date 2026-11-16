@@ -671,7 +671,7 @@ fn model_tool_and_duration_presentation_are_stable_boundaries() {
         super::model::footer_model_name("Local tuned Qwen", "local/qwen3.6-27b"),
         "Local tuned Qwen",
     );
-    assert_eq!(format_duration(Duration::from_millis(1_250)), "1.3s");
+    assert_eq!(format_duration(Duration::from_millis(1_250)), "1.25s");
 
     let summary = summarize_tool("write", &json!({"path": "src/lib.rs"}));
     assert_eq!(summary.label, "write");

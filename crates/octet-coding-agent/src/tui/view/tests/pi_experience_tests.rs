@@ -168,6 +168,14 @@ fn pi_working_spinner_advances_without_label_shimmer_and_stops_on_settlement() {
         let mut shell = InteractiveShell::test_shell_with_theme(theme);
         shell.set_identity("test", "test-model", "max");
         let run_id = shell.begin_run("test");
+
+        // Keep the live timer deterministic while comparing layout/animation.
+        for block in &mut shell.state.borrow_mut().transcript {
+            if let crate::tui::view::TranscriptBlock::Reasoning(reasoning) = block {
+                reasoning.activity_started_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+            }
+        }
         let mut state = shell.state.borrow_mut();
         assert!(state.has_active_thinking_spinner());
         assert!(!state.has_active_status_shimmer());

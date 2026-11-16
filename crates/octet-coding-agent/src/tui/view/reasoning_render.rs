@@ -1127,21 +1127,6 @@ fn reasoning_detail_line(theme: &OctetTheme, reasoning: &AssistantBlock) -> Stri
     subdued_text(theme, &detail)
 }
 
-fn format_activity_duration(seconds: u64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3_600 {
-        format!("{}m{:02}s", seconds / 60, seconds % 60)
-    } else {
-        format!(
-            "{}h{:02}m{:02}s",
-            seconds / 3_600,
-            (seconds / 60) % 60,
-            seconds % 60
-        )
-    }
-}
-
 fn activity_status_line(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
@@ -1156,7 +1141,7 @@ fn activity_status_line(
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
-    let elapsed = format_activity_duration(started_at.elapsed().as_secs());
+    let elapsed = crate::presentation::format_duration(started_at.elapsed());
     let detail = subdued_text(theme, &format!("({elapsed} • esc to interrupt)"));
     format!("{label} {detail}")
 }

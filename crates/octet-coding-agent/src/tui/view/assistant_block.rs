@@ -124,8 +124,8 @@ impl RetryActivity {
             activity
         } else {
             format!(
-                "{activity} in {}s",
-                remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0)
+                "{activity} in {}",
+                crate::presentation::format_duration(remaining)
             )
         }
     }

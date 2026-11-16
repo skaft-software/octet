@@ -204,6 +204,14 @@ fn tool_input_preview_global_disclosure_reveals_and_recovers_live_and_completed_
             name: name.into(),
             args: serde_json::json!({"command": input}),
         });
+
+        // Keep the live timer deterministic while comparing layout/animation.
+        for block in &mut shell.state.borrow_mut().transcript {
+            if let crate::tui::view::TranscriptBlock::Reasoning(reasoning) = block {
+                reasoning.activity_started_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+            }
+        }
         let transcript = |shell: &InteractiveShell| {
             strip_terminal_sequences(&shell.state.borrow().rendered_transcript(100).join("\n"))
         };

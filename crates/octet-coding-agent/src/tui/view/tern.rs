@@ -1138,8 +1138,8 @@ fn block_node(
                                     || "Thoughts".into(),
                                     |elapsed| {
                                         format!(
-                                            "Thought for {:.1}s",
-                                            elapsed.as_secs_f64().max(0.1)
+                                            "Thought for {}",
+                                            format_duration(elapsed)
                                         )
                                     },
                                 )
@@ -1337,6 +1337,18 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
         .unwrap_or(&label);
     let age = run.elapsed_at(now).as_millis() as u64;
     let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
+    if let Some(elapsed) = node.c.as_mut().and_then(|children| {
+        children.iter_mut().find(|child| child.id == "work.elapsed")
+    }) {
+        *elapsed = Node::new(
+            "work.elapsed",
+            Kind::Text,
+            Props::new().text(
+                "spans",
+                vec![Span::styled(format_duration(run.elapsed_at(now)), "dim")],
+            ),
+        );
+    }
     node.p = Some(node.p.unwrap_or_default().role("omp.working"));
     if shell.theme.is_pi_theme() {
         let children = node.c.as_mut().expect("working row");

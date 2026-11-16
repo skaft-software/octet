@@ -157,6 +157,15 @@ Visible tool failures follow the same rule: collapsed rows retain a bounded acti
 summary while complete captured output remains available through disclosure when
 it exists.
 
+## Duration display
+
+TUI durations share one display-only formatter: up to three significant digits,
+with `ns`, `µs`, `ms`, `s`, `min`, or `h` selected automatically. Rounding is
+nearest, ties upward, and promotes across unit boundaries; fractional trailing
+zeroes are omitted and zero displays as `0ns`. Stored measurements retain their
+original precision. Live timers use the existing render schedule, not a faster
+refresh loop.
+
 ## Interaction tone
 
 The default should be calm, dense under pressure, and precise about state. The

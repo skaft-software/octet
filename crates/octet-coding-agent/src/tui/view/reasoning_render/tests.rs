@@ -1738,9 +1738,9 @@ fn retry_marker_uses_the_displayed_label_shimmer_cycle() {
 
 #[test]
 fn activity_durations_use_compact_clock_units() {
-    assert_eq!(format_activity_duration(28), "28s");
-    assert_eq!(format_activity_duration(376), "6m16s");
-    assert_eq!(format_activity_duration(3661), "1h01m01s");
+    assert_eq!(crate::presentation::format_duration(Duration::from_secs(28)), "28s");
+    assert_eq!(crate::presentation::format_duration(Duration::from_secs(376)), "6.27min");
+    assert_eq!(crate::presentation::format_duration(Duration::from_secs(3661)), "1.02h");
 }
 
 #[test]
@@ -1753,7 +1753,7 @@ fn working_status_reports_root_run_elapsed_time_and_interrupt_hint() {
     working.show_reasoning_hint = false;
 
     let rendered = collapsed_reasoning_lines_at(&theme, &working, 0, 0);
-    assert_eq!(rendered, vec!["Working (28s • esc to interrupt)"]);
+    assert_eq!(rendered, vec!["Working (28.1s • esc to interrupt)"]);
 }
 
 #[test]

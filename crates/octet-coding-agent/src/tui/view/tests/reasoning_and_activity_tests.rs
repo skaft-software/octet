@@ -15,6 +15,13 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         },
     );
 
+    // Keep the live timer deterministic while comparing layout/animation.
+    for block in &mut shell.state.borrow_mut().transcript {
+        if let crate::tui::view::TranscriptBlock::Reasoning(reasoning) = block {
+            reasoning.activity_started_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        }
+    }
     let rendered = shell
         .state
         .borrow()
@@ -26,7 +33,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         rendered,
         vec![
             "",
-            "• Thinking (0s • esc to interrupt)",
+            "• Thinking (0ns • esc to interrupt)",
             "  └ Verifying reproducibility of evidence package (ctrl+t to expand)",
         ]
     );
@@ -277,7 +284,7 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
     assert_eq!(rendered.len(), 3, "{rendered:?}");
     assert!(rendered[0].is_empty(), "{rendered:?}");
     assert!(
-        rendered[1].starts_with("• Working (0s • esc to interrupt)"),
+        rendered[1].starts_with("• Working ("),
         "{rendered:?}"
     );
     assert!(rendered[2].is_empty(), "{rendered:?}");
@@ -621,6 +628,14 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
             text: "first private sentinel".into(),
         },
     );
+
+    // Keep the live timer deterministic while comparing layout/animation.
+    for block in &mut shell.state.borrow_mut().transcript {
+        if let crate::tui::view::TranscriptBlock::Reasoning(reasoning) = block {
+            reasoning.activity_started_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        }
+    }
     let transcript = |shell: &InteractiveShell| {
         shell
             .state

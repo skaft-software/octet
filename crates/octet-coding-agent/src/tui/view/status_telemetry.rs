@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use octet_ai::Usage;
 
+use crate::presentation::format_duration;
+
 use super::terminal_text::sanitize_for_terminal;
 use super::{OctetTheme, PriceDisplay, ShellState};
 
@@ -94,13 +96,13 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
             ("", "provider-reported output tokens incl. reasoning")
         };
         lines.push(format!(
-            "Throughput     {approx}{rate:.1} tok/s, last response ({approx}{tokens} {basis} / {:.2}s request-to-stream-end; excludes tool time)",
-            elapsed.as_secs_f64()
+            "Throughput     {approx}{rate:.1} tok/s, last response ({approx}{tokens} {basis} / {} request-to-stream-end; excludes tool time)",
+            format_duration(elapsed)
         ));
     } else if let Some(started) = state.turn_requested_at {
         lines.push(format!(
-            "Throughput     awaiting turn completion ({:.2}s request in progress)",
-            now.saturating_duration_since(started).as_secs_f64()
+            "Throughput     awaiting turn completion ({} request in progress)",
+            format_duration(now.saturating_duration_since(started))
         ));
     } else {
         lines.push("Throughput     unavailable".to_owned());
@@ -108,7 +110,7 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
     if let Some(metrics) = &state.last_turn_inference {
         if let Some(server) = &metrics.server {
             if let Some(rate) = server.tokens_per_second() {
-                lines.push(format!("Server timing  {rate:.1} tok/s generation, reported ({:?}; {} tokens / {:.6}s; native unit {:?}; not GPU-active or post-first-token decode)", server.source, server.tokens, server.generation_ns as f64 / 1e9, server.reported_unit));
+                lines.push(format!("Server timing  {rate:.1} tok/s generation, reported ({:?}; {} tokens / {}; native unit {:?}; not GPU-active or post-first-token decode)", server.source, server.tokens, format_duration(Duration::from_nanos(server.generation_ns)), server.reported_unit));
             }
         } else {
             lines.push(format!(
@@ -117,7 +119,7 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
             ));
         }
         if let Some(estimate) = &metrics.decode_estimate {
-            lines.push(format!("Decode estimate ~{:.1} tok/s; {} visible-usage tokens; {:.3}s output window; {} arrival bursts; {:.1}% slope dispersion (not accuracy confidence); {} reasoning tokens excluded", estimate.tokens_per_second, estimate.reported_visible_tokens, estimate.observed_ns as f64 / 1e9, estimate.samples, estimate.relative_dispersion * 100.0, estimate.reasoning_tokens_excluded));
+            lines.push(format!("Decode estimate ~{:.1} tok/s; {} visible-usage tokens; {} output window; {} arrival bursts; {:.1}% slope dispersion (not accuracy confidence); {} reasoning tokens excluded", estimate.tokens_per_second, estimate.reported_visible_tokens, format_duration(Duration::from_nanos(estimate.observed_ns)), estimate.samples, estimate.relative_dispersion * 100.0, estimate.reasoning_tokens_excluded));
         } else if let Some(reason) = metrics.decode_unavailable {
             lines.push(format!(
                 "Decode estimate unavailable ({reason:?}); no E2E substitute"
@@ -127,7 +129,7 @@ pub(super) fn status_telemetry(state: &ShellState, now: Instant) -> String {
             let offset = |value: Option<u64>| {
                 value.map_or_else(
                     || "unavailable".to_owned(),
-                    |v| format!("{:.2}ms", v as f64 / 1e6),
+                    |v| format_duration(Duration::from_nanos(v)),
                 )
             };
             lines.push(format!("Client timing  {:?}; first output {}, answer {}, reasoning {}, tool arguments {}; {} output events (not tokens); max gap {}; completion tail {} (includes buffering/backpressure)", client.scope, offset(client.first_output_ns), offset(client.first_text_ns), offset(client.first_reasoning_ns), offset(client.first_tool_arguments_ns), client.output_events, offset(client.max_output_gap_ns), offset(client.completion_tail_ns())));
@@ -608,7 +610,7 @@ mod inference_tests {
         assert!(text.contains("Server timing  unavailable"), "{text}");
         assert!(text.contains("no client-derived substitute"), "{text}");
         assert!(
-            text.contains("answer 800.00ms, reasoning 100.00ms"),
+            text.contains("answer 800ms, reasoning 100ms"),
             "{text}"
         );
         assert!(text.contains("2 output events (not tokens)"), "{text}");

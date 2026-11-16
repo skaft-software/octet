@@ -198,7 +198,7 @@ fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
                 );
             }
             assert!(
-                visible_position(&settled, "1m23s").is_some(),
+                visible_position(&settled, "1.38min").is_some(),
                 "{name}/{width}: {settled:?}"
             );
         }
@@ -279,7 +279,7 @@ fn content_width_uses_usable_streaming_width_and_real_final_markdown_and_complet
                 "visible.",
                 "marker.",
                 "completed",
-                "1m23s",
+                "1.38min",
             ] {
                 assert!(
                     rows.iter().any(|row| row.contains(marker)),
@@ -983,6 +983,14 @@ fn subagent_spacing_live_band_disclosure_and_metrics_keep_canonical_frame_rows()
                 shell.isolate_native_test_renderer();
             }
             let run = shell.begin_run("fixture");
+
+            // Keep the live timer deterministic while comparing layout/animation.
+            for block in &mut shell.state.borrow_mut().transcript {
+                if let crate::tui::view::TranscriptBlock::Reasoning(reasoning) = block {
+                    reasoning.activity_started_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+                }
+            }
             let roster = shell.state.borrow_mut().push_block(subagents_with_worker());
             let check_frame = |shell: &mut InteractiveShell| {
                 shell.render_written_test_frame();

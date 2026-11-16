@@ -501,7 +501,7 @@ fn ascii_plain_and_unicode_no_colour_keep_the_same_structure() {
     assert!(ascii.contains("- done"));
     assert!(ascii.contains("Edit"));
     assert!(ascii.contains("lib.rs"));
-    assert!(ascii.contains("completed - 1.0s"));
+    assert!(ascii.contains("completed - 1s"));
     assert!(!ascii.contains("ok completed"));
 
     let unicode_theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(

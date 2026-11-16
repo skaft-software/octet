@@ -89,34 +89,55 @@ impl PriceDisplay {
     }
 }
 
-/// Render a short elapsed interval without floating-point conversion.
+/// Display-only, three-significant-digit rounding, with ties rounded up.
+/// Integer nanoseconds avoid floating-point drift and preserve stored precision.
+/// Only the returned string allocates; trailing fractional zeroes are omitted.
 pub fn format_duration(duration: Duration) -> String {
-    let micros = duration.as_micros();
-    if micros < 1_000 {
-        return format!("{micros}µs");
-    }
-    if micros < 1_000_000 {
-        let whole = micros / 1_000;
-        let fraction = micros % 1_000;
-        if fraction == 0 {
-            return format!("{whole}ms");
+    const UNITS: [(u128, &str); 6] = [
+        (1, "ns"),
+        (1_000, "µs"),
+        (1_000_000, "ms"),
+        (1_000_000_000, "s"),
+        (60_000_000_000, "min"),
+        (3_600_000_000_000, "h"),
+    ];
+    let nanos = duration.as_nanos();
+    for (index, &(unit, suffix)) in UNITS.iter().enumerate() {
+        if index + 1 < UNITS.len() && nanos >= UNITS[index + 1].0 {
+            continue;
         }
-        return format!(
-            "{whole}.{}ms",
-            format!("{fraction:03}").trim_end_matches('0')
-        );
+        let whole = nanos / unit;
+        let decimals = if whole < 10 {
+            2
+        } else if whole < 100 {
+            1
+        } else {
+            0
+        };
+        let scale = 10u128.pow(decimals);
+        let mut quantum = 1;
+        while whole / quantum >= 1_000 {
+            quantum *= 10;
+        }
+        let divisor = unit * quantum;
+        let rounded = (nanos * scale + divisor / 2) / divisor * quantum;
+        // Rounding may promote into the next unit (including seconds/minutes).
+        if index + 1 < UNITS.len() && rounded * unit >= UNITS[index + 1].0 * scale {
+            continue;
+        }
+        let integer = rounded / scale;
+        let mut fraction = rounded % scale;
+        let mut width = decimals as usize;
+        if fraction == 0 {
+            return format!("{integer}{suffix}");
+        }
+        while fraction % 10 == 0 {
+            fraction /= 10;
+            width -= 1;
+        }
+        return format!("{integer}.{fraction:0width$}{suffix}");
     }
-    let seconds = duration.as_secs();
-    if seconds < 60 {
-        let tenths = seconds.saturating_mul(10).saturating_add(u64::from(
-            (duration.subsec_nanos() + 50_000_000) / 100_000_000,
-        ));
-        format!("{}.{:01}s", tenths / 10, tenths % 10)
-    } else {
-        let minutes = seconds / 60;
-        let remainder = seconds % 60;
-        format!("{minutes}m{remainder:02}s")
-    }
+    unreachable!("hours is the final unit")
 }
 
 #[cfg(test)]
@@ -124,22 +145,45 @@ mod duration_tests {
     use super::*;
 
     #[test]
-    fn elapsed_units_and_boundaries() {
+    fn precision_and_transitions() {
         for (nanos, expected) in [
-            (0, "0µs"),
-            (999, "0µs"),
-            (999_999, "999µs"),
-            (1_000_000, "1ms"),
-            (1_250_000, "1.25ms"),
-            (999_999_999, "999.999ms"),
-            (1_000_000_000, "1.0s"),
-            (1_250_000_000, "1.3s"),
-            (60_000_000_000, "1m00s"),
+            (0, "0ns"),
+            (1, "1ns"),
+            (842, "842ns"),
+            (999, "999ns"),
+            (1_000, "1µs"),
+            (1_234, "1.23µs"),
+            (9_995, "10µs"),
+            (99_950, "100µs"),
+            (842_000, "842µs"),
+            (999_499, "999µs"),
+            (999_500, "1ms"),
+            (1_234_000, "1.23ms"),
+            (12_345_000, "12.3ms"),
+            (147_600_000, "148ms"),
+            (999_500_000, "1s"),
+            (1_234_000_000, "1.23s"),
+            (59_949_999_999, "59.9s"),
+            (59_950_000_000, "1min"),
+            (60_000_000_000, "1min"),
+            (90_000_000_000, "1.5min"),
+            (3_597_000_000_000, "1h"),
+            (3_600_000_000_000, "1h"),
         ] {
-            let duration = Duration::from_nanos(nanos);
-            assert_eq!(format_duration(duration), expected);
-            let persisted = Duration::from_micros(duration.as_micros() as u64);
-            assert_eq!(format_duration(duration), format_duration(persisted));
+            assert_eq!(
+                format_duration(Duration::from_nanos(nanos)),
+                expected,
+                "{nanos}ns"
+            );
         }
+    }
+
+    #[test]
+    fn large_durations_and_stored_microseconds() {
+        assert_eq!(format_duration(Duration::MAX), "5120000000000000h");
+        assert_eq!(format_duration(Duration::from_secs(4_444_444)), "1230h");
+        let measured = Duration::from_micros(1_234_567);
+        assert_eq!(format_duration(measured), "1.23s");
+        assert_eq!(measured.as_micros(), 1_234_567);
     }
 }
