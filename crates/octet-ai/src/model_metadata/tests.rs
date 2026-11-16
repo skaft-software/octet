@@ -11,6 +11,31 @@
 use super::*;
 
 #[test]
+fn audio_input_resolution_reports_its_source_and_route_limit() {
+    use crate::Protocol;
+    assert_eq!(
+        resolve_audio_input(Protocol::OpenAiChat, Some(true), Some(false)),
+        (true, AudioInputSource::Declaration)
+    );
+    assert_eq!(
+        resolve_audio_input(Protocol::OpenAiChat, None, Some(true)),
+        (true, AudioInputSource::Catalog)
+    );
+    assert_eq!(
+        resolve_audio_input(Protocol::OpenAiChat, Some(false), Some(true)),
+        (false, AudioInputSource::Declaration)
+    );
+    assert_eq!(
+        resolve_audio_input(Protocol::OpenAiChat, None, None),
+        (false, AudioInputSource::Absent)
+    );
+    assert_eq!(
+        resolve_audio_input(Protocol::OpenAiResponses, Some(true), None),
+        (false, AudioInputSource::UnsupportedProtocol)
+    );
+}
+
+#[test]
 fn generated_registry_resolves_canonical_and_unique_leaf_ids() {
     assert!(model_display_name("openai/gpt-4o-mini").is_some());
     assert_eq!(

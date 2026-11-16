@@ -2134,7 +2134,9 @@ impl DiscoveredApiModel {
         if self.vision {
             modalities = modalities.with(octet_ai::Modality::Image);
         }
-        if self.audio && !protocol.audio_input_formats().is_empty() {
+        let (audio, _) =
+            octet_ai::model_metadata::resolve_audio_input(protocol, Some(self.audio), None);
+        if audio {
             modalities = modalities.with(octet_ai::Modality::Audio);
         }
         if self.pdf && protocol.supports_document_input() {

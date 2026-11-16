@@ -16,6 +16,38 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::pricing::{Pricing, TokenRate};
 
+/// Authority used to resolve native audio input for a model route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioInputSource {
+    /// The selected wire protocol cannot encode native audio input.
+    UnsupportedProtocol,
+    /// An explicit provider or model declaration.
+    Declaration,
+    /// A provider-scoped catalog record.
+    Catalog,
+    /// Neither source asserted the capability.
+    Absent,
+}
+
+/// Resolve an explicit declaration before catalog metadata and apply the wire limit.
+/// `None` means no assertion; `Some(false)` is an explicit denial.
+pub fn resolve_audio_input(
+    protocol: crate::Protocol,
+    declaration: Option<bool>,
+    catalog: Option<bool>,
+) -> (bool, AudioInputSource) {
+    if protocol.audio_input_formats().is_empty() {
+        return (false, AudioInputSource::UnsupportedProtocol);
+    }
+    if let Some(value) = declaration {
+        return (value, AudioInputSource::Declaration);
+    }
+    if let Some(value) = catalog {
+        return (value, AudioInputSource::Catalog);
+    }
+    (false, AudioInputSource::Absent)
+}
+
 mod live;
 pub use live::{live_metadata_from_models_dev, LiveModelMetadata, LivePricing};
 

@@ -36,6 +36,7 @@
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Pi prompt hooks preserve valid results around malformed prompt replacements.
+- Static models use provider-scoped catalog audio metadata when their declarations are silent.
 
 ## [0.10.4] - 2026-11-12
 

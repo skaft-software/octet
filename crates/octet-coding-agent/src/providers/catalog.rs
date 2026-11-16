@@ -72,13 +72,8 @@ impl ProviderDeclaration {
         pinned_reasoning_capability(&record, api_name, protocol, max_output_tokens)
     }
 
-    /// Input modalities the pinned record documents for an OpenCode model,
-    /// limited to what the route can actually send.
-    pub(crate) fn pinned_input_modalities(
-        &self,
-        api_name: &str,
-        protocol: Protocol,
-    ) -> ModalitySet {
+    /// Image input the pinned record documents for an OpenCode model.
+    pub(crate) fn pinned_input_modalities(&self, api_name: &str) -> ModalitySet {
         if self.compatibility != super::contract::CompatibilityProfile::OpenCode {
             return ModalitySet::none();
         }
@@ -97,9 +92,6 @@ impl ProviderDeclaration {
         let mut result = ModalitySet::none();
         if inputs.contains(&"image") {
             result = result.with(octet_ai::Modality::Image);
-        }
-        if inputs.contains(&"audio") && !protocol.audio_input_formats().is_empty() {
-            result = result.with(octet_ai::Modality::Audio);
         }
         result
     }
@@ -418,11 +410,28 @@ fn register_static_model(
     let mut capabilities = static_model_capabilities(model);
     // A preset's hand-written modality flags lag the pinned record for routes
     // whose inventory publishes identifiers only; never drop a documented input.
-    let pinned = declaration.pinned_input_modalities(model.id, route.protocol);
-    for modality in [octet_ai::Modality::Image, octet_ai::Modality::Audio] {
-        if pinned.contains(modality) {
-            capabilities.input_modalities = capabilities.input_modalities.with(modality);
-        }
+    let pinned = declaration.pinned_input_modalities(model.id);
+    if pinned.contains(octet_ai::Modality::Image) {
+        capabilities.input_modalities = capabilities
+            .input_modalities
+            .with(octet_ai::Modality::Image);
+    }
+    let catalog_audio =
+        octet_ai::model_metadata::model_capability_metadata(declaration.id, model.id)
+            .and_then(|record| record.get("modalities")?.get("input")?.as_array().cloned())
+            .map(|inputs| inputs.iter().any(|value| value.as_str() == Some("audio")));
+    let (audio, _) = octet_ai::model_metadata::resolve_audio_input(
+        route.protocol,
+        model.audio.then_some(true),
+        catalog_audio,
+    );
+    capabilities.input_modalities = capabilities
+        .input_modalities
+        .without(octet_ai::Modality::Audio);
+    if audio {
+        capabilities.input_modalities = capabilities
+            .input_modalities
+            .with(octet_ai::Modality::Audio);
     }
     if pdf_input(declaration.id, model.id, route.protocol) {
         capabilities.input_modalities = capabilities.input_modalities.with(octet_ai::Modality::Pdf);

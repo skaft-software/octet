@@ -72,10 +72,10 @@ request fits the provider's total request limit.
   file for `read` instead.
 - Static provider presets, discovered model inventories, explicit custom-model
   declarations and pinned models.dev records can supply modality information.
-  For static presets, the pinned input-modality overlay currently applies to
-  OpenCode declarations; it is not a universal metadata precedence rule. The
-  selected protocol further limits the audio formats actually available. A model
-  listing audio by itself does not make an unsupported wire format available.
+  For static presets, explicit audio support takes precedence over provider-scoped
+  models.dev metadata; where the preset is silent, the catalog may supply it.
+  The selected protocol further limits the audio formats actually available. A
+  model listing audio by itself does not make an unsupported wire format available.
 - Google `generateContent` encodes supported audio and PDF input as base64
   `inlineData` with its MIME type. OpenAI Chat encodes WAV and MP3 as base64
   `input_audio`. OpenAI Responses does not implement native audio input here;
