@@ -527,3 +527,9 @@ ADC credentials or access tokens.
 Interactive, plain, and print modes share `App`, `Agent`, session persistence,
 reasoning normalization, and finish classification. TUI-specific rendering and
 terminal ownership are specified in `docs/design/octet-tui.md`.
+
+RPC keeps its command-loop future heap-owned at the frontend boundary, so callers
+and their polling combinators do not embed copies of its large state. This keeps
+resource reloads and subsequent provider turns within the default thread stack in
+unoptimized builds without a larger-stack requirement. The loop allocation lasts
+for the frontend, rather than each command.

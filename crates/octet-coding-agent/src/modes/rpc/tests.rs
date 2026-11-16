@@ -1718,6 +1718,18 @@ async fn rpc_provider_reload_prompt_reconciles_the_selected_route() {
     app.executable_extensions.shutdown().await;
 }
 
+#[test]
+fn rpc_loop_future_keeps_its_state_on_the_heap() {
+    let (_directory, app) = crate::compaction::tests::app_for_estimate();
+    let (_tx, input) = mpsc::channel(4);
+    let rpc = run_rpc_loop(app, input, RpcCapture::default().output(false));
+    assert_eq!(
+        std::mem::size_of_val(&rpc),
+        std::mem::size_of::<Box<()>>(),
+        "callers must not embed the large RPC state in their own futures"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_provider_reload_streams_only_from_the_replacement_process() {

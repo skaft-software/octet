@@ -1674,7 +1674,18 @@ fn finish_rpc_accounting(result: anyhow::Result<()>) -> anyhow::Result<()> {
     }
 }
 
-async fn run_rpc_loop(
+fn run_rpc_loop(
+    app: App,
+    input: mpsc::Receiver<RpcInput>,
+    output: RpcOutput,
+) -> impl std::future::Future<Output = anyhow::Result<()>> {
+    // Keep the command-loop state out of callers' futures. In debug builds,
+    // nested polling plus the consuming reload rebuild can exhaust a normal
+    // thread stack even though no recursion is involved.
+    Box::pin(run_rpc_loop_inner(app, input, output))
+}
+
+async fn run_rpc_loop_inner(
     mut app: App,
     mut input: mpsc::Receiver<RpcInput>,
     mut output: RpcOutput,
