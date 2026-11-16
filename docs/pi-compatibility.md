@@ -106,8 +106,8 @@ manifests alone do not establish active ownership. Reviewed builtin overrides
 receive exact manifest grants and require native `builtin_tool_overrides_v1`
 admission. Unsupported tool-schema constraints cause an explicit skip, not
 constraint removal. Supported patterns are enforced. Loading is not proof that an extension's commands, hooks or UI work.
-Failing lifecycle observation callbacks are reported and isolated; permission/veto
-hooks and failed host mutations still fail closed. Generated configuration records
+Failing callbacks are reported and isolated; explicit vetoes and failed host
+mutations remain authoritative. Generated configuration records
 the executable; using Bun does not establish Node or Bun compatibility qualification.
 
 `--reviewed` accepts executing the enabled factories and their imports, including
@@ -281,13 +281,21 @@ not end a prompt-phase wait on the extension's behalf: cancellation, owner
 generations and process supervision do.
 A handler that outlives its share keeps running but is no longer waited for. It
 is named once in `[Extension issues]`, and later hooks skip it while it is still
-busy. A tool-call guard that cannot answer in time blocks the call rather than
-letting it through.
+busy. A tool-call callback that cannot answer is skipped with a warning; only
+an explicit veto blocks the call. Open UI prompts are unbounded for every callback:
+the user's answer time is excluded, and execution resumes with its remaining budget.
 
 These budgets do not bound the whole request. Queueing, setup, transport and
 tracked host operations can take additional time; a pending host operation can
-hold the hook's flush after its callback returns. Synchronously blocked JavaScript
-cannot be preempted either. The native deadline may therefore still be exceeded.
+hold the hook's flush after its callback returns. The adapter dispatcher records
+last dispatch/completion times and in-flight callback kinds, and the host queries
+that dispatcher through the negotiated status path. A responsive pipe worker is
+not a liveness signal. Missing probes alone do not mark a legitimate input or UI
+wait as stuck. Only an overdue bounded callback does: asynchronous callbacks are
+detached; synchronously blocked JavaScript requires stopping that process generation.
+Warnings name the extension and stage, and the turn continues without replaying
+interrupted work. EOF/exit is reported separately as a disconnect with exit status
+when available. Ordinary commands use a 30 s callback budget and tools 10 min.
 A callback returning does not itself certify a host mutation. A later callback
 timeout does not discard host-operation failures already recorded at the live
 boundary, including failures from an earlier callback. A failure arriving after
@@ -297,7 +305,10 @@ while its extension hooks or Pi setup capture are still starting waits up to
 running without those hooks. A factory's own setup (the work its default export does
 before it returns) gets 10 s, and 20 s across all factories; one that is still
 going is left out of the mirror, named in `[Extension issues]`, and tried again
-the next time octet starts.
+the next time octet starts. A factory that throws during live load or reload is
+marked failed, its registrations are removed, and an extension-and-factory warning
+is shown while sibling factories continue. Source-review and native authority
+refusals stay authoritative; review-only capture remains strict for a lone factory.
 
 To see which factory is slow, start octet with `OCTET_STARTUP_TRACE=1` and
 redirect stderr, for example `OCTET_STARTUP_TRACE=1 octet 2>trace.txt`. Each

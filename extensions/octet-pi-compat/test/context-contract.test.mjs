@@ -206,14 +206,12 @@ test('observation failures report the factory and continue without weakening vet
   assert.match(errors[0].message, /turn_start hook called an API octet does not support, so the hook was skipped/);
   assert.doesNotMatch(errors[0].message, /private text|ctx\.missing/);
   runtime.events.set('tool_call', handlers);
-  await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === failure);
-  // A genuine host owner refusal carries host provenance; a callback's own
-  // numeric code is isolated, as the dedicated turn-observer regression checks.
+  assert.deepEqual(await runtime.runEvent('tool_call', {}, store, { veto: true }), {action:'continue'});
   handlers[0].handler = () => { throw rpcError(-32002, 'owner lost'); };
   await assert.rejects(runtime.runEvent('turn_start', {}, store), /owner lost/);
   handlers[0].handler = () => { store.controller.abort(); throw new Error('ordinary error'); };
   await assert.rejects(runtime.runEvent('turn_start', {}, store), /abort/i);
-  assert.equal(kept, 1);
+  assert.equal(kept, 2);
 });
 
 test('facts refuse absent snapshots and preserve false project trust', () => {
@@ -323,7 +321,7 @@ test('Pi trust follows workspace changes on the same owner without reviving stal
   assert.equal(contextFacts(runtime, fresh).isProjectTrusted(), true);
 });
 
-test('exhausting the shared budget before a tool guard fails closed', async () => {
+test('exhausting the shared budget skips the tool callback without manufacturing a veto', async () => {
   const previous = process.env.OCTET_PI_HANDLER_BUDGET_MS;
   process.env.OCTET_PI_HANDLER_BUDGET_MS = '5';
   try {
@@ -334,8 +332,7 @@ test('exhausting the shared budget before a tool guard fails closed', async () =
       { factory: 1, handler() { secondCalled = true; } },
     ]);
     const disposition = await runtime.runEvent('tool_call', {}, store, { veto: true });
-    assert.equal(disposition.action, 'deny');
-    assert.match(disposition.reason, /did not answer in time/);
+    assert.equal(disposition.action, 'continue');
     assert.equal(secondCalled, false, 'an exhausted guard must not start after the shared deadline');
   } finally {
     if (previous === undefined) delete process.env.OCTET_PI_HANDLER_BUDGET_MS;

@@ -20,7 +20,7 @@ import { tracePhase, traceEnabled } from './startup-trace.mjs';
 //
 // The budgets that remain cover the phases where a stall has nothing to give:
 // the context phases and resources discovery must fit inside the host's 5 s
-// deadline, and a tool guard that cannot answer in time must fail closed. There a
+// deadline. A tool guard that cannot answer is skipped, not an implicit veto. A
 // handler that outlives its budget is detached instead: the hook stops waiting
 // for it, the handler keeps running, the factory is reported once by name, and
 // the next hook proceeds. A detached handler that is still running is skipped on
@@ -38,18 +38,15 @@ const TOTAL_MS = { context: 4000, context_with_system: 4000, resources_discover:
 // them and none is reported as "skipped this time": `input` and
 // `before_agent_start` compose the run, `session_start` announces it. Cancel
 // and preemption still stop the wait at once. The phases below keep a wait
-// because they must answer inside a host deadline, and a tool guard must fail
-// closed; their user-dialog time is excluded separately.
+// because bounded callbacks must keep the ordered queue moving; user-dialog
+// time is excluded separately.
 const UNBUDGETED_EVENTS = new Set(['input', 'before_agent_start', 'session_start']);
 const DEFAULT_PER_HANDLER_MS = 5000;
 const DEFAULT_TOTAL_MS = 15000;
 const MIN_WAIT_MS = 250;
-// A tool guard may ask the user (a permission dialog) and the user takes as long
-// as they take, as in Pi. That time is not charged to the guard, up to a cap kept
-// below the host's 30 s request timeout, so a guard whose dialog never settles
-// still fails closed.
-const USER_WAIT_EVENTS = new Set(['tool_call']);
-const USER_WAIT_CAP_MS = 20000;
+// Pi runner.ts:580-614 awaits UI prompts without a deadline, for every kind
+// of callback. User time is excluded without a cap; callback execution keeps
+// its original budget once the prompt closes.
 const TIMED_OUT = Symbol('handler budget exceeded');
 const PREEMPTED = Symbol('hook preempted by quit');
 
@@ -119,29 +116,28 @@ export class LoadBudget {
 // Time one handler spends awaiting a dialog the user answers. `ctx.ui` marks
 // those waits through `child.userWait` while the budget runs the handler.
 export class UserWait {
-  constructor() { this.active = 0; this.since = 0; this.total = 0; this.release = undefined; }
+  constructor(changed = () => {}) { this.changed = changed; this.active = 0; this.since = 0; this.total = 0; this.release = undefined; }
 
   track(promise) {
     if (this.active++ === 0) this.since = performance.now();
+    this.changed();
     const end = () => {
       if (--this.active > 0) return;
       this.total += performance.now() - this.since;
-      this.release?.(); this.release = undefined;
+      this.release?.(); this.release = undefined; this.changed();
     };
     promise.then(end, end);
     return promise;
   }
 
   spent() {
-    return Math.min(USER_WAIT_CAP_MS, this.total + (this.active ? performance.now() - this.since : 0));
+    return this.total + (this.active ? performance.now() - this.since : 0);
   }
 
-  // Resolves when no dialog is open or the cap is reached.
+  // Resolves when no dialog remains open. Cancellation is raced by the caller.
   idle() {
-    const room = USER_WAIT_CAP_MS - this.spent();
-    if (!this.active || room <= 0) return Promise.resolve();
-    const timer = nativeTimer(room);
-    return Promise.race([new Promise(resolve => { this.release = resolve; }), timer.promise]).finally(() => timer.cancel());
+    if (!this.active) return Promise.resolve();
+    return new Promise(resolve => { this.release = resolve; });
   }
 }
 
@@ -225,16 +221,18 @@ export class HookBudget {
     }
     const started = performance.now();
     const pendingBefore = new Set(store.pending);
-    const userWait = USER_WAIT_EVENTS.has(this.event) ? child.userWait = new UserWait() : undefined;
+    const userWait = child.userWait = new UserWait(() => { this.runtime.dispatcher?.publish().catch(error => this.runtime.backgroundError(error)); });
+    const callback = await this.runtime.dispatcher?.begin(child, this.event, this.describe(entry), budget ? waited : undefined);
     const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
     if (budget) entry.busy = true;
-    settled.then(late => {
+    settled.then(async late => {
+      await this.runtime.dispatcher?.finish(callback);
       if (budget) entry.busy = false;
       // The hook stopped waiting for this one: detached out of its budget,
       // preempted by a quit, or a run the host cancelled.
       if (!child.detached && !store.controller.signal.aborted) return;
       this.reportLate(entry, late, started, options);
-    });
+    }).catch(error => this.runtime.backgroundError(error));
     // A quit aborts the hook still starting up: stop waiting so shutdown handlers run at
     // once, and let the handler finish in the background. Nothing is reported, the
     // process is going away.
@@ -249,7 +247,7 @@ export class HookBudget {
       if (!budget) outcome = await Promise.race([settled, preempted]);
       else for (;;) {
         const left = started + waited + (userWait?.spent() ?? 0) - performance.now();
-        if (userWait?.active && userWait.spent() < USER_WAIT_CAP_MS) {
+        if (userWait?.active) {
           outcome = await Promise.race([settled, userWait.idle().then(() => TIMED_OUT), preempted]);
           if (outcome !== TIMED_OUT) break;
           continue;
@@ -264,6 +262,7 @@ export class HookBudget {
     if (budget) this.excluded += userWait?.spent() ?? 0;
     if (outcome === PREEMPTED) {
       child.detached = true;
+      await this.runtime.dispatcher?.interrupt(callback);
       for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
       this.trace(entry, performance.now() - started, 'preempted');
       return { ran: false, busy: false };
@@ -272,6 +271,7 @@ export class HookBudget {
       // Work the handler already queued on this hook must not hold the hook's
       // own flush, and anything it queues later is observed but never joined.
       child.detached = true;
+      await this.runtime.dispatcher?.interrupt(callback);
       for (const pending of [...store.pending]) if (!pendingBefore.has(pending)) store.pending.delete(pending);
       this.detached.set(this.describe(entry), waited);
       this.trace(entry, performance.now() - started, 'detached');

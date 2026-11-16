@@ -231,6 +231,7 @@ pub(super) fn negotiate_contributions_with_host_services(
                 .copied()
                 .collect::<BTreeSet<_>>();
             if manifest.api_version == EXTENSION_API_VERSION_0_4 {
+                allowed.insert(liveness::FEATURE);
                 allowed.insert(EXTENSION_FEATURE_RESOURCE_REFS_V1);
                 allowed.insert(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1);
                 allowed.insert(EXTENSION_FEATURE_TOOL_PROMPT_METADATA);

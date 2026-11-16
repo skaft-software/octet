@@ -77,7 +77,8 @@ export function loadIssue(failure) {
     reason = `skipped: failed while loading${reportedCode(error) ? ` ("${reportedCode(error)}")` : ''}`;
     next = 'Check dependencies and settings, or disable.';
   }
-  return { path: entry, level: 'error', reason, next };
+  if (failure.stage === 'factory' && name !== 'FactoryStalled') reason = 'factory failed during load and was skipped';
+  return { path: entry, level: failure.stage === 'factory' ? 'warning' : 'error', reason, next };
 }
 
 // A factory left out of the mirror when the setup was captured: said once at

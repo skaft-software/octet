@@ -5,6 +5,7 @@ import { bounded, facade, fields, invalid, ownerKey, strict, unsupported } from 
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
 import { translateSessionEntries } from './session-mirror.mjs';
+import { HookBudget } from './handler-budget.mjs';
 import { runCompactionCallback } from './compaction.mjs';
 export const sessionReplacementHooks = ['session_before_switch', 'session_before_fork'];
 export async function sessionReplacement(runtime, params, store) {
@@ -22,12 +23,15 @@ export async function sessionReplacement(runtime, params, store) {
   }
   return cancellable(runtime.queued(store, async () => {
     let disposition = { action: 'continue' };
+    const budget = new HookBudget(runtime, store, hook);
     for (const entry of [...runtime.events.get(hook) || []]) {
       signal.throwIfAborted(); runtime.assertSessionOwner(store);
       const child = { ...store, factory: entry.factory };
       try {
-        const result = await cancellable(runtime.scope.run(child, () => entry.handler(
-          facade({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
+        const run = await budget.run(entry, child, () => cancellable(runtime.scope.run(child, () => entry.handler(
+          facade({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal));
+      if (!run.ran) continue;
+      const result = run.value;
         signal.throwIfAborted();
         if (result === undefined) continue;
         fields(result, hook === 'session_before_switch' ? ['cancel'] : ['cancel', 'skipConversationRestore'], `${hook} result`);
@@ -41,6 +45,7 @@ export async function sessionReplacement(runtime, params, store) {
         runtime.reportCallbackError(hook, entry.factory, error, store.state);
       }
     }
+    budget.finish();
     await cancellable(runtime.flush(store), signal);
     return { disposition, context: [], notifications: [] };
   }), signal);
@@ -99,11 +104,14 @@ export async function sessionOperation(runtime, params, store) {
       }
     }
     let decision = { action: 'continue' };
+    const budget = new HookBudget(runtime, store, hook);
     for (const entry of [...runtime.events.get(hook) || []]) {
       live(); const child = { ...store, factory: entry.factory };
       let result;
       try {
-        result = await cancellable(runtime.scope.run(child, () => entry.handler(facade({ ...event }, `${hook} event`), createContext(runtime, child))), signal);
+        const run = await budget.run(entry, child, () => cancellable(runtime.scope.run(child, () => entry.handler(facade({ ...event }, `${hook} event`), createContext(runtime, child))), signal));
+        if (!run.ran) continue;
+        result = run.value;
         if (store.errors.length) throw store.errors[0];
       } catch (error) {
         live();
@@ -133,6 +141,7 @@ export async function sessionOperation(runtime, params, store) {
         runtime.reportCallbackError(hook, entry.factory, error, store.state);
       }
     }
+    budget.finish();
     await cancellable(runtime.flush(store), signal); live();
     return { disposition: { action: 'continue' }, context: [], notifications: [], session_operation: decision };
   }), signal);

@@ -378,6 +378,16 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .send(ExtensionEvent::ContextContributed { contribution });
             }
             methods::STATUS_CONTRIBUTION => {
+                if let Some(snapshot) = params.get("liveness") {
+                    require_feature(state, liveness::FEATURE)?;
+                    if params.as_object().map_or(0, |params| params.len()) != 1 {
+                        return Err("invalid dispatcher status fields".into());
+                    }
+                    write_std_lock(&state.health)
+                        .dispatcher
+                        .install(snapshot.clone())?;
+                    return Ok(());
+                }
                 let contribution = serde_json::from_value(params)
                     .map_err(|error| format!("invalid status contribution: {error}"))?;
                 let ExtensionStatusContribution { surface, .. } = &contribution;

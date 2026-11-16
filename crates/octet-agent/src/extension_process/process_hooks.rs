@@ -661,7 +661,7 @@ impl ExtensionProcess {
         arguments: &serde_json::Value,
         context: &ToolContext<'_>,
     ) -> Result<Option<serde_json::Value>, ToolError> {
-        let output = self
+        let outcome = self
             .run_tool_session_hook(
                 ExtensionHook::BeforeToolCall,
                 serde_json::json!({ "name": name, "arguments": arguments,
@@ -669,8 +669,17 @@ impl ExtensionProcess {
                     "parent_tool_call_id": context.progress.tool_call_identity().1 }),
                 context,
             )
-            .await
-            .map_err(|error| ToolError::new(error.to_string()))?;
+            .await;
+        let output = match outcome {
+            Ok(output) => output,
+            Err(ExtensionRuntimeError::Closed(_) | ExtensionRuntimeError::Timeout { .. }) => {
+                let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                    message: format!("warning: extension {:?} stage before_tool_call interrupted; skipped without replay", self.inner.descriptor.manifest.name),
+                });
+                return Ok(None);
+            }
+            Err(error) => return Err(ToolError::new(error.to_string())),
+        };
         self.publish_hook_output(&output);
         if let ExtensionHookDisposition::Deny { reason } = output.disposition {
             let error = ToolError::policy_denied(

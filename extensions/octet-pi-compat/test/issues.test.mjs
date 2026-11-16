@@ -60,9 +60,9 @@ test('startup groups skipped factories and inert renderers into one actionable E
   const notices = peer.seen.filter(issueNotice);
   assert.deepEqual(notices.map(notice => notice.params.level), ['error', 'warning'], JSON.stringify(peer.seen) + '\n' + peer.stderr());
   const [blocking, degraded] = notices.map(notice => notice.params.message);
-  assert.match(blocking, /^Broken: skipped: failed while loading\. Check dependencies and settings, or disable\.$/m);
+  assert.match(degraded, /^Broken: factory failed during load and was skipped\. Check dependencies and settings, or disable\.$/m);
   assert.match(blocking, /^Missing: skipped: a file is missing\. Reinstall, or remove from your Pi settings\.$/m);
-  assert.match(degraded, /^Render: custom display not shown; the default view is used\. Disable if you need the custom display\.$/);
+  assert.match(degraded, /^Render: custom display not shown; the default view is used\. Disable if you need the custom display\.$/m);
   for (const message of [blocking, degraded]) {
     assert.ok(message.split('\n').length <= 4);
     assert.doesNotMatch(message, /unsupported_feature|invalid_request|ENOENT|Next:/);
@@ -182,9 +182,8 @@ test('tool-result callback failures are redacted and deduplicated while later tr
 
 test('veto, cancellation, owner fences, and tracked host mutations still fail closed without a skipped-callback notice', async t => {
   const { runtime, store, frames } = harness(t);
-  const veto = new Error('permission callback failed');
-  runtime.events.set('tool_call', [{ factory: 0, handler: () => { throw veto; } }]);
-  await assert.rejects(runtime.runEvent('tool_call', {}, store, { veto: true }), error => error === veto);
+  runtime.events.set('tool_call', [{ factory: 0, handler: () => ({block:true,reason:'explicit veto'}) }]);
+  assert.deepEqual(await runtime.runEvent('tool_call', {}, store, { veto: true }), {action:'deny',reason:'explicit veto'});
   for (const event of ['agent_end', 'turn_start', 'turn_end', 'tool_result']) {
     for (const code of [-32800, -32002]) {
       const refusal = rpcError(code, 'refused');

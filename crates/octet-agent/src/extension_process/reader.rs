@@ -1086,7 +1086,23 @@ pub(super) async fn read_protocol_stdout<R>(
     }
     lock_std_mutex(&state.provider_streams).clear();
     let message = match result {
-        Ok(()) => "extension stdout closed".to_owned(),
+        Ok(()) => {
+            let status = if let Some(child) = state.child.as_ref() {
+                let mut child = child.lock().await;
+                match child.try_wait() {
+                    Ok(Some(status)) => Some(status),
+                    _ => tokio::time::timeout(Duration::from_millis(250), child.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok),
+                }
+            } else {
+                None
+            };
+            let interrupted = read_std_lock(&state.health).dispatcher.interrupted();
+            format!("extension disconnected (stdout EOF; {}; {interrupted} callbacks interrupted, not replayed)",
+                status.map_or_else(|| "exit status unavailable (process still running)".into(), |status| status.to_string()))
+        }
         Err(message) => {
             let _ = state.events.send(ExtensionEvent::Diagnostic {
                 message: message.clone(),

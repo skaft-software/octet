@@ -100,3 +100,13 @@ test('reverse IDs never wrap past the portable integer limit', () => {
   assert.equal(transport.nextChildId(), Number.MAX_SAFE_INTEGER);
   assert.throws(() => transport.nextChildId(), /identity exhausted/);
 });
+
+test('an unbounded UI wait has no timer and still obeys cancellation', async () => {
+  const transport = new Transport({write(_line, callback) { callback(); }, output:{}}, {onLost() {}});
+  const controller = new AbortController();
+  const waiting = transport.request('input/request', {}, {timeout:null,signal:controller.signal});
+  assert.equal([...transport.children.values()][0].timer, undefined);
+  controller.abort();
+  await assert.rejects(waiting, error => error.code === -32800);
+  assert.equal(transport.children.size, 0);
+});

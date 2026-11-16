@@ -65,6 +65,7 @@
 - Authenticated frontend model discovery keeps API keys within the requested HTTP origin.
 - Ctrl+D exits restore terminal attributes under tmux, including after extension reload and resize.
 - Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
+- Pi dispatcher liveness preserves user waits, isolates stalled callbacks and factory failures, and reports disconnects without replay.
 
 ## [0.10.4] - 2026-11-12
 

@@ -239,6 +239,7 @@ pub(super) async fn spawn_connection(
     let health = Arc::new(StdRwLock::new(ConnectionHealth {
         state: ExtensionHealthState::Initializing,
         last_error: None,
+        dispatcher: liveness::Progress::default(),
     }));
     let initialization_complete = Arc::new(AtomicBool::new(false));
     let initialization_changed = Arc::new(Notify::new());
@@ -479,6 +480,7 @@ pub(super) async fn spawn_connection(
         optional_features.push(EXTENSION_FEATURE_CACHE_WARMING_DECISION.to_owned());
     }
     if descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4 {
+        optional_features.push(liveness::FEATURE.to_owned());
         optional_features.push(EXTENSION_FEATURE_RESOURCE_REFS_V1.to_owned());
         optional_features.push(EXTENSION_FEATURE_OPERATION_DESCRIPTORS_V1.to_owned());
         optional_features.push(EXTENSION_FEATURE_TOOL_PROMPT_METADATA.to_owned());

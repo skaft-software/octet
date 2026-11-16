@@ -104,6 +104,7 @@ pub use self::exec::ExtensionExecRequest;
 mod mcp;
 pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
+mod liveness;
 mod manifest;
 mod message_events;
 mod model_control;

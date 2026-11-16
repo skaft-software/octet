@@ -155,6 +155,7 @@ pub(super) fn protocol_read_state_for_test(
             health: Arc::new(StdRwLock::new(ConnectionHealth {
                 state: ExtensionHealthState::Ready,
                 last_error: None,
+                dispatcher: liveness::Progress::default(),
             })),
             artifact_store,
             child: None,
@@ -3403,6 +3404,7 @@ fn lifecycle_reasons_are_clipped_on_a_utf8_boundary() {
     let health = StdRwLock::new(ConnectionHealth {
         state: ExtensionHealthState::Ready,
         last_error: None,
+        dispatcher: liveness::Progress::default(),
     });
     update_health(
         &health,

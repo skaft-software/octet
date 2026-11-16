@@ -147,6 +147,33 @@ feature. See [initialization validation](PROTOCOL-REFERENCE.md#11-initialize)
 for schemas, dependent features and paired-profile validation. Do not send a
 canonical 0.3 `contract`, schema ID, encoding, capabilities or method selection.
 
+## Dispatcher liveness (`dispatcher_liveness_v1`)
+
+This optional process-boundary feature uses the existing `status/collect` request
+with `{liveness:true}` (no semantic UI declaration or callback slot needed).
+The result is `{liveness: snapshot}`. Dispatchers also publish the same snapshot
+in `status/contribution` notifications with `{liveness: snapshot}` and no other fields.
+It must originate in the callback dispatcher, never an independent pipe reader.
+
+A snapshot has monotonic `sequence`, nullable `last_dispatched_at_ms` and
+`last_completed_at_ms` Unix timestamps, and at most 128 `callbacks`. Each callback
+has `id`, `request_id`, `kind` (128 ASCII identifier bytes), `extension` (4096 UTF-8
+bytes, no controls), `interrupted` and nullable `remaining_ms` (0..600000).
+Null means a legitimately unbounded input/UI wait or already interrupted callback;
+only a bounded, overdue callback establishes a hang. Host deadlines use received
+remaining durations, not comparison of wall clocks, with 500 ms settlement grace.
+Probes run every 250 ms with a 200 ms response deadline; after a missed probe,
+further probes wait for dispatcher progress to keep the pipe queue bounded.
+Missed probes alone never establish a hang or escalate cancellation. Normal request cancellation and owner
+fences still apply. The selected dispatcher supplies callback deadlines instead of
+a whole-request deadline that would incorrectly charge user wait time. Shutdown
+and session-end finalizers retain their short host cleanup deadlines.
+
+A blocked dispatcher may require generation termination. Its pending operations
+are interrupted, not replayed; a lost stream/exit is a disconnect, with exit status
+when available, not evidence of a hung callback. This is subprocess supervision,
+not a Pi API method or authority to retry effects.
+
 ## Capabilities
 
 Manifest capabilities describe reviewed consent and contributions. Protocol

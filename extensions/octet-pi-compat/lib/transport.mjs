@@ -246,7 +246,7 @@ export class Transport {
         if (!this.closed) this.notify('$/cancelRequest', { id, reason: 'cancelled' }).catch(error => this.fail(error));
       };
       const abort = () => cancel(rpcError(-32800, 'request cancelled'));
-      const timer = nativeTimeout(() => cancel(rpcError(-32002, `${method} timed out`)), timeout);
+      const timer = timeout === null ? undefined : nativeTimeout(() => cancel(rpcError(-32002, `${method} timed out`)), timeout);
       this.children.set(id, { parent, method, onUpdate, sequence: 0, resolve, reject, timer, signal, abort, cancel });
       signal?.addEventListener('abort', abort, { once: true });
       this.send({ jsonrpc: '2.0', id, method, params }).catch(cancel);

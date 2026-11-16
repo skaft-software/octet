@@ -16,7 +16,8 @@ import { cancellable, projectContext } from './provider-context.mjs';
 import { customProviderHttp, customProviderHttpChunk, nativeProviderEvent, nativeProviderPayload, checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
 import { transformInput } from './context-api.mjs';
 import { projectTrustEvent, retainPiProjectTrust } from './project-trust.mjs';
-import { HookBudget, LoadBudget } from './handler-budget.mjs';
+import { Dispatcher, LIVENESS_FEATURE } from './dispatcher.mjs';
+import { HookBudget, LoadBudget, UserWait } from './handler-budget.mjs';
 import { forgetMcpRegistrations, hasMcpRegistrations, startMcpSession, retireMcpSession } from './mcp.mjs';
 import { providerPipeline, pipelineHooks } from './provider-pipeline.mjs';
 import { sessionOperation, sessionOperationHooks, sessionReplacement, sessionReplacementHooks } from './session-operations.mjs';
@@ -48,7 +49,7 @@ import { withToolHost } from './tool-host.mjs';
 import { createHostedRunner, hostedToolCatalog } from './extension-runner.mjs';
 
 const retainedMethods = new Set([...CHILD_METHODS, 'ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register', 'session/append_entry', 'session/set_name', 'session/set_label', 'session/send_message', 'session/send_user_message', 'session/compact', 'mcp/replace', 'tools/set_active', 'model/select', 'process/exec', 'provider/credentials', 'pi/settings/update']);
-const supportedFeatures = new Set([...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_request_hooks_v1', 'provider_inheritance_v1', 'provider_google_generative_ai_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'run_system_prompt_read_v1', 'command_catalog_v1', 'pi_settings_v1']);
+const supportedFeatures = new Set([LIVENESS_FEATURE, ...SESSION_FEATURES, 'session_append_receipts_v1', ...CHILD_FEATURES, 'terminal_input_intercept_v1', 'request_cancellation', 'content_parts', 'request_progress', 'dynamic_tools', 'dynamic_tool_renderers', 'builtin_tool_overrides_v1', 'runtime_commands', 'runtime_command_registration_v1', 'artifacts', 'remote_ui', 'transcript_render_v1', 'lifecycle_events', 'lifecycle_events_v2', 'committed_message_events_v1', 'editor_handoff', 'composer', 'shortcuts', 'session_entries', 'message_injection', 'active_tools', 'autocomplete', 'autocomplete_edit_v1', 'tool_prompt_metadata_v1', 'resource_paths_v1', 'session_control_v1', 'session_compaction_v1', 'pipeline_hooks_v1', 'before_prompt_state_v1', 'input_transform_v1', 'process_exec_v1', 'mcp_registration_v1', 'tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1', 'nested_inference_v1', 'provider_proxy_v1', 'provider_request_hooks_v1', 'provider_inheritance_v1', 'provider_google_generative_ai_v1', 'notification_source_v1', 'provider_credentials', 'system_prompt_read', 'run_system_prompt_read_v1', 'command_catalog_v1', 'pi_settings_v1']);
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 const cancelled = () => rpcError(-32800, 'request cancelled');
 
@@ -215,6 +216,7 @@ export class Runtime {
     this.scope = new AsyncLocalStorage(); this.tools = new Map(); this.commands = new Map(); this.shortcuts = new Map(); this.flags = new Map(); this.events = new Map();
     this.terminalInput = new TerminalInputListeners(this);
     this.bus = new SharedBus(this); this.ui = new RemoteUI(this); this.transcript = new TranscriptRenderers(this); this.timers = new Timers(this);
+    this.dispatcher = new Dispatcher(this);
     this.issues = new ExtensionIssues(this); this.initializeEpilogue = Promise.resolve();
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set(); this.extensionNames = new Map();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
@@ -300,7 +302,7 @@ export class Runtime {
     }, { parent: live && !detachedUi && !independentCheckpoint ? store.id : undefined,
       signal: requestOptions.signal ?? store.controller.signal,
       ...(requestOptions.onUpdate === undefined ? {} : { onUpdate: requestOptions.onUpdate }),
-      timeout: method === 'process/exec' ? 2147483647 : method === 'provider/infer' ? 60000 : undefined });
+      timeout: ['confirmation/request', 'input/request'].includes(method) ? null : method === 'process/exec' ? 2147483647 : method === 'provider/infer' ? 60000 : undefined });
     // A host that does not serve this method answers -32601. The method name is
     // this bridge's own vocabulary, so a diagnostic can name it; the rejection
     // itself is unchanged and still reaches the caller first.
@@ -459,7 +461,7 @@ export class Runtime {
     // belong at each ordered import boundary, not in a batch before registration.
     const fingerprints = sharedSourceFingerprints();
     for (const [factory, requestedEntry] of extensions.entries()) {
-      let entry = requestedEntry, mode = routes[entry] ?? globalMode, preparationError, verificationFailure;
+      let entry = requestedEntry, mode = routes[entry] ?? globalMode, preparationError, verificationFailure, factoryFailed = false;
       try {
         entry = realpathSync(entry);
         mode = routes[entry] ?? globalMode;
@@ -514,8 +516,15 @@ export class Runtime {
               return register(...args);
             };
           }
-          try { await setupBudget.settle(() => this.scope.run(s, () => fn(api))); }
-          catch (error) { if (error?.name === 'FactoryStalled') s.controller.abort(error); throw error; }
+          const factoryCallback = await this.dispatcher.begin(s, 'factory', entry, setupBudget.wait());
+          const setup = Promise.resolve().then(() => this.scope.run(s, () => fn(api)))
+            .finally(() => this.dispatcher.finish(factoryCallback));
+          try { await setupBudget.settle(() => setup); }
+          catch (error) {
+            factoryFailed = true;
+            if (error?.name === 'FactoryStalled') { await this.dispatcher.interrupt(factoryCallback); s.controller.abort(error); }
+            throw error;
+          }
           tracePhase(`adapter.factory.registered.${factory}`);
           // Mirror mode advertises one fixed hook set recorded at configure time.
           // A hook outside it would be silently inert at the host, so name it and
@@ -533,14 +542,15 @@ export class Runtime {
         } catch (error) { throw error === verificationFailure || mode === 'installed' || error?.name === 'FactoryStalled' ? error : await classifyLoadFailure(error, entry, this.jiti); }
       } catch (error) {
         this.forgetFactory(factory, entry);
-        // A single explicit entrypoint keeps its failure, which is how configure
-        // learns a factory cannot be used. A mirror of the whole Pi setup is
-        // different: one factory that only ran out of time is skipped and named,
-        // and the rest of the setup (resources, themes, keys) still starts.
-        if (!isolate && !(this.mirrorPiSetup && error?.name === 'FactoryStalled')) throw error;
+        // Capture stays strict for a lone entrypoint so configure can exclude
+        // it. Live factory exceptions are contained even for a lone factory;
+        // source verification and native authority refusals remain authoritative.
+        // Pi loader.ts:618-658 returns a failed load without activating it.
+        const liveFactoryFailure = this.initializingId !== undefined && error !== verificationFailure && !isHostError(error);
+        if (!isolate && !liveFactoryFailure && !(this.mirrorPiSetup && error?.name === 'FactoryStalled')) throw error;
         this.tools = previousTools;
         restoreProviders();
-        const failure = { entry, route: mode, error: String(error?.message || error).slice(0, 1024), code: error?.code, name: error?.name };
+        const failure = { entry, route: mode, error: String(error?.message || error).slice(0, 1024), code: error?.code, name: error?.name, ...(liveFactoryFailure && factoryFailed ? { stage: 'factory' } : {}) };
         this.loadFailures.push(failure);
         // configure consumes this exact review-only diagnostic; capture has no
         // prompt or session. Live startup uses the safe grouped issue block.
@@ -633,6 +643,7 @@ export class Runtime {
     await this.load();
     validateProviderInitialization(this);
     const metadata = this.metadata(), declared = params.contributes || {};
+    this.admittedHooks = new Set(declared.hooks || []);
     if (metadata.argument_completions?.length) this.require('autocomplete');
     if (metadata.hooks.includes('resources_discover')) this.require('resource_paths_v1');
     if (metadata.hooks.some(hook => hook === 'provider_context' || sessionOperationHooks.includes(hook) || modelTurnHooks.includes(hook))) this.require('session_entries');
@@ -853,20 +864,18 @@ export class Runtime {
         try {
           const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore))));
           store.controller.signal.throwIfAborted();
-          // A guard that cannot answer in time blocks the call; an observer that
-          // cannot answer is skipped. Neither keeps the ordered queue held.
+          // A stalled callback is skipped; only an explicit block vetoes.
           if (!run.ran) {
-            if (veto) return { action: 'deny', reason: `${this.extensionNames.get(entry.factory) ?? 'A Pi extension'} did not answer in time` };
             continue;
           }
           result = run.value;
         } catch (error) {
           store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
           // Pi's packages/coding-agent/src/core/extensions/runner.ts:1096-1123
-          // reports a throwing observer and continues. A callback's own code
+          // reports a throwing handler and continues. A callback's own code
           // is not a host outcome. Preserve genuine cancellation/owner refusals
           // and tracked mutations; never retry the callback or its effects.
-          if (veto || isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
+          if (isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
           this.reportCallbackError(event, entry.factory, error);
           continue;
         }
@@ -974,10 +983,19 @@ export class Runtime {
     this.hookTail = result.catch(() => {});
     return result.finally(() => { this.hookQueued--; });
   }
+  async invokeCallback(store, kind, factory, call) {
+    store.userWait = new UserWait(() => { this.dispatcher.publish().catch(error => this.backgroundError(error)); });
+    const callback = await this.dispatcher.begin(store, kind, this.entrypoint(factory), 30000);
+    try { return await this.scope.run(store, call); }
+    finally { await this.dispatcher.finish(callback); }
+  }
   async dispatch(message, store) {
     const p = message.params;
     if (message.method === 'initialize') return this.initialize(p, store);
     if (!this.initialized) invalid('not initialized');
+    if (message.method === 'hook/run' && this.admittedHooks?.has(p.hook) && !this.metadata().hooks.includes(p.hook) && !['session_start', 'session_end'].includes(p.hook)) {
+      this.bind(p, store); return { disposition: { action: 'continue' }, context: [], notifications: [] };
+    }
     if (message.method === 'ui/terminal-input/intercept') return this.terminalInput.dispatch(p, store);
     if (message.method === 'session/snapshot/prepare') {
       this.require('session_snapshot_transport_v1');
@@ -1015,7 +1033,7 @@ export class Runtime {
           if (!this.ui.activeEditor(store)) store.state.host.composer_text = text;
         }
         // Pi awaits command handlers but ignores their return value.
-        await cmd.definition.handler((p.arguments || []).join(' '), createContext(this, store));
+        await this.invokeCallback(store, 'command', cmd.factory, () => cmd.definition.handler((p.arguments || []).join(' '), createContext(this, store)));
         await this.flush(store); return { text: '', notifications: [], context: [] };
       });
       run.catch(error => { if (store.detached && !store.controller.signal.aborted) this.backgroundError(error); });
@@ -1027,7 +1045,7 @@ export class Runtime {
       if (!meta) invalid(`unknown shortcut ${p.name}`);
       const shortcut = this.shortcuts.get(meta.key);
       store.factory = shortcut.factory;
-      await this.scope.run(store, () => shortcut.definition.handler(createContext(this, store)));
+      await this.invokeCallback(store, 'shortcut', shortcut.factory, () => shortcut.definition.handler(createContext(this, store)));
       await this.flush(store);
       return { text: '', notifications: [], context: [] };
     }
@@ -1173,7 +1191,7 @@ export class Runtime {
     return this.queued(store, async () => {
       if (handler) {
         store.factory = handler.factory;
-        await this.scope.run(store, () => handler.definition.handler(createContext(this, store)));
+        await this.invokeCallback(store, 'shortcut', handler.factory, () => handler.definition.handler(createContext(this, store)));
       } else {
         if (runMessageMethods.has(message.method)) await handleRunMessage(this, message.method, p, store);
         else {
@@ -1193,6 +1211,10 @@ export class Runtime {
     this.ui.cancelParent(id).catch(e => this.backgroundError(e));
   }
   async receive(message) {
+    if (message.method === 'status/collect' && message.params.liveness === true) {
+      this.require(LIVENESS_FEATURE); fields(message.params, ['liveness'], 'dispatcher status');
+      await this.transport.send({ jsonrpc: '2.0', id: message.id, result: { liveness: this.dispatcher.snapshot() } }); return;
+    }
     if (message.method === '$/cancelRequest') { this.cancel(message.params.id); return; }
     if (message.method === 'shutdown') { await this.shutdown(message.id); return; }
     if (this.stopping) return;
@@ -1213,7 +1235,15 @@ export class Runtime {
       // receipt arrives. Keep startup publication ahead of that command without
       // waiting for reverse registrations (whose replies the host must serve).
       if (message.method !== 'initialize') await this.initializationBarrier?.promise;
-      let result = await withContextLimits(this.sessionTransport?.profile, () => this.scope.run(store, () => this.dispatch(message, store)));
+      let callback;
+      if (this.features.has(LIVENESS_FEATURE) && !['initialize', 'hook/run', 'session/snapshot/prepare', 'command/execute', 'shortcut/execute'].includes(message.method)) {
+        const factory = (this.commands.get(message.params.name) || this.tools.get(message.params.name))?.factory;
+        store.userWait = new UserWait(() => { this.dispatcher.publish().catch(error => this.backgroundError(error)); });
+        callback = await this.dispatcher.begin(store, message.method, factory === undefined ? this.namespace : this.entrypoint(factory), message.method === 'tool/call' ? 600000 : 30000);
+      }
+      let result;
+      try { result = await withContextLimits(this.sessionTransport?.profile, () => this.scope.run(store, () => this.dispatch(message, store))); }
+      finally { if (callback) await this.dispatcher.finish(callback); }
       if (this.sessionTransport && store.hook === 'provider_context') result = await this.sessionTransport.projection(result, store);
       store.controller.signal.throwIfAborted();
       // Arm the chain before this reply's write settles. The host may query

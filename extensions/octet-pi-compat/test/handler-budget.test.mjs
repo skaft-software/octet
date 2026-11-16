@@ -203,11 +203,11 @@ test('cancellation stops waiting a stalled before_agent_start at once', async t 
   await peer.close();
 });
 
-test('a stalled tool_call guard fails closed instead of wedging the bridge', async t => {
+test('a stalled tool_call callback warns and continues without wedging the bridge', async t => {
   const peer = launch(t, [stalled], options); await peer.init(features);
   const guarded = await peer.request('hook/run', { hook: 'before_tool_call', payload: { name: 'bash', tool_call_id: 'call-1', arguments: { command: 'true' } }, context: peer.context() }).response;
-  assert.equal(guarded.result?.disposition?.action, 'deny', JSON.stringify(guarded));
-  assert.match(guarded.result.disposition.reason, /did not answer/);
+  assert.equal(guarded.result?.disposition?.action, 'continue', JSON.stringify(guarded));
+  assert.match(peer.seen.find(frame => frame.method === 'notification')?.params.message, /tool_call.*skipped/);
   await peer.close();
 });
 
@@ -288,7 +288,7 @@ test('a stalled factory is reported by name when the bridge starts', async t => 
   const metadata = JSON.parse(inspectWith([stalledFactory, healthy], { OCTET_PI_HANDLER_BUDGET_MS: '300' }).stdout).result;
   const peer = launch(t, [stalledFactory, healthy], { metadata, env: { OCTET_PI_HANDLER_BUDGET_MS: '300' } }); await peer.init(features);
   const issue = await peer.wait(frame => frame.method === 'notification' && /^Octet Pi Compat: /.test(frame.params?.message ?? ''));
-  assert.equal(issue.params.level, 'error');
+  assert.equal(issue.params.level, 'warning');
   assert.match(issue.params.message, /skipped: setup did not finish within [0-9.]+ s\. Check that its services are reachable, or disable\./);
   await peer.close();
 });

@@ -556,6 +556,7 @@ impl RequestTombstones {
 pub(super) struct ConnectionHealth {
     pub(super) state: ExtensionHealthState,
     pub(super) last_error: Option<String>,
+    pub(super) dispatcher: liveness::Progress,
 }
 
 pub(super) fn update_health(
@@ -1012,7 +1013,13 @@ impl ProcessConnection {
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&self.protocol));
         // Lifecycle hooks execute factory code too: routed requests cannot use
         // the legacy lifecycle semaphore bypass. Shutdown is transport control.
-        let use_request_slot = use_request_slot || (routed && method != methods::SHUTDOWN);
+        let liveness_query = method == methods::STATUS_COLLECT
+            && params.get("liveness") == Some(&serde_json::Value::Bool(true));
+        let lifecycle_finalizer = method == methods::SHUTDOWN
+            || (method == methods::HOOK_RUN
+                && params.get("hook").and_then(serde_json::Value::as_str) == Some("session_end"));
+        let use_request_slot =
+            use_request_slot || (routed && method != methods::SHUTDOWN && !liveness_query);
         if self.closed.load(Ordering::Acquire) {
             return Err(ExtensionRuntimeError::Closed("stdout is closed".into()));
         }
@@ -1355,7 +1362,20 @@ impl ProcessConnection {
             Ok(reply)
         };
         tokio::pin!(operation);
-        let timed = tokio::time::timeout(timeout, &mut operation);
+        let monitored = !liveness_query
+            && !lifecycle_finalizer
+            && method != methods::INITIALIZE
+            && read_std_lock(&self.protocol).supports(liveness::FEATURE);
+        // The dispatcher supplies individual bounded deadlines. Its input/UI
+        // waits are legitimately unbounded; the ordinary whole-request timeout
+        // must not mistake those for a hung child.
+        let timed = async {
+            if monitored {
+                Ok((&mut operation).await)
+            } else {
+                tokio::time::timeout(timeout, &mut operation).await
+            }
+        };
         tokio::pin!(timed);
 
         let wait_for_cancellation = async {
@@ -1367,6 +1387,14 @@ impl ProcessConnection {
         };
         tokio::pin!(wait_for_cancellation);
 
+        let liveness = async {
+            if monitored {
+                self.monitor_dispatcher().await
+            } else {
+                std::future::pending::<ExtensionRuntimeError>().await
+            }
+        };
+        tokio::pin!(liveness);
         if cancel_on_host_shutdown {
             tokio::select! {
                 biased;
@@ -1381,6 +1409,7 @@ impl ProcessConnection {
                         reason: "user".into(),
                     })
                 },
+                error = &mut liveness => Err(error),
                 result = &mut timed => match result {
                     Ok(result) => result,
                     Err(_) => {
@@ -1390,13 +1419,14 @@ impl ProcessConnection {
                 },
             }
         } else {
-            match timed.await {
-                Ok(result) => result,
-                Err(_) => {
-                    *lock_std_mutex(&cancellation_reason) = "timeout".into();
-                    Err(ExtensionRuntimeError::Timeout {
-                        method: method.to_owned(),
-                    })
+            tokio::select! {
+                error = &mut liveness => Err(error),
+                result = &mut timed => match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        *lock_std_mutex(&cancellation_reason) = "timeout".into();
+                        Err(ExtensionRuntimeError::Timeout { method: method.to_owned() })
+                    }
                 }
             }
         }
@@ -2176,5 +2206,8 @@ impl Drop for ProcessConnection {
 /// termination: they carry no authority and produce no effect, so an
 /// unacknowledged cancellation is a busy peer, not an unbounded one.
 pub(super) fn cancellation_never_escalates(method: &str) -> bool {
-    matches!(method, "ui/terminal-input/intercept")
+    matches!(
+        method,
+        "ui/terminal-input/intercept" | methods::STATUS_COLLECT
+    )
 }
