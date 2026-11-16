@@ -477,9 +477,9 @@ struct AnthropicResponseUsage {
 #[derive(Deserialize)]
 struct AnthropicCacheCreation {
     #[serde(default)]
-    ephemeral_1h_input_tokens: u64,
+    ephemeral_1h_input_tokens: Option<u64>,
     #[serde(default)]
-    ephemeral_5m_input_tokens: u64,
+    ephemeral_5m_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1367,41 +1367,10 @@ pub(crate) fn decode_stream_event(
                 // also restate input/cache buckets and the thinking-token subset.
                 // Merge every field the delta actually reports; fall back to the
                 // `message_start` baseline only where the delta omits a value.
-                let delta_usage = map_usage(&u_dto)?;
-                match builder.usage.as_mut() {
-                    Some(existing) => {
-                        // Pi packages/ai/src/api/anthropic-messages.ts:849-879:
-                        // presence, not positivity, determines authoritative usage.
-                        if u_dto.output_tokens.is_some() {
-                            existing.output_tokens = delta_usage.output_tokens;
-                        }
-                        if u_dto.input_tokens.is_some() {
-                            existing.input_tokens = delta_usage.input_tokens;
-                        }
-                        if u_dto.cache_read_input_tokens.is_some() {
-                            existing.cache_read_tokens = delta_usage.cache_read_tokens;
-                        }
-                        if u_dto.cache_creation_input_tokens.is_some()
-                            || u_dto.cache_creation.is_some()
-                        {
-                            existing.cache_write_tokens = delta_usage.cache_write_tokens;
-                            existing.cache_write_1h_tokens = delta_usage.cache_write_1h_tokens;
-                        }
-                        if u_dto.output_tokens_details.is_some() {
-                            existing.reasoning_tokens = delta_usage.reasoning_tokens;
-                        }
-                        if existing.reasoning_tokens > existing.output_tokens {
-                            return Err(AiError::Decode(DecodeError::UsageUnderflow));
-                        }
-                        existing.total_tokens = existing
-                            .input_tokens
-                            .checked_add(existing.cache_read_tokens)
-                            .and_then(|value| value.checked_add(existing.cache_write_tokens))
-                            .and_then(|value| value.checked_add(existing.output_tokens))
-                            .ok_or(AiError::Decode(DecodeError::UsageUnderflow))?;
-                    }
-                    None => builder.usage = Some(delta_usage),
-                }
+                builder.usage = Some(match builder.usage {
+                    Some(existing) => merge_usage(existing, &u_dto)?,
+                    None => map_usage(&u_dto)?,
+                });
             }
         }
         AnthropicSseData::MessageStop => {
@@ -1448,6 +1417,53 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
+// Pi packages/ai/src/api/anthropic-messages.ts:849-879: aggregate and TTL
+// subset counters update independently; missing fields retain the start value.
+fn merge_usage(existing: Usage, usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
+    let creation = usage.cache_creation.as_ref();
+    let cache_write = match (usage.cache_creation_input_tokens, creation) {
+        (Some(total), _) => total,
+        (
+            None,
+            Some(AnthropicCacheCreation {
+                ephemeral_1h_input_tokens: Some(one_hour),
+                ephemeral_5m_input_tokens: Some(five_minute),
+            }),
+        ) => one_hour
+            .checked_add(*five_minute)
+            .ok_or(AiError::Decode(DecodeError::UsageUnderflow))?,
+        _ => existing.cache_write_tokens,
+    };
+    let one_hour = creation
+        .and_then(|c| c.ephemeral_1h_input_tokens)
+        .unwrap_or(if cache_write == 0 {
+            0
+        } else {
+            existing.cache_write_1h_tokens
+        });
+    map_usage(&AnthropicResponseUsage {
+        input_tokens: Some(usage.input_tokens.unwrap_or(existing.input_tokens)),
+        output_tokens: Some(usage.output_tokens.unwrap_or(existing.output_tokens)),
+        cache_read_input_tokens: Some(
+            usage
+                .cache_read_input_tokens
+                .unwrap_or(existing.cache_read_tokens),
+        ),
+        cache_creation_input_tokens: Some(cache_write),
+        cache_creation: Some(AnthropicCacheCreation {
+            ephemeral_1h_input_tokens: Some(one_hour),
+            ephemeral_5m_input_tokens: None,
+        }),
+        output_tokens_details: Some(AnthropicOutputTokensDetails {
+            thinking_tokens: usage
+                .output_tokens_details
+                .as_ref()
+                .map(|details| details.thinking_tokens)
+                .unwrap_or(existing.reasoning_tokens),
+        }),
+    })
+}
+
 fn map_usage(usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
     // Design §15: Anthropic `input_tokens` ALREADY excludes cache, so it maps
     // directly (no subtraction — that is the OpenAI rule). `total` includes cache.
@@ -1455,14 +1471,15 @@ fn map_usage(usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
     let cache_write_1h = usage
         .cache_creation
         .as_ref()
-        .map(|c| c.ephemeral_1h_input_tokens)
+        .and_then(|c| c.ephemeral_1h_input_tokens)
         .unwrap_or(0);
     let cache_write = usage
         .cache_creation_input_tokens
         .or_else(|| {
             usage.cache_creation.as_ref().and_then(|c| {
                 c.ephemeral_1h_input_tokens
-                    .checked_add(c.ephemeral_5m_input_tokens)
+                    .unwrap_or(0)
+                    .checked_add(c.ephemeral_5m_input_tokens.unwrap_or(0))
             })
         })
         .unwrap_or(0);

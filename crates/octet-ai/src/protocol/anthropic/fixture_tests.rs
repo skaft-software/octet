@@ -535,3 +535,41 @@ async fn final_usage_zero_counters_replace_start_buckets() {
         }
     }
 }
+
+#[tokio::test]
+async fn partial_cache_ttl_updates_preserve_omitted_totals_and_subsets() {
+    // Pi packages/ai/src/api/anthropic-messages.ts:861-869 updates the
+    // aggregate creation count and the 1h subset independently by presence.
+    for (delta, writes, one_hour) in [
+        (r#""cache_creation":{"ephemeral_1h_input_tokens":0}"#, 30, 0),
+        (
+            r#""cache_creation":{"ephemeral_1h_input_tokens":25}"#,
+            30,
+            25,
+        ),
+        (r#""cache_creation_input_tokens":40"#, 40, 20),
+        (
+            r#""cache_creation":{"ephemeral_1h_input_tokens":25,"ephemeral_5m_input_tokens":15}"#,
+            40,
+            25,
+        ),
+    ] {
+        let data = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"fixture-model\",\"usage\":{{\"input_tokens\":100,\"output_tokens\":0,\"cache_read_input_tokens\":40,\"cache_creation_input_tokens\":30,\"cache_creation\":{{\"ephemeral_1h_input_tokens\":20,\"ephemeral_5m_input_tokens\":10}}}}}}}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":5,{delta}}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        for chunk in [0, 1, 17] {
+            let events = harness::drive(
+                &harness::model(Protocol::AnthropicMessages, None),
+                decode_stream_event,
+                data.as_bytes(),
+                chunk,
+            )
+            .await
+            .unwrap();
+            let usage = harness::finished(&events).usage;
+            assert_eq!(usage.cache_write_tokens, writes, "{delta}");
+            assert_eq!(usage.cache_write_1h_tokens, one_hour, "{delta}");
+            assert_eq!(usage.total_tokens, 145 + writes);
+        }
+    }
+}

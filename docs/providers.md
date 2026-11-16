@@ -1058,7 +1058,8 @@ Usage reports keep uncached input, cache reads and cache writes disjoint.
 Anthropic's one-hour writes are a subset of total writes, counted once in
 session reports, pricing and the footer's latest-request hit ratio. Final
 Anthropic counters replace earlier values even when explicitly zero; omitted
-counters retain their start values. OpenAI/Codex subtract reported cached tokens
+counters retain their start values. Partial TTL breakdowns update the one-hour
+subset independently of the aggregate write count. OpenAI/Codex subtract reported cached tokens
 from total prompt input; Google subtracts `cachedContentTokenCount` and reports
 no generation-time cache writes. Missing write counters are not estimated.
 
