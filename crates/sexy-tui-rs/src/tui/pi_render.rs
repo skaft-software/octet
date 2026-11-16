@@ -99,6 +99,7 @@ impl<'a> TUI<'a> {
         let cursor = logical_cursor_position
             .filter(|cursor| cursor.row >= window_top)
             .map(|cursor| (cursor.row - window_top, cursor.column));
+        self.begin_synchronized_output();
         if let Some(session) = self.alternate_screen_session.as_mut() {
             session.paint(
                 &mut *self.terminal,
@@ -109,6 +110,7 @@ impl<'a> TUI<'a> {
                 self.show_hardware_cursor,
             );
         }
+        self.end_synchronized_output();
         self.logical_cursor_position = logical_cursor_position;
         self.cursor_row =
             logical_cursor_position.map_or(rendered.len().saturating_sub(1), |cursor| cursor.row);
@@ -600,6 +602,12 @@ impl<'a> TUI<'a> {
     /// Bound each write without changing the frame stream or its sync transaction.
     /// The frame is still assembled in memory; this is not a total memory bound.
     fn pi_write_frame(&mut self, mut buffer: &str) {
+        if self.synchronized_output_depth > 0 {
+            // An outer transaction owns the markers (e.g. startup chrome and
+            // screen entry). CSI 2026 is not nestable in terminal emulators.
+            buffer = buffer.strip_prefix("\x1b[?2026h").unwrap_or(buffer);
+            buffer = buffer.strip_suffix("\x1b[?2026l").unwrap_or(buffer);
+        }
         while !buffer.is_empty() {
             let mut end = buffer.len().min(PI_MAX_WRITE_BYTES);
             while !buffer.is_char_boundary(end) {

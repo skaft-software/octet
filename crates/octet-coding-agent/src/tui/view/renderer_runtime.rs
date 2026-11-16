@@ -757,6 +757,66 @@ impl InteractiveShell {
     }
 }
 
+/// Coalesce unresolved startup until readiness or the existing idle-poll
+/// deadline. This is a maximum budget for a provisional paint, never a minimum
+/// loading duration: readiness, editing, dialogs and errors bypass it. Input is
+/// owned by the async driver and never waits on this renderer-thread decision.
+fn await_first_paint(state: &SharedState, rx: &Receiver<RenderCommand>) -> bool {
+    let deadline = Instant::now() + RESIZE_POLL_INTERVAL;
+    loop {
+        {
+            let shell = state.borrow();
+            if !shell.startup_pending
+                || shell.editor.revision() != 0
+                || state.input_sequence() != 0
+                || shell.panel.is_some()
+                || shell.overlay.is_some()
+                || shell.error.is_some()
+                || shell.close_requested
+            {
+                return true;
+            }
+        }
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(RenderCommand::Render) => {}
+            Ok(RenderCommand::DumpFrame(reply)) => {
+                let _ = reply.send(Vec::new());
+            }
+            Ok(RenderCommand::Suspend(reply)) => {
+                let _ = reply.send(());
+                return false;
+            }
+            Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+        }
+    }
+}
+
+#[derive(Default)]
+struct StartupPaintTrace {
+    first: bool,
+    ready: bool,
+    settled: bool,
+}
+
+impl StartupPaintTrace {
+    fn written(&mut self, pending: bool, extensions_loading: bool) {
+        if !self.first {
+            self.first = true;
+            crate::app::bootstrap::startup_phase("frame.first-written");
+            crate::app::bootstrap::startup_phase("frame.editable-written");
+        }
+        if !pending && !self.ready {
+            self.ready = true;
+            crate::app::bootstrap::startup_phase("frame.ready-written");
+        }
+        if !pending && !extensions_loading && !self.settled {
+            self.settled = true;
+            crate::app::bootstrap::startup_phase("frame.settled-written");
+        }
+    }
+}
+
 // The same loop is exercised with an in-memory terminal and resize probe in
 // tests, without reading/changing the test runner's physical terminal state.
 pub(super) fn render_loop_with_terminal(
@@ -773,6 +833,9 @@ pub(super) fn render_loop_with_terminal(
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
+    if !await_first_paint(&state, &rx) {
+        return;
+    }
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
     // policy in `native_scrollback` (not native history) decides which rows stay
@@ -797,12 +860,27 @@ pub(super) fn render_loop_with_terminal(
         tui.request_render_force(true);
     }
     let mut painted_resize_epoch = state.borrow().resize_epoch;
-    tui.start();
-    state.frame_written_at(tui.rendered_viewport_top());
-    // Startup waits for resolved session metadata; a newly resumed renderer
-    // writes its title once even if the semantic name has not changed.
+    // Native terminal ownership belongs here, not in a process extension.
+    // Pi enters before rendering (packages/tui/src/tui-alt-screen.ts:384-386).
+    // Batch that entry with chrome and cursor to avoid a visible empty screen.
     let mut last_title = None;
-    sync_terminal_chrome(&mut tui, &state, &mut last_title);
+    let mut startup_trace = StartupPaintTrace::default();
+    let (pending, loading) = {
+        let shell = state.borrow();
+        (
+            shell.startup_pending,
+            shell.extension_loading_status.is_some(),
+        )
+    };
+    tui.synchronized_output(|tui| {
+        sync_terminal_chrome(tui, &state, &mut last_title);
+        tui.start();
+    });
+    if last_title.is_some() {
+        crate::app::bootstrap::startup_phase("title.written");
+    }
+    startup_trace.written(pending, loading);
+    state.frame_written_at(tui.rendered_viewport_top());
 
     let mut pacer = FramePacer::default();
     // Capture before each paint: an edit admitted during a slow terminal write
@@ -945,7 +1023,6 @@ pub(super) fn render_loop_with_terminal(
             last_editor_revision = shell.editor.revision();
             last_startup_pending = shell.startup_pending;
         }
-        sync_terminal_chrome(&mut tui, &state, &mut last_title);
         // Dimensions alone miss an away-and-back resize whose final size is
         // unchanged. Capture before writing so a newer resize during the paint
         // remains pending instead of being mistaken for the rendered geometry.
@@ -954,7 +1031,28 @@ pub(super) fn render_loop_with_terminal(
         // slow paint is paid out of the budget rather than added after it.
         let input_sequence = state.input_sequence();
         pacer.begin();
-        tui.request_render_force(resize_epoch != painted_resize_epoch);
+        let (pending, loading) = {
+            let shell = state.borrow();
+            (
+                shell.startup_pending,
+                shell.extension_loading_status.is_some(),
+            )
+        };
+        let title_was_written = last_title.is_some();
+        if !pending && !title_was_written {
+            tui.synchronized_output(|tui| {
+                sync_terminal_chrome(tui, &state, &mut last_title);
+                tui.request_render_force(resize_epoch != painted_resize_epoch);
+            });
+        } else {
+            // Unchanged frames stay quiet; a transaction alone is not a paint.
+            sync_terminal_chrome(&mut tui, &state, &mut last_title);
+            tui.request_render_force(resize_epoch != painted_resize_epoch);
+        }
+        if !title_was_written && last_title.is_some() {
+            crate::app::bootstrap::startup_phase("title.written");
+        }
+        startup_trace.written(pending, loading);
         state.frame_written_at(tui.rendered_viewport_top());
         crate::tui::latency::painted(input_sequence);
         last_input_sequence = input_sequence;

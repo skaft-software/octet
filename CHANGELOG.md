@@ -122,6 +122,7 @@
 - Pi extensions can switch back to a previously opened session while captured contexts from its prior incarnation stay retired.
 - Wheel scrolling moves the transcript over hints and viewport edges while the scrollbar holds a pointer press.
 - Pi custom editors retain pending edits and resume ordered input when native panels such as `/extensions` close.
+- Fast terminal startup paints screen entry, resolved chrome, title and cursor together while slow initialization keeps editing responsive.
 
 ## [0.10.4] - 2026-11-12
 

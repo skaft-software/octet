@@ -1,4 +1,5 @@
 use super::*;
+use std::thread;
 
 struct RecordingTerminal {
     writes: Arc<Mutex<String>>,
@@ -348,4 +349,77 @@ fn ansi_and_native_stop_suspend_retire_live_activity_but_preserve_results() {
             }
         }
     }
+}
+
+#[test]
+fn fast_startup_first_transaction_contains_ready_chrome_title_and_cursor() {
+    let state = SharedState::new(ShellState {
+        theme: crate::tui::theme::test_theme(),
+        size: (80, 24),
+        startup_pending: true,
+        follow_tail: true,
+        ..ShellState::default()
+    });
+    let writes = Arc::new(Mutex::new(String::new()));
+    let (tx, rx) = mpsc::channel();
+    let publish = state.clone();
+    let output = writes.clone();
+    let worker = thread::spawn(move || {
+        // A quick initialization completes between renderer construction and
+        // the existing idle poll deadline, not after an artificial sleep gate.
+        thread::sleep(Duration::from_millis(5));
+        {
+            let mut shell = publish.borrow_mut();
+            shell.startup_pending = false;
+            shell.startup_card_started_at = Some(Instant::now());
+            shell.session_name = Some("Resolved".into());
+            shell.model_display = "startup-model".into();
+        }
+        tx.send(RenderCommand::Render).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !output.lock().unwrap().contains("startup-model") {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        tx.send(RenderCommand::Stop).unwrap();
+    });
+    render_loop_with_terminal(
+        RecordingTerminal {
+            writes: writes.clone(),
+            capabilities: sexy_tui_rs::TerminalCapabilities {
+                synchronized_output: true,
+                ..interactive_capabilities()
+            },
+        },
+        state,
+        Arc::new(Mutex::new((80, 24))),
+        rx,
+        RenderLoopOptions {
+            alternate_screen: true,
+            ..Default::default()
+        },
+        |_, _| false,
+    );
+    worker.join().unwrap();
+    let output = writes.lock().unwrap();
+    let end = output.find("\x1b[?2026l").unwrap();
+    let first = &output[..end];
+    assert!(
+        first.contains("startup-model"),
+        "partial first transaction: {first:?}"
+    );
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    parser.process(first.as_bytes());
+    assert!(
+        parser.screen().contents().contains("octet  v"),
+        "{}",
+        parser.screen().contents()
+    );
+    assert!(first.contains("\x1b]2;octet · Resolved\x07"));
+    assert!(first.contains("\x1b[?1049h"));
+    assert!(first.contains("\x1b[?25h"));
+    assert!(
+        output.starts_with("\x1b[?2026h"),
+        "screen entry escaped the first transaction"
+    );
 }

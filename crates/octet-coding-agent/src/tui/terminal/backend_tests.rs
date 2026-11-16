@@ -19,6 +19,7 @@ fn terminal_with_hyperlinks(supported: bool) -> OctetTerminal<Vec<u8>> {
         image_store: TerminalImageStore::default(),
         write_log: None,
         in_synchronized_frame_depth: 0,
+        initial_frame: false,
     }
 }
 
@@ -63,6 +64,7 @@ fn osc8_policy_preserves_other_controls_and_every_utf8_safe_chunk_boundary() {
                 image_store: TerminalImageStore::default(),
                 write_log: None,
                 in_synchronized_frame_depth: 0,
+                initial_frame: false,
             };
             backend.write(SYNC_OUTPUT_BEGIN);
             backend.write(&body[..split]);
@@ -136,6 +138,7 @@ fn filtered_hyperlink_frame_retains_write_all_and_single_flush_on_short_sink_wri
         image_store: TerminalImageStore::default(),
         write_log: None,
         in_synchronized_frame_depth: 0,
+        initial_frame: false,
     };
     backend.write(SYNC_OUTPUT_BEGIN);
     backend.write("\x1b]8;;https://example.test/\x07界é\x1b]8;;\x07");
@@ -250,6 +253,7 @@ fn a_multi_row_frame_reaches_the_sink_in_one_write() {
         image_store: TerminalImageStore::default(),
         write_log: None,
         in_synchronized_frame_depth: 0,
+        initial_frame: false,
     };
     // The shape of a differential repaint: cursor motion, per-row clears and
     // text, emitted through many backend calls inside one frame.
@@ -478,5 +482,53 @@ fn the_encoded_cache_stays_bounded_across_many_resizes() {
         backend.image_store.encoded_len() <= MAX_ENCODED_IMAGES,
         "encoded cache grew to {}",
         backend.image_store.encoded_len()
+    );
+}
+
+#[test]
+fn first_frame_batches_screen_entry_title_content_and_cursor_in_one_physical_write() {
+    let mut backend = OctetTerminal {
+        out: RecordingSink::default(),
+        size: Arc::new(Mutex::new((80, 24))),
+        last_was_cr: false,
+        hyperlink_filter: None,
+        pending: Vec::new(),
+        pending_log: Vec::new(),
+        image_store: TerminalImageStore::default(),
+        write_log: None,
+        in_synchronized_frame_depth: 0,
+        initial_frame: true,
+    };
+    backend.write(SYNC_OUTPUT_BEGIN);
+    backend.write("\x1b]2;octet · Ready\x07");
+    backend.enter_alternate_screen("\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H");
+    assert!(
+        backend.out.frames.is_empty(),
+        "screen entry flushed an empty frame"
+    );
+    backend.write("\x1b[?2026h\x1b[1;1HReady chrome\x1b[3;1HDraft\x1b[3;6H\x1b[?25h\x1b[?2026l");
+    assert!(
+        backend.out.frames.is_empty(),
+        "nested frame escaped the transaction"
+    );
+    backend.write(SYNC_OUTPUT_END);
+    assert_eq!(backend.out.frames.len(), 1);
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    // Inspect every physical write, not only a concatenated final transcript.
+    for frame in &backend.out.frames {
+        parser.process(frame);
+        assert!(parser.screen().contents().contains("Ready chrome"));
+        assert!(parser.screen().contents().contains("Draft"));
+        assert_eq!(parser.screen().cursor_position(), (2, 5));
+        assert!(!parser.screen().hide_cursor());
+        assert!(frame.starts_with(SYNC_OUTPUT_BEGIN.as_bytes()));
+        assert!(frame.ends_with(SYNC_OUTPUT_END.as_bytes()));
+        assert!(frame.windows(8).any(|bytes| bytes == b"\x1b]2;octe"));
+    }
+    assert!(
+        !backend.out.frames[0]
+            .windows(4)
+            .any(|bytes| bytes == b"\x1b[3J"),
+        "shell scrollback was erased"
     );
 }

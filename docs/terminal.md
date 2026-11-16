@@ -83,9 +83,22 @@ the session or model changed meanwhile. Setup prompts, errors, and cancel or
 shutdown diagnostics stay visible. Fresh sessions skip the replay worker
 entirely, and resumed sessions still restore their history. `--models` inventory
 discovery also runs after the shell owns input, not before the first paint.
+Fast ANSI startup coalesces into the resolved first frame, including screen
+entry, title and cursor. The existing 100 ms idle-poll interval bounds how long
+an unresolved initial paint can be coalesced; readiness, typing, setup panels,
+errors and cancellation bypass that budget. It is not a minimum loading time,
+and input never waits for cosmetic work. Slower initialization keeps the neutral
+composer editable without provisional model branding or changing its geometry.
 With `OCTET_STARTUP_TRACE=1`, stderr's `frame.ready` marks resolved native
 session/input ownership independently of splash and footer labels; it does not
-mean extension startup has settled. Ctrl+D restores the starting terminal
+mean extension startup has settled. `frame.first-written` and
+`frame.editable-written` mark completed first ANSI output; `frame.ready-written`
+marks resolved output. `submission.ready` marks the first native submission
+boundary after extension startup settles. `frame.settled-written` marks painted
+native chrome with the extension-loading status cleared. `title.written` follows
+the transaction containing the first OSC 2 title. These are application/write
+boundaries, not emulator pixels or title-bar display timestamps. Redirect stderr
+to a file for off-screen traces. See the [handoff audit](benchmarks/startup-handoff.md). Ctrl+D restores the starting terminal
 settings, including under tmux after extension reload and resize.
 
 An extension's custom editor, footer, header, or widgets that appear during
@@ -109,9 +122,11 @@ it. Submit after resolution.
 
 After session resolution, the interactive renderer sets the terminal window
 title to `octet` or `octet · <session name>` (via OSC 2). It updates on rename
-and session changes, and nothing is written to plain, print or RPC output. When
-auto-theme detection needs an OSC 11 background-color reply, the probe starts
-after the first ready frame. A changed background triggers a repaint, and a
+and session changes, and nothing is written to plain, print or RPC output. The
+first title shares the synchronized transaction with the resolved frame; a
+terminal or multiplexer can still present its heading later. When auto-theme
+detection needs an OSC 11 background-color reply, the probe starts alongside
+initialization, without waiting before the first paint. A changed background triggers a repaint, and a
 timeout or an unsupported reply keeps the initial theme.
 
 </details>

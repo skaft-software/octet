@@ -337,6 +337,8 @@ pub struct OctetTerminal<W: FrameSink = Stdout> {
     image_store: TerminalImageStore,
     write_log: Option<File>,
     in_synchronized_frame_depth: usize,
+    /// Visible setup belongs to the first frame, not raw-mode acquisition.
+    initial_frame: bool,
 }
 
 /// SGR 1006 and 1016 have identical byte shapes but different coordinate units.
@@ -439,20 +441,8 @@ impl OctetTerminal<Stdout> {
         execute!(
             out,
             event::EnableBracketedPaste,
-            cursor::SetCursorStyle::SteadyBlock,
-            cursor::Hide,
-            // The renderer owns the complete physical viewport. ED2/CUP do
-            // not reset inherited scrolling margins or origin mode: cursor-up
-            // can clamp at that margin while the logical cursor keeps moving,
-            // leaving a stale version/logo strip on each subsequent redraw.
-            // Establish physical coordinates without erasing saved lines.
-            crossterm::style::Print("\x1b[?6l\x1b[r"),
-            // Pi's first primary-screen frame deliberately preserves saved
-            // lines and therefore does not erase physical rows left by the
-            // shell. Clear only the visible viewport before that frame; ED 3
-            // is intentionally omitted so ordinary terminal history survives.
-            terminal::Clear(terminal::ClearType::All),
-            cursor::MoveTo(0, 0),
+            // Visual setup is deferred until the first complete frame. Raw
+            // input and keyboard negotiation remain immediately available.
         )?;
         // Native Tern owns an inline surface, regardless of the ANSI screen
         // preference. Capturing here diverts its touchpad/selection gestures
@@ -503,6 +493,7 @@ impl OctetTerminal<Stdout> {
             image_store,
             write_log: open_tui_write_log(std::env::var_os("OCTET_TUI_WRITE_LOG")),
             in_synchronized_frame_depth: 0,
+            initial_frame: true,
         })
     }
 }
@@ -722,7 +713,7 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
         // Mirror it only where that request succeeded (never on consoles such
         // as Windows' where crossterm cannot push keyboard flags).
         if !lifecycle::keyboard_enhancement_active() {
-            self.flush_pending();
+            self.flush_if_outside_frame();
             return;
         }
         let mut bytes = Vec::new();
@@ -733,7 +724,7 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
         .is_ok()
         {
             self.append_backend_bytes(&bytes);
-            self.flush_pending();
+            self.flush_if_outside_frame();
             lifecycle::mark_alt_keyboard_enhancement_active();
         }
     }
@@ -749,7 +740,7 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
         }
         self.append_backend_bytes(&bytes);
         self.write(sequence);
-        self.flush_pending();
+        self.flush_if_outside_frame();
     }
 
     fn write(&mut self, data: &str) {
@@ -757,7 +748,19 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
         // opt-in legacy inline extension can still write bare LF; raw mode
         // disables output post-processing, so normalize those at the backend
         // while preserving Pi's existing CRLF sequences.
-        self.append_render_data(data);
+        if self.initial_frame && data.starts_with(SYNC_OUTPUT_BEGIN) {
+            self.initial_frame = false;
+            self.append_render_data(SYNC_OUTPUT_BEGIN);
+            // Native terminal ownership: reset inherited origin/margins and
+            // clear only the viewport, preserving saved shell history. Pi's
+            // fullscreen entry uses ED2/CUP (packages/tui/src/tui-alt-screen.ts:
+            // 384-386); its title uses OSC 0 (terminal.ts:600-604). Octet keeps
+            // its existing OSC 2 contract and batches both with the first paint.
+            self.append_render_data("\x1b[0m\x1b[2 q\x1b[?25l\x1b[?6l\x1b[r\x1b[2J\x1b[H");
+            self.append_render_data(&data[SYNC_OUTPUT_BEGIN.len()..]);
+        } else {
+            self.append_render_data(data);
+        }
 
         let begin_count = data.matches(SYNC_OUTPUT_BEGIN).count();
         let end_count = data.matches(SYNC_OUTPUT_END).count();

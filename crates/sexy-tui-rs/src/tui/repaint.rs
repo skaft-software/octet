@@ -17,6 +17,15 @@ use super::kitty::{delete_all_kitty_images, is_image_line};
 use super::TUI;
 
 impl<'a> TUI<'a> {
+    /// Batch terminal chrome and rendering in one synchronized output transaction.
+    /// Nested render helpers share this transaction; the backend can flush once
+    /// after title, screen entry, content and hardware cursor have been written.
+    pub fn synchronized_output(&mut self, paint: impl FnOnce(&mut Self)) {
+        self.begin_synchronized_output();
+        paint(self);
+        self.end_synchronized_output();
+    }
+
     pub(super) fn begin_synchronized_output(&mut self) {
         if !self.capabilities.synchronized_output {
             return;

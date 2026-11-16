@@ -7001,7 +7001,13 @@ fn startup_phase_line(phase: &str, elapsed: std::time::Duration) -> String {
 /// `session.marker`, `catalog.client`, `bootstrap.ready`, `session.resolve`, `session.replay`,
 /// `extensions.provider-preflight`, `extensions.prestart`, `extensions.activate`,
 /// `app.build`, `app.config.persisted`, `app.goal.open`, `app.complete`,
-/// `history.hydrate`, `frame.ready`, `theme.published`. `process.enter` starts after
+/// `history.hydrate`, `frame.ready`, `theme.published`. ANSI renderer completion
+/// adds `frame.first-written`, `frame.editable-written`, `frame.ready-written`,
+/// `frame.settled-written` and `title.written`; `submission.ready` names the
+/// first native submission boundary after deferred startup settles. Written
+/// means the backend transaction completed, not emulator pixels or title-bar
+/// presentation. Redirect stderr to keep trace records off the TUI.
+/// `process.enter` starts after
 /// the Tokio runtime has initialized; spawn-to-first-editable-frame latency must
 /// be measured outside the process on a PTY, not inferred from this trace.
 /// `theme.published` marks the one publication that changed the painted theme:

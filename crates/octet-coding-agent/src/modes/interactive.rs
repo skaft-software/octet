@@ -13433,6 +13433,7 @@ async fn run_interactive_once(
     // Owns the idle "extensions loading" status: cleared only when this loop
     // set it, never over a run or compaction label it did not write.
     let mut extension_status_shown = app.executable_extensions.startup_pending();
+    let mut submission_ready_traced = false;
     'interactive: loop {
         if app.executable_extensions.startup_pending() {
             shell.set_run_label(&pending_extension_label(&app));
@@ -13482,7 +13483,12 @@ async fn run_interactive_once(
             shell.set_run_label("idle");
             shell.set_extension_loading_status(None);
             crate::app::bootstrap::startup_phase("extensions.hooks-settled");
+            shell.render();
             extension_status_shown = false;
+        }
+        if !submission_ready_traced && !app.executable_extensions.startup_pending() {
+            crate::app::bootstrap::startup_phase("submission.ready");
+            submission_ready_traced = true;
         }
         let thinking_input = if startup_input.is_none() {
             shell.take_thinking_submission(&thinking_selection_owner(&app), &app.reasoning)

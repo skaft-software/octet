@@ -341,14 +341,15 @@ impl<'a> TUI<'a> {
     /// and leaving the alternate screen for its whole lifetime.
     pub fn set_alternate_screen(&mut self, enabled: bool) {
         self.inline_scrollback = false;
-        let synchronized_output = self.capabilities.synchronized_output;
         self.alternate_screen_session = if enabled {
             Some(crate::alt_screen::AlternateScreen::new(
                 crate::alt_screen::AltScreenOptions {
                     // Mouse reporting stays with the backend that enabled it.
                     mouse: false,
                     all_motion_mouse: false,
-                    synchronized_output,
+                    // TUI owns the transaction so outer chrome/entry batching
+                    // shares the same markers instead of nesting raw CSI 2026.
+                    synchronized_output: false,
                 },
             ))
         } else {
@@ -551,11 +552,13 @@ impl<'a> TUI<'a> {
             // reader's terminal keeps the transcript after the session ends.
             // Autowrap returns to the terminal inside the session's exit.
             let document = std::mem::take(&mut self.previous_frame);
+            self.begin_synchronized_output();
             session.exit(
                 &mut *self.terminal,
                 &document,
                 !self.restore_transcript_on_exit,
             );
+            self.end_synchronized_output();
             self.terminal.stop();
             return;
         }
