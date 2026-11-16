@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Composer overflow counts sit in centered, subdued border labels, leaving more
+  room for draft text while preserving model-coloured rules and custom chrome.
+
 - Codex uses provider-default context budgets instead of a universal 272K cap,
   preserving GPT-6.1 Sol and Terra's advertised 500K defaults through discovery,
   caching, registration and compaction. Explicit budgets use provider maxima

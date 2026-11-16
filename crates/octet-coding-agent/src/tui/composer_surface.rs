@@ -188,6 +188,44 @@ fn horiz(state: &super::view::ShellState) -> &str {
     state.theme.glyph("horizontal")
 }
 
+fn overflow_label(theme: &super::theme::OctetTheme, count: usize, above: bool) -> String {
+    let arrow = match (theme.unicode(), above) {
+        (true, true) => "↑",
+        (true, false) => "↓",
+        (false, true) => "^",
+        (false, false) => "v",
+    };
+    format!("{arrow} {count} more")
+}
+
+fn overflow_rule(
+    theme: &super::theme::OctetTheme,
+    border: (u8, u8, u8),
+    width: usize,
+    count: usize,
+    above: bool,
+) -> String {
+    let horizontal = theme.glyph("horizontal");
+    if count == 0 {
+        return theme.rgb_fg(border, &horizontal.repeat(width));
+    }
+    let label = overflow_label(theme, count, above);
+    let label = if visible_width(&label) + 2 <= width {
+        format!(" {label} ")
+    } else {
+        let short = label.trim_end_matches(" more");
+        fit_line(short, width as u16)
+    };
+    let remaining = width.saturating_sub(visible_width(&label));
+    let left = remaining / 2;
+    format!(
+        "{}{}{}",
+        theme.rgb_fg(border, &horizontal.repeat(left)),
+        theme.fg("dim", &label),
+        theme.rgb_fg(border, &horizontal.repeat(remaining - left)),
+    )
+}
+
 fn render_topline(state: &super::view::ShellState, width: u16, now: Instant) -> String {
     let theme = &state.theme;
     let border = theme
@@ -318,7 +356,7 @@ fn materialized_text_width(geometry: ComposerEditorGeometry, prefix: &str) -> us
 /// Render composer content inside the shared horizontal inset. Plain boxed
 /// rules span the terminal, while explicit framed/shaded theme chrome stays
 /// on the content grid. Selected prompt text copies without chrome. Rules
-/// remain byte-stable while a draft changes or work runs; live motion belongs
+/// retain stable colour and geometry; overflow counts label the rules. Live motion belongs
 /// to the semantic transcript entry doing the work.
 fn render_composer_box(
     state: &super::view::ShellState,
@@ -338,7 +376,6 @@ fn render_composer_box(
     let inset = usize::from(layout.inset);
     let frame_width = usize::from(layout.content_width);
     let frame_prefix = " ".repeat(inset);
-    let h = horiz(state);
     let chrome = composer_chrome(theme);
     let inner_width = geometry.inner_width();
 
@@ -350,14 +387,34 @@ fn render_composer_box(
     let shaded_bg = (chrome == ComposerChrome::Shaded)
         .then(|| theme.role_rgb("composer_bg"))
         .flatten();
-    let render_rule = || -> String { theme.rgb_fg(border_rgb, &h.repeat(terminal_width)) };
-    let frame_rule = |left: &str, right: &str| -> String {
+    let ruled = matches!(chrome, ComposerChrome::Boxed | ComposerChrome::Framed);
+    let total_lines = editor.line_count();
+    let visible_rows = if !ruled && total_lines > content_rows {
+        content_rows.saturating_sub(1).max(1)
+    } else {
+        content_rows.max(1)
+    }
+    .min(total_lines);
+    let start = editor
+        .cursor_row()
+        .saturating_add(1)
+        .saturating_sub(visible_rows);
+    let end = (start + visible_rows).min(total_lines);
+    let hidden_above = start;
+    let hidden_below = total_lines.saturating_sub(end);
+    let render_rule = |count, above| overflow_rule(theme, border_rgb, terminal_width, count, above);
+    let frame_rule = |left: &str, right: &str, count, above| -> String {
         format!(
-            "{frame_prefix}{}",
-            theme.rgb_fg(
+            "{frame_prefix}{}{}{}",
+            theme.rgb_fg(border_rgb, left),
+            overflow_rule(
+                theme,
                 border_rgb,
-                &format!("{left}{}{right}", h.repeat(frame_width.saturating_sub(2))),
-            )
+                frame_width.saturating_sub(2),
+                count,
+                above
+            ),
+            theme.rgb_fg(border_rgb, right),
         )
     };
     // A theme that caps its reading column would otherwise float a narrow
@@ -409,11 +466,13 @@ fn render_composer_box(
 
     let mut lines = Vec::with_capacity(content_rows + 2);
     match chrome {
-        ComposerChrome::Boxed => lines.push(render_rule()),
+        ComposerChrome::Boxed => lines.push(render_rule(hidden_above, true)),
         ComposerChrome::Topline => lines.push(render_topline(state, width, _now)),
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("top_left"),
             theme.glyph("top_right"),
+            hidden_above,
+            true,
         )),
         ComposerChrome::Shaded => lines.push(blank_shaded_row()),
     }
@@ -441,32 +500,16 @@ fn render_composer_box(
             }
         }
     } else {
-        let total_lines = editor.line_count();
-        let overflow = total_lines.saturating_sub(content_rows);
-        let visible_rows = if overflow > 0 {
-            (content_rows.saturating_sub(1)).max(1).min(total_lines)
-        } else {
-            content_rows.max(1).min(total_lines)
-        };
-        let mut start = editor
-            .cursor_row()
-            .saturating_add(1)
-            .saturating_sub(visible_rows);
-        let end = (start + visible_rows).min(total_lines);
-        if end.saturating_sub(start) < visible_rows {
-            start = end.saturating_sub(visible_rows);
-        }
-        let hidden_above = start;
-        let hidden_below = total_lines.saturating_sub(end);
-
         let mut rendered = Vec::with_capacity(content_rows);
-        if hidden_above > 0 {
-            let ellipsis = theme.glyph("ellipsis");
-            let message = format!(
-                "{ellipsis} {hidden_above} more line{} above",
-                if hidden_above == 1 { "" } else { "s" }
-            );
-            rendered.push(render_row(&theme.fg("accent", &message)));
+        if !ruled && hidden_above > 0 {
+            let mut label = overflow_label(theme, hidden_above, true);
+            if hidden_below > 0 {
+                label.push_str(&format!(
+                    " / {}",
+                    overflow_label(theme, hidden_below, false)
+                ));
+            }
+            rendered.push(render_row(&theme.fg("dim", &label)));
         }
 
         for index in start..end {
@@ -483,13 +526,10 @@ fn render_composer_box(
             rendered.push(render_row(&format!("{prefix}{row}")));
         }
 
-        if hidden_below > 0 {
-            let ellipsis = theme.glyph("ellipsis");
-            let message = format!(
-                "{ellipsis} {hidden_below} more line{} below",
-                if hidden_below == 1 { "" } else { "s" }
-            );
-            rendered.push(render_row(&theme.fg("accent", &message)));
+        if !ruled && hidden_above == 0 && hidden_below > 0 {
+            rendered.push(render_row(
+                &theme.fg("dim", &overflow_label(theme, hidden_below, false)),
+            ));
         }
 
         while rendered.len() < content_rows {
@@ -499,11 +539,13 @@ fn render_composer_box(
     }
 
     match chrome {
-        ComposerChrome::Boxed => lines.push(render_rule()),
+        ComposerChrome::Boxed => lines.push(render_rule(hidden_below, false)),
         ComposerChrome::Topline => {}
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("bottom_left"),
             theme.glyph("bottom_right"),
+            hidden_below,
+            false,
         )),
         ComposerChrome::Shaded => lines.push(blank_shaded_row()),
     }
@@ -1329,6 +1371,131 @@ mod tests {
                     .all(|line| visible_width(line) <= width as usize),
                 "{width}: {plain:?}"
             );
+        }
+    }
+
+    #[test]
+    fn overflow_labels_live_in_rules_without_consuming_draft_rows() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme();
+        let text = (0..12)
+            .map(|n| format!("row {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for width in [12, 40, 81] {
+            let geometry = composer_editor_geometry(&state, width);
+            for cursor in [0, text.find("row 6").unwrap(), text.len()] {
+                let editor = ComposerEditorProjection::new(&text, cursor, geometry.text_width());
+                let rows = render_composer_box(&state, width, Instant::now(), 4, geometry, &editor);
+                assert_eq!(rows.len(), 6);
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| row.contains(CURSOR_MARKER))
+                        .count(),
+                    1
+                );
+                assert!(rows
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                let plain = rows
+                    .iter()
+                    .map(|row| sexy_tui_rs::strip_terminal_sequences(row))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    plain[1..5]
+                        .iter()
+                        .filter(|row| row.contains("row "))
+                        .count(),
+                    4
+                );
+                let start = editor.cursor_row().saturating_add(1).saturating_sub(4);
+                let below = editor.line_count().saturating_sub(start + 4);
+                if start > 0 {
+                    assert!(plain[0].contains(&format!("↑ {start} more")), "{plain:?}");
+                }
+                if below > 0 {
+                    assert!(plain[5].contains(&format!("↓ {below} more")), "{plain:?}");
+                }
+                assert!(!plain.join("\n").contains("more lines"));
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_rules_center_labels_and_support_ascii_and_tiny_widths() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        for unicode in [true, false] {
+            let theme = crate::tui::theme::test_theme_with(TerminalCapabilities::test(
+                true,
+                unicode,
+                ColorDepth::None,
+            ));
+            for width in 0..100 {
+                for count in [0, 1, 123456] {
+                    for above in [true, false] {
+                        let row = overflow_rule(&theme, (128, 128, 128), width, count, above);
+                        let plain = sexy_tui_rs::strip_terminal_sequences(&row);
+                        assert_eq!(visible_width(&plain), width);
+                        if !unicode {
+                            assert!(plain.is_ascii(), "{plain:?}");
+                        }
+                        let label = format!(" {} ", overflow_label(&theme, count, above));
+                        if count > 0 && visible_width(&label) <= width {
+                            let offset = plain.find(&label).unwrap();
+                            assert_eq!(
+                                visible_width(&plain[..offset]),
+                                (width - visible_width(&label)) / 2
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_preserves_custom_chrome_and_cursor_through_wrapping() {
+        for chrome in ["boxed", "framed", "shaded", "topline"] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = crate::tui::theme::test_theme_from_source(&format!(
+                "[colors]\ncomposer = \"{chrome}\"\n[layout]\nshow_footer = true"
+            ));
+            let text = "界e\u{301} long wrapped draft ".repeat(30);
+            for width in [12, 40, 81] {
+                let geometry = composer_editor_geometry(&state, width);
+                let cursor = text.char_indices().nth(350).unwrap().0;
+                let editor = ComposerEditorProjection::new(&text, cursor, geometry.text_width());
+                let rows = render_composer_box(&state, width, Instant::now(), 4, geometry, &editor);
+                assert_eq!(
+                    rows.len(),
+                    if chrome == "topline" { 5 } else { 6 },
+                    "{chrome}"
+                );
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| row.contains(CURSOR_MARKER))
+                        .count(),
+                    1
+                );
+                assert!(rows
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                let plain = rows
+                    .iter()
+                    .map(|row| sexy_tui_rs::strip_terminal_sequences(row))
+                    .collect::<Vec<_>>();
+                if chrome == "shaded" {
+                    assert!(!plain.join("\n").contains('─'));
+                }
+                if chrome == "framed" {
+                    assert!(plain[0].contains(state.theme.glyph("top_left")));
+                    assert!(plain[5].contains(state.theme.glyph("bottom_right")));
+                }
+                if matches!(chrome, "boxed" | "framed") {
+                    assert!(plain[0].contains('↑'), "{plain:?}");
+                    assert!(plain[5].contains('↓'), "{plain:?}");
+                }
+            }
         }
     }
 

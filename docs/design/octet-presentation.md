@@ -94,7 +94,12 @@ markers begin at terminal column 0; primary text begins at column 2; and
 nested detail begins at column 4. Narrow pickers collapse to compact rows,
 regular terminals stack labels over metadata, and genuinely wide terminals may
 use columns. The composer keeps stable full-width top and bottom rules and no
-side borders, so copied draft text cannot include frame characters. Its height
+side borders, so copied draft text cannot include frame characters. When wrapped
+rows extend beyond the editor viewport, centered `↑ N more` / `↓ N more` labels
+occupy the top/bottom rules rather than draft rows. Labels use subdued text and
+ASCII arrow fallbacks; rule colour and geometry remain stable. Framed themes
+keep their corners; shaded and metadata-topline themes retain compact in-content
+hints without adding rules or replacing metadata. Its height
 grows proportionally but remains bounded by terminal height. Default tool/shell
 headers and output share a two-cell right gutter (reduced safely in tiny panes);
 this is layout space, never part of source or semantic copy text. Code surfaces and

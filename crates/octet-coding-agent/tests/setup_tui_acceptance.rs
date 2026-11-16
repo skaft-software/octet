@@ -780,11 +780,11 @@ fn answer_context_window(
 ) {
     // Models without a known effective context require an explicit positive
     // limit before the reviewed transaction can be saved. In the tiny fixed
-    // fullscreen viewport the wrapped prompt label is clipped above the input
-    // row, so there the new (non-"Model ID:") input surface is the signal.
+    // fullscreen viewport the start of the wrapped prompt label and its top
+    // rule can be clipped; its final qualifier still identifies the question.
     octet.wait_for_screen(parser, consumed, columns, WAIT, |screen| {
         screen.contains("Effective context window in tokens")
-            || (screen.contains("more lines above") && !screen.contains("Model ID:"))
+            || (screen.contains("(positive number):") && !screen.contains("Model ID:"))
     });
     octet.terminal.write_input(b"32768\r");
 }
