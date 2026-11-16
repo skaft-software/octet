@@ -280,14 +280,7 @@ async fn discovery_clients_do_not_follow_authenticated_redirects() {
     .unwrap();
     assert_eq!(blocking_status, reqwest::StatusCode::FOUND);
 
-    let async_status = discovery_client(Duration::from_secs(2))
-        .unwrap()
-        .get(format!("{}/models", origin.uri()))
-        .header("x-api-key", "async-secret")
-        .send()
-        .await
-        .unwrap()
-        .status();
-    assert_eq!(async_status, reqwest::StatusCode::FOUND);
+    // The async Codex inventory client moved to octet-ai; its redirect check is
+    // `providers::codex::inventory_client_tests` there.
     assert!(destination.received_requests().await.unwrap().is_empty());
 }
