@@ -90,7 +90,7 @@ pub(super) fn node(shell: &ShellState, brand: &Brand) -> Node {
     // The composer placeholder carries the discovery hints where it fits on one
     // line; the rail carries them where it does not, so they are never doubled.
     // Each tip is its own item: a narrow pane wraps between them, never inside
-    // "ctrl+o details".
+    // "Ctrl+O details".
     let mut tips = Vec::new();
     if !super::tern::hints_in_placeholder(shell.size.0) {
         tips.push(text(
@@ -100,7 +100,7 @@ pub(super) fn node(shell: &ShellState, brand: &Brand) -> Node {
     }
     tips.push(text(
         "welcome.details",
-        vec![Span::styled("ctrl+o details", "muted")],
+        vec![Span::styled("Ctrl+O details", "muted")],
     ));
     // RAIL is one wrapping row in the conversation, not a centered startup card.
     // OMP's private welcome hooks impose their own logo sizing and animation.
@@ -275,7 +275,7 @@ mod tests {
             assert!(children
                 .iter()
                 .all(|node| matches!(node.k, Kind::Text | Kind::Image)));
-            // The tips wrap between their items, never inside "ctrl+o details".
+            // The tips wrap between their items, never inside "Ctrl+O details".
             let tips = child(&rail, "welcome.tips");
             assert_eq!(tips.k, Kind::Row);
             let props = tips.p.as_ref().unwrap().as_map();
@@ -349,7 +349,7 @@ mod tests {
             );
             let rail = node(&shell.state.borrow(), &brand);
             let tips = tip_text(child(&rail, "welcome.tips"));
-            assert!(tips.contains("ctrl+o details"), "{cols}: {tips}");
+            assert!(tips.contains("Ctrl+O details"), "{cols}: {tips}");
             for hint in ["/ commands", "@ files", "! shell"] {
                 assert_eq!(tips.contains(hint), !in_placeholder, "{cols}: {tips}");
             }
@@ -380,7 +380,7 @@ mod tests {
             );
             assert!(plain(child(&rail, "welcome.release")).contains("/changelog"));
             let tips = tip_text(child(&rail, "welcome.tips"));
-            for hint in ["/ commands", "@ files", "! shell", "ctrl+o details"] {
+            for hint in ["/ commands", "@ files", "! shell", "Ctrl+O details"] {
                 assert!(tips.contains(hint));
             }
             shell.state.borrow_mut().available_update = Some(semver::Version::new(9, 8, 7));

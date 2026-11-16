@@ -173,7 +173,7 @@ fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme, preferred_
             collapsed_reasoning_lines(theme, reasoning).join("\n")
         }
         TranscriptBlock::Compaction(compaction) if !compaction.expanded => {
-            format!("{} · (ctrl+o to view)", compaction.label)
+            format!("{} · (Ctrl+O to view)", compaction.label)
         }
         _ => block_copy_text(block),
     };

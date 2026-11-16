@@ -1262,49 +1262,9 @@ pub(super) fn visible_block_copy_rows(
         },
         visible,
         memo,
-    )
-}
-
-/// The painted content rows of one block, aligned with its copy text.
-fn painted_copy_rows(
-    state: &ShellState,
-    retained: Option<&super::renderer_geometry::RenderedGeometry>,
-    block: usize,
-    _copy_text: &str,
-    geometry: SurfaceGeometry,
-) -> Option<CopyRows> {
-    if state.render_threaded {
-        return retained?
-            .blocks
-            .iter()
-            .find(|geometry| geometry.index == block)?
-            .copy_rows
-            .clone();
-    }
-    let (start, length) = {
-        let cache = state.transcript_cache.borrow();
-        (
-            *cache.block_starts.get(block)?,
-            *cache.block_lengths.get(block)?,
-        )
-    };
-    let painted = {
-        let cache = state.transcript_cache.borrow();
-        let rows = cache.lines.get(start..start.checked_add(length)?)?;
-        #[cfg(test)]
-        super::fullscreen_work_tests::record(|work| {
-            work.bytes_cloned += rows.iter().map(String::len).sum::<usize>();
-        });
-        rows.to_vec()
-    };
-    visible_block_copy_rows(
-        state,
-        block,
-        &painted,
-        geometry,
-        0..painted.len(),
-        &mut BlockCopyMemo::default(),
-    )
+        Some(identity),
+    );
+    (!rows.is_empty()).then_some(rows)
 }
 
 fn visual_cell_to_copy_offset(

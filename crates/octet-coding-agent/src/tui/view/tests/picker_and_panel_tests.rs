@@ -252,7 +252,7 @@ fn session_picker_render_shows_scope_markers_and_fork_metadata() {
     assert!(rendered.contains("Resume Session (Current Folder)"));
     assert!(rendered.contains("Forked (fork)"));
     assert!(!rendered.contains("(current)"));
-    assert!(rendered.contains("^s sort"));
+    assert!(rendered.contains("Ctrl+S sort"));
     assert_eq!(raw.join("\n").matches(CURSOR_MARKER).count(), 1);
     assert!(plain[1].starts_with("Resume Session"), "{plain:?}");
     assert!(plain[2].starts_with("Select a saved session"), "{plain:?}");
@@ -360,8 +360,8 @@ fn session_picker_hides_advanced_filter_hints_until_used() {
         )),
     });
     let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"));
-    assert!(plain.contains("^f transcripts"), "{plain:?}");
-    assert!(plain.contains("^s sort"), "{plain:?}");
+    assert!(plain.contains("Ctrl+F transcripts"), "{plain:?}");
+    assert!(plain.contains("Ctrl+S sort"), "{plain:?}");
     assert!(!plain.contains("re:<pattern>"), "{plain:?}");
 
     let mut advanced = PickerState::new(vec![picker_session("one", "First session", 1, 1)], None);
@@ -675,7 +675,7 @@ fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
     assert!(plain.contains("2 Done"), "{plain}");
     assert!(plain.contains("2 Failed"), "{plain}");
     assert!(plain.contains("2 Stopped"), "{plain}");
-    assert!(plain.contains("ctrl+t shows all"), "{plain}");
+    assert!(plain.contains("Ctrl+T shows all"), "{plain}");
     // Bounded: the panel never renders past its row allowance.
     assert!(rows.len() <= 36, "{} panel rows", rows.len());
 
@@ -694,7 +694,7 @@ fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
     assert!(plain.contains("Done · 2"), "{plain}");
     assert!(plain.contains("Failed · 2"), "{plain}");
     assert!(plain.contains("Stopped · 2"), "{plain}");
-    assert!(!plain.contains("ctrl+t shows all"), "{plain}");
+    assert!(!plain.contains("Ctrl+T shows all"), "{plain}");
 
     // Collapsing again still lets a typed filter reach a hidden worker.
     assert!(shell
@@ -1214,10 +1214,10 @@ fn resume_named_only_empty_state_says_how_to_show_all() {
     ctrl_n(&mut shell);
     let text = resume_empty_text(&shell, 120);
     assert!(text.contains("No named sessions"), "{text}");
-    assert!(text.contains("^n"), "{text}");
+    assert!(text.contains("Ctrl+N"), "{text}");
     assert!(
         !text.contains("Tab to switch"),
-        "named-only hiding is undone with ^n, not Tab: {text}"
+        "named-only hiding is undone with Ctrl+N, not Tab: {text}"
     );
     ctrl_n(&mut shell);
     let text = resume_empty_text(&shell, 120);
@@ -1236,9 +1236,15 @@ fn resume_all_scope_no_match_does_not_offer_a_scope_switch_or_claim_empty_worksp
     type_into_picker(&mut shell, "zzz");
     let text = resume_empty_text(&shell, 120);
     assert!(text.contains("No sessions match 'zzz'"), "{text}");
+    // Tab still switches scope in the footer; only recovery guidance must not
+    // offer to search all workspaces when that scope is already active.
+    let guidance = text
+        .lines()
+        .find(|line| line.contains("No sessions match"))
+        .expect("empty-state guidance");
     assert!(
-        !text.contains("Tab"),
-        "already showing every workspace: {text}"
+        !guidance.contains("Tab"),
+        "already showing every workspace: {guidance}"
     );
     assert!(!text.contains("this workspace"), "{text}");
 
@@ -1246,7 +1252,7 @@ fn resume_all_scope_no_match_does_not_offer_a_scope_switch_or_claim_empty_worksp
     let mut shell = resume_empty_shell(vec![picker_session("one", "alpha", 1, 1)], 120);
     type_into_picker(&mut shell, "zzz");
     let text = resume_empty_text(&shell, 120);
-    assert!(text.contains("Tab"), "{text}");
+    assert!(text.contains("Tab searches all workspaces"), "{text}");
     assert!(text.contains("Backspace"), "{text}");
 }
 

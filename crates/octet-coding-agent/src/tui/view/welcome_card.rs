@@ -169,8 +169,8 @@ fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
     let mut lines: [String; PI_STARTUP_ROWS] = [
         format!("{} {}", accent("octet"), muted(&version)),
         changelog_hint(state, width),
-        muted("escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more"),
-        muted("Press ctrl+o to show full startup help and loaded resources."),
+        muted("Esc interrupt · Ctrl+C/Ctrl+D clear/exit · / commands · ! bash · Ctrl+O more"),
+        muted("Press Ctrl+O to show full startup help and loaded resources."),
         String::new(),
         muted(
             "octet can explain its own features and look up its docs. Ask it how to use or extend octet.",

@@ -205,7 +205,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
     assert!(
         replayed
             .trim_end()
-            .lines().last().is_some_and(|line| line.contains("Working (") && line.ends_with(" • esc to interrupt)"))
+            .lines().last().is_some_and(|line| line.contains("Working (") && line.ends_with(" • Esc to interrupt)"))
             || replayed.trim_end().ends_with("Working"),
         "the new turn's status row must remain the transcript tail: {replayed}"
     );
@@ -375,7 +375,7 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
     let ends_with_working = |rendered: &str| {
         rendered
             .trim_end()
-            .lines().last().is_some_and(|line| line.contains("Working (") && line.ends_with(" • esc to interrupt)"))
+            .lines().last().is_some_and(|line| line.contains("Working (") && line.ends_with(" • Esc to interrupt)"))
             || rendered.trim_end().ends_with("Working")
     };
 

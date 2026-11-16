@@ -174,11 +174,11 @@ fn queued_follow_up_heading_advertises_the_platform_edit_hint() {
         && (std::env::var_os("WSL_DISTRO_NAME").is_some()
             || std::env::var_os("WSL_INTEROP").is_some());
     let expected = if cfg!(target_os = "macos") {
-        "option+↑ to edit"
+        "Option+Up to edit"
     } else if cfg!(windows) || wsl {
-        "alt+q to edit"
+        "Alt+Q to edit"
     } else {
-        "alt+↑ to edit"
+        "Alt+Up to edit"
     };
     assert!(heading.contains(expected), "{heading:?}");
     // The hint rides on the heading row and stays inside the viewport budget.

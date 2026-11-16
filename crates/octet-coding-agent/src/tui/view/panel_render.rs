@@ -445,9 +445,9 @@ fn render_hidden_subagent_groups(
         .collect::<Vec<_>>()
         .join(separator);
     let hint = if unicode {
-        format!("hidden{separator}ctrl+t shows all")
+        format!("hidden{separator}Ctrl+T shows all")
     } else {
-        "hidden | ctrl+t shows all".to_owned()
+        "hidden | Ctrl+T shows all".to_owned()
     };
     let text = if summary.is_empty() {
         hint
@@ -816,11 +816,11 @@ fn select_list_purpose<'a>(
 ) -> Option<&'a str> {
     surface.purpose.as_deref().or_else(|| {
         action.subagent_panel().map(|_| {
-            let full = "Enter inspects · ^x stops the selected worker";
+            let full = "Enter inspects · Ctrl+X stops the selected worker";
             if usize::from(width) >= visible_width(full) + 2 {
                 full
             } else {
-                "^x stops the selected worker"
+                "Ctrl+X stops the selected worker"
             }
         })
     })
@@ -1100,7 +1100,7 @@ fn render_panel_output_with_limit(
                 let navigation = if state.theme.unicode() {
                     "↑↓"
                 } else {
-                    "up/down"
+                    "Up/Down"
                 };
                 let mut hints: Vec<(&str, &str)> = vec![(navigation, "navigate")];
                 // Only the grouped subagent panel has collapsible groups and a
@@ -1112,23 +1112,23 @@ fn render_panel_output_with_limit(
                     .map(|label| format!("state: {label}"));
                 if let Some(panel) = subagents {
                     hints.push((
-                        "ctrl+t",
+                        "Ctrl+T",
                         if panel.collapsed {
                             "show all"
                         } else {
                             "hide finished"
                         },
                     ));
-                    hints.push(("ctrl+f", "state filter"));
+                    hints.push(("Ctrl+F", "state filter"));
                 }
-                hints.push(("esc", "close"));
+                hints.push(("Esc", "close"));
                 lines.push(panel_action_footer(
                     state,
                     width,
                     &content_inset,
                     subagent_scope.as_deref(),
                     (
-                        "enter",
+                        "Enter",
                         if subagents.is_some() {
                             "inspect"
                         } else {
@@ -1180,12 +1180,12 @@ fn render_panel_output_with_limit(
             let navigation = if state.theme.unicode() {
                 "↑↓"
             } else {
-                "up/down"
+                "Up/Down"
             };
             let back = if state.theme.unicode() {
-                "esc/←"
+                "Esc/←"
             } else {
-                "esc/left"
+                "Esc/Left"
             };
             lines.push(panel_action_footer(
                 state,
@@ -1510,8 +1510,11 @@ mod subagent_surface_tests {
             let plain = super::super::strip_terminal_sequences(&rows.join("\n"));
             assert!(plain.contains("audit-auth"), "{plain}");
             assert!(plain.contains("running"), "{plain}");
-            assert!(plain.contains("enter inspect"), "{plain}");
-            assert!(plain.contains("^x stops the selected worker"), "{plain}");
+            assert!(plain.contains("Enter inspect"), "{plain}");
+            assert!(
+                plain.contains("Ctrl+X stops the selected worker"),
+                "{plain}"
+            );
             assert!(!plain.contains("state · elapsed"), "{plain}");
             assert!(rows.len() <= 20);
             assert!(rows
@@ -1537,7 +1540,7 @@ mod subagent_surface_tests {
                     .all(|row| visible_width(row) <= usize::from(width)));
                 if height >= 4 {
                     assert!(
-                        plain.contains("^x stops the selected worker"),
+                        plain.contains("Ctrl+X stops the selected worker"),
                         "{width}x{height}: {plain}"
                     );
                 }

@@ -247,7 +247,7 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
     );
     assert!(!live.contains('—'), "unknown price stays quiet: {live:?}");
     assert!(
-        !live.contains("esc"),
+        !live.contains("Esc"),
         "implicit controls stay out: {live:?}"
     );
     assert!(

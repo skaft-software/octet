@@ -1763,7 +1763,7 @@ fn working_status_reports_root_run_elapsed_time_and_interrupt_hint() {
     working.show_reasoning_hint = false;
 
     let rendered = collapsed_reasoning_lines_at(&theme, &working, 0, 0);
-    assert_eq!(rendered, vec!["Working (28s • esc to interrupt)"]);
+    assert_eq!(rendered, vec!["Working (28s • Esc to interrupt)"]);
 }
 
 #[test]
@@ -1791,9 +1791,9 @@ fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
                 .unwrap()
                 .label_at(now + Duration::from_secs(elapsed));
             let expected = if elapsed == 0 {
-                "Retrying 2/3 in 5s (esc to interrupt)"
+                "Retrying 2/3 in 5s (Esc to interrupt)"
             } else {
-                "Retrying 2/3 (esc to interrupt)"
+                "Retrying 2/3 (Esc to interrupt)"
             };
             assert_eq!(
                 activity_status_line(&theme, &working, &label, 0, 0),
@@ -1829,6 +1829,40 @@ fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_the
         settled.is_empty(),
         "finished reasoning leaves no trace when collapsed"
     );
+}
+
+#[test]
+fn shortcut_labels_match_between_reasoning_layouts() {
+    for unicode in [false, true] {
+        for custom in [false, true] {
+            let capabilities = TerminalCapabilities::test(false, unicode, ColorDepth::None);
+            let theme = if custom {
+                theme::test_theme_source_with("", capabilities, TerminalBackground::Dark)
+            } else {
+                theme::test_theme_with(capabilities)
+            };
+            for text in ["private detail", "## Check\n\nprivate detail"] {
+                let reasoning = AssistantBlock::streaming_reasoning(text);
+                for width in [32, 80] {
+                    let lines =
+                        render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, width);
+                    let rendered = strip_terminal_sequences(&lines.join("\n"));
+                    assert_eq!(
+                        rendered.matches("Ctrl+T to expand").count(),
+                        1,
+                        "{rendered}"
+                    );
+                    assert!(!rendered.contains("ctrl+t"), "{rendered}");
+                    assert!(lines
+                        .iter()
+                        .all(|line| visible_width(line) <= usize::from(width)));
+                    if !unicode {
+                        assert!(rendered.is_ascii(), "{rendered}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

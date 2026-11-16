@@ -329,7 +329,7 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     let plain_footer = strip_terminal_sequences(footer);
     assert!(
         plain_footer.contains("commands 1–5/")
-            && plain_footer.contains("↑↓ navigate · ↵ select · esc close"),
+            && plain_footer.contains("↑↓ navigate · ↵ select · Esc close"),
         "{plain_footer:?}"
     );
     assert!(footer.contains(&model_accent), "{footer:?}");
@@ -358,7 +358,7 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     let footer = paths.last().expect("mention suggestion footer");
     assert_eq!(
         strip_terminal_sequences(footer).trim(),
-        "project files · tab complete · ↑↓ navigate"
+        "project files · Tab complete · ↑↓ navigate"
     );
     assert!(footer.contains(&model_accent), "{footer:?}");
     assert!(!footer.contains(&ui_accent), "{footer:?}");
@@ -666,7 +666,7 @@ fn mention_completion_inserts_path_reference_for_text_files() {
     let rendered = render_shell(&shell.state.borrow(), 120);
     assert!(rendered
         .iter()
-        .any(|line| { strip_terminal_sequences(line).contains("project files · tab complete") }));
+        .any(|line| { strip_terminal_sequences(line).contains("project files · Tab complete") }));
     // Rendered separators are platform-native.
     assert!(rendered
         .iter()
@@ -702,7 +702,7 @@ fn early_startup_mention_recovers_when_workspace_is_installed_without_another_ed
     let rendered = render_shell(&shell.state.borrow(), 120);
     assert!(rendered
         .iter()
-        .any(|line| { strip_terminal_sequences(line).contains("project files · tab complete") }));
+        .any(|line| { strip_terminal_sequences(line).contains("project files · Tab complete") }));
     shell.complete_path();
     assert_eq!(
         shell.pending(),
@@ -725,7 +725,7 @@ fn literal_path_completion_descends_through_directories() {
     let rendered = render_shell(&shell.state.borrow(), 120);
     assert!(rendered
         .iter()
-        .any(|line| strip_terminal_sequences(line).contains("paths · tab complete")));
+        .any(|line| strip_terminal_sequences(line).contains("paths · Tab complete")));
     assert!(rendered.iter().any(|line| line.contains("./src/")));
     assert_input_suggestions_replace_status_footer(&mut shell, "paths");
 

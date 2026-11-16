@@ -237,6 +237,11 @@ See [Discovery and trust](resources.md).
 
 ## Keys
 
+TUI hints and `/hotkeys` use `Ctrl+T`-style labels: capitalized key names and
+explicit modifiers. An uppercase letter does not imply Shift; `Ctrl+Shift+T`
+is a different binding. macOS labels use Option and Cmd where applicable.
+Key IDs in `keybindings.json` keep their existing spelling.
+
 | Key | What it does |
 | --- | --- |
 | Enter | Send when idle; while octet works, steer at the next model boundary. In a picker, choose the highlighted action. In the slash popup, run the highlighted command. |

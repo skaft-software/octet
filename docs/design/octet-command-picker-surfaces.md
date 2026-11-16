@@ -170,11 +170,13 @@ The common action-footer grammar is:
 <scope-or-count> · <key> <verb> · <key> <verb> [· <key> <verb>]
 ```
 
-For example, command discovery uses `commands · ↑↓ navigate · ↵ select · esc
-close`; ASCII falls back to `commands - up/down navigate - enter select - esc
-close`. At compact widths, scope drops first. The remaining key/verb pairs are
-complete priority-ordered segments: the rightmost close/cancel pair drops, then
-select, before navigation; only navigation can truncate after every optional
+Key names use `Ctrl+X`, `Enter`, `Tab`, and `Esc` casing, with explicit Shift
+modifiers; compact navigation can retain its arrow glyphs. For example, command
+discovery uses `commands · ↑↓ navigate · ↵ select · Esc close`; ASCII falls back
+to `commands - Up/Down navigate - Enter select - Esc close`. At compact widths,
+scope drops first. The remaining key/verb pairs are complete priority-ordered
+segments: the rightmost close/cancel pair drops, then select, before navigation;
+only navigation can truncate after every optional
 segment is gone. A footer never claims a key that the current surface does not
 handle. Destructive or trust-changing actions keep their existing explicit
 approval semantics rather than being made safe by a terse footer.
@@ -249,8 +251,9 @@ The worker list reuses ordinary label/detail rows: stacked at narrow and regular
 widths when height permits, side by side on wide terminals. It has no synthetic
 column legend over its variable metadata. Enter is labelled `inspect`; the
 finished-group toggle names its current action (`show all` or `hide finished`).
-A subdued purpose hint says `Enter inspects · ^x stops the selected worker` (just
-the Ctrl+X half at narrow widths). Ctrl+X routes to the same owner-bound
+A subdued purpose hint says
+`Enter inspects · Ctrl+X stops the selected worker` (just the Ctrl+X half at
+narrow widths). Ctrl+X routes to the same owner-bound
 first-party stop, not a change in cancellation authority; the focused worker row
 takes precedence at constrained heights.
 The bounded **Subagents** transcript block remains a mutable tail, not pinned

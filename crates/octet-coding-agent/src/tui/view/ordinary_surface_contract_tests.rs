@@ -311,10 +311,10 @@ fn ordinary_surface_contract_fixture_matrix_preserves_grid_and_capabilities() {
             fixture.name
         );
         let expected_footer = match (fixture.width, fixture.unicode) {
-            (46, true) => "↑↓ navigate · ↵ select · esc close",
-            (40, false) => "up/down navigate - enter select",
-            (_, true) => "commands · ↑↓ navigate · ↵ select · esc close",
-            (_, false) => "commands - up/down navigate - enter select - esc close",
+            (46, true) => "↑↓ navigate · ↵ select · Esc close",
+            (40, false) => "Up/Down navigate - Enter select",
+            (_, true) => "commands · ↑↓ navigate · ↵ select · Esc close",
+            (_, false) => "commands - Up/Down navigate - Enter select - Esc close",
         };
         assert_eq!(
             rendered.commands.last().map(|line| line.trim_start()),
@@ -378,13 +378,13 @@ fn ordinary_surface_contract_fixture_matrix_preserves_grid_and_capabilities() {
         "ASCII focus marker: {ascii_picker}"
     );
     assert!(
-        ascii_commands.contains("up/down navigate") && ascii_commands.contains("enter select"),
+        ascii_commands.contains("Up/Down navigate") && ascii_commands.contains("Enter select"),
         "ASCII action footer: {ascii_commands}"
     );
     assert!(
-        ascii_report.contains("up/down scroll")
-            && ascii_report.contains("pgup/dn page")
-            && ascii_report.contains("esc/left close"),
+        ascii_report.contains("Up/Down scroll")
+            && ascii_report.contains("PageUp/PageDown page")
+            && ascii_report.contains("Esc/Left close"),
         "ASCII report action footer: {ascii_report}"
     );
     assert!(
@@ -444,7 +444,7 @@ fn ordinary_surface_contract_migrates_resume_extensions_and_inline_completion() 
         extension_text.contains("Manage extensions")
             && extension_text.contains("Select a bundle to inspect or manage its activation")
             && extension_text.contains("octet-web-search")
-            && extension_text.contains("enter select"),
+            && extension_text.contains("Enter select"),
         "extension picker lost shared title/purpose/action chrome: {extension_text}"
     );
 
@@ -609,8 +609,8 @@ fn ordinary_surface_contract_footer_drops_complete_lower_priority_segments() {
     set_editor(&mut shell, "/m");
 
     for (width, expected) in [
-        (40, "up/down navigate - enter select"),
-        (30, "up/down navigate"),
+        (40, "Up/Down navigate - Enter select"),
+        (30, "Up/Down navigate"),
     ] {
         let rows = plain_rows(&super::input_overlays::render_slash_suggestions(
             &shell.state.borrow(),
@@ -633,11 +633,11 @@ fn ordinary_surface_contract_footer_drops_complete_lower_priority_segments() {
     let footer = rows.last().expect("tiny slash footer");
     assert_eq!(
         footer.trim(),
-        "up/down na",
+        "Up/Down na",
         "only the highest-priority navigation segment may truncate: {footer:?}"
     );
     assert!(
-        !footer.contains("select") && !footer.contains("esc") && !footer.contains(" - "),
+        !footer.contains("select") && !footer.contains("Esc") && !footer.contains(" - "),
         "tiny footer retained a partial optional segment: {footer:?}"
     );
 }

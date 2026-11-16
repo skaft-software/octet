@@ -251,17 +251,17 @@ fn render_report_overlay(
         let navigation = if state.theme.unicode() {
             "↑↓"
         } else {
-            "up/down"
+            "Up/Down"
         };
         let page = if state.theme.unicode() {
-            "pg↑↓"
+            "Pg↑↓"
         } else {
-            "pgup/dn"
+            "PageUp/PageDown"
         };
         let close = if state.theme.unicode() {
-            "esc/←"
+            "Esc/←"
         } else {
-            "esc/left"
+            "Esc/Left"
         };
         lines.push(super::panel_render::panel_action_footer(
             state,

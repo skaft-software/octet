@@ -827,24 +827,7 @@ fn hotkey_group(id: &str) -> &'static str {
 
 /// One key id as a Markdown code chip, title-cased (`ctrl+b` → `Ctrl+B`).
 fn markdown_key_chip(key: &str) -> String {
-    let label = key
-        .split('+')
-        .map(|part| match part {
-            "pageup" => "PageUp".to_owned(),
-            "pagedown" => "PageDown".to_owned(),
-            "escape" => "Esc".to_owned(),
-            "" => "+".to_owned(),
-            _ => {
-                let mut chars = part.chars();
-                chars
-                    .next()
-                    .map(|first| first.to_uppercase().chain(chars).collect())
-                    .unwrap_or_default()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-        .replace("++", "+");
+    let label = crate::tui::keymap::keybindings::display_key_id(key, cfg!(target_os = "macos"));
     let label = markdown_table_cell(&label);
     if label.contains('`') {
         format!("`` {label} ``")
@@ -1138,6 +1121,15 @@ mod tests {
             shell.translate_input(Some(key(KeyCode::Char('d'), KeyModifiers::CONTROL)), false),
             InputAction::Closed
         );
+    }
+
+    #[test]
+    fn hotkey_chips_keep_literal_plus_and_escape_markdown_keys() {
+        assert_eq!(markdown_key_chip("ctrl+t"), "`Ctrl+T`");
+        assert_eq!(markdown_key_chip("ctrl+shift+t"), "`Ctrl+Shift+T`");
+        assert_eq!(markdown_key_chip("ctrl++"), "`Ctrl++`");
+        assert_eq!(markdown_key_chip("ctrl+|"), "`Ctrl+\\|`");
+        assert_eq!(markdown_key_chip("ctrl+`"), "`` Ctrl+` ``");
     }
 
     #[test]

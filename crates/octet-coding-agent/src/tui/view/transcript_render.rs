@@ -571,9 +571,9 @@ pub(super) fn render_block_planned_with_rainbow(
             let continuation = " ".repeat(visible_width(&prefix));
             let expanded = compaction.expanded || verbose_tools;
             let action = if expanded {
-                "ctrl+o to collapse"
+                "Ctrl+O to collapse"
             } else {
-                "ctrl+o to view"
+                "Ctrl+O to view"
             };
             let label = format!("{} · ({action})", sanitize_for_terminal(&compaction.label));
             let mut lines = wrap_hanging(&label, &prefix, &continuation, width);

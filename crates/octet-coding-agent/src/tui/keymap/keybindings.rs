@@ -141,6 +141,30 @@ pub fn normalize_key_id(raw: &str) -> String {
     }
 }
 
+/// Human-readable key name shared by terminal hints and keyboard references.
+/// Letter casing is presentation only; Shift is always an explicit modifier.
+#[must_use]
+pub(crate) fn display_key_id(key: &str, macos: bool) -> String {
+    normalize_key_id(key)
+        .split('+')
+        .map(|part| match part {
+            "alt" if macos => "Option".to_owned(),
+            "super" if macos => "Cmd".to_owned(),
+            "escape" => "Esc".to_owned(),
+            "pageup" => "PageUp".to_owned(),
+            "pagedown" => "PageDown".to_owned(),
+            other => {
+                let mut chars = other.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 /// Canonical key id for a terminal event, in the [`normalize_key_id`] space.
 #[must_use]
 pub fn key_event_id(key: &KeyEvent) -> String {
@@ -712,6 +736,37 @@ mod tests {
             .iter()
             .map(|(id, keys)| ((*id).to_owned(), strings(keys)))
             .collect()
+    }
+
+    #[test]
+    fn shortcut_display_uses_one_case_and_explicit_shift() {
+        for (key, expected) in [
+            ("ctrl+t", "Ctrl+T"),
+            ("Ctrl+T", "Ctrl+T"),
+            ("shift+CTRL+t", "Ctrl+Shift+T"),
+            ("shift+tab", "Shift+Tab"),
+            ("esc", "Esc"),
+            ("return", "Enter"),
+            ("backspace", "Backspace"),
+            ("ctrl+pageup", "Ctrl+PageUp"),
+            ("pagedown", "PageDown"),
+            ("ctrl+f12", "Ctrl+F12"),
+            ("+", "+"),
+            ("ctrl++", "Ctrl++"),
+            ("shift+ctrl++", "Ctrl+Shift++"),
+            ("ctrl+|", "Ctrl+|"),
+            ("ctrl+`", "Ctrl+`"),
+        ] {
+            assert_eq!(display_key_id(key, false), expected, "{key}");
+            assert_eq!(
+                normalize_key_id(&display_key_id(key, false)),
+                normalize_key_id(key)
+            );
+        }
+        assert_eq!(display_key_id("alt+up", true), "Option+Up");
+        assert_eq!(display_key_id("alt+up", false), "Alt+Up");
+        assert_eq!(display_key_id("super+p", true), "Cmd+P");
+        assert_eq!(display_key_id("super+p", false), "Super+P");
     }
 
     #[test]

@@ -404,14 +404,14 @@ fn ctrl_o_expands_and_collapses_the_inline_compaction_summary() {
         collapsed.contains("12,000 input tokens summarized"),
         "{collapsed}"
     );
-    assert!(collapsed.contains("ctrl+o to view"), "{collapsed}");
+    assert!(collapsed.contains("Ctrl+O to view"), "{collapsed}");
     assert!(!collapsed.contains("summary sentinel"), "{collapsed}");
 
     shell.toggle_disclosure();
     let expanded = plain(&shell);
     assert!(expanded.contains("Grounded summary"), "{expanded}");
     assert!(expanded.contains("summary sentinel"), "{expanded}");
-    assert!(expanded.contains("ctrl+o to collapse"), "{expanded}");
+    assert!(expanded.contains("Ctrl+O to collapse"), "{expanded}");
     assert!(!shell.has_overlay(), "compaction must expand inline");
 
     shell.toggle_disclosure();
@@ -421,7 +421,7 @@ fn ctrl_o_expands_and_collapses_the_inline_compaction_summary() {
         "{collapsed_again}"
     );
     assert!(
-        collapsed_again.contains("ctrl+o to view"),
+        collapsed_again.contains("Ctrl+O to view"),
         "{collapsed_again}"
     );
 }
@@ -450,7 +450,7 @@ fn autonomous_compaction_events_show_work_success_and_failure_inline() {
     let compacting =
         strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
     assert!(compacting.contains("• Compacting context"), "{compacting}");
-    assert!(!compacting.contains("ctrl+o"), "{compacting}");
+    assert!(!compacting.contains("Ctrl+O"), "{compacting}");
 
     shell.on_run_event(
         run_id,
@@ -574,7 +574,7 @@ fn resumed_compaction_summary_remains_expandable_after_theme_switch() {
     shell.set_theme(crate::tui::theme::test_theme());
     let restyled = render(&shell);
     assert!(restyled.contains("resume-only sentinel"), "{restyled}");
-    assert!(restyled.contains("ctrl+o to collapse"), "{restyled}");
+    assert!(restyled.contains("Ctrl+O to collapse"), "{restyled}");
 }
 
 #[test]
@@ -648,7 +648,7 @@ fn compaction_disclosure_preserves_native_presentation() {
         process_vt100_with_saved_line_clear(&mut terminal, &collapse, HEIGHT, WIDTH, 512);
         terminal.set_scrollback(0);
         let collapsed = terminal.screen().contents();
-        assert!(collapsed.contains("ctrl+o to view"), "{collapsed}");
+        assert!(collapsed.contains("Ctrl+O to view"), "{collapsed}");
         assert!(!collapsed.contains("compaction-detail-"), "{collapsed}");
         assert!(
             collapsed

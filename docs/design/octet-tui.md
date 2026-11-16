@@ -449,7 +449,7 @@ label; a completed provider turn restores generic `Working` while the run stays
 active.
 
 Visible assistant text does not prove that the owning run has settled. Exactly
-one trailing `Working (<elapsed> • esc to interrupt)` row remains while the run
+one trailing `Working (<elapsed> • Esc to interrupt)` row remains while the run
 is active, including after public text; its timer is measured from the latest
 non-steering user prompt and refreshes every second. Tool admission replaces
 that row with the tool lifecycle, and authoritative run settlement removes the

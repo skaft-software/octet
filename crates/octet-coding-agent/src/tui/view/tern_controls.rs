@@ -25,20 +25,7 @@ pub(super) fn key<'a>(shell: &'a ShellState, binding: &str) -> Option<&'a str> {
 pub(super) fn label(shell: &ShellState, binding: &str) -> String {
     key(shell, binding).map_or_else(
         || "unavailable".to_owned(),
-        |key| {
-            key.split('+')
-                .map(|part| match part {
-                    "enter" => "Enter".to_owned(),
-                    "escape" | "esc" => "Esc".to_owned(),
-                    "ctrl" => "Ctrl".to_owned(),
-                    "alt" => "Alt".to_owned(),
-                    "shift" => "Shift".to_owned(),
-                    "super" | "meta" => "Super".to_owned(),
-                    other => other.to_uppercase(),
-                })
-                .collect::<Vec<_>>()
-                .join("+")
-        },
+        |key| crate::tui::keymap::keybindings::display_key_id(key, cfg!(target_os = "macos")),
     )
 }
 
@@ -147,6 +134,21 @@ mod tests {
             picker_action(&shell, "confirm", "Select", "tui.select.confirm", true)["keys"],
             json!(["ctrl+y"])
         );
+    }
+
+    #[test]
+    fn named_keys_share_the_terminal_reference_case_without_changing_wire_keys() {
+        let shell = ShellState {
+            native_keys: Some(KeybindingsManager::with_platform(
+                "linux",
+                false,
+                BTreeMap::from([("tui.select.confirm".into(), vec!["ctrl+pageup".into()])]),
+            )),
+            ..ShellState::default()
+        };
+        assert_eq!(label(&shell, "tui.select.confirm"), "Ctrl+PageUp");
+        assert_eq!(key(&shell, "tui.select.confirm"), Some("ctrl+pageup"));
+        assert_eq!(label(&shell, "tui.select.down"), "Down");
     }
 
     #[test]

@@ -1153,13 +1153,13 @@ fn activity_status_line(
 ) -> String {
     let label = activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength);
     if reasoning.retry_activity.is_some() {
-        return format!("{label} {}", subdued_text(theme, "(esc to interrupt)"));
+        return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
     }
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
     let elapsed = format_activity_duration(started_at.elapsed().as_secs());
-    let detail = subdued_text(theme, &format!("({elapsed} • esc to interrupt)"));
+    let detail = subdued_text(theme, &format!("({elapsed} • Esc to interrupt)"));
     format!("{label} {detail}")
 }
 

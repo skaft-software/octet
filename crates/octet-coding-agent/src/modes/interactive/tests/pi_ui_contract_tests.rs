@@ -58,7 +58,7 @@ async fn native_pi_test_shell_preserves_real_styles_and_complete_labels() {
     assert!(rows.iter().all(|row| sexy_tui_rs::visible_width(row) <= 37));
     let visible = sexy_tui_rs::strip_terminal_sequences(&raw);
     assert_eq!(visible.matches("Working").count(), 1, "{visible}");
-    assert!(visible.contains("esc to interrupt"), "{visible}");
+    assert!(visible.contains("Esc to interrupt"), "{visible}");
     shell.interrupt_run(run);
 }
 

@@ -33,7 +33,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         rendered,
         vec![
             "",
-            "• Thinking (0ns • esc to interrupt)",
+            "• Thinking (0s • Esc to interrupt)",
             "  └ Verifying reproducibility of evidence package (Ctrl+T to expand)",
         ]
     );
@@ -288,7 +288,7 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         "{rendered:?}"
     );
     assert!(rendered[2].is_empty(), "{rendered:?}");
-    assert!(!rendered[1].contains("ctrl+o"), "{rendered:?}");
+    assert!(!rendered[1].contains("Ctrl+O"), "{rendered:?}");
 
     shell.on_run_event(
         run_id,
@@ -722,7 +722,11 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_t_hint() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(rendered.matches("Ctrl+T to expand").count(), 1, "{rendered}");
+    assert_eq!(
+        rendered.matches("Ctrl+T to expand").count(),
+        1,
+        "{rendered}"
+    );
     shell.toggle_thinking();
     let expanded = shell
         .state

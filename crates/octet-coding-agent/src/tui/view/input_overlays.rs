@@ -189,7 +189,7 @@ fn slash_suggestion_footer(
     let (navigation_key, select_key) = if state.theme.unicode() {
         ("↑↓", "↵")
     } else {
-        ("up/down", "enter")
+        ("Up/Down", "Enter")
     };
     let separator = suggestion_separator(state);
     let mut segments = [
@@ -198,7 +198,7 @@ fn slash_suggestion_footer(
         FooterSegment::optional(state.theme.fg("muted", &scope), 0),
         FooterSegment::primary(suggestion_key_hint(state, navigation_key, "navigate")),
         FooterSegment::optional(suggestion_key_hint(state, select_key, "select"), 2),
-        FooterSegment::optional(suggestion_key_hint(state, "esc", "close"), 1),
+        FooterSegment::optional(suggestion_key_hint(state, "Esc", "close"), 1),
     ];
     fit_prioritized_footer("  ", &separator, &mut segments, width)
 }
@@ -394,14 +394,14 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     let separator = suggestion_separator(state);
     let mut segments = [
         FooterSegment::optional(state.theme.fg("muted", heading_label), 0),
-        FooterSegment::primary(suggestion_key_hint(state, "tab", "complete")),
+        FooterSegment::primary(suggestion_key_hint(state, "Tab", "complete")),
         FooterSegment::optional(
             suggestion_key_hint(
                 state,
                 if state.theme.unicode() {
                     "↑↓"
                 } else {
-                    "up/down"
+                    "Up/Down"
                 },
                 "navigate",
             ),
@@ -512,7 +512,7 @@ fn render_extension_autocomplete(state: &ShellState, width: u16, max_rows: usize
         &format!(
             "  {}{separator}{}",
             state.theme.fg("muted", "extension suggestions"),
-            suggestion_key_hint(state, "tab", "accept")
+            suggestion_key_hint(state, "Tab", "accept")
         ),
         width,
     ));
@@ -605,43 +605,10 @@ fn queued_edit_key_id() -> &'static str {
         .get_or_init(|| queued_edit_key_id_in(&keybindings::KeybindingsManager::current_platform()))
 }
 
-/// Human-readable label for one normalized key id.
-///
-/// `keymap::encode` is a terminal-*byte* encoder, not a label formatter, so the
-/// display names live here. `macos` is a parameter (never a `cfg!` branch
-/// inside) so both namings stay assertable on one host, matching the crate's
-/// convention for platform-dependent text.
-fn key_display_label(key_id: &str, macos: bool) -> String {
-    let mut parts: Vec<&str> = key_id.split('+').collect();
-    let base = parts.pop().unwrap_or_default().to_ascii_lowercase();
-    let base = match base.as_str() {
-        "up" | "arrowup" => "↑".to_owned(),
-        "down" | "arrowdown" => "↓".to_owned(),
-        "left" | "arrowleft" => "←".to_owned(),
-        "right" | "arrowright" => "→".to_owned(),
-        other => other.to_owned(),
-    };
-    let modifiers: Vec<String> = parts
-        .iter()
-        .map(|part| match part.to_ascii_lowercase().as_str() {
-            "alt" if macos => "option".to_owned(),
-            "super" | "cmd" | "meta" if macos => "cmd".to_owned(),
-            "control" => "ctrl".to_owned(),
-            other => other.to_owned(),
-        })
-        .collect();
-    if modifiers.is_empty() {
-        base
-    } else {
-        format!("{}+{}", modifiers.join("+"), base)
-    }
-}
-
-/// The `(option+↑ to edit)` / `(alt+↑ to edit)` affordance shown beside a
-/// queued follow-up heading, matching the established `(ctrl+o to expand)`
-/// style. `macos` is a parameter so both namings are assertable on one host.
+/// The `(Option+Up to edit)` / `(Alt+Up to edit)` affordance shown beside a
+/// queued follow-up heading. `macos` keeps both platform namings testable.
 pub(super) fn queued_edit_hint(key_id: &str, macos: bool) -> String {
-    format!("({} to edit)", key_display_label(key_id, macos))
+    format!("({} to edit)", keybindings::display_key_id(key_id, macos))
 }
 
 pub(super) fn render_pending_steering(
@@ -818,17 +785,18 @@ mod tests {
                 "{platform} (wsl: {wsl})"
             );
         }
-        assert_eq!(queued_edit_hint("alt+q", false), "(alt+q to edit)");
+        assert_eq!(queued_edit_hint("alt+q", false), "(Alt+Q to edit)");
     }
 
     #[test]
     fn queued_edit_hint_names_option_on_macos_and_alt_elsewhere() {
-        assert_eq!(queued_edit_hint("alt+up", true), "(option+↑ to edit)");
-        assert_eq!(queued_edit_hint("alt+up", false), "(alt+↑ to edit)");
-        // Modifier and key display mapping is total, so an unexpected binding
-        // never renders as an empty affordance.
-        assert_eq!(key_display_label("ctrl+alt+down", true), "ctrl+option+↓");
-        assert_eq!(key_display_label("super+up", false), "super+↑");
-        assert_eq!(key_display_label("alt+q", true), "option+q");
+        assert_eq!(queued_edit_hint("alt+up", true), "(Option+Up to edit)");
+        assert_eq!(queued_edit_hint("alt+up", false), "(Alt+Up to edit)");
+        assert_eq!(
+            queued_edit_hint("ctrl+alt+down", true),
+            "(Ctrl+Option+Down to edit)"
+        );
+        assert_eq!(queued_edit_hint("super+up", false), "(Super+Up to edit)");
+        assert_eq!(queued_edit_hint("alt+q", true), "(Option+Q to edit)");
     }
 }

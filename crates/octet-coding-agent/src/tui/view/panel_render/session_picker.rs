@@ -340,8 +340,8 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             width,
             &inset,
             Some(&picker_delete_prompt(state, picker)),
-            ("enter", "confirm"),
-            &[("esc", "cancel")],
+            ("Enter", "confirm"),
+            &[("Esc", "cancel")],
         )
     } else if picker.rename.is_some() {
         panel_action_footer(
@@ -349,8 +349,8 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             width,
             &inset,
             None,
-            ("enter", "save"),
-            &[("esc", "cancel")],
+            ("Enter", "save"),
+            &[("Esc", "cancel")],
         )
     } else if matches!(
         picker.surface.lifecycle,
@@ -366,9 +366,9 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
                         width,
                         &inset,
                         None,
-                        ("tab", "scope"),
+                        ("Tab", "scope"),
                         &[
-                            ("^f", "transcripts"),
+                            ("Ctrl+F", "transcripts"),
                             ("re:<pattern>", "filter"),
                             ("\"phrase\"", "exact"),
                         ],
@@ -379,8 +379,8 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
                         width,
                         &inset,
                         None,
-                        ("tab", "scope"),
-                        &[("^f", "transcripts")],
+                        ("Tab", "scope"),
+                        &[("Ctrl+F", "transcripts")],
                     )
                 }
             },
@@ -392,9 +392,9 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             width,
             &inset,
             None,
-            ("tab", "scope"),
+            ("Tab", "scope"),
             &[
-                ("^f", "transcripts"),
+                ("Ctrl+F", "transcripts"),
                 ("re:<pattern>", "filter"),
                 ("\"phrase\"", "exact"),
             ],
@@ -405,8 +405,8 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             width,
             &inset,
             None,
-            ("tab", "scope"),
-            &[("^f", "transcripts")],
+            ("Tab", "scope"),
+            &[("Ctrl+F", "transcripts")],
         )
     };
     let second = if picker.confirming_delete || picker.rename.is_some() {
@@ -417,12 +417,12 @@ fn picker_hints(state: &ShellState, picker: &PickerState, width: u16) -> (String
             width,
             &inset,
             None,
-            ("^s", "sort"),
+            ("Ctrl+S", "sort"),
             &[
-                ("^n", "named"),
-                ("^x", "trash"),
-                ("^p", "path on/off"),
-                ("^r", "rename"),
+                ("Ctrl+N", "named"),
+                ("Ctrl+X", "trash"),
+                ("Ctrl+P", "path on/off"),
+                ("Ctrl+R", "rename"),
             ],
         )
     };
@@ -734,9 +734,9 @@ pub(in crate::tui::view) fn session_empty_message(
     }
     if picker.named_only {
         actions.push(if filter.is_empty() {
-            "^n shows all sessions"
+            "Ctrl+N shows all sessions"
         } else {
-            "^n shows unnamed sessions too"
+            "Ctrl+N shows unnamed sessions too"
         });
     }
     if current {
@@ -915,7 +915,7 @@ pub(super) fn render_message_picker(
         let navigation = if state.theme.unicode() {
             "↑↓"
         } else {
-            "up/down"
+            "Up/Down"
         };
         lines.push(panel_action_footer(
             state,
@@ -923,7 +923,7 @@ pub(super) fn render_message_picker(
             "",
             None,
             (navigation, "select"),
-            &[("enter", "fork"), ("esc", "cancel")],
+            &[("Enter", "fork"), ("Esc", "cancel")],
         ));
     }
     let body_rows = max_rows.saturating_sub(lines.len() + border_rows);
