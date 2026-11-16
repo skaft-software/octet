@@ -507,9 +507,17 @@ async fn project_context_hooks(
                 })
             });
             if !unchanged_prefix || appended.is_none() {
-                return Err(refused(
-                    "opaque Responses replay requires an authoritative projection seam",
-                ));
+                let boundary = if accepted_before_hook.system != request.system {
+                    "system instructions changed"
+                } else if !unchanged_prefix {
+                    "existing messages changed or were removed"
+                } else {
+                    "appended messages are not text-only user messages"
+                };
+                return Err(refused_owned(format!(
+                    "provider context projection on Responses route {} cannot replay opaque input: {boundary}; disable or reconfigure the context-modifying extension and retry without changing the session",
+                    bounded_name(&model.endpoint.id.0)
+                )));
             }
             let appended = appended.expect("checked above");
             if !appended.is_empty() {

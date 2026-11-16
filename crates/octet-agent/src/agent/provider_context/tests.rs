@@ -1238,6 +1238,93 @@ async fn opaque_replay_keeps_appended_context_after_local_compaction_and_tool_re
 }
 
 #[tokio::test]
+async fn persisted_opaque_projection_refusal_identifies_route_and_boundary() {
+    for route in ["openai", "openai-codex"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("session.jsonl");
+        let mut model = model();
+        Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+        Arc::make_mut(&mut model.endpoint).id = octet_ai::EndpointId(route.into());
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(projected_user("prompt")))
+            .unwrap();
+        let assistant = session
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                model: model.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+                content: vec![AssistantPart::ToolCall(ToolCall {
+                    id: octet_ai::ToolCallId("call-1".into()),
+                    name: "tool".into(),
+                    arguments_json: "{}".into(),
+                    async_execution: false,
+                    argument_error: None,
+                })],
+            })))
+            .unwrap();
+        let output = octet_ai::ResponsesOutput::new(vec![
+            octet_ai::ResponsesItem::new(serde_json::json!({"type":"reasoning", "id":"r1", "encrypted_content":"opaque-state"})).unwrap(),
+            octet_ai::ResponsesItem::new(serde_json::json!({"type":"function_call", "call_id":"call-1", "name":"tool", "arguments":"{}"})).unwrap(),
+        ]);
+        session
+            .append_responses_turn(
+                assistant,
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                output,
+            )
+            .unwrap();
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("call-1".into()),
+                    content: vec![ToolResultPart::Text("completed".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                    tool_name: None,
+                })],
+            })))
+            .unwrap();
+        drop(session);
+        let before = std::fs::read(&path).unwrap();
+        let mut session = Session::open(&path).unwrap();
+        let mut canonical = request();
+        canonical.messages = session.context().unwrap();
+        canonical.responses =
+            durable_responses_options(&session, &model, "canonical system", None).unwrap();
+        let input = canonical
+            .responses
+            .as_ref()
+            .unwrap()
+            .input
+            .as_ref()
+            .unwrap();
+        assert!(serde_json::to_string(input)
+            .unwrap()
+            .contains("opaque-state"));
+        let hook: Arc<dyn ProviderContextHook> = Arc::new(UnsupportedOpaqueProjection("edit"));
+        let error = project_provider_context(
+            canonical,
+            &[hook],
+            &identity(),
+            &model,
+            &AbortFlag::default(),
+            &mut session,
+            &mut vec![],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("provider context projection"), "{error}");
+        assert!(error.contains(route), "{error}");
+        assert!(error.contains("existing messages"), "{error}");
+        assert!(error.contains("disable"), "{error}");
+        drop(session);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[tokio::test]
 async fn opaque_replay_keeps_native_checkpoint_when_context_is_appended() {
     let mut model = model();
     Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
