@@ -294,6 +294,8 @@ harness exit.
 | `--enable-extension NAME` | Enable and save to user config, like Enable in `/extensions`. Not trust. |
 | `--trust-extension NAME` | Trust the exact selected source for one run. Not activation. |
 
+Each activation or trust flag takes one comma-separated list; repeat the flag for additional lists. A following word is a prompt or subcommand.
+
 [Instructions](instructions.md) and [resource discovery](resources.md) cover
 precedence, file limits, trust and reload.
 

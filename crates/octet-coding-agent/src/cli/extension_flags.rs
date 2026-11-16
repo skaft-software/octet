@@ -49,20 +49,19 @@ pub(super) struct ExtensionFlagBootstrap {
     pub(super) effect_policy: Option<String>,
 }
 
+/// Read one activation list, exactly as clap reads it: the next word, split on
+/// commas. The list is not greedy, so a following subcommand stays a
+/// subcommand instead of becoming an extension name.
 fn collect_bootstrap_list(args: &[OsString], index: &mut usize, target: &mut Vec<String>) -> bool {
-    let mut found = false;
-    while *index < args.len() {
-        let Some(value) = args[*index].to_str() else {
-            return false;
-        };
-        if value == "--" || value.starts_with('-') {
-            break;
-        }
-        target.extend(value.split(',').map(str::to_owned));
-        *index += 1;
-        found = true;
+    let Some(value) = args.get(*index).and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if value == "--" || value.starts_with('-') {
+        return false;
     }
-    found
+    target.extend(value.split(',').map(str::to_owned));
+    *index += 1;
+    true
 }
 
 /// Extract only the options that select trusted extension manifests. This pass

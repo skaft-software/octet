@@ -444,12 +444,7 @@ pub struct Cli {
     pub extension_dirs: Vec<PathBuf>,
     /// Enable executable extensions by name (comma-separated), persisted to
     /// user config like the `/extensions` menu's Enable.
-    #[arg(
-        long = "enable-extension",
-        value_name = "NAMES",
-        value_delimiter = ',',
-        num_args = 1..
-    )]
+    #[arg(long = "enable-extension", value_name = "NAMES", value_delimiter = ',')]
     pub enable_extensions: Vec<String>,
     /// Ignore every enabled extension for this invocation, like Pi's
     /// `--no-extensions` (`-ne`). The saved `enabled_extensions` list, project
@@ -461,12 +456,7 @@ pub struct Cli {
     /// Explicit invocation-only trust (comma-separated); full access already
     /// trusts selected extensions. Does not enable them; grants host process
     /// authority for the selected source even under safe mode.
-    #[arg(
-        long = "trust-extension",
-        value_name = "NAMES",
-        value_delimiter = ',',
-        num_args = 1..
-    )]
+    #[arg(long = "trust-extension", value_name = "NAMES", value_delimiter = ',')]
     pub trust_extensions: Vec<String>,
     /// Process-owner opt-in for experimental remote Streamable HTTP MCP. This
     /// one-shot gate is never read from configuration, environment, or sessions.
