@@ -1054,6 +1054,15 @@ native capabilities are separate work, not implied by these codec repairs.
 
 ## Prompt caching
 
+Usage reports keep uncached input, cache reads and cache writes disjoint.
+Anthropic's one-hour writes are a subset of total writes, counted once in
+session reports, pricing and the footer's latest-request hit ratio. Final
+Anthropic counters replace earlier values even when explicitly zero; omitted
+counters retain their start values. OpenAI/Codex subtract reported cached tokens
+from total prompt input; Google subtracts `cachedContentTokenCount` and reports
+no generation-time cache writes. Missing write counters are not estimated.
+
+
 With cache retention enabled, Anthropic Messages marks eligible tools, system
 and final content. Large tool batches also retain the preceding user breakpoint so it
 stays reachable within the provider's 20-block lookup window (at most four

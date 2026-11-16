@@ -1000,3 +1000,33 @@ fn codex_context_surface_does_not_invent_missing_provider_limits() {
     let (_directory, app) = app_for_status();
     assert_eq!(CodexContextSurface::capture(&app.model), None);
 }
+
+#[test]
+fn session_cache_writes_include_one_hour_subset_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache-session.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    session
+        .record_compaction_usage(
+            octet_ai::EndpointId("anthropic".into()),
+            octet_ai::ModelId("fixture-model".into()),
+            octet_ai::Usage {
+                input_tokens: 10,
+                cache_read_tokens: 60,
+                cache_write_tokens: 30,
+                cache_write_1h_tokens: 20,
+                output_tokens: 5,
+                total_tokens: 105,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    for session in [session, Session::open(&path).unwrap()] {
+        let text = session_text(&session, &Default::default());
+        assert!(
+            text.contains("10 input · 60 cache-read · 30 cache-write · 5 output"),
+            "{text}"
+        );
+    }
+}

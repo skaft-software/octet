@@ -457,9 +457,9 @@ struct AnthropicResponseUsage {
     // `input_tokens` appears on `message_start`; `message_delta` usage carries
     // only `output_tokens`. Both default so either shape deserializes.
     #[serde(default)]
-    input_tokens: u64,
+    input_tokens: Option<u64>,
     #[serde(default)]
-    output_tokens: u64,
+    output_tokens: Option<u64>,
     #[serde(default)]
     cache_creation_input_tokens: Option<u64>,
     #[serde(default)]
@@ -1370,18 +1370,24 @@ pub(crate) fn decode_stream_event(
                 let delta_usage = map_usage(&u_dto)?;
                 match builder.usage.as_mut() {
                     Some(existing) => {
-                        existing.output_tokens = delta_usage.output_tokens;
-                        if delta_usage.input_tokens > 0 {
+                        // Pi packages/ai/src/api/anthropic-messages.ts:849-879:
+                        // presence, not positivity, determines authoritative usage.
+                        if u_dto.output_tokens.is_some() {
+                            existing.output_tokens = delta_usage.output_tokens;
+                        }
+                        if u_dto.input_tokens.is_some() {
                             existing.input_tokens = delta_usage.input_tokens;
                         }
-                        if delta_usage.cache_read_tokens > 0 {
+                        if u_dto.cache_read_input_tokens.is_some() {
                             existing.cache_read_tokens = delta_usage.cache_read_tokens;
                         }
-                        if delta_usage.cache_write_tokens > 0 {
+                        if u_dto.cache_creation_input_tokens.is_some()
+                            || u_dto.cache_creation.is_some()
+                        {
                             existing.cache_write_tokens = delta_usage.cache_write_tokens;
                             existing.cache_write_1h_tokens = delta_usage.cache_write_1h_tokens;
                         }
-                        if delta_usage.reasoning_tokens > 0 {
+                        if u_dto.output_tokens_details.is_some() {
                             existing.reasoning_tokens = delta_usage.reasoning_tokens;
                         }
                         if existing.reasoning_tokens > existing.output_tokens {
@@ -1460,11 +1466,12 @@ fn map_usage(usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
             })
         })
         .unwrap_or(0);
-    let input = usage.input_tokens;
+    let input = usage.input_tokens.unwrap_or(0);
+    let output = usage.output_tokens.unwrap_or(0);
     let total_tokens = input
         .checked_add(cache_read)
         .and_then(|value| value.checked_add(cache_write))
-        .and_then(|value| value.checked_add(usage.output_tokens))
+        .and_then(|value| value.checked_add(output))
         .ok_or(AiError::Decode(DecodeError::UsageUnderflow))?;
     if cache_write_1h > cache_write {
         return Err(AiError::Decode(DecodeError::UsageUnderflow));
@@ -1478,7 +1485,7 @@ fn map_usage(usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
         .as_ref()
         .map(|d| d.thinking_tokens)
         .unwrap_or(0);
-    if reasoning > usage.output_tokens {
+    if reasoning > output {
         return Err(AiError::Decode(DecodeError::UsageUnderflow));
     }
     Ok(Usage {
@@ -1486,7 +1493,7 @@ fn map_usage(usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
         cache_read_tokens: cache_read,
         cache_write_tokens: cache_write,
         cache_write_1h_tokens: cache_write_1h,
-        output_tokens: usage.output_tokens,
+        output_tokens: output,
         reasoning_tokens: reasoning,
         total_tokens,
     })

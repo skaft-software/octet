@@ -503,3 +503,35 @@ async fn premature_eof() {
         "got {err:?}"
     );
 }
+
+// Pi packages/ai/src/api/anthropic-messages.ts:849-879 treats explicit zero
+// counters as authoritative, while omitted counters retain the start baseline.
+#[tokio::test]
+async fn final_usage_zero_counters_replace_start_buckets() {
+    for delta in [
+        r#""input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":0},"output_tokens":5"#,
+        r#""input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":5"#,
+    ] {
+        let data = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"fixture-model\",\"usage\":{{\"input_tokens\":100,\"output_tokens\":0,\"cache_read_input_tokens\":40,\"cache_creation_input_tokens\":30,\"cache_creation\":{{\"ephemeral_1h_input_tokens\":20,\"ephemeral_5m_input_tokens\":10}}}}}}}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{{delta}}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        for chunk in [0, 1, 17] {
+            let events = harness::drive(
+                &harness::model(Protocol::AnthropicMessages, None),
+                decode_stream_event,
+                data.as_bytes(),
+                chunk,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                harness::finished(&events).usage,
+                crate::Usage {
+                    output_tokens: 5,
+                    total_tokens: 5,
+                    ..Default::default()
+                }
+            );
+        }
+    }
+}

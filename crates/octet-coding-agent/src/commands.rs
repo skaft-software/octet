@@ -1816,9 +1816,7 @@ pub fn session_text(session: &Session, labels: &crate::presentation::ModelLabels
         session.usage_records().len(),
         usage.input_tokens,
         usage.cache_read_tokens,
-        usage
-            .cache_write_tokens
-            .saturating_add(usage.cache_write_1h_tokens),
+        usage.cache_write_tokens,
         usage.output_tokens,
         format_microdollars(session.total_cost_microdollars()),
         if session.has_uncertain_usage() || session.has_unpriced_usage() {
