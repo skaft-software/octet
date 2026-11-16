@@ -202,7 +202,9 @@ padding/separator rows search within the old viewport for semantic text.
 the semantic anchor rebases it after growth, contraction, deferred-history
 prepends, and width/height changes. Scrolling above the tail keeps semantic rows
 fixed while one Markdown block continues to grow, increments the new-output
-state, and exposes the PageDown return-to-live affordance. Transcript count nouns
+state, and exposes one concise return-to-live instruction:
+`↑ N rows back · M new · PageDown for latest` (the new counter appears only
+when nonzero). Separators and arrows use the theme's Unicode/ASCII glyphs. Transcript count nouns
 use singular at one (`1 row back`, `1 queued row hidden`, `1 output row collapsed`)
 and plural at zero or multiple; the noun-free `1 new` counter stays compact.
 

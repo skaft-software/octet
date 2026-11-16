@@ -36,7 +36,7 @@ fn polish_scroll_counts_use_singular_and_plural_rows() {
     for (count, unit) in [(1, "row"), (2, "rows")] {
         assert_eq!(
             scroll_hint(count, 1),
-            format!("↑ {count} {unit} back · 1 new · Jump to latest · PageDown returns to live")
+            format!("↑ {count} {unit} back · 1 new · PageDown for latest")
         );
     }
 }

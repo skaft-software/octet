@@ -622,9 +622,12 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
             state.theme.layout().block_padding_x.unwrap_or(0),
         ));
         let unit = super::plural(scroll, "row", "rows");
-        let hint = format!(
-            "{arrow} {scroll} {unit} back{new_output} · Jump to latest · PageDown returns to live"
-        );
+        // Pi compatibility reference: packages/coding-agent/src/modes/interactive/
+        // tui-renderer.ts:30-33 uses one latest-message instruction and its key.
+        // Native viewport ownership keeps our PageDown binding and row counter.
+        let separator = semantic_separator(&state.theme);
+        let hint =
+            format!("{arrow} {scroll} {unit} back{new_output}{separator}PageDown for latest");
         lines.push(fit_line(
             &format!(
                 "{padding}{}",
