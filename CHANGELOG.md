@@ -20,9 +20,12 @@
 
 ### Fixed
 
-- Audio read errors identify the provider and model when the selected route cannot accept the clip.
-
 - Update quinn-udp to fix a receive loop that can spin after a truncated datagram. ([#735](https://github.com/skaft-software/octet/pull/735) by [@gafiatulin](https://github.com/gafiatulin))
+
+- Extension activation and trust flags preserve following subcommands. ([#734](https://github.com/skaft-software/octet/pull/734) by [@gafiatulin](https://github.com/gafiatulin))
+- Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
+- Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Audio read errors identify the provider and model when the selected route cannot accept the clip.
 - Packaged documentation keeps internal investigation notes private.
 - Provider request traces count signed Google parts by kind without exposing signatures.
 - Live activity timers show whole seconds again (`28s`, `1m49s`, `1h01m01s`).
@@ -37,9 +40,6 @@
 - Pi input hooks skip coded callback faults and malformed transforms while preserving later handlers and native authority.
 - Opaque Responses replay refusals identify the route and unsupported context projection with guidance for retrying safely.
 - Scrolling preserves the reader's position during streamed output and follows new output at the live tail.
-- Extension activation and trust flags preserve following subcommands. ([#734](https://github.com/skaft-software/octet/pull/734) by [@gafiatulin](https://github.com/gafiatulin))
-- Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
-- Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Pi prompt hooks preserve valid results around malformed prompt replacements.
 - Static models use provider-scoped catalog audio metadata when their declarations are silent.
 - Extension reverse requests remain available beyond 65,536 calls with bounded in-flight correlation.
