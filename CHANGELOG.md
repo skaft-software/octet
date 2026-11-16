@@ -12,6 +12,7 @@
 - Codex uses provider-default context budgets, keeping GPT-6.1 Sol and Terra's advertised 500K windows.
 - Completed shell-tool rows show their recorded duration; themes can restyle or hide it.
 - The default splash is a compact two-line mark with the version, access mode and `/changelog`.
+- Document audio input paths, capability sources and provider wire formats.
 
 ### Fixed
 

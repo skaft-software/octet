@@ -59,6 +59,28 @@ transcription or transcoding, and a provider may still reject a file octet
 accepted. The raw-byte safety cap is not a guarantee that a base64-encoded
 request fits the provider's total request limit.
 
+### Input and capability paths
+
+- TUI paste, drop and `@` completion attach recognized local audio as typed media;
+  typing a path alone does not attach it. `read` can return structured audio from
+  local files or explicitly enabled HTTPS reads. A tool result remains media, not
+  a transcript, and is replayed with the conversation.
+- The native host accepts ordered typed `media` paths; its legacy `image_paths`
+  field is image-only. The separate line-oriented RPC prompt `images` field is
+  also image-only; it is not a native audio upload interface. A prompt can name a
+  file for `read` instead.
+- Static provider presets, discovered model inventories, explicit custom-model
+  declarations and pinned models.dev records can supply modality information.
+  For static presets, the pinned input-modality overlay currently applies to
+  OpenCode declarations; it is not a universal metadata precedence rule. The
+  selected protocol further limits the audio formats actually available. A model
+  listing audio by itself does not make an unsupported wire format available.
+- Google `generateContent` encodes supported audio and PDF input as base64
+  `inlineData` with its MIME type. OpenAI Chat encodes WAV and MP3 as base64
+  `input_audio`. OpenAI Responses does not implement native audio input here;
+  it does support PDF `input_file`. These are octet's implemented wire paths,
+  not a guarantee that every model or compatible endpoint accepts them.
+
 ### PDFs
 
 A dropped or `@`-selected `.pdf` becomes a `[PDF #N]` chip. On a model that
