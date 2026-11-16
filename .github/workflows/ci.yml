@@ -103,6 +103,10 @@ jobs:
           python3 scripts/test_diff_model_catalog.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Check independent tools and extension-host embedding
+        run: |
+          cargo check -p octet-agent --no-default-features --features tools,extensions --locked
+          python3 examples/tools-extensions-only/check-dependencies.py
       - run: cargo test --workspace --doc --profile ci-test --locked
       # Cargo 1.90 stabilized packaging interdependent workspace crates. Keep
       # the dedicated compilation check on the 1.89 MSRV in the job below; use

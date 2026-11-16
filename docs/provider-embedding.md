@@ -178,8 +178,21 @@ Delivering this prerequisite does not resume Ultra or update its dependency:
 its owner must separately authorize integration and any live OAuth/inference
 qualification. Renderer work and separate releases are not prerequisites.
 
-The [tool/extension module dependency map](maintainers/agent-feature-boundary.md)
-records the compilation coupling being separated for independent hosts.
+The [independent tools/extensions fixture](../examples/tools-extensions-only)
+imports Ultra's complete item list and exercises the four built-ins, progress,
+manifest loading, process startup, a tool call and shutdown offline. Its
+`check-dependencies.py` checks the resolved Cargo features and rustc module
+inputs, then runs runtime tests and compile-fail probes for excluded loop/session
+symbols. CI runs the reduced package check and this fixture separately from the
+default workspace build:
+
+```sh
+cargo check -p octet-agent --no-default-features --features tools,extensions
+python3 examples/tools-extensions-only/check-dependencies.py
+```
+
+The [module dependency map and measurements](maintainers/agent-feature-boundary.md)
+record the original coupling and the reduced compilation footprint.
 
 See the [ownership map](maintainers/provider-boundary.md) and
 [AI architecture](design/octet-ai.md) for the extraction and transport contracts.

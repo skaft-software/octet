@@ -71,3 +71,6 @@ crates/ygg-coding-agent/
 
 # Independent provider-only fixture builds locally when no target override is set.
 /examples/provider-only/target/
+
+# Independent tool/extension embedding acceptance fixture.
+/examples/tools-extensions-only/target/

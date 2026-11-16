@@ -4,6 +4,7 @@
 
 ### Added
 
+- Verify independent tool and extension hosting with an offline consumer and compile-time orchestration boundary checks.
 - Build tools and the extension process host independently with octet-agent's default agent feature disabled.
 - Document the tool and extension-host module dependencies for independent embedding.
 

@@ -44,3 +44,52 @@ process host while omitting concrete agent-loop and session persistence modules.
 Default features preserve the existing API and behavior. Compile-time and
 non-test compiled-source measurements are recorded with the worker's checks;
 source counts must distinguish shared wire vocabulary from orchestration.
+
+## Implemented compilation boundary
+
+`agent` is default-on; `agent -> tools -> extensions`. The reduced selection is
+`--no-default-features --features tools,extensions`. `extensions` alone leaves
+out built-in implementations; no features exports no infrastructure. Cargo
+feature unification can re-enable `agent`, so the independent acceptance crate
+checks resolved compiler features rather than trusting manifest spelling.
+
+Module-boundary gates omit `agent` (including its provider-context driver),
+`session`, `session_writer`, `session_leaf`, `compaction`, `delegation`, `cache`,
+`cache_warmer`, `context`, `telemetry`, `goal_driver`, `goal_store`, `skills` and
+`extension_runtime`. Agent-specific extension session-leaf/provider-context
+modules and durable deferred/summary tooling are also omitted. Shared
+`extension_message` and `session_types` contain only message validation,
+identifiers and error vocabulary; original default-feature paths re-export the
+same types. `AgentModelSelection` belongs to host request vocabulary. Encoded
+provider pipeline hooks remain with the extension host, separate from canonical
+session-context preparation. In-memory invocation memos remain usable without
+the `SessionWriter` backend. No second implementation or crate is introduced.
+
+`examples/tools-extensions-only` imports exactly the requested downstream list.
+Its dependency script checks resolved features, compiler dep-info inputs and
+nineteen separate compile-fail import probes, plus three offline runtime tests.
+The process peer checks that excluded agent/session transport services are not
+offered. Default tests keep their existing assertions and ignored-test policy.
+
+## Local compilation measurements
+
+Linux, Rust/Cargo 1.97.1, two build jobs, non-incremental builds on a shared host.
+Dependencies were warmed first; touching only `src/lib.rs` forced each package
+recheck. Three alternating `cargo check -p octet-agent` and
+`cargo check -p octet-agent --no-default-features --features tools,extensions`
+runs measured root-package checking only, not clean dependency builds:
+
+| Metric | Default | Reduced | Reduction |
+| --- | ---: | ---: | ---: |
+| Wall seconds, three runs | 40.86 / 32.19 / 32.31 | 11.09 / 10.07 / 11.94 | shared-host observations |
+| Median wall seconds | 32.31 | 11.09 | 21.22 s (65.7%) |
+| Expanded non-test implementation lines | 276,507 | 170,549 | 105,958 (38.3%) |
+
+The line metric counts compiler-expanded, cfg-resolved nonblank lines excluding
+comments and rustdoc attributes, **including generated derives**, for this crate
+only. It is not a handwritten-source or downstream binary-size measurement.
+It was captured with `RUSTC_BOOTSTRAP=1 cargo rustc -p octet-agent --lib --
+-Zunpretty=expanded`, then the same command with `--no-default-features --features
+tools,extensions` before `--`. CI uses only stable checks; the internal compiler
+view is a local measurement aid. No live provider or downstream application
+qualification is implied by these numbers.
