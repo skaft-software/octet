@@ -1113,9 +1113,9 @@ fn real_queued_follow_up_option_up_edit_and_settled_dispatch_pty_contract() {
     candidate.pty.write_input(b"STEER-ORIGINAL\x13");
     await_screen(&mut candidate, &mut parser, &mut consumed, "Follow-up");
     let edit_hint = if cfg!(target_os = "macos") {
-        "(option+↑ to edit)"
+        "(Option+Up to edit)"
     } else {
-        "(alt+↑ to edit)"
+        "(Alt+Up to edit)"
     };
     await_screen(&mut candidate, &mut parser, &mut consumed, edit_hint);
 
