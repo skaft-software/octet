@@ -27,6 +27,7 @@ pub(crate) struct DiscoveredModelMetadata<'a> {
     pub capabilities: Capabilities,
     pub limits: ModelLimits,
     pub pricing: Option<octet_ai::Pricing>,
+    pub audio_input_source: Option<octet_ai::model_metadata::AudioInputSource>,
 }
 
 impl ProviderDeclaration {
@@ -420,7 +421,7 @@ fn register_static_model(
         octet_ai::model_metadata::model_capability_metadata(declaration.id, model.id)
             .and_then(|record| record.get("modalities")?.get("input")?.as_array().cloned())
             .map(|inputs| inputs.iter().any(|value| value.as_str() == Some("audio")));
-    let (audio, _) = octet_ai::model_metadata::resolve_audio_input(
+    let (audio, audio_source) = octet_ai::model_metadata::resolve_audio_input(
         route.protocol,
         model.audio.then_some(true),
         catalog_audio,
@@ -439,6 +440,7 @@ fn register_static_model(
     catalog.register_model(ModelSpec {
         context_window_options: None,
         preset: octet_ai::ModelPreset {
+            audio_input_source: Some(audio_source),
             mistral_reasoning: match model.reasoning_mode {
                 super::models::StaticReasoningMode::MistralEffort => {
                     Some(octet_ai::MistralReasoningProfile::ReasoningEffort)
@@ -480,6 +482,7 @@ pub(crate) fn register_discovered_model(
     capabilities: Capabilities,
     limits: ModelLimits,
     pricing: Option<octet_ai::Pricing>,
+    audio_input_source: Option<octet_ai::model_metadata::AudioInputSource>,
 ) -> anyhow::Result<()> {
     let Some(route) = declaration.route_for_model(api_name) else {
         return Ok(());
@@ -494,6 +497,7 @@ pub(crate) fn register_discovered_model(
             capabilities,
             limits,
             pricing,
+            audio_input_source,
         },
     )
 }
@@ -514,6 +518,7 @@ pub(crate) fn register_discovered_model_at_route(
         capabilities,
         limits,
         pricing,
+        audio_input_source,
     } = metadata;
     if !declaration.routes.contains(route) {
         anyhow::bail!("discovery route is not declared by the provider");
@@ -523,7 +528,32 @@ pub(crate) fn register_discovered_model_at_route(
     // assertions always win: a model without a reasoning capability receives no
     // thinking profile, and the profile carries no header, sampling value or
     // credential from discovery.
-    let preset = discovered_wire_preset(declaration, route, &capabilities);
+    let mut preset = discovered_wire_preset(declaration, route, &capabilities);
+    let mut capabilities = capabilities;
+    let (audio, source) = octet_ai::model_metadata::resolve_audio_input(
+        route.protocol,
+        Some(
+            capabilities
+                .input_modalities
+                .contains(octet_ai::Modality::Audio),
+        ),
+        None,
+    );
+    capabilities.input_modalities = capabilities
+        .input_modalities
+        .without(octet_ai::Modality::Audio);
+    if audio {
+        capabilities.input_modalities = capabilities
+            .input_modalities
+            .with(octet_ai::Modality::Audio);
+    }
+    preset.audio_input_source = Some(
+        if source == octet_ai::model_metadata::AudioInputSource::UnsupportedProtocol {
+            source
+        } else {
+            audio_input_source.unwrap_or(source)
+        },
+    );
     let catalog_id = format!("{}/{}", declaration.id, api_name);
     if has_model_id(catalog, &catalog_id) {
         return Ok(());
@@ -1081,6 +1111,7 @@ mod tests {
                 capabilities.clone(),
                 limits,
                 None,
+                None,
             )
             .unwrap();
             let id = ModelId("anthropic/claude-new-model".into());
@@ -1103,6 +1134,7 @@ mod tests {
                 None,
                 capabilities,
                 limits,
+                None,
                 None,
             )
             .unwrap();
@@ -1156,6 +1188,7 @@ mod tests {
                         context_window: 128_000,
                         max_output_tokens: 16_000,
                     },
+                    None,
                     None,
                 )
                 .unwrap();
@@ -1211,6 +1244,7 @@ mod tests {
                 context_window: 128_000,
                 max_output_tokens: 32_768,
             },
+            None,
             None,
         )
         .unwrap();
@@ -1484,6 +1518,7 @@ mod tests {
                 capabilities(),
                 limits,
                 None,
+                None,
             )
             .unwrap();
             let model = catalog
@@ -1529,6 +1564,7 @@ mod tests {
                 context_window: 32_768,
                 max_output_tokens: 8_192,
             },
+            None,
             None,
         )
         .unwrap();
@@ -1648,6 +1684,7 @@ mod openrouter_attribution_tests {
             None,
             capabilities,
             limits,
+            None,
             None,
         )
         .unwrap();

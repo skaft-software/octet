@@ -611,6 +611,7 @@ fn register_fixture_model(
                 max_output_tokens: 256,
             },
             None,
+            None,
         )
         .unwrap_or_else(|error| panic!("{fixture_id}: model registration failed: {error}")),
         other => panic!("{fixture_id}: unknown fixture registration {other}"),

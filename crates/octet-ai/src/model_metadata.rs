@@ -17,7 +17,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 use crate::pricing::{Pricing, TokenRate};
 
 /// Authority used to resolve native audio input for a model route.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AudioInputSource {
     /// The selected wire protocol cannot encode native audio input.
     UnsupportedProtocol,

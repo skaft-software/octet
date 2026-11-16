@@ -1074,3 +1074,89 @@ fn declared_endpoint_match_ignores_case_and_trailing_slash() {
     let local = url::Url::parse("http://127.0.0.1:11434/v1").unwrap();
     assert!(!same_endpoint_base(declared.base_url, &local));
 }
+
+#[test]
+fn audio_metadata_catalog_provenance_survives_raw_inventory_cache_replay() {
+    use octet_ai::model_metadata::AudioInputSource;
+    for (provider, id, expected_source, audio) in [
+        (
+            &crate::providers::OPENROUTER,
+            "openai/gpt-audio-test",
+            AudioInputSource::Declaration,
+            true,
+        ),
+        (
+            &crate::providers::OPENCODE,
+            "gemini-3-flash",
+            AudioInputSource::Declaration,
+            true,
+        ),
+        (
+            &crate::providers::OPENAI,
+            "gpt-audio-test",
+            AudioInputSource::UnsupportedProtocol,
+            false,
+        ),
+    ] {
+        for inputs in [
+            serde_json::json!(["text", "audio"]),
+            serde_json::json!(["text"]),
+            serde_json::Value::Null,
+        ] {
+            let fresh = serde_json::json!({"data": [{"id": id, "input_modalities": inputs}]});
+            // Built-in inventory caches store the original response, not a lossy projection.
+            let cached: serde_json::Value =
+                serde_json::from_slice(&serde_json::to_vec(&fresh).unwrap()).unwrap();
+            for body in [&fresh, &cached] {
+                let mut catalog = ModelCatalog::default();
+                crate::providers::register_private_endpoints_at_base_url(
+                    &mut catalog,
+                    provider,
+                    octet_ai::Auth::None,
+                    &url::Url::parse(provider.base_url).unwrap(),
+                    Duration::from_secs(2),
+                )
+                .unwrap();
+                register_openai_compatible_models_from_response(
+                    &mut catalog,
+                    provider,
+                    ModelFilter::All,
+                    body,
+                )
+                .unwrap();
+                let model = catalog
+                    .resolve(&ModelId(format!("{}/{id}", provider.id)))
+                    .unwrap();
+                assert_eq!(
+                    model.spec.supports_audio_input(octet_ai::AudioFormat::Wav),
+                    audio && inputs == serde_json::json!(["text", "audio"])
+                );
+                assert_eq!(model.spec.preset.audio_input_source, Some(expected_source));
+            }
+        }
+    }
+    // A sparse inventory may inherit the pinned record; explicit false/text-only
+    // assertions above never do, even when that snapshot is stale.
+    let body = serde_json::json!({"data": [{"id": "gemini-3-flash"}]});
+    let models = api_models_from_response_for(&body, Some(&crate::providers::OPENCODE)).unwrap();
+    assert_eq!(models[0].audio_source, AudioInputSource::Catalog);
+    assert!(models[0].audio);
+}
+
+#[test]
+fn custom_audio_assertion_survives_normalized_cache_and_configured_override() {
+    use crate::auth::custom::CustomModel;
+    let discovered: CustomModel = serde_json::from_value(serde_json::json!({
+        "api_name": "sound", "context_window": 32000, "preset": {"audio_input": true}
+    }))
+    .unwrap();
+    let cached: CustomModel =
+        serde_json::from_slice(&serde_json::to_vec(&discovered).unwrap()).unwrap();
+    for assertion in [None, Some(false), Some(true)] {
+        let mut configured = cached.clone();
+        configured.preset.audio_input = assertion;
+        let merged =
+            apply_configured_custom_model_overrides(vec![cached.clone()], &[configured], true);
+        assert_eq!(merged[0].preset.audio_input, assertion.or(Some(true)));
+    }
+}

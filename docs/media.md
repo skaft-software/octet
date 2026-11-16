@@ -72,8 +72,11 @@ request fits the provider's total request limit.
   file for `read` instead.
 - Static provider presets, discovered model inventories, explicit custom-model
   declarations and pinned models.dev records can supply modality information.
-  For static presets, explicit audio support takes precedence over provider-scoped
-  models.dev metadata; where the preset is silent, the catalog may supply it.
+  Explicit audio assertions take precedence over provider-scoped models.dev
+  metadata; only silence allows a catalog fallback. Catalog entries retain the
+  decision's source: declaration, catalog, absent evidence or unsupported protocol.
+  Custom Chat models can set `preset.audio_input: true` (or `false` to deny);
+  normalized caches preserve the assertion.
   The selected protocol further limits the audio formats actually available. A
   model listing audio by itself does not make an unsupported wire format available.
 - Google `generateContent` encodes supported audio and PDF input as base64

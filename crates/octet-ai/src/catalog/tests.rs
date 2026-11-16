@@ -834,3 +834,23 @@ fn provider_context_options_must_contain_the_default_and_effective_budgets() {
         );
     }
 }
+
+#[test]
+fn catalog_retains_audio_resolution_and_custom_declarations() {
+    let mut catalog = ModelCatalog::builtin().unwrap();
+    let mut spec = (*catalog
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap()
+        .spec)
+        .clone();
+    spec.id = ModelId("custom-audio".into());
+    spec.protocol = Protocol::OpenAiChat;
+    spec.preset.audio_input = Some(true);
+    catalog.register_model(spec).unwrap();
+    let model = catalog.resolve(&ModelId("custom-audio".into())).unwrap();
+    assert!(model.spec.supports_audio_input(crate::AudioFormat::Wav));
+    assert_eq!(
+        model.spec.preset.audio_input_source,
+        Some(crate::model_metadata::AudioInputSource::Declaration)
+    );
+}

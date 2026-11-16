@@ -45,6 +45,7 @@
 - Extension reverse requests remain available beyond 65,536 calls with bounded in-flight correlation.
 - Pi context, tool-result and session-operation hooks preserve accepted results when a sibling returns malformed data.
 - Pi streaming observations account for new deltas and share immutable text while preserving retained event snapshots.
+- Model discovery and custom audio declarations retain capability provenance through catalog registration and cached inventories.
 
 ## [0.10.4] - 2026-11-12
 

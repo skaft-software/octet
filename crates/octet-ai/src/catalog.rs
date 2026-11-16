@@ -255,6 +255,34 @@ impl ModelCatalog {
             return Err(ConfigError::UnknownEndpoint(spec.endpoint.clone()));
         }
 
+        // Resolve custom declarations at the same boundary as built-in evidence.
+        // Unannotated direct SDK specs retain strict protocol validation below.
+        let assertion = spec.preset.audio_input;
+        let (audio, source) = crate::model_metadata::resolve_audio_input(
+            spec.protocol,
+            assertion.or_else(|| {
+                spec.capabilities
+                    .input_modalities
+                    .contains(Modality::Audio)
+                    .then_some(true)
+            }),
+            None,
+        );
+        if assertion.is_some() {
+            spec.capabilities.input_modalities =
+                spec.capabilities.input_modalities.without(Modality::Audio);
+            if audio {
+                spec.capabilities.input_modalities =
+                    spec.capabilities.input_modalities.with(Modality::Audio);
+            }
+        }
+        if assertion.is_some()
+            || spec.preset.audio_input_source.is_none()
+            || source == crate::model_metadata::AudioInputSource::UnsupportedProtocol
+        {
+            spec.preset.audio_input_source = Some(source);
+        }
+
         // Pricing is immutable once the spec is stored in the catalog. Keep
         // tiers canonical here so every response cost calculation can iterate
         // without cloning or sorting.

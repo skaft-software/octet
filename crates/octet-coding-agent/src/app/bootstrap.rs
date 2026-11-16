@@ -455,7 +455,7 @@ const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 // recording each limit's provenance so a cached inventory re-merges to the same
 // effective limit on the next start. Version 12 adds provenance-scoped native
 // metadata, including separate maximum and loaded-instance context values.
-const CUSTOM_MODEL_CACHE_VERSION: u8 = 12;
+const CUSTOM_MODEL_CACHE_VERSION: u8 = 13;
 /// Provider inventory caches share the private-metadata write ceiling.
 const PROVIDER_INVENTORY_CACHE_WRITE_LIMIT: usize = 256 * 1024 * 1024;
 const PROVIDER_INVENTORY_CACHE_VERSION: u8 = 1;
@@ -2121,6 +2121,7 @@ struct DiscoveredApiModel {
     display_name: Option<String>,
     vision: bool,
     audio: bool,
+    audio_source: octet_ai::model_metadata::AudioInputSource,
     output_modalities: ModalitySet,
     /// The inventory or pinned record lists PDF (or OpenRouter `file`) input.
     pdf: bool,
@@ -2439,8 +2440,21 @@ fn api_models_from_response_for(
             input_modalities.contains(octet_ai::Modality::Image)
                 || (!modalities_asserted && model_id_implies_vision(id))
         });
-        let audio = asserted_capability(entry, &["audio"])
-            .unwrap_or_else(|| input_modalities.contains(octet_ai::Modality::Audio));
+        let protocol = declaration
+            .and_then(|d| d.route_for_model(id))
+            .map_or(Protocol::OpenAiChat, |route| route.protocol);
+        let declaration_audio = modalities_asserted.then(|| {
+            asserted_capability(entry, &["audio"])
+                .unwrap_or_else(|| input_modalities.contains(octet_ai::Modality::Audio))
+        });
+        let catalog_audio = snapshot
+            .as_ref()
+            .map(|record| input_modalities_from_entry(record).contains(octet_ai::Modality::Audio));
+        let (audio, audio_source) = octet_ai::model_metadata::resolve_audio_input(
+            protocol,
+            declaration_audio,
+            catalog_audio,
+        );
         models.push(DiscoveredApiModel {
             id: id.to_owned(),
             context_window: positive_u64(
@@ -2491,6 +2505,7 @@ fn api_models_from_response_for(
             display_name: discovered_display_name(entry, id),
             vision,
             audio,
+            audio_source,
             output_modalities: output_modalities_from_entry(entry),
             pdf: input_modalities.contains(octet_ai::Modality::Pdf),
             modalities_asserted,
@@ -3134,6 +3149,7 @@ pub(crate) fn register_openai_compatible_models_from_response(
                 max_output_tokens,
             },
             current_direct_model_pricing(declaration.id, api_name),
+            Some(model.audio_source),
         )?;
     }
     Ok(())
@@ -3238,6 +3254,7 @@ pub(crate) fn register_anthropic_compatible_models_from_response(
                 max_output_tokens,
             },
             current_direct_model_pricing(declaration.id, api_name),
+            Some(model.audio_source),
         )?;
     }
     Ok(())
@@ -3467,6 +3484,7 @@ fn register_deepseek_models_from_response(
                 max_output_tokens,
             },
             None,
+            Some(model.audio_source),
         )?;
     }
     Ok(())
@@ -3886,6 +3904,7 @@ fn register_azure_openai(
             context_window: 128_000,
             max_output_tokens: 16_384,
         },
+        None,
         None,
     )
 }
@@ -4818,6 +4837,9 @@ where
                     if configured_model.reasoning_profile.is_none() {
                         effective.reasoning_profile = model.reasoning_profile.clone();
                     }
+                }
+                if effective.preset.audio_input.is_none() {
+                    effective.preset.audio_input = model.preset.audio_input;
                 }
                 effective.max_output_tokens = if model.max_output_tokens_asserted {
                     model
@@ -6243,7 +6265,14 @@ fn discover_models_blocking(
                 reasoning_uses_system_message: true,
                 pricing: None,
                 // Inventory is not authority for request headers or wire overrides.
-                preset: Default::default(),
+                preset: octet_ai::ModelPreset {
+                    audio_input: has_metadata_assertion(entry, MODALITY_FIELDS).then(|| {
+                        asserted_capability(entry, &["audio"]).unwrap_or_else(|| {
+                            input_modalities_from_entry(entry).contains(octet_ai::Modality::Audio)
+                        })
+                    }),
+                    ..Default::default()
+                },
             };
             if apply_discovered_reasoning(entry, &mut model).is_err() {
                 if report_errors {
@@ -7572,6 +7601,7 @@ fn register_pinned_requested_model(
             max_output_tokens,
         },
         None,
+        Some(octet_ai::model_metadata::AudioInputSource::Catalog),
     )
 }
 

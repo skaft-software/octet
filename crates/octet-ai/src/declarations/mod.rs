@@ -353,6 +353,12 @@ impl ThinkingSelection {
 /// Per-model preset metadata declared for a provider route.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelPreset {
+    /// Explicit native-audio input assertion; the codec still limits formats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_input: Option<bool>,
+    /// Authority retained by discovery and catalog resolution, never a wire field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_input_source: Option<crate::model_metadata::AudioInputSource>,
     /// Default sampling parameters merged into the request body; per-request
     /// keys override these. Applies only to OpenAI-compatible codecs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

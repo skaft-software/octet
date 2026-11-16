@@ -661,6 +661,7 @@ impl CopilotProvider {
                 &COPILOT_DECLARATION,
                 route,
                 super::catalog::DiscoveredModelMetadata {
+                    audio_input_source: None,
                     api_name: &model.id,
                     display_name: model.display_name,
                     capabilities: model.capabilities,

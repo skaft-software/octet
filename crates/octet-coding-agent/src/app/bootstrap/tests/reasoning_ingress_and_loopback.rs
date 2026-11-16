@@ -204,6 +204,7 @@ async fn sparse_cerebras_discovery_selection_stream_and_tool_continuation_loopba
             max_output_tokens: 4096,
         },
         None,
+        None,
     )
     .unwrap();
     let model = catalog
