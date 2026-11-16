@@ -62,6 +62,23 @@ pub(crate) async fn prepare(
     if estimated > 256 * 1024 * 1024 {
         return Err(crate::recorded_audio::limit_error(model, 256 * 1024 * 1024));
     }
+    // File preparation is a provider side effect: reject locally invalid
+    // requests before sending recording bytes, not only at generateContent.
+    crate::json_repair::validate_tool_definitions(&request.tools).map_err(AiError::Decode)?;
+    let normalized =
+        crate::validate::normalize_request_reasoning(request, &model.spec.capabilities);
+    crate::protocol::route_validation(
+        model,
+        crate::validate::validate_request(
+            &normalized,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::GoogleGenerativeAi,
+            &model.spec.id,
+            request.compatibility,
+        ),
+    )?;
+    drop(normalized);
     let mut digest = Sha256::new();
     digest.update(upload.as_str());
     for (name, value) in &headers {
@@ -505,5 +522,46 @@ mod reference_tests {
             reference.protocol = Protocol::OpenAiChat;
             assert!(!usable(&reference));
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[tokio::test]
+    async fn invalid_request_does_not_start_a_file_upload() {
+        let server = wiremock::MockServer::start().await;
+        let mut model = crate::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&crate::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        std::sync::Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
+        std::sync::Arc::make_mut(&mut model.spec)
+            .capabilities
+            .input_modalities = crate::ModalitySet::none().with(crate::Modality::Audio);
+        let mut request = Request {
+            temperature: Some(f32::NAN),
+            messages: vec![Message::User(crate::UserMessage {
+                content: vec![UserPart::Media(Media::audio_bytes(
+                    bytes::Bytes::from(vec![0; 12_000_000]),
+                    crate::AudioFormat::Wav,
+                ))],
+            })],
+            ..crate::test_fixtures::base_request()
+        };
+        let error = prepare(
+            &reqwest::Client::builder().no_proxy().build().unwrap(),
+            &model,
+            &mut request,
+            &url::Url::parse(&server.uri()).unwrap(),
+            http::HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(matches!(
+            error,
+            AiError::Validation(crate::ValidationError::InvalidTemperature)
+        ));
     }
 }

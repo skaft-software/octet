@@ -159,7 +159,8 @@ Earlier audio reads remain in history and are re-sent: an album can exceed the
 request-byte limit even when every track fits individually and token context
 remains. On the built-in Gemini Developer API route, an estimated 16 MB of
 encoded media triggers the documented resumable Files API before constructing
-`generateContent`. Audio uploads finalize, wait for `ACTIVE` within a bounded
+`generateContent`. File preparation validates request settings and tool schemas before any upload.
+Audio uploads finalize, wait for `ACTIVE` within a bounded
 60-second preparation deadline, and become `fileData` parts in their original
 positions. Vertex can use explicitly supplied `gs://bucket/object` audio
 references; octet does not provision GCS buckets or upload to Vertex/OpenCode on
