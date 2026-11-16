@@ -355,7 +355,7 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
         .find(|line| line.contains("Thinking"))
         .expect("reasoning row");
     assert!(
-        reasoning_line.contains("Ctrl+T expand"),
+        reasoning_line.contains("Ctrl+T to expand"),
         "{reasoning_line:?}"
     );
     let visual_column = |line: &str, needle: &str| {

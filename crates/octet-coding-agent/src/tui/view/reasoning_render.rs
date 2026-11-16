@@ -1117,9 +1117,11 @@ pub(super) fn activity_shimmer_marker(
     activity_shimmer_foreground(theme, color, marker)
 }
 
+const REASONING_EXPAND_HINT: &str = "Ctrl+T to expand";
+
 fn reasoning_detail_line(theme: &OctetTheme, reasoning: &AssistantBlock) -> String {
     let elbow = activity_elbow(theme);
-    let hint = "(ctrl+t to expand)";
+    let hint = format!("({REASONING_EXPAND_HINT})");
     let detail = reasoning.reasoning_heading.as_deref().map_or_else(
         || format!("{elbow} {hint}"),
         |heading| format!("{elbow} {heading} {hint}"),
@@ -1155,17 +1157,15 @@ fn collapsed_reasoning_lines_at(
     collapsed_reasoning_lines_sized(theme, reasoning, shimmer_frame, rainbow_strength, u16::MAX)
 }
 
-fn reasoning_inline_hint(theme: &OctetTheme) -> &'static str {
-    if theme.unicode() {
-        " · Ctrl+T expand"
-    } else {
-        " - Ctrl+T expand"
-    }
+fn reasoning_inline_hint(theme: &OctetTheme) -> String {
+    let separator = if theme.unicode() { " · " } else { " - " };
+    format!("{separator}{REASONING_EXPAND_HINT}")
 }
 
 fn thinking_hint_fits_inline(theme: &OctetTheme, status: &str, width: u16) -> bool {
     theme.is_compiled_default()
-        && visible_width(status) + visible_width(reasoning_inline_hint(theme)) <= usize::from(width)
+        && visible_width(status) + visible_width(&reasoning_inline_hint(theme))
+            <= usize::from(width)
 }
 
 pub(super) fn collapsed_reasoning_lines_sized(
@@ -1281,7 +1281,7 @@ pub(super) fn collapsed_reasoning_lines_sized(
         if reasoning.reasoning_heading.is_none()
             && thinking_hint_fits_inline(theme, &lines[0], width)
         {
-            lines[0].push_str(&subdued_text(theme, reasoning_inline_hint(theme)));
+            lines[0].push_str(&subdued_text(theme, &reasoning_inline_hint(theme)));
         } else {
             lines.push(reasoning_detail_line(theme, reasoning));
         }

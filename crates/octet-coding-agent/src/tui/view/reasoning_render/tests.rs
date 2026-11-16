@@ -184,7 +184,7 @@ fn collapsed_reasoning_shimmers_thinking_and_moves_heading_to_detail() {
     assert_eq!(strip_terminal_sequences(&first[0]), "Thinking");
     assert_eq!(
         strip_terminal_sequences(&first[1]),
-        "└ Verifying implementation (ctrl+t to expand)"
+        "└ Verifying implementation (Ctrl+T to expand)"
     );
     assert!(first[0].contains("\x1b[1m"), "{first:?}");
     assert!(!first[1].contains("\x1b[3m"), "{first:?}");
@@ -1803,14 +1803,14 @@ fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_the
     assert_eq!(live.len(), 1, "{live:?}");
     assert_eq!(
         strip_terminal_sequences(&live[0]),
-        "Thinking · Ctrl+T expand"
+        "Thinking · Ctrl+T to expand"
     );
     assert!(live[0].contains("\x1b[1m"), "{live:?}");
 
     let custom = theme::test_theme_from_source("");
     let legacy = render_reasoning(&reasoning, &custom.reasoning_renderer(), &custom, 80);
     assert_eq!(legacy.len(), 2, "{legacy:?}");
-    assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (ctrl+t to expand)");
+    assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (Ctrl+T to expand)");
 
     reasoning.reasoning_elapsed = Some(Duration::from_millis(13_700));
     reasoning.finish_reasoning();
@@ -1861,7 +1861,7 @@ fn two_line_thinking_reserves_its_detail_row_while_working() {
             "composer would shift at {width}"
         );
         assert!(strip_terminal_sequences(&thinking[0]).starts_with("Thinking"));
-        assert!(strip_terminal_sequences(&thinking[1]).contains("ctrl+t to expand"));
+        assert!(strip_terminal_sequences(&thinking[1]).contains("Ctrl+T to expand"));
         activity = AssistantBlock::streaming_reasoning("");
         activity.reasoning_heading = Some("Working".into());
         activity.show_reasoning_hint = false;
@@ -1883,4 +1883,31 @@ fn non_expandable_activity_is_one_truthful_row() {
     let verbose = render_reasoning(&activity, &theme.reasoning_renderer(), &theme, 80);
     assert_eq!(verbose.len(), 1, "{verbose:?}");
     assert_eq!(strip_terminal_sequences(&verbose[0]), "Working");
+}
+
+#[test]
+fn thinking_hint_wording_survives_layout_transitions() {
+    for unicode in [false, true] {
+        let capabilities = TerminalCapabilities::test(false, unicode, ColorDepth::None);
+        let theme = theme::test_theme_with(capabilities);
+        let mut reasoning = AssistantBlock::streaming_reasoning("private detail");
+        let inline = collapsed_reasoning_lines_sized(&theme, &reasoning, 0, 0, 80);
+        assert_eq!(inline.len(), 1);
+        assert!(inline[0].ends_with("Ctrl+T to expand"));
+        let exact_width = visible_width(&inline[0]) as u16;
+        for (width, rows) in [(exact_width, 1), (exact_width - 1, 2)] {
+            let lines = collapsed_reasoning_lines_sized(&theme, &reasoning, 0, 0, width);
+            assert_eq!(lines.len(), rows);
+            assert_eq!(lines.join("\n").matches("Ctrl+T to expand").count(), 1);
+        }
+        reasoning.reasoning_heading = Some("Check".into());
+        let headed = collapsed_reasoning_lines_sized(&theme, &reasoning, 0, 0, 80);
+        assert_eq!(headed.len(), 2);
+        assert!(headed[1].ends_with("(Ctrl+T to expand)"));
+        let custom = theme::test_theme_source_with("", capabilities, TerminalBackground::Dark);
+        reasoning.reasoning_heading = None;
+        let lines = collapsed_reasoning_lines_sized(&custom, &reasoning, 0, 0, 80);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].ends_with("(Ctrl+T to expand)"));
+    }
 }

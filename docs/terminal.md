@@ -345,12 +345,13 @@ after its backoff countdown reaches zero, so two clocks never compete on one
 row. While the model reasons, the bold `Thinking` label shimmers more quietly
 than `Working` on supported terminals. It shows the latest Markdown heading from
 the reasoning (a `#` heading or a standalone bold line), with a dim expand hint.
-Ordinary reasoning text never becomes a label. With no heading, only the hint
-shows.
+Ordinary reasoning text never becomes a label. With no heading, the compiled
+default theme puts the hint beside `Thinking` when it fits; otherwise it uses a
+second row. Both layouts use `Ctrl+T to expand`.
 
 ```text
 • Thinking
-  └ Verifying the implementation (ctrl+t to expand)
+  └ Verifying the implementation (Ctrl+T to expand)
 ```
 
 Reasoning and activity dots keep a solid, fixed-size glyph. The `Working` dot

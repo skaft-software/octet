@@ -34,7 +34,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         vec![
             "",
             "• Thinking (0ns • esc to interrupt)",
-            "  └ Verifying reproducibility of evidence package (ctrl+t to expand)",
+            "  └ Verifying reproducibility of evidence package (Ctrl+T to expand)",
         ]
     );
 }
@@ -83,7 +83,7 @@ fn still_working_to_thinking_keeps_the_transcript_height_stable() {
     assert!(
         thinking
             .last()
-            .is_some_and(|row| row.contains("ctrl+t to expand")),
+            .is_some_and(|row| row.contains("Ctrl+T to expand")),
         "{thinking:?}"
     );
 
@@ -311,7 +311,7 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
     );
     assert!(promoted[0].is_empty(), "{promoted:?}");
     assert!(promoted[1].contains("Thinking"), "{promoted:?}");
-    assert!(promoted[1].contains("Ctrl+T expand"), "{promoted:?}");
+    assert!(promoted[1].contains("Ctrl+T to expand"), "{promoted:?}");
     assert!(promoted[2].is_empty(), "{promoted:?}");
     assert!(!promoted.join("\n").contains("provider-private detail"));
 }
@@ -649,7 +649,7 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
     assert_eq!(initial.len(), 3, "{initial:?}");
     assert!(initial[0].is_empty(), "{initial:?}");
     assert!(initial[1].contains("Thinking"), "{initial:?}");
-    assert!(initial[1].contains("Ctrl+T expand"), "{initial:?}");
+    assert!(initial[1].contains("Ctrl+T to expand"), "{initial:?}");
     assert!(initial[2].is_empty(), "{initial:?}");
     assert!(!initial.join("\n").contains("first private sentinel"));
 
@@ -683,7 +683,7 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
     let expanded = transcript(&shell).join("\n");
     assert!(expanded.contains("first private sentinel"), "{expanded}");
     assert!(expanded.contains("private reasoning row 127"), "{expanded}");
-    assert!(!expanded.contains("Ctrl+T expand"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T to expand"), "{expanded}");
 
     shell.toggle_thinking();
     assert_eq!(transcript(&shell), initial);
@@ -722,7 +722,7 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_t_hint() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(rendered.matches("Ctrl+T expand").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches("Ctrl+T to expand").count(), 1, "{rendered}");
     shell.toggle_thinking();
     let expanded = shell
         .state
@@ -734,7 +734,7 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_t_hint() {
         .join("\n");
     assert!(expanded.contains("first thought"), "{expanded}");
     assert!(expanded.contains("second thought"), "{expanded}");
-    assert!(!expanded.contains("Ctrl+T expand"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T to expand"), "{expanded}");
 }
 
 #[test]
@@ -760,7 +760,7 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
     );
     let collapsed = rendered(&shell);
     assert!(!collapsed.contains("first private thought"), "{collapsed}");
-    assert!(collapsed.contains("Ctrl+T expand"), "{collapsed}");
+    assert!(collapsed.contains("Ctrl+T to expand"), "{collapsed}");
 
     // Ctrl+O owns tool output and chrome; it never reveals private reasoning.
     shell.toggle_disclosure();
@@ -773,7 +773,7 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
     assert!(shell.toggle_thinking());
     let expanded = rendered(&shell);
     assert!(expanded.contains("first private thought"), "{expanded}");
-    assert!(!expanded.contains("Ctrl+T expand"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T to expand"), "{expanded}");
 
     // A trace that starts after the choice follows it instead of the theme.
     shell.on_run_event(
@@ -1171,12 +1171,12 @@ fn an_expanding_theme_paints_the_trace_while_the_default_paints_a_collapsed_line
     };
 
     let collapsed = rendered("[colors]\n");
-    assert!(collapsed.contains("ctrl+t to expand"), "{collapsed}");
+    assert!(collapsed.contains("Ctrl+T to expand"), "{collapsed}");
 
     let expanded = rendered("[colors]\nthinking_expanded = true");
     assert!(
         expanded.contains("Weighing the two migration paths."),
         "{expanded}"
     );
-    assert!(!expanded.contains("ctrl+t to expand"), "{expanded}");
+    assert!(!expanded.contains("Ctrl+T to expand"), "{expanded}");
 }
