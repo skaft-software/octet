@@ -164,13 +164,13 @@ fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
         "default fullscreen did not enable mouse reporting"
     );
     assert!(contains_bytes(&octet.pty.output, b"\x1b[?1006h"));
-    assert!(!parser.screen().contents().contains("rows back"));
+    assert!(!parser.screen().contents().contains("Jump to bottom"));
     octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
     await_screen(
         &mut octet,
         &mut parser,
         &mut consumed,
-        "rows back",
+        "Jump to bottom",
         STARTUP_TIMEOUT,
     );
     let capture = octet.shutdown();
@@ -185,9 +185,9 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     octet.pty.write_input(b"fullscreen-draft");
     await_screen(octet, parser, consumed, "fullscreen-draft", STARTUP_TIMEOUT);
     settle(octet, parser, consumed);
-    assert!(!parser.screen().contents().contains("rows back"));
+    assert!(!parser.screen().contents().contains("Jump to bottom"));
     octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
-    await_screen(octet, parser, consumed, "4 rows back", STARTUP_TIMEOUT);
+    await_screen(octet, parser, consumed, "Jump to bottom", STARTUP_TIMEOUT);
     // The VT parser exposes partial synchronized frames; hit-test only after
     // the completed frame/geometry receipt, as the terminal presents it.
     settle(octet, parser, consumed);
@@ -202,7 +202,7 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     octet.pty.write_input(&sgr(0, columns - 1, rows - 1, true));
     await_screen(octet, parser, consumed, "MOUSE-END", STARTUP_TIMEOUT);
     settle(octet, parser, consumed);
-    assert!(!parser.screen().contents().contains("rows back"));
+    assert!(!parser.screen().contents().contains("Jump to bottom"));
 
     let (row, column) = (1..rows - 5)
         .find_map(|row| {
@@ -489,6 +489,10 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         STARTUP_TIMEOUT,
     );
 
+    let tail_top = row_text(&parser, 0, 100);
+    let top_number = tail_top.split("MOUSE-ROW-").nth(1).unwrap()[..3]
+        .parse::<usize>()
+        .unwrap();
     // Repeated identical events in one touchpad-sized burst, including
     // Shift/Ctrl modifiers; no per-frame event loss or composer history moves.
     let mut up = Vec::new();
@@ -496,24 +500,23 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         up.extend(sgr(64 | [0, 4, 16][index % 3], 30, 10, false));
     }
     octet.pty.write_input(&up);
-    await_screen(
-        &mut octet,
-        &mut parser,
-        &mut consumed,
-        "96 rows back",
-        STARTUP_TIMEOUT,
-    );
+    // The centered control no longer exposes a numeric offset. Verify exact
+    // one-row motion against the uniquely numbered source rows instead.
+    let up_top = format!("MOUSE-ROW-{:03}", top_number - 96);
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while !row_text(&parser, 0, 100).contains(&up_top) && Instant::now() < deadline {
+        settle(&mut octet, &mut parser, &mut consumed);
+    }
+    assert!(row_text(&parser, 0, 100).contains(&up_top));
+    assert!(parser.screen().contents().contains("Jump to bottom"));
     assert!(parser.screen().contents().contains("draft-kept"));
-    let top = row_text(&parser, 0, 100);
     octet.pty.write_input(&sgr(65, 30, 10, false).repeat(4));
-    await_screen(
-        &mut octet,
-        &mut parser,
-        &mut consumed,
-        "92 rows back",
-        STARTUP_TIMEOUT,
-    );
-    assert_ne!(row_text(&parser, 0, 100), top);
+    let down_top = format!("MOUSE-ROW-{:03}", top_number - 92);
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while !row_text(&parser, 0, 100).contains(&down_top) && Instant::now() < deadline {
+        settle(&mut octet, &mut parser, &mut consumed);
+    }
+    assert!(row_text(&parser, 0, 100).contains(&down_top));
     octet.pty.write_input(&x10(65, 30, 10).repeat(92));
     await_screen(
         &mut octet,
@@ -523,7 +526,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         STARTUP_TIMEOUT,
     );
     settle(&mut octet, &mut parser, &mut consumed);
-    assert!(!parser.screen().contents().contains("rows back"));
+    assert!(!parser.screen().contents().contains("Jump to bottom"));
     assert!(
         parser.screen().contents().contains("draft-kept"),
         "{}",
@@ -600,20 +603,18 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
         octet.pty.write_input(b"\x1b[5~\x1b[6~");
         octet.pty.write_input(&sgr(64, 20, 3, false).repeat(12));
         settle(&mut octet, &mut parser, &mut consumed);
-        // Pick a row only from the repaint at the final scroll position. The
-        // half-page PageUp above also paints a "N rows back" frame, and
-        // PageDown returns to the tail, so the twelve wheel steps of one row
-        // leave exactly 12 rows back. Any earlier frame still on screen would
-        // aim the drag at a row the wheel has since moved.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !parser.screen().contents().contains("12 rows back") && Instant::now() < deadline {
-            settle(&mut octet, &mut parser, &mut consumed);
-        }
-        assert!(
-            parser.screen().contents().contains("12 rows back"),
-            "the wheel's final repaint never reached the screen: {}",
-            parser.screen().contents()
+        // Fence the final scroll with a composer edit accepted after every
+        // wheel delta. The centered button intentionally has no offset label.
+        octet.pty.write_input(b"-scroll-fence");
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            "draft-private-scroll-fence",
+            STARTUP_TIMEOUT,
         );
+        settle(&mut octet, &mut parser, &mut consumed);
+        assert!(parser.screen().contents().contains("Jump to bottom"));
         for legacy in [false, true] {
             // Search upward: rows above an inline frame can hold stale
             // scrollback the application does not own, and where the frame

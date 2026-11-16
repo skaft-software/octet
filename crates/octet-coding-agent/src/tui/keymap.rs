@@ -313,6 +313,10 @@ pub fn translate_with_bindings(
         Event::FocusGained => InputAction::FocusGained,
         Event::FocusLost => InputAction::FocusLost,
         Event::Mouse(mouse) => match mouse.kind {
+            // The terminal already quantizes/accelerates trackpad motion into
+            // line events. Pi compatibility: packages/tui/src/tui-alt-screen.ts:
+            // 272,719-724 defaults to one line, without a second curve. Octet
+            // retains its explicit fifteen-row Alt shortcut.
             MouseEventKind::ScrollUp => {
                 InputAction::ScrollLines(-wheel_scroll_rows(mouse.modifiers))
             }

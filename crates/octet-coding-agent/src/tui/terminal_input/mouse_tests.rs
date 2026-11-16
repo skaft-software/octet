@@ -34,6 +34,7 @@ async fn wheel_matrix(master: &mut std::fs::File, input: &mut TerminalInput) {
             (64, MouseEventKind::ScrollUp),
             (65, MouseEventKind::ScrollDown),
         ] {
+            // One terminal-reported line stays one native line (Alt: fifteen).
             // SGR 1006, legacy X10/1000, and decimal rxvt 1015 all decode to
             // the same zero-based cell event, including combined modifiers.
             for wire in [

@@ -29,6 +29,7 @@
 ### Changed
 
 - Mouse wheel and trackpad scrolling move one row per step with matching terminal guidance and PTY coverage; Alt+wheel moves 15.
+- Trackpad line reports accumulate without an extra application-side multiplier.
 - Recorded-audio guidance documents input paths, durable media and separate transport-acceptance and recognition checks.
 
 - Recorded media reuses prepared bytes across turns and resumes from session data; Gemini audio uses Files uploads when inline requests grow.

@@ -195,8 +195,10 @@ file and compare identically instrumented builds. Normal sessions retain only an
 atomic input/publication clock, not timing samples.
 
 The offline Unix PTY driver uses a disposable home, a 100-model manual catalog,
-1,000 synthetic user/assistant turns, and 4 ms wheel, selection, slash-filter and
-arrow bursts. It verifies trace counts, the final composer marker, clean exit,
+1,000 synthetic turns with paired tool cards and 100 inline PNGs, and 4 ms wheel,
+selection, slash-filter and arrow bursts. Its synthetic Ghostty capability profile
+exercises Kitty image commands (not a physical terminal). Separate settled wheel
+probes at 0/1/4 ms gaps report actual rows moved from the native scroll hint. It verifies trace counts, the final composer marker, clean exit,
 and terminal-mode restoration, retaining raw samples and per-kind p50/p95:
 
 ```sh
@@ -205,7 +207,8 @@ python3 scripts/bench-interaction-latency.py target/debug/octet > interaction.js
 python3 -m unittest discover -s scripts/tests -p 'test_bench_interaction_latency.py'
 ```
 
-Use the same debug build profile, host and workload for both runs. These clocks
+Compare the same build profile, host and workload for both runs; run debug and
+release separately. These clocks
 exclude OS input queueing and physical emulator display. The driver drains real
 terminal output but does not qualify physical touchpad smoothness or live-provider
 load. Selection/reader-position correctness remains covered by the TUI tests.
@@ -221,6 +224,30 @@ on the first delta of a burst. Already-ready input still drains before that wake
 and all deltas update state in order; the capacity-one renderer channel coalesces
 presentation. The input owner no longer waits for a second periodic 16 ms slot
 before notifying the renderer.
+
+### Terminal wheel granularity
+
+The host preserves one row per terminal line event (Alt: fifteen), matching Pi's
+`packages/tui/src/tui-alt-screen.ts:272,719-724`. Terminal input is owned by the
+native host, not an adapter render callback. SGR 1006 carries integer line events;
+the terminal accumulates sub-line trackpad motion before reporting them. Mode
+1016 changes pointer coordinates to pixels, not wheel deltas. No app-side pixel
+deltas exist to recover or accumulate, and enabling it would break cell hit tests.
+
+One local shared Linux-host run (120×40, 1,000 mixed turns, 20 rounds, 513 wheel
+samples including the motion probes) measured:
+
+| Profile | Before: wheel write p50 / p95 | One-line reports: p50 / p95 | Rows / event before → after |
+| --- | --- | --- | --- |
+| Debug | 4.241 / 8.770 ms | 3.995 / 5.813 ms | 3 → 1 |
+| Release | 1.500 / 1.884 ms | 1.585 / 1.832 ms | 3 → 1 |
+
+All four motion probes preserve every report, including a 64-event same-write
+burst. This removes overshoot from the extra threefold multiplier, not terminal
+acceleration. Counts and hashes are retained in the driver's JSON. These are
+within-run descriptive percentiles on a shared host, not display latency or
+independent-trial tail guarantees. Image command emission is asserted; image
+placement and Ghostty touchpad feel still need physical-terminal qualification.
 
 ### Fullscreen navigation and selection audit
 
