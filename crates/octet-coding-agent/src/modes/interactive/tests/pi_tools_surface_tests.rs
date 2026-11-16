@@ -404,7 +404,6 @@ export default pi => {
     let run_id = shell.begin_run("tool-surface");
     shell.set_awaiting_provider(run_id);
     let control = run.control();
-    let mut ticker = tokio::time::interval(Duration::from_millis(16));
     let outcome = tokio::time::timeout(
         Duration::from_secs(20),
         drive_active_run(
@@ -412,7 +411,6 @@ export default pi => {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut VecDeque::new(),
             &mut false,
             None,

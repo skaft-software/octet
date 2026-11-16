@@ -133,7 +133,6 @@ async fn drive(app: &mut App, shell: &mut InteractiveShell, mut input: UserInput
     shell.set_awaiting_provider(id);
     let control = run.control();
     let mut terminal = futures_util::stream::pending::<std::io::Result<Event>>();
-    let mut ticker = tokio::time::interval(Duration::from_millis(16));
     let ended = tokio::time::timeout(
         Duration::from_secs(20),
         drive_active_run(
@@ -141,7 +140,6 @@ async fn drive(app: &mut App, shell: &mut InteractiveShell, mut input: UserInput
             &control,
             shell,
             &mut terminal,
-            &mut ticker,
             &mut VecDeque::new(),
             &mut false,
             None,

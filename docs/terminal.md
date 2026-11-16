@@ -280,8 +280,9 @@ one row per terminal line event (Alt/Option: fifteen); bursts accumulate without
 changing composer history. Each event keeps that fixed step: the terminal converts
 high-resolution trackpad motion to line reports and applies its own acceleration;
 octet preserves every report without a second multiplier, curve, smoothing, or
-inertia. Pixel mouse mode (1016) changes pointer coordinates, not wheel-delta
-precision, and stays disabled. Dragging the
+inertia. Each event immediately notifies the renderer; only pending paints
+coalesce, never the line deltas. Pixel mouse mode (1016) changes pointer
+coordinates, not wheel-delta precision, and stays disabled. Dragging the
 scrollbar keeps the pointer until you release it; wheel events still move the
 transcript over the track, scroll hint, and viewport edges during that press.
 Repeated selection-drag
@@ -349,6 +350,15 @@ the transcript, while height-only changes reuse its wrapping. Away-and-back
 resizes also rebuild native history. The hardware composer cursor stays visible
 inside synchronized frames through panels, resizing, and renderer resumes.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
+
+For a physical Ghostty scroll check, use a long resumed session with images and
+tool cards: make tiny up/down gestures at the live tail and reverse direction;
+repeat over the hint, top/bottom edges and scrollbar, including while holding a
+scrollbar press. Try a continuous sweep and stop, Alt/Option scrolling, edge-drag
+selection and copy, then PageDown back to live. While output arrives, an older
+reading position should stay pinned and the live tail should follow. Repeat at
+normal and short pane heights with your usual extensions. PTY timings do not
+qualify those physical gestures or image placement.
 
 Layouts adapt between wide and narrow terminals and fall back from truecolor to
 256 colors, 16 colors and no color, and from Unicode to ASCII. Markdown shows

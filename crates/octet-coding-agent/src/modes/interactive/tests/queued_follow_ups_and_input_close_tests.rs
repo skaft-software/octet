@@ -69,7 +69,6 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
         let mut quit = false;
         let mut goal_deadline = None;
         let ended = tokio::time::timeout(
@@ -79,7 +78,6 @@ async fn queued_follow_ups_dispatch_only_after_completion_or_escape_settlement()
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut VecDeque::new(),
                 &mut quit,
                 None,
@@ -141,7 +139,6 @@ async fn closed_input_is_disabled_while_the_aborted_run_settles() {
     shell.set_awaiting_provider(run_id);
     let control = run.control();
     let mut input = EndsThenPanics(false);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
@@ -152,7 +149,6 @@ async fn closed_input_is_disabled_while_the_aborted_run_settles() {
         &control,
         &mut shell,
         &mut input,
-        &mut ticker,
         &mut pending,
         &mut quit,
         None,

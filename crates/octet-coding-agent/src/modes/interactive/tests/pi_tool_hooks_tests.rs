@@ -286,7 +286,6 @@ async fn exercise_mode(
     let id = startup_shell.begin_run("tool-hooks");
     startup_shell.set_awaiting_provider(id);
     let control = run.control();
-    let mut ticker = tokio::time::interval(Duration::from_millis(16));
     let ended = tokio::time::timeout(
         Duration::from_secs(20),
         drive_active_run(
@@ -294,7 +293,6 @@ async fn exercise_mode(
             &control,
             &mut startup_shell,
             &mut startup_input,
-            &mut ticker,
             &mut VecDeque::new(),
             &mut false,
             None,

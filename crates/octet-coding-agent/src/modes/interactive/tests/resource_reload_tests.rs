@@ -488,7 +488,6 @@ async fn idle_prompt_observes_worker_settlement_without_input_or_extension_polli
     let before = shell.debug_snapshot();
     assert!(before.contains("Subagents · 1 running"), "{before}");
     let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_secs(60));
     let (watcher, mut reload, mut reload_tick) = test_reload();
     // The idle prompt owns `&mut shell`; this handle observes the same state.
@@ -498,7 +497,6 @@ async fn idle_prompt_observes_worker_settlement_without_input_or_extension_polli
         let idle = wait_for_prompt(
             &mut shell,
             &mut input,
-            &mut scroll_tick,
             &mut extension_tick,
             &mut app.executable_extensions,
             None,
@@ -1094,7 +1092,6 @@ export default pi => {{
     assert!(!shell.debug_snapshot().contains("reload succeeded"));
     let session = app.agent.session().path().to_owned();
     let (watcher, mut reload, mut reload_tick) = test_reload();
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
     for (attempt, text) in ["/reload", "/verbose on", "/reload", "/reload"]
         .into_iter()
@@ -1127,7 +1124,6 @@ export default pi => {{
                 wait_for_prompt(
                     &mut shell,
                     &mut input,
-                    &mut scroll_tick,
                     &mut extension_tick,
                     &mut app.executable_extensions,
                     None,

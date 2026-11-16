@@ -184,7 +184,6 @@ async fn held_open_model_request_keeps_input_live_and_settles_once() {
             remaining: 3,
             handled: Some(handled_tx),
         };
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut made_tool_call = false;
@@ -194,8 +193,7 @@ async fn held_open_model_request_keeps_input_live_and_settles_once() {
         let ended = tokio::time::timeout(Duration::from_secs(5), async {
             let mut goal_deadline = None;
             tokio::select! {
-                result = drive_active_run(&mut run, &control, &mut shell, &mut input,
-                    &mut ticker, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call,
+                result = drive_active_run(&mut run, &control, &mut shell, &mut input, &mut pending, &mut quit, None, None, &mut extensions, &mut made_tool_call,
                     test_run_inspection(), &mut goal_deadline) => result.unwrap(),
                 _ = &mut stimulus => unreachable!(),
             }
@@ -247,7 +245,6 @@ async fn caller_driven_run_settles_and_cancels_while_real_renderer_is_gated() {
         assert!(gate.wait_until_entered(Duration::from_secs(3)));
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -274,7 +271,7 @@ async fn caller_driven_run_settles_and_cancels_while_real_renderer_is_gated() {
         let mut deadline = None;
         let result = tokio::select! {
             result = drive_active_run(
-                &mut run, &control, &mut shell, &mut input, &mut ticker,
+                &mut run, &control, &mut shell, &mut input,
                 &mut pending, &mut quit, None, None, &mut extensions,
                 &mut made_tool_call, test_run_inspection(), &mut deadline,
             ) => result.unwrap(),

@@ -165,7 +165,6 @@ struct IdleDriver<'a> {
     shell: &'a mut InteractiveShell,
     extensions: &'a mut crate::extensions::ExecutableExtensions,
     agent: &'a mut octet_agent::Agent,
-    scroll: tokio::time::Interval,
     ticks: tokio::time::Interval,
     reload_watcher: crate::reload::ReloadWatcher,
     reload: crate::reload::ReloadSupervisor,
@@ -182,7 +181,6 @@ impl IdleDriver<'_> {
             wait_for_prompt(
                 self.shell,
                 input,
-                &mut self.scroll,
                 &mut self.ticks,
                 self.extensions,
                 None,
@@ -208,7 +206,6 @@ async fn idle_driver<'a>(
         shell,
         extensions,
         agent,
-        scroll: tokio::time::interval(Duration::from_millis(16)),
         ticks: tokio::time::interval(Duration::from_millis(10)),
         reload_watcher,
         reload,
@@ -790,7 +787,6 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
                 },
             ),
         )]);
-        let mut ticker = tokio::time::interval(Duration::from_millis(5));
         let mut pending = VecDeque::new();
         let ended = tokio::time::timeout(
             Duration::from_secs(10),
@@ -799,7 +795,6 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut false,
                 None,
@@ -922,7 +917,6 @@ async fn native_pi_custom_editor_refused_paste_retains_payload_and_undo() {
     shell.set_awaiting_provider(run_id);
     let control = run.control();
     let mut input = scripted(vec![(10, key(KeyCode::Char('s'), KeyModifiers::CONTROL))]);
-    let mut ticker = tokio::time::interval(Duration::from_millis(5));
     tokio::time::timeout(
         Duration::from_secs(8),
         drive_active_run(
@@ -930,7 +924,6 @@ async fn native_pi_custom_editor_refused_paste_retains_payload_and_undo() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut VecDeque::new(),
             &mut false,
             None,
@@ -1152,7 +1145,6 @@ async fn native_pi_custom_editor_busy_admission_precedes_terminal_consumers() {
         shell.set_awaiting_provider(run_id);
         let control = run.control();
         let mut input = super::pi_ui_contract_tests::raw_input(&shell, bytes);
-        let mut ticker = tokio::time::interval(Duration::from_millis(5));
         tokio::time::timeout(
             Duration::from_secs(8),
             drive_active_run(
@@ -1160,7 +1152,6 @@ async fn native_pi_custom_editor_busy_admission_precedes_terminal_consumers() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut VecDeque::new(),
                 &mut false,
                 None,

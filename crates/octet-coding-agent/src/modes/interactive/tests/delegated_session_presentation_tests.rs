@@ -383,7 +383,6 @@ async fn active_subagent_refresh_timeout_preserves_the_roster_without_transcript
             theme_picker_key(KeyCode::Enter),
         ])
         .chain(futures_util::stream::pending());
-        let mut tick = tokio::time::interval(Duration::from_millis(16));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut made_tool_call = false;
@@ -396,7 +395,6 @@ async fn active_subagent_refresh_timeout_preserves_the_roster_without_transcript
             &control,
             &mut shell,
             &mut input,
-            &mut tick,
             &mut pending,
             &mut quit,
             None,

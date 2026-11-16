@@ -163,14 +163,12 @@ async fn idle_for_285_seconds(agent: &mut Agent) -> Idle {
             .unwrap();
     });
     let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-    let mut scroll = tokio::time::interval(Duration::from_millis(16));
     let mut extensions_tick = tokio::time::interval(Duration::from_millis(50));
     let mut extensions = crate::extensions::ExecutableExtensions::default();
     let (watcher, mut reload, mut reload_tick) = test_reload();
     wait_for_prompt(
         &mut shell,
         &mut input,
-        &mut scroll,
         &mut extensions_tick,
         &mut extensions,
         None,

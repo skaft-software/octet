@@ -219,16 +219,33 @@ Non-editing navigation therefore bypasses that timer too. The sequence credited
 to a completed frame is captured before rendering; events during a write still
 preempt the following slot. Semantic-only updates retain the 16 ms pacing budget.
 
-The idle and active input owners arm their wheel-publication wake immediately
-on the first delta of a burst. Already-ready input still drains before that wake,
-and all deltas update state in order; the capacity-one renderer channel coalesces
-presentation. The input owner no longer waits for a second periodic 16 ms slot
-before notifying the renderer.
+Idle and active input owners publish each wheel delta before polling another
+input event. Only the capacity-one renderer channel coalesces presentation; no
+wheel timer or drain-until-pending stage delays notification. Resetting an async
+timer to “now” still incurred roughly 1 ms of timer quantization on the measured
+host, and a biased stream of ready input could starve that timer entirely.
+Paused-clock regressions now exercise actual single-event and 64-event input
+bursts, checking publication even when another input event is already ready.
+
+After removing that timer, one matched mixed-transcript run measured publication
+p50/p95 of 0.016/0.033 ms in debug and 0.001/0.006 ms in release (previously
+1.102/1.211 and 1.072/1.163 ms with one-line reports). Completed-write p50/p95
+changed from 3.995/5.813 to 2.994/8.834 ms in debug and 1.585/1.832 to
+0.393/0.986 ms in release. The debug tail is noisy, not a demonstrated tail win.
+
+Three further alternating-order baseline/final runs, 513 wheel samples each,
+showed baseline → final median within-run p50 write times of 4.014 → 2.779 ms
+(debug) and 1.512 → 0.438 ms (release). Within-run p95 ranges were 6.425–12.563 →
+5.225–15.985 ms (debug), and 1.687–1.738 → 0.560–1.087 ms (release). Every
+0/1/4 ms probe preserved every event; publication p50 stayed below 0.015 ms in
+both final profiles. These are shared-host PTY observations, not physical display
+measurements or enough independent trials to establish extreme-tail guarantees.
 
 ### Terminal wheel granularity
 
-The host preserves one row per terminal line event (Alt: fifteen), matching Pi's
-`packages/tui/src/tui-alt-screen.ts:272,719-724`. Terminal input is owned by the
+The host preserves one row per terminal line event, matching Pi's
+`packages/tui/src/tui-alt-screen.ts:272,719-724`; octet retains its explicit
+fifteen-row Alt shortcut. Terminal input is owned by the
 native host, not an adapter render callback. SGR 1006 carries integer line events;
 the terminal accumulates sub-line trackpad motion before reporting them. Mode
 1016 changes pointer coordinates to pixels, not wheel deltas. No app-side pixel

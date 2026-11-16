@@ -680,7 +680,6 @@ hooks = ["session_start", "session_end", "post_mutation"]
                     handled: Some(handled_tx),
                 };
                 let mut queue = VecDeque::new();
-                let mut ticker = tokio::time::interval(Duration::from_millis(1));
                 let mut quit = false;
                 let mut made_tool_call = false;
                 let mut deadline = None;
@@ -697,7 +696,6 @@ hooks = ["session_start", "session_end", "post_mutation"]
                     &control,
                     &mut shell,
                     &mut input,
-                    &mut ticker,
                     &mut queue,
                     &mut quit,
                     None,
@@ -818,7 +816,6 @@ async fn unqualified_active_thinking_cycles_immediately_without_wire_mutation() 
             handled: Some(handled_tx),
         };
         let mut pending = VecDeque::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
         let mut made_tool_call = false;
@@ -832,7 +829,6 @@ async fn unqualified_active_thinking_cycles_immediately_without_wire_mutation() 
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -958,7 +954,6 @@ async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
             handled: Some(handled_tx),
         };
         let mut pending = VecDeque::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
         let id = shell.begin_run("test");
@@ -972,7 +967,6 @@ async fn thinking_control_preserves_active_run_and_hands_off_wire_update() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -1301,7 +1295,6 @@ async fn active_model_and_thinking_panels_do_not_suspend_run() {
             handled: Some(handled_tx),
         };
         let mut pending = VecDeque::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
         let run_id = shell.begin_run("test");
@@ -1318,7 +1311,6 @@ async fn active_model_and_thinking_panels_do_not_suspend_run() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -1387,7 +1379,6 @@ async fn active_modal_escape_ctrl_c_and_close_keep_their_owners() {
         }
         let _sender = sender;
         let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -1402,7 +1393,6 @@ async fn active_modal_escape_ctrl_c_and_close_keep_their_owners() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,
@@ -1495,7 +1485,6 @@ async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
     let mut run = agent.prompt("initial").await.unwrap();
     shell.set_awaiting_provider(run_id);
     let control = run.control();
-    let mut ticker = tokio::time::interval(Duration::from_millis(16));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -1507,7 +1496,6 @@ async fn cancellation_retains_answer_draft_and_ordered_undelivered_steering() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,

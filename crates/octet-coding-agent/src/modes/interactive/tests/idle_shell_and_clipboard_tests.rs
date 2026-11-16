@@ -92,7 +92,6 @@ async fn active_clipboard_completion_preserves_native_and_terminal_paste() {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -104,7 +103,6 @@ async fn active_clipboard_completion_preserves_native_and_terminal_paste() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,
@@ -175,7 +173,6 @@ async fn active_clipboard_slow_helper_cancels_on_ctrl_c_and_settlement() {
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -187,7 +184,6 @@ async fn active_clipboard_slow_helper_cancels_on_ctrl_c_and_settlement() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,
@@ -377,7 +373,6 @@ async fn active_clipboard_draft_handoff_drops_pending_read_before_replacement() 
         let mut run = agent.prompt("initial").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -389,7 +384,6 @@ async fn active_clipboard_draft_handoff_drops_pending_read_before_replacement() 
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,
@@ -440,16 +434,64 @@ async fn clipboard_gesture_is_consumed_on_the_active_run_path_too() {
     clipboard_read::clear_test_text();
 }
 
+async fn assert_ready_wheel_publication(count: usize) {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    let mut shell = InteractiveShell::test_shell();
+    for index in 0..100 {
+        shell.notice(format!("wheel-row-{index}"));
+    }
+    shell.render();
+    let wheel = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 20,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    });
+    let mut events = (0..count).map(|_| Ok(wheel.clone())).collect::<Vec<_>>();
+    events.push(Ok(ctrl_key('d')));
+    let mut input = tokio_stream::iter(events);
+
+    let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
+    let mut extensions = crate::extensions::ExecutableExtensions::default();
+    let (watcher, mut reload, mut reload_tick) = test_reload();
+    let result = wait_for_prompt(
+        &mut shell,
+        &mut input,
+        &mut extension_tick,
+        &mut extensions,
+        None,
+        &mut reload_tick,
+        &watcher,
+        &mut reload,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Idle::Quit));
+    let frame = shell.dump_rendered_frame().await.unwrap();
+    assert!(frame.iter().any(|row| row.contains("Jump to bottom")));
+    let mut expected = InteractiveShell::test_shell();
+    for index in 0..100 {
+        expected.notice(format!("wheel-row-{index}"));
+    }
+    expected.render();
+    expected.scroll_lines(-(count as i16));
+    expected.render();
+    assert_eq!(
+        frame,
+        expected.dump_rendered_frame().await.unwrap(),
+        "ready input must publish every wheel delta before another ready event"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn ready_wheel_input_publishes_before_the_next_ready_event() {
+    assert_ready_wheel_publication(64).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn wheel_publication_is_due_without_a_second_frame_interval() {
-    let mut tick = tokio::time::interval(Duration::from_millis(16));
-    tick.tick().await; // consume the interval's initial immediate tick
-    let mut dirty = false;
-    schedule_scroll_frame(&mut tick, &mut dirty);
-    assert!(dirty);
-    assert!(futures_util::poll!(Box::pin(tick.tick())).is_ready());
-    dirty = false;
-    schedule_scroll_frame(&mut tick, &mut dirty);
-    schedule_scroll_frame(&mut tick, &mut dirty); // preserve burst coalescing
-    assert!(futures_util::poll!(Box::pin(tick.tick())).is_ready());
+    // Exercise the real input owner, not just a timer reset: no clock advance
+    // or pending input is needed for the first wheel report to publish.
+    assert_ready_wheel_publication(1).await;
 }

@@ -645,21 +645,10 @@ enum Idle {
     Quit,
 }
 
-// Adjacent ready wheel events share one publication on the input owner.
-fn schedule_scroll_frame(tick: &mut Interval, dirty: &mut bool) {
-    if !*dirty {
-        // Rendering already coalesces on its capacity-one channel. This wake
-        // only lets ready input drain first; it must not add another 16 ms slot.
-        tick.reset_immediately();
-        *dirty = true;
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_prompt<S>(
     shell: &mut InteractiveShell,
     input: &mut S,
-    scroll_tick: &mut Interval,
     extension_tick: &mut Interval,
     executable_extensions: &mut crate::extensions::ExecutableExtensions,
     goal_deadline: Option<Instant>,
@@ -671,7 +660,6 @@ async fn wait_for_prompt<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let mut scroll_dirty = false;
     let mut cache_warming_failed = false;
     let mut delegation_telemetry = agent
         .as_deref()
@@ -803,7 +791,7 @@ where
                     }
                     InputAction::ScrollLines(direction) => {
                         shell.scroll_lines(direction);
-                        schedule_scroll_frame(scroll_tick, &mut scroll_dirty);
+                        shell.render();
                     }
                     InputAction::JumpToTail => {
                         shell.jump_to_tail();
@@ -867,12 +855,6 @@ where
                     | InputAction::Queue(_) | InputAction::Steer(_) => {}
                 }
             }
-            // Apply every ready delta before publishing once. The first wheel
-            // event arms this wake immediately; only the renderer owns pacing.
-            _ = scroll_tick.tick(), if scroll_dirty => {
-                shell.render();
-                scroll_dirty = false;
-            },
             _ = async {
                 match goal_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -4031,7 +4013,6 @@ pub async fn drive_active_run<S>(
     control: &RunControl,
     shell: &mut InteractiveShell,
     input: &mut S,
-    scroll_tick: &mut Interval,
     pending_actions: &mut VecDeque<PendingIdleAction>,
     quit_requested: &mut bool,
     max_cost_microdollars: Option<u64>,
@@ -4071,7 +4052,6 @@ where
     let mut dispatch_queued = false;
     shell.settle_queued_follow_ups(false);
     let mut input_open = true;
-    let mut scroll_dirty = false;
     let mut last_run_cost = 0u64;
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -4263,10 +4243,6 @@ where
                 // That error is harmless; no detached send survives this loop.
                 let _ = result;
                 in_flight = None;
-            }
-            _ = scroll_tick.tick(), if scroll_dirty => {
-                shell.render();
-                scroll_dirty = false;
             }
             result = futures_util::future::OptionFuture::from(update_check.as_mut().map(|future| future.as_mut())), if update_check.is_some() => {
                 update_check = None;
@@ -4947,7 +4923,7 @@ where
                     }
                     InputAction::ScrollLines(direction) => {
                         shell.scroll_lines(direction);
-                        schedule_scroll_frame(scroll_tick, &mut scroll_dirty);
+                        shell.render();
                     }
                     InputAction::JumpToTail => {
                         shell.jump_to_tail();
@@ -12021,8 +11997,6 @@ async fn run_interactive_without_model(
     // Late OSC replies are handled by the ordinary input owner. Cosmetic
     // discovery must not add a timeout before the native command boundary.
 
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
-    scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let reason = launch_reason;
@@ -12061,7 +12035,6 @@ async fn run_interactive_without_model(
         match wait_for_prompt(
             shell,
             input,
-            &mut scroll_tick,
             &mut extension_tick,
             &mut state.extensions,
             None,
@@ -13300,10 +13273,6 @@ async fn run_interactive_once(
         shell.leave();
         return Ok(InteractiveExit::Finished);
     }
-    // The wheel wake coalesces ready input before notifying the renderer. Each
-    // burst resets it immediately; its nominal period never delays input.
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
-    scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     extension_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -13527,7 +13496,6 @@ async fn run_interactive_once(
                 wait_for_prompt(
                     &mut shell,
                     &mut input,
-                    &mut scroll_tick,
                     &mut extension_tick,
                     &mut app.executable_extensions,
                     goal_deadline,
@@ -14042,7 +14010,6 @@ async fn run_interactive_once(
                     &control,
                     &mut shell,
                     &mut input,
-                    &mut scroll_tick,
                     &mut pending_actions,
                     &mut quit_requested,
                     app.config.max_cost_microdollars,

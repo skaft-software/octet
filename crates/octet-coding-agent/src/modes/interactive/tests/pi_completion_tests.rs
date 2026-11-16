@@ -38,7 +38,6 @@ async fn input_events_for(
     duration: Duration,
 ) {
     let mut input = futures_util::stream::iter(events).chain(futures_util::stream::pending());
-    let mut scroll = tokio::time::interval(Duration::from_millis(16));
     let mut extensions = tokio::time::interval(Duration::from_millis(10));
     let (watcher, mut reload, mut tick) = support::test_reload();
     assert!(
@@ -47,7 +46,6 @@ async fn input_events_for(
             wait_for_prompt(
                 shell,
                 &mut input,
-                &mut scroll,
                 &mut extensions,
                 &mut app.executable_extensions,
                 None,

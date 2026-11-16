@@ -59,7 +59,6 @@ async fn transcript_search_active_owner_consumes_query_and_escape_without_interr
     }
     let _sender = sender;
     let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -76,7 +75,6 @@ async fn transcript_search_active_owner_consumes_query_and_escape_without_interr
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -138,14 +136,12 @@ async fn scoped_model_cycle_reaches_idle_owner_without_draining_draft() {
         shell.set_model_cycle(vec!["first".into(), "second".into()]);
         shell.extension_set_editor(draft.into());
         let mut input = tokio_stream::iter([Ok(ctrl_key('p'))]);
-        let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
         let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
         let mut extensions = crate::extensions::ExecutableExtensions::default();
         let (reload_watcher, mut reload, mut reload_tick) = test_reload();
         let idle = wait_for_prompt(
             &mut shell,
             &mut input,
-            &mut scroll_tick,
             &mut extension_tick,
             &mut extensions,
             None,
@@ -175,7 +171,6 @@ async fn scoped_model_cycle_queues_on_active_owner_without_draining_draft() {
         sender.send(Ok(ctrl_key('p'))).await.unwrap();
         let _sender = sender;
         let mut input = tokio_stream::wrappers::ReceiverStream::new(receiver);
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -191,7 +186,6 @@ async fn scoped_model_cycle_queues_on_active_owner_without_draining_draft() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,

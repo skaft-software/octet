@@ -85,14 +85,12 @@ pub(super) async fn idle_shell_after(events: Vec<Event>) -> (InteractiveShell, I
     }
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     let mut extensions = crate::extensions::ExecutableExtensions::default();
     let (reload_watcher, mut reload, mut reload_tick) = test_reload();
     let idle = wait_for_prompt(
         &mut shell,
         &mut input,
-        &mut scroll_tick,
         &mut extension_tick,
         &mut extensions,
         None,

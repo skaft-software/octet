@@ -77,7 +77,6 @@ export default pi => {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut tokio::time::interval(Duration::from_millis(16)),
                 &mut pending,
                 &mut false,
                 None,
@@ -209,7 +208,6 @@ export default pi => {
             &control,
             &mut shell,
             &mut input,
-            &mut tokio::time::interval(Duration::from_millis(16)),
             &mut pending,
             &mut false,
             None,
@@ -375,7 +373,6 @@ export default pi => pi.on('turn_start', async () => {
         let id = shell.begin_run("busy hook UI");
         shell.set_awaiting_provider(id);
         let mut pending = VecDeque::new();
-        let mut tick = tokio::time::interval(Duration::from_millis(16));
         let mut quit = false;
         let mut made_tool_call = false;
         let mut deadline = None;
@@ -384,7 +381,6 @@ export default pi => pi.on('turn_start', async () => {
             &control,
             &mut shell,
             &mut input,
-            &mut tick,
             &mut pending,
             &mut quit,
             None,
@@ -566,7 +562,6 @@ export default pi => {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut tokio::time::interval(Duration::from_millis(16)),
                 &mut VecDeque::new(),
                 &mut quitting,
                 None,

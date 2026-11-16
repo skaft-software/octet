@@ -128,7 +128,6 @@ async fn active_goal_commands_apply_while_the_run_is_still_streaming() {
     // Keep the sender alive so EOF cannot abort the held run.
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut made_tool_call = false;
@@ -143,7 +142,6 @@ async fn active_goal_commands_apply_while_the_run_is_still_streaming() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,

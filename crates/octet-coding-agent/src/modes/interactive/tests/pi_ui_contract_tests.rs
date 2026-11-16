@@ -513,7 +513,6 @@ export default pi => {
             crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         ))])
         .chain(futures_util::stream::pending());
-        let mut scroll = tokio::time::interval(Duration::from_millis(16));
         let mut extensions = tokio::time::interval(Duration::from_millis(10));
         let (watcher, mut reload, mut tick) = super::support::test_reload();
         let idle = tokio::time::timeout(
@@ -521,7 +520,6 @@ export default pi => {
             wait_for_prompt(
                 &mut shell,
                 &mut input,
-                &mut scroll,
                 &mut extensions,
                 &mut app.executable_extensions,
                 None,
@@ -553,13 +551,11 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
 "#).await;
     command(&mut app, &mut shell, "listen").await.unwrap();
     let mut input = raw_input(&shell, b"xaq\x1bOA\x04");
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));
     let (watcher, mut reload, mut reload_tick) = test_reload();
     wait_for_prompt(
         &mut shell,
         &mut input,
-        &mut scroll_tick,
         &mut extension_tick,
         &mut app.executable_extensions,
         None,
@@ -599,7 +595,6 @@ async fn type_through_listener(
     deadline: Duration,
 ) -> (Vec<String>, Duration) {
     let mut input = raw_input(shell, bytes);
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
     let (watcher, mut reload, mut reload_tick) = test_reload();
     let started = std::time::Instant::now();
@@ -608,7 +603,6 @@ async fn type_through_listener(
         wait_for_prompt(
             shell,
             &mut input,
-            &mut scroll_tick,
             &mut extension_tick,
             &mut app.executable_extensions,
             None,
@@ -747,7 +741,6 @@ export default pi => {
         ));
         let mut input =
             futures_util::stream::iter([Ok(event)]).chain(futures_util::stream::pending());
-        let mut ticker = tokio::time::interval(Duration::from_millis(5));
         let mut pending = VecDeque::new();
         let ended = tokio::time::timeout(
             Duration::from_secs(8),
@@ -756,7 +749,6 @@ export default pi => {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut false,
                 None,
@@ -831,7 +823,6 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
     .await;
     command(&mut app, &mut shell, "listen").await.unwrap();
     let mut input = raw_input(&shell, b"typed text is consumed\x1bOA\x04");
-    let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     let mut extension_tick = tokio::time::interval(Duration::from_millis(10));
     let (watcher, mut reload, mut reload_tick) = test_reload();
     let idle = tokio::time::timeout(
@@ -839,7 +830,6 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
         wait_for_prompt(
             &mut shell,
             &mut input,
-            &mut scroll_tick,
             &mut extension_tick,
             &mut app.executable_extensions,
             None,

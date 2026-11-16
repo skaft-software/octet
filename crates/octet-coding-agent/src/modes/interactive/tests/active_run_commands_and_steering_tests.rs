@@ -171,7 +171,6 @@ async fn scripted_active_changelog_keeps_running_without_provider_input() {
         .unwrap();
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -187,7 +186,6 @@ async fn scripted_active_changelog_keeps_running_without_provider_input() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -241,7 +239,6 @@ async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands()
     }
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -257,7 +254,6 @@ async fn active_skill_invocations_queue_as_prompts_instead_of_unknown_commands()
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -337,7 +333,6 @@ async fn scripted_active_loop_enter_steers_and_never_forwards_active_model_comma
     // signalling an input close that would abort the real run.
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
@@ -351,7 +346,6 @@ async fn scripted_active_loop_enter_steers_and_never_forwards_active_model_comma
         &control,
         &mut shell,
         &mut input,
-        &mut ticker,
         &mut pending,
         &mut quit,
         None,
@@ -440,7 +434,6 @@ async fn abort_restores_all_undelivered_steering_after_the_final_event() {
     let _sender = sender;
 
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
@@ -454,7 +447,6 @@ async fn abort_restores_all_undelivered_steering_after_the_final_event() {
         &control,
         &mut shell,
         &mut input,
-        &mut ticker,
         &mut pending,
         &mut quit,
         None,
@@ -497,7 +489,6 @@ async fn drive_scripted_events(
     }
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
@@ -513,7 +504,6 @@ async fn drive_scripted_events(
             &control,
             shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -588,7 +578,6 @@ async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
         .unwrap();
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut extensions = crate::extensions::ExecutableExtensions::default();
@@ -599,7 +588,6 @@ async fn full_steering_admission_restores_the_draft_without_a_shell_entry() {
         &control,
         &mut shell,
         &mut input,
-        &mut ticker,
         &mut pending,
         &mut quit,
         None,
@@ -771,7 +759,6 @@ async fn active_run_subagents_without_extension_owner_stays_an_unknown_command()
     // signalling an input close that would abort the real run.
     let _sender = sender;
     let mut input = ReceiverStream::new(receiver);
-    let mut ticker = tokio::time::interval(Duration::from_millis(1));
     let mut pending = VecDeque::new();
     let mut quit = false;
     let mut executable_extensions = crate::extensions::ExecutableExtensions::default();
@@ -785,7 +772,6 @@ async fn active_run_subagents_without_extension_owner_stays_an_unknown_command()
         &control,
         &mut shell,
         &mut input,
-        &mut ticker,
         &mut pending,
         &mut quit,
         None,
@@ -1155,7 +1141,6 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
             handled: Some(handled_tx),
         };
         let mut pending = VecDeque::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut quit = false;
         let mut extensions = crate::extensions::ExecutableExtensions::default();
         let id = shell.begin_run("test");
@@ -1172,7 +1157,6 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,
@@ -1251,7 +1235,6 @@ async fn held_provider_theme_matrix_applies_previews_and_keeps_native_chrome() {
                 &control,
                 &mut shell,
                 &mut input,
-                &mut ticker,
                 &mut pending,
                 &mut quit,
                 None,

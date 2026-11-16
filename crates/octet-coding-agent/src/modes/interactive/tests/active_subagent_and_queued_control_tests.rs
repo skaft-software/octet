@@ -112,7 +112,6 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
         let mut run = agent.prompt("held turn").await.unwrap();
         shell.set_awaiting_provider(run_id);
         let control = run.control();
-        let mut ticker = tokio::time::interval(Duration::from_millis(16));
         let mut pending = VecDeque::new();
         let mut quit = false;
         let mut made_tool_call = false;
@@ -122,7 +121,6 @@ async fn active_subagent_stops_are_owned_and_survive_root_completion() {
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
@@ -421,7 +419,6 @@ async fn fast_active_commands_wait_for_ownership_before_changing_wire_requests()
             handled: Some(handled_tx),
         };
         let mut pending = VecDeque::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
         let mut quit = false;
         let mut made_tool_call = false;
         let mut deadline = None;
@@ -434,7 +431,6 @@ async fn fast_active_commands_wait_for_ownership_before_changing_wire_requests()
             &control,
             &mut shell,
             &mut input,
-            &mut ticker,
             &mut pending,
             &mut quit,
             None,
