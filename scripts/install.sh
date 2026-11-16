@@ -501,6 +501,7 @@ extensions/octet-pi-compat/SETTINGS.md
 extensions/octet-pi-compat/shims/pi-1.0.2/README.md
 extensions/octet-pi-compat/test/pi-v1.0.2/README.md
 scripts/bench-startup-resume.py
+scripts/fixtures/pi-reference/README.md
 extensions/octet-codemode/THIRD_PARTY_NOTICES.md
 extensions/octet-codemode/LICENSE
 extensions/octet-codemode/vendor/PROVENANCE.json

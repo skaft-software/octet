@@ -40,6 +40,7 @@
 - Pi streamed tool arguments accept native-sized chunks while retaining bounded, isolated observations.
 - Audio read errors identify the provider and model when the selected route cannot accept the clip.
 - Packaged documentation keeps internal investigation notes private.
+- Packaged documentation includes reusable provider ownership and refreshed Pi message compatibility references.
 - Provider request traces count signed Google parts by kind without exposing signatures.
 - Live activity timers show whole seconds again (`28s`, `1m49s`, `1h01m01s`).
 - Responses screenshot retention updates only new replay items instead of rescanning settled history.

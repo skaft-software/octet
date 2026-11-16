@@ -12,8 +12,9 @@ resolve from `extensions/octet-pi-compat/shims/`. Without one the shim refuses
 reports an error, and tests such as
 `pi_custom_http_delegate_uses_process_fetch_and_current_host_hooks` fail.
 
-This directory is never shipped and is not a dependency of octet or of
-`extensions/octet-pi-compat`. CI installs it from the lockfile with scripts
+Only this reference page is packaged as inert documentation. The fixture code
+and dependencies are test-only, not shipped dependencies of octet or of
+`extensions/octet-pi-compat`. CI installs them from the lockfile with scripts
 disabled and links the package where the shim resolves it:
 
 ```sh

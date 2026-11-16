@@ -240,6 +240,7 @@ text docs/instructions.md
 text docs/linux.md
 text docs/maintainers/README.md
 text docs/maintainers/conventions.md
+text docs/maintainers/provider-boundary.md
 text docs/maintainers/pi-v0.10-candidate.md
 text docs/maintainers/prompts/cl.md
 text docs/maintainers/prompts/is.md
@@ -364,6 +365,7 @@ text extensions/octet-pi-compat/SETTINGS.md
 text extensions/octet-pi-compat/shims/pi-1.0.2/README.md
 text extensions/octet-pi-compat/test/pi-v1.0.2/README.md
 text scripts/bench-startup-resume.py
+text scripts/fixtures/pi-reference/README.md
 text extensions/octet-codemode/THIRD_PARTY_NOTICES.md
 text extensions/octet-codemode/LICENSE
 text extensions/octet-codemode/vendor/PROVENANCE.json

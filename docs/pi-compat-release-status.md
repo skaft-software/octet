@@ -102,7 +102,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_context_contract_tests` | 5 | context/prompt projections and live-command system-prompt reads/refusals |
 | `pi_exec_contract_tests` | 3 | exact argv, controlled-policy approval/refusal, timeout and cancellation |
 | `pi_helper_import_tests` | 3 | public helper imports, matrix key/package helpers, absent optional properties |
-| `pi_messages_tests` | 9 | text/images, public message events, persistence/resume, delivery and tool pairing |
+| `pi_messages_tests` | 10 | text/images, public message events, persistence/resume, delivery, tool pairing and repeated compaction/restart |
 | `pi_model_provider_tests` | 9 | model facts, scoped views, cold interactive startup/reload facts, model/thinking selection, custom and inherited providers, request hooks and custom HTTP delegation |
 | `pi_session_replacement_tests` | 10 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch and before-hook cancellation |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
