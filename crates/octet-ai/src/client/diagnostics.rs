@@ -157,6 +157,49 @@ fn sanitize_batch_error(redactor: &CredentialRedactor, error: &mut crate::batch:
     }
 }
 
+// Pi compatibility: packages/ai/src/api/openai-codex-responses.ts:1613-1642
+// extracts error.message and error.code/error.type before falling back to status.
+// Parse before escaping: escaping pretty-printed JSON's whitespace first makes
+// it invalid JSON and hides the useful error behind a bare HTTP 400.
+fn sanitize_http_body(redactor: &CredentialRedactor, body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error").unwrap_or(&value);
+    let mut fields = serde_json::Map::new();
+    for field in ["code", "type"] {
+        if let Some(value) = error.get(field).and_then(json_scalar_string) {
+            fields.insert(
+                field.into(),
+                serde_json::Value::String(sanitize_diagnostic(
+                    redactor,
+                    &value,
+                    MAX_DIAGNOSTIC_METADATA_BYTES / 2,
+                )),
+            );
+        }
+    }
+    if let Some(message) = ["message", "detail", "description"]
+        .iter()
+        .find_map(|field| error.get(*field).and_then(serde_json::Value::as_str))
+        .or_else(|| error.as_str())
+    {
+        fields.insert(
+            "message".into(),
+            serde_json::Value::String(sanitize_diagnostic(
+                redactor,
+                message,
+                MAX_PROVIDER_DIAGNOSTIC_BYTES / 4,
+            )),
+        );
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    // Only structured diagnostic fields cross this boundary, never echoed
+    // prompts, request objects, headers or arbitrary provider body metadata.
+    // Per-field caps leave room for JSON escaping within the body snippet cap.
+    Some(serde_json::json!({"error": fields}).to_string())
+}
+
 pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiError {
     match &mut error {
         AiError::Http(error) => {
@@ -170,11 +213,30 @@ pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiErro
                 &mut error.provider_code,
                 MAX_DIAGNOSTIC_METADATA_BYTES,
             );
-            sanitize_optional_diagnostic(
-                redactor,
-                &mut error.body_snippet,
-                MAX_PROVIDER_DIAGNOSTIC_BYTES,
-            );
+            if let Some(body) = &mut error.body_snippet {
+                if error
+                    .provider_code
+                    .as_ref()
+                    .is_none_or(|code| code.trim().is_empty())
+                {
+                    error.provider_code = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|value| {
+                            let error = value.get("error").unwrap_or(&value);
+                            error
+                                .get("code")
+                                .and_then(json_scalar_string)
+                                .filter(|code| !code.trim().is_empty())
+                                .or_else(|| error.get("type").and_then(json_scalar_string))
+                        })
+                        .map(|kind| {
+                            sanitize_diagnostic(redactor, &kind, MAX_DIAGNOSTIC_METADATA_BYTES)
+                        });
+                }
+                *body = sanitize_http_body(redactor, body).unwrap_or_else(|| {
+                    sanitize_diagnostic(redactor, body, MAX_PROVIDER_DIAGNOSTIC_BYTES)
+                });
+            }
         }
         AiError::Transport(error) | AiError::NetworkUnavailable(error) => {
             error.message =

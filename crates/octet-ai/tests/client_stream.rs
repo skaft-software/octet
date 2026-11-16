@@ -2849,3 +2849,75 @@ async fn output_rate_uses_reported_usage_over_dispatch_to_stream_end() {
         "80 tokens over 0.8-1.3 s: {rate}"
     );
 }
+
+#[tokio::test]
+async fn responses_bad_request_retains_structured_error_without_request_data() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string(include_str!("fixtures/errors/responses_bad_request.json")),
+        )
+        .mount(&server)
+        .await;
+    for codex in [false, true] {
+        let mut model = make_test_model(&server.uri(), Protocol::OpenAiResponses, false);
+        if codex {
+            Arc::make_mut(&mut model.endpoint).runtime.responses_profile =
+                octet_ai::ResponsesRuntimeProfile::Codex;
+        }
+        let error = AiClient::new()
+            .stream(&model, text_request())
+            .await
+            .err()
+            .unwrap();
+        let AiError::Http(http) = &error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(http.status.as_u16(), 400);
+        assert_eq!(
+            http.provider_code.as_deref(),
+            Some("invalid_reasoning_pair")
+        );
+        let body: serde_json::Value = serde_json::from_str(http.body_snippet.as_deref().unwrap())
+            .expect("redacted diagnostic stays valid JSON");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("requires its paired function call"));
+        let rendered = format!("{error} {error:?}");
+        for private in [
+            "test-api-key",
+            "PRIVATE_PROMPT_MUST_NOT_APPEAR",
+            "PRIVATE_HEADER_MUST_NOT_APPEAR",
+        ] {
+            assert!(!rendered.contains(private), "{rendered}");
+        }
+        assert!(!rendered.contains('\n'));
+    }
+}
+
+#[tokio::test]
+async fn http_error_type_is_available_when_code_or_message_is_absent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            "{\n  \"error\": { \"code\": \"\", \"type\": \"invalid_request_error\" }\n}",
+        ))
+        .mount(&server)
+        .await;
+    let model = make_test_model(&server.uri(), Protocol::OpenAiResponses, false);
+    let error = AiClient::new()
+        .stream(&model, text_request())
+        .await
+        .err()
+        .unwrap();
+    let AiError::Http(http) = error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(http.provider_code.as_deref(), Some("invalid_request_error"));
+    let body: serde_json::Value =
+        serde_json::from_str(http.body_snippet.as_deref().unwrap()).unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+}

@@ -112,3 +112,45 @@ async fn deepseek_reasoning_session_resumes_on_codex_with_tools() {
         .contains("private DeepSeek reasoning_content"));
     assert!(requests[1].to_string().contains("current result"));
 }
+
+#[tokio::test]
+async fn codex_bad_request_shows_structured_details_in_public_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(include_str!(
+            "../../../octet-ai/tests/fixtures/errors/responses_bad_request.json"
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let mut model = recovery_codex_model(&server.uri());
+    Arc::make_mut(&mut model.endpoint).auth = Auth::bearer("test-api-key");
+    let mut agent = build_agent_from_session_with_model(
+        model,
+        workspace.path(),
+        Session::create(workspace.path().join("error.jsonl")).unwrap(),
+        ReasoningConfig::Off,
+        Some(1),
+    );
+    let error = agent
+        .complete("PRIVATE_PROMPT_MUST_NOT_APPEAR")
+        .await
+        .unwrap_err();
+    let diagnostic = octet_agent::public_error_diagnostic(&error, "openai-codex", "gpt-6-astra");
+    for expected in [
+        "status=400",
+        "code=invalid_reasoning_pair",
+        "type=invalid_request_error",
+        "requires its paired function call",
+    ] {
+        assert!(diagnostic.contains(expected), "{diagnostic}");
+    }
+    for private in [
+        "test-api-key",
+        "PRIVATE_PROMPT_MUST_NOT_APPEAR",
+        "PRIVATE_HEADER_MUST_NOT_APPEAR",
+    ] {
+        assert!(!diagnostic.contains(private), "{diagnostic}");
+    }
+}

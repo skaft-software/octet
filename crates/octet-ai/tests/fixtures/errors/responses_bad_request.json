@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "invalid_reasoning_pair",
+    "type": "invalid_request_error",
+    "message": "Reasoning item requires its paired function call; credential test-api-key\nretry with a complete pair."
+  },
+  "prompt": "PRIVATE_PROMPT_MUST_NOT_APPEAR",
+  "headers": { "authorization": "Bearer test-api-key", "x-private": "PRIVATE_HEADER_MUST_NOT_APPEAR" }
+}

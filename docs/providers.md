@@ -1067,6 +1067,15 @@ remain provider-dependent. [Cache warming](cache-warming.md) is additional
 billable work, not a repair for unstable prefixes. The credential-free
 [cache audit](https://github.com/skaft-software/octet/blob/v0.9.5/CACHE_AUDIT.md) separates local estimates from live usage.
 
+## Provider errors
+
+HTTP failures show the provider's structured error code, type and message, when
+available, including pretty-printed Responses and Codex error bodies. Diagnostic
+fields are credential-redacted, control-escaped and bounded. Echoed request,
+prompt and header fields outside the structured error are omitted. A body with
+no structured error still reports its HTTP status; use the shape-only request
+trace below when the provider supplies no explanation.
+
 ## Provider request trace
 
 When a provider rejects a request with an opaque status (for example an HTTP 400

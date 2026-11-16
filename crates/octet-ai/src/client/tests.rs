@@ -386,3 +386,35 @@ fn transport_diagnostic_truncation_preserves_utf8_boundaries() {
     assert_eq!(message.len(), 511);
     assert!(message.chars().all(|character| character == 'a'));
 }
+
+#[test]
+fn structured_http_error_sanitization_is_bounded_valid_json() {
+    let body = serde_json::to_string_pretty(&serde_json::json!({
+        "error": {
+            "message": "\"\\\u{1b}\n界".repeat(1000),
+            "code": "\\\"".repeat(1000),
+            "type": "\\\"".repeat(1000),
+        },
+        "request": {"prompt": "private prompt"},
+    }))
+    .unwrap();
+    let error = sanitize_ai_error(
+        &CredentialRedactor::default(),
+        AiError::Http(HttpError {
+            status: http::StatusCode::BAD_REQUEST,
+            request_id: None,
+            retry_after: None,
+            provider_code: None,
+            body_snippet: Some(body),
+            retryable: false,
+        }),
+    );
+    let AiError::Http(http) = error else {
+        unreachable!()
+    };
+    let body = http.body_snippet.unwrap();
+    assert!(body.len() <= 4096, "{}", body.len());
+    assert!(serde_json::from_str::<serde_json::Value>(&body).is_ok());
+    assert!(!body.contains("private prompt"));
+    assert!(!body.contains('\x1b'));
+}

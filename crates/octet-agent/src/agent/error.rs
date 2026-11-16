@@ -348,6 +348,9 @@ pub(super) fn format_http_diagnostic(prefix: &str, error: &octet_ai::HttpError) 
         );
     }
     append_provider_field(&mut diagnostic, "code", error.provider_code.as_deref());
+    if let Some(kind) = provider_error_field(error.body_snippet.as_deref(), "type") {
+        append_provider_field(&mut diagnostic, "type", Some(&kind));
+    }
     if let Some(message) = provider_error_message(error.body_snippet.as_deref()) {
         append_provider_field(&mut diagnostic, "detail", Some(&message));
     }
@@ -361,6 +364,16 @@ pub(super) fn format_http_diagnostic(prefix: &str, error: &octet_ai::HttpError) 
     append_provider_field(&mut diagnostic, "request_id", error.request_id.as_deref());
     truncate_public_diagnostic(&mut diagnostic);
     diagnostic
+}
+
+fn provider_error_field(body: Option<&str>, field: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(body?).ok()?;
+    value
+        .get("error")
+        .unwrap_or(&value)
+        .get(field)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 pub(super) fn provider_error_message(body: Option<&str>) -> Option<String> {
