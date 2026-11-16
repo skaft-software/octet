@@ -28,6 +28,9 @@
 
 ### Fixed
 
+- Restore whole-second live activity timers (`28s`, `1m49s`, `1h01m01s`)
+  instead of fractional seconds or decimal minutes.
+
 - Responses screenshot retention updates only new replay items and the retained
   image window instead of rescanning settled history on every screenshot turn.
   Native computer-call screenshots and immutable snapshots remain intact.

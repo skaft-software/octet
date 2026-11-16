@@ -164,7 +164,8 @@ it exists.
 
 ## Duration display
 
-TUI durations share one display-only formatter: up to three significant digits,
+Live activity elapsed timers use whole seconds: `28s`, `1m49s`, or `1h01m01s`.
+Other TUI durations share one display-only formatter: up to three significant digits,
 with `ns`, `µs`, `ms`, `s`, `min`, or `h` selected automatically. Rounding is
 nearest, ties upward, and promotes across unit boundaries; fractional trailing
 zeroes are omitted and zero displays as `0ns`. Stored measurements retain their
