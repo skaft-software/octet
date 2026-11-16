@@ -622,3 +622,5 @@ text docs/benchmarks/pi-extensions-2026-11-02/v3/results.jsonl
 text docs/design/pi-native-esm.md
 text docs/design/pi-single-import.md
 text examples/themes/pi-profile.toml
+
+# private docs/design/codex-parity-context-tools-and-delegation.md
