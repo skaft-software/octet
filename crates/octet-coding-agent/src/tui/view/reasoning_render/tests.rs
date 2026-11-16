@@ -1763,7 +1763,7 @@ fn working_status_reports_root_run_elapsed_time_and_interrupt_hint() {
     working.show_reasoning_hint = false;
 
     let rendered = collapsed_reasoning_lines_at(&theme, &working, 0, 0);
-    assert_eq!(rendered, vec!["Working (28s • Esc to interrupt)"]);
+    assert_eq!(rendered, vec!["Working (28s · Esc to interrupt)"]);
 }
 
 #[test]

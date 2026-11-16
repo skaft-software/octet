@@ -48,6 +48,7 @@
 
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Working and Thinking timers use the shared inline metadata separator.
 - Scrolled transcripts show one concise PageDown instruction alongside the new-output counter.
 - Transcript scroll, queue and omission counts use singular nouns for one row or byte.
 - Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.

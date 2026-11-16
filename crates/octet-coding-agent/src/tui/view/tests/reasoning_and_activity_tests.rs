@@ -33,7 +33,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         rendered,
         vec![
             "",
-            "• Thinking (0s • Esc to interrupt)",
+            "• Thinking (0s · Esc to interrupt)",
             "  └ Verifying reproducibility of evidence package (Ctrl+T to expand)",
         ]
     );

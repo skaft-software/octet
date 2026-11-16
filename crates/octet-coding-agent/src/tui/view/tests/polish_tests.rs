@@ -63,3 +63,26 @@ fn polish_count_nouns_share_one_rule() {
         );
     }
 }
+
+#[test]
+fn polish_working_row_uses_the_theme_separator() {
+    let mut working = AssistantBlock::streaming_reasoning("")
+        .with_activity_started_at(Some(Instant::now() + Duration::from_secs(3600)));
+    working.reasoning_heading = Some("Working".into());
+    working.show_reasoning_hint = false;
+    let theme = crate::tui::theme::test_theme();
+    let renderer = theme.rich_renderer();
+    let rows = render_block(
+        None,
+        &TranscriptBlock::Reasoning(Box::new(working)),
+        &theme,
+        &renderer,
+        &renderer,
+        120,
+        false,
+    );
+    assert_eq!(
+        screen_dump(&rows, 120).trim(),
+        "• Working (0s · Esc to interrupt)"
+    );
+}

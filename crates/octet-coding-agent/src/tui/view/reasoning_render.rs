@@ -1159,7 +1159,8 @@ fn activity_status_line(
         return label;
     };
     let elapsed = format_activity_duration(started_at.elapsed().as_secs());
-    let detail = subdued_text(theme, &format!("({elapsed} • Esc to interrupt)"));
+    let separator = super::semantic_separator(theme);
+    let detail = subdued_text(theme, &format!("({elapsed}{separator}Esc to interrupt)"));
     format!("{label} {detail}")
 }
 
