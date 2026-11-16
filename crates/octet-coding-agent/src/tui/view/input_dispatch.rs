@@ -1,9 +1,7 @@
 //! Stateful product input policy. Exclusive panels and tool prompts keep their
 //! own input owner; editor prefixes never escape into those surfaces.
 
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::*;
 use crate::tui::keymap::{self, keybindings::KeybindingsManager, InputAction};
@@ -552,33 +550,6 @@ impl InteractiveShell {
                 _ => InputAction::Ignore,
             };
         }
-        if let Some(Event::Mouse(mouse)) = event.as_ref() {
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                let hit = {
-                    let state = self.state.borrow();
-                    if state.render_threaded {
-                        state.retained_render_geometry().is_some_and(|geometry| {
-                            state.scroll_from_bottom.get() > 0
-                                && usize::from(mouse.row) == geometry.viewport_rows
-                                && mouse.column < state.size.0
-                        })
-                    } else {
-                        let chrome = shell_chrome(&state, state.size.0, Instant::now());
-                        let length = state.rendered_transcript(state.size.0).len();
-                        let scroll =
-                            resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-                        let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
-                        scroll > 0
-                            && capacity < chrome.transcript_rows
-                            && usize::from(mouse.row) == capacity
-                            && mouse.column < state.size.0
-                    }
-                };
-                if hit {
-                    return InputAction::JumpToTail;
-                }
-            }
-        }
         let popup = self.slash_popup_open();
         if let Some(Event::Key(key)) = event.as_ref() {
             if key.kind == KeyEventKind::Release {
@@ -876,6 +847,7 @@ fn markdown_table_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{MouseButton, MouseEventKind};
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
@@ -1446,6 +1418,7 @@ mod tests {
         assert_eq!(action, InputAction::ScrollLines(-15));
         let row = {
             let state = shell.state.borrow();
+            super::super::viewport::render_shell_viewport_at(&state, 60, Instant::now());
             transcript_viewport_capacity(
                 shell_chrome(&state, 60, Instant::now()).transcript_rows,
                 true,
@@ -1455,12 +1428,12 @@ mod tests {
             &mut shell,
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 1,
+                column: 30,
                 row,
                 modifiers: KeyModifiers::NONE,
             }),
         );
-        assert_eq!(action, InputAction::JumpToTail);
+        assert_eq!(action, InputAction::Ignore);
         assert!(shell.state.borrow().follow_tail);
     }
 }

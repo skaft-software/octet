@@ -534,7 +534,7 @@ fn custom_themes_render_overrides_and_keep_other_themes_upright() {
 }
 
 #[test]
-fn scroll_hint_padding_and_theme_replacement_follow_theme_data() {
+fn scroll_button_centering_and_theme_replacement_follow_theme_data() {
     let pi = themes().remove(0);
     let default = compiled_theme_for_selector(
         "default",
@@ -551,18 +551,24 @@ fn scroll_hint_padding_and_theme_replacement_follow_theme_data() {
     shell.scroll(-1);
     let hint = |shell: &InteractiveShell| {
         let rows = render_shell_viewport_at(&shell.state.borrow(), 80, Instant::now());
-        strip_terminal_sequences(row_containing(&rows, "rows back"))
+        strip_terminal_sequences(row_containing(&rows, "Jump to bottom"))
     };
-    assert!(hint(&shell).starts_with("↑ "));
+    let centered = |row: String, label: &str| {
+        assert_eq!(
+            row,
+            format!("{}{label}", " ".repeat((80 - visible_width(label)) / 2))
+        );
+    };
+    centered(hint(&shell), "[ ↓ Jump to bottom ]");
     shell.set_theme(pi);
-    assert!(hint(&shell).starts_with(" ↑ "));
+    centered(hint(&shell), "[ ↓ Jump to bottom ]");
     let ascii = crate::tui::theme::test_theme_source_with(
         "[metadata]\nprofile = 'pi'\n",
         TerminalCapabilities::test(true, false, ColorDepth::TrueColor),
         TerminalBackground::Dark,
     );
     shell.set_theme(ascii);
-    assert!(hint(&shell).starts_with(" ^ "));
+    centered(hint(&shell), "[ v Jump to bottom ]");
 }
 
 #[test]
@@ -659,6 +665,11 @@ fn inherited_style_fixture(foreground_role: &str) -> String {
         background = "#234567"
         bold = false
         italic = true
+        [roles.accent]
+        foreground = "#765432"
+        background = "#234567"
+        bold = true
+        italic = true
         [roles.muted]
         foreground = "#abcdef"
         background = "#345678"
@@ -702,7 +713,7 @@ fn rendered_scroll_hint(theme: &OctetTheme) -> String {
     }
     shell.scroll(-1);
     let rows = render_shell_viewport_at(&shell.state.borrow(), 80, Instant::now());
-    row_containing(&rows, "rows back").to_owned()
+    row_containing(&rows, "Jump to bottom").to_owned()
 }
 
 fn assert_rendered_style(
@@ -735,7 +746,7 @@ fn assert_row_does_not_bleed(row: &str) {
 }
 
 #[test]
-fn legacy_foreground_and_muted_attributes_reach_the_rendered_header_and_scroll_hint() {
+fn legacy_foreground_and_accent_attributes_reach_the_rendered_header_and_scroll_button() {
     for foreground_role in ["foreground", "text"] {
         let theme = test_theme_from_source(&inherited_style_fixture(foreground_role));
         let header = rendered_read_header(&theme);
@@ -767,9 +778,9 @@ fn legacy_foreground_and_muted_attributes_reach_the_rendered_header_and_scroll_h
         let hint = rendered_scroll_hint(&theme);
         assert_rendered_style(
             &hint,
-            "rows back",
-            vt100::Color::Rgb(0xab, 0xcd, 0xef),
-            vt100::Color::Rgb(0x34, 0x56, 0x78),
+            "Jump to bottom",
+            vt100::Color::Rgb(0x76, 0x54, 0x32),
+            vt100::Color::Rgb(0x23, 0x45, 0x67),
             true,
             true,
         );
@@ -808,7 +819,7 @@ fn explicit_transcript_roles_override_inherited_attributes_after_aliases_compile
     let hint = rendered_scroll_hint(&theme);
     assert_rendered_style(
         &hint,
-        "rows back",
+        "Jump to bottom",
         vt100::Color::Rgb(0xa1, 0xb2, 0xc3),
         vt100::Color::Rgb(0x45, 0x67, 0x89),
         false,

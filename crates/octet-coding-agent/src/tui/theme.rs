@@ -908,6 +908,16 @@ impl OctetTheme {
         )
     }
 
+    /// A compact native scroll control, with style-only hover and plain fallback.
+    pub(crate) fn transcript_scroll_button(&self, text: &str, hovered: bool) -> String {
+        if self.capabilities.color == ColorDepth::None {
+            return text.to_owned();
+        }
+        let mut style = self.semantic_style("scroll_hint");
+        style.attributes.underline |= hovered;
+        self.inner.apply_style(style, text)
+    }
+
     /// Search decoration uses the active theme accent and capability downgrade.
     /// Current and ordinary matches differ in attributes, not raw ANSI colours.
     pub(crate) fn transcript_search_match(&self, text: &str, current: bool) -> String {

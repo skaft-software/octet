@@ -240,11 +240,19 @@ struct ScrollbarGeometry {
 }
 
 #[derive(Clone, Copy)]
+struct JumpToBottomButton {
+    row: usize,
+    column: u16,
+    width: u16,
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct NavigationFrame {
     size: (u16, u16),
     generation: u64,
     scrollbar: Option<ScrollbarGeometry>,
     search_buttons_row: Option<usize>,
+    jump_to_bottom: Option<JumpToBottomButton>,
 }
 
 #[cfg(test)]
@@ -264,6 +272,7 @@ pub(super) struct TranscriptNavigation {
     search: Option<TranscriptSearch>,
     mode: TranscriptScrollbar,
     hover: bool,
+    jump_to_bottom_hover: bool,
     drag_offset: Option<usize>,
     hide_at: Option<Instant>,
     frame: Option<NavigationFrame>,
@@ -292,6 +301,7 @@ impl TranscriptNavigation {
             }),
             mode: self.mode,
             hover: self.hover,
+            jump_to_bottom_hover: self.jump_to_bottom_hover,
             drag_offset: self.drag_offset,
             hide_at: self.hide_at,
             frame: self.frame,
@@ -337,6 +347,7 @@ impl TranscriptNavigation {
 
     fn reset_pointer(&mut self) {
         self.hover = false;
+        self.jump_to_bottom_hover = false;
         self.drag_offset = None;
         if let Some(search) = self.search.as_mut() {
             search.hover = None;
@@ -655,10 +666,56 @@ impl ShellState {
                 *line = format!("{prefix}{reset}{}{painted}", " ".repeat(padding));
             }
         }
+        // Native terminal ownership keeps this control and its exact painted
+        // hit rectangle in the host. Pi compatibility source: packages/tui/src/
+        // tui-alt-screen.ts:1655-1676 centers its scroll-to-end control on the
+        // last viewport row and retains only the control's occupied cells.
+        let jump_to_bottom = if scroll > 0 && chrome.transcript_rows > 0 && width > 0 {
+            let padding = self
+                .theme
+                .layout()
+                .block_padding_x
+                .unwrap_or(0)
+                .min(width.saturating_sub(1) / 2);
+            let available = usize::from(width - 2 * padding);
+            let arrow = if self.theme.unicode() { "↓" } else { "v" };
+            let mut label = format!("[ {arrow} Jump to bottom ]");
+            if self.new_output_count > 0 {
+                let count_label = format!(
+                    "[ {arrow} Jump to bottom{}{} new ]",
+                    semantic_separator(&self.theme),
+                    self.new_output_count
+                );
+                if visible_width(&count_label) <= available {
+                    label = count_label;
+                }
+            }
+            let label = sexy_tui_rs::truncate_to_width(&label, available, Some(""));
+            let button_width = visible_width(&label) as u16;
+            let column = (width - button_width) / 2;
+            // This is the reserved breathing row, including at the oldest row
+            // where fewer transcript lines might fill the viewport.
+            lines.resize_with(chrome.transcript_rows, String::new);
+            lines[rows] = format!(
+                "{}{}",
+                " ".repeat(usize::from(column)),
+                self.theme
+                    .transcript_scroll_button(&label, nav.jump_to_bottom_hover)
+            );
+            Some(JumpToBottomButton {
+                row: rows,
+                column,
+                width: button_width,
+            })
+        } else {
+            nav.jump_to_bottom_hover = false;
+            None
+        };
         nav.frame = Some(NavigationFrame {
             size: self.size,
             generation: self.transcript_cache.borrow().generation,
             scrollbar,
+            jump_to_bottom,
             search_buttons_row: (nav.search.is_some() && chrome.panel.len() > 1).then_some(
                 chrome.transcript_rows
                     + chrome.header.len()
@@ -949,21 +1006,6 @@ impl InteractiveShell {
                 return true;
             }
             if self.transcript_search_active() {
-                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    let latest = {
-                        let state = self.state.borrow();
-                        let chrome = shell_chrome(&state, state.size.0, Instant::now());
-                        state.scroll_from_bottom.get() > 0
-                            && usize::from(mouse.row)
-                                == transcript_viewport_capacity(chrome.transcript_rows, true)
-                            && mouse.column < state.size.0
-                    };
-                    if latest {
-                        self.jump_to_tail();
-                        self.render();
-                        return true;
-                    }
-                }
                 match mouse.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                         let step = crate::tui::keymap::wheel_scroll_rows(mouse.modifiers);
@@ -1035,6 +1077,32 @@ impl InteractiveShell {
             nav.reset_pointer();
             return false;
         };
+        let bottom_hovered = !state.follow_tail
+            && frame.jump_to_bottom.is_some_and(|button| {
+                usize::from(mouse.row) == button.row
+                    && mouse.column >= button.column
+                    && mouse.column < button.column + button.width
+            });
+        if !state.selection_dragging
+            && state.pending_selection_anchor.is_none()
+            && nav.drag_offset.is_none()
+        {
+            if nav.jump_to_bottom_hover != bottom_hovered {
+                nav.jump_to_bottom_hover = bottom_hovered;
+                self.request_navigation_render();
+            }
+            // Pi compatibility source: packages/tui/src/tui-alt-screen.ts:
+            // 1050-1056 activates only a left press within the painted rectangle.
+            if bottom_hovered
+                && mouse.modifiers.is_empty()
+                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            {
+                drop(nav);
+                drop(state);
+                self.jump_to_tail();
+                return true;
+            }
+        }
         let button = if frame.search_buttons_row == Some(usize::from(mouse.row)) {
             match mouse.column {
                 0..=2 if state.size.0 >= 3 => Some(SearchButton::Previous),
@@ -1149,6 +1217,223 @@ mod tests {
     use super::*;
     use crate::tui::keymap::{keybindings::KeybindingsManager, InputAction, PointerGesture};
     use crossterm::event::{KeyEvent, MouseEvent};
+
+    fn bottom_button_shell(threaded: bool, new: usize) -> InteractiveShell {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(60, 16);
+        shell.capture_mouse = true;
+        for index in 0..80 {
+            shell.notice(format!("button history {index:02}"));
+        }
+        shell.scroll_lines(-1);
+        shell.state.borrow_mut().new_output_count = new;
+        if threaded {
+            shell.isolate_native_test_renderer();
+            shell.render_written_test_frame();
+        } else {
+            frame(&shell, Instant::now());
+        }
+        shell
+    }
+
+    fn bottom_button_row(shell: &InteractiveShell) -> u16 {
+        let state = shell.state.borrow();
+        transcript_viewport_capacity(
+            shell_chrome(&state, state.size.0, Instant::now()).transcript_rows,
+            true,
+        ) as u16
+    }
+
+    #[test]
+    fn jump_to_bottom_button_limits_clicks_to_its_cells() {
+        for threaded in [false, true] {
+            for new in [0, 1, 2] {
+                let label_width = if new == 0 { 20 } else { 28 };
+                let left = (60 - label_width) / 2;
+                let right = left + label_width;
+                for column in [0, left - 1, right, 59] {
+                    let mut shell = bottom_button_shell(threaded, new);
+                    let row = bottom_button_row(&shell);
+                    dispatch(
+                        &mut shell,
+                        mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+                    );
+                    assert!(
+                        !shell.state.borrow().follow_tail,
+                        "outside column {column}, threaded={threaded}, new={new}"
+                    );
+                }
+                // Include brackets, padding, arrow and every new-count cell.
+                for column in left..right {
+                    let mut shell = bottom_button_shell(threaded, new);
+                    let row = bottom_button_row(&shell);
+                    dispatch(
+                        &mut shell,
+                        mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+                    );
+                    assert!(
+                        shell.state.borrow().follow_tail,
+                        "inside column {column}, threaded={threaded}, new={new}"
+                    );
+                    assert_eq!(shell.state.borrow().scroll_from_bottom.get(), 0);
+                    assert_eq!(shell.state.borrow().new_output_count, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jump_to_bottom_button_hover_and_accessible_profiles_keep_geometry() {
+        use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+        for (interactive, unicode, color) in [
+            (true, true, ColorDepth::TrueColor),
+            (true, true, ColorDepth::Ansi16),
+            (true, false, ColorDepth::None),
+            (false, false, ColorDepth::None),
+        ] {
+            let mut shell = bottom_button_shell(false, 1);
+            shell.set_theme(crate::tui::theme::test_theme_with(
+                TerminalCapabilities::test(interactive, unicode, color),
+            ));
+            let before = frame(&shell, Instant::now());
+            let row = bottom_button_row(&shell);
+            let label = if unicode {
+                "[ ↓ Jump to bottom · 1 new ]"
+            } else {
+                "[ v Jump to bottom - 1 new ]"
+            };
+            assert_eq!(
+                strip_terminal_sequences(&before[usize::from(row)]),
+                format!("{}{label}", " ".repeat(16))
+            );
+            dispatch(&mut shell, mouse(MouseEventKind::Moved, 17, row));
+            assert!(
+                shell
+                    .state
+                    .borrow()
+                    .transcript_navigation
+                    .borrow()
+                    .jump_to_bottom_hover
+            );
+            let after = frame(&shell, Instant::now());
+            assert_eq!(before.len(), after.len());
+            assert_eq!(
+                strip_terminal_sequences(&before[usize::from(row)]),
+                strip_terminal_sequences(&after[usize::from(row)])
+            );
+            if color == ColorDepth::None {
+                assert!(!after[usize::from(row)].contains('\x1b'));
+            } else {
+                let terminal =
+                    super::super::surface_frame::emulate_row_for_test(&after[usize::from(row)], 60);
+                assert!(terminal.screen().cell(0, 18).unwrap().underline());
+                assert!(terminal.screen().cell(0, 18).unwrap().bold());
+            }
+            dispatch(&mut shell, mouse(MouseEventKind::Moved, 0, row));
+            assert!(
+                !shell
+                    .state
+                    .borrow()
+                    .transcript_navigation
+                    .borrow()
+                    .jump_to_bottom_hover
+            );
+            shell.jump_to_tail();
+            let live = frame(&shell, Instant::now());
+            assert!(!live.iter().any(|line| line.contains("Jump to bottom")));
+            assert_eq!(after.len(), live.len());
+        }
+        let mut shell = bottom_button_shell(false, 1);
+        shell.set_size(22, 8);
+        let narrow = frame(&shell, Instant::now());
+        let row = bottom_button_row(&shell);
+        assert_eq!(
+            strip_terminal_sequences(&narrow[usize::from(row)]),
+            " [ ↓ Jump to bottom ]"
+        );
+    }
+
+    #[test]
+    fn jump_to_bottom_button_preserves_search_keyboard_and_transcript_selection() {
+        let mut shell = bottom_button_shell(false, 0);
+        let rows = frame(&shell, Instant::now());
+        let (row, column) = rows
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find_map(|(row, line)| {
+                let plain = strip_terminal_sequences(line);
+                plain
+                    .find("button history")
+                    .map(|index| (row as u16, visible_width(&plain[..index]) as u16))
+            })
+            .unwrap();
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Up(MouseButton::Left), column + 10, row),
+        );
+        assert_eq!(
+            shell.state.borrow().copy_buffer.as_deref(),
+            Some("button his")
+        );
+        assert!(!shell.state.borrow().follow_tail);
+        dispatch(&mut shell, key(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(shell.state.borrow().follow_tail);
+        shell.scroll_lines(-100);
+        dispatch(&mut shell, key(KeyCode::End, KeyModifiers::CONTROL));
+        assert!(shell.state.borrow().follow_tail);
+        shell.scroll_lines(-100);
+        shell.input_dispatch.bindings = KeybindingsManager::with_platform(
+            "linux",
+            false,
+            std::collections::BTreeMap::from([("tui.altScreen.bottom".into(), vec!["end".into()])]),
+        );
+        dispatch(&mut shell, key(KeyCode::End, KeyModifiers::NONE));
+        assert!(shell.state.borrow().follow_tail);
+
+        for threaded in [false, true] {
+            let mut shell = bottom_button_shell(threaded, 0);
+            shell.open_transcript_search();
+            if threaded {
+                shell.render_written_test_frame();
+            } else {
+                frame(&shell, Instant::now());
+            }
+            let row = bottom_button_row(&shell);
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), 0, row),
+            );
+            assert!(!shell.state.borrow().follow_tail);
+            dispatch(
+                &mut shell,
+                mouse(MouseEventKind::Down(MouseButton::Left), 30, row),
+            );
+            assert!(shell.state.borrow().follow_tail);
+        }
+    }
+
+    #[test]
+    fn jump_to_bottom_button_rejects_stale_painted_geometry() {
+        let mut shell = bottom_button_shell(true, 0);
+        let row = bottom_button_row(&shell);
+        shell.set_size(62, 16);
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, row),
+        );
+        assert!(!shell.state.borrow().follow_tail);
+        shell.render_written_test_frame();
+        dispatch(
+            &mut shell,
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, row),
+        );
+        assert!(shell.state.borrow().follow_tail);
+    }
 
     #[test]
     fn search_visibility_invalidates_painted_geometry() {

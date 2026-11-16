@@ -202,11 +202,22 @@ padding/separator rows search within the old viewport for semantic text.
 the semantic anchor rebases it after growth, contraction, deferred-history
 prepends, and width/height changes. Scrolling above the tail keeps semantic rows
 fixed while one Markdown block continues to grow, increments the new-output
-state, and exposes one concise return-to-live instruction:
-`↑ N rows back · M new · PageDown for latest` (the new counter appears only
-when nonzero). Separators and arrows use the theme's Unicode/ASCII glyphs. Transcript count nouns
-use singular at one (`1 row back`, `1 queued row hidden`, `1 output row hidden`)
-and plural at zero or multiple; the noun-free `1 new` counter stays compact.
+state, and exposes one centered `[ ↓ Jump to bottom · M new ]` control on the
+reserved breathing row, immediately above the pinned chrome. Its row and the
+transcript capacity stay fixed, including at the oldest history row; at the live
+tail that row is blank. The noun-free `1 new` / `2 new` counter appears only when
+nonzero and fits; it drops before the primary label clips in tiny panes. No
+keyboard instruction competes with the button label. PageDown and the existing
+Ctrl+End/configured bottom binding keep their normal behavior.
+
+The control uses the theme's accented, bold `scroll_hint` role, with underline
+on reported hover; explicit role overrides remain authoritative. Brackets and
+Unicode/ASCII arrow/separator fallbacks keep it recognizable without color.
+Only the painted button cells (including brackets and inner padding) are clickable,
+using completed-frame hit geometry. Surrounding blank cells and transcript text
+retain ordinary selection behavior; a stale frame cannot activate the control.
+Transcript count nouns use singular at one (`1 queued row hidden`, `1 output row
+hidden`) and plural at zero or multiple.
 
 Terminal-owned modes retain native selection and ordinary append scrollback,
 but octet cannot observe or freeze a reader's native position. Complete canonical

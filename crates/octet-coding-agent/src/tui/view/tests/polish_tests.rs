@@ -24,20 +24,24 @@ fn scroll_hint(scroll: usize, new: usize) -> String {
     }
     let rows = viewport::render_shell_viewport_at(&shell.state.borrow(), 120, Instant::now());
     let dump = screen_dump(&rows, 120);
-    dump.lines()
-        .find(|row| row.contains("back"))
-        .unwrap()
-        .trim()
-        .to_owned()
+    let row = viewport::transcript_viewport_capacity(
+        shell_chrome(&shell.state.borrow(), 120, Instant::now()).transcript_rows,
+        true,
+    );
+    dump.lines().nth(row).unwrap().to_owned()
 }
 
 #[test]
-fn polish_scroll_counts_use_singular_and_plural_rows() {
-    for (count, unit) in [(1, "row"), (2, "rows")] {
-        assert_eq!(
-            scroll_hint(count, 1),
-            format!("↑ {count} {unit} back · 1 new · PageDown for latest")
-        );
+fn polish_jump_to_bottom_button_and_new_counts() {
+    for (new, label) in [
+        (0, "[ ↓ Jump to bottom ]"),
+        (1, "[ ↓ Jump to bottom · 1 new ]"),
+        (2, "[ ↓ Jump to bottom · 2 new ]"),
+    ] {
+        let expected = format!("{}{label}", " ".repeat((120 - visible_width(label)) / 2));
+        for scroll in [1, 2, 1000] {
+            assert_eq!(scroll_hint(scroll, new), expected);
+        }
     }
 }
 

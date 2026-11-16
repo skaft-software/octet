@@ -536,7 +536,10 @@ so on) resolve to the same underlying role.
 ### Transcript roles
 
 In addition to the text-role vocabulary above, `thinking`, `tool_header` and
-`scroll_hint` accept the same style fields. Surface roles use
+`scroll_hint` accept the same style fields. `scroll_hint` styles the centered
+Jump to bottom control, defaulting to bold theme-accent text; reported hover
+adds underline without changing geometry. Explicit foreground, background and
+attribute overrides still apply. Surface roles use
 `[roles."surface.<kind>"]`, including `surface.activity`; activity falls back to
 reasoning styling when not configured. Tool and shell states can override their
 base role with `surface.tool.pending`, `surface.tool.success`,

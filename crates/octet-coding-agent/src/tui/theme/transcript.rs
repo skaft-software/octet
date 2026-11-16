@@ -42,7 +42,7 @@ impl TranscriptRole {
                 };
                 legacy_fg_style(theme, role).bold()
             }
-            Self::ScrollHint => legacy_fg_style(theme, "muted"),
+            Self::ScrollHint => legacy_fg_style(theme, "accent").bold(),
         }
     }
 }

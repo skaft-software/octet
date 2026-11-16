@@ -326,8 +326,12 @@ clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
 (1007); octet does not infer cells from pixel reports.
 
 In the semantic viewport, scrolling up pins the reader's position while output
-streams; at the live tail, the view follows new output. Inline, PageUp also shows
-when there's new output, and PageDown returns to live output. Wheel history that octet doesn't capture stays with your terminal,
+streams; at the live tail, the view follows new output. A centered **↓ Jump to
+bottom** button above the input returns to live output; it optionally shows
+`1 new` or `2 new`. Click any button cell, not the blank space around it.
+Hover underlines the control when motion is reported; no-color/ASCII profiles
+retain a bracketed text button. PageDown and Ctrl+End keep their keyboard paths.
+Wheel history that octet doesn't capture stays with your terminal,
 because portable protocols can't report its position.
 
 The renderer uses a complete retained frame, synchronized frames, and exact

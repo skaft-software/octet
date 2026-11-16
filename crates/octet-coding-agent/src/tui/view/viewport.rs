@@ -9,9 +9,9 @@ use super::transcript_selection::{
     selection_position_for_visual_cell, visual_line_for_transcript_position, TranscriptPosition,
 };
 use super::{
-    fit_line, render_ordinary_status, sanitize_ordinary_surface_cell, semantic_separator,
-    subdued_text, OrdinarySurfaceLifecycle, ReportBody, ReportOverlay, ShellOverlay, ShellState,
-    TranscriptBlock, ViewportAnchor,
+    fit_line, render_ordinary_status, sanitize_ordinary_surface_cell, subdued_text,
+    OrdinarySurfaceLifecycle, ReportBody, ReportOverlay, ShellOverlay, ShellState, TranscriptBlock,
+    ViewportAnchor,
 };
 use crate::tui::layout::PresentationLayout;
 
@@ -607,35 +607,6 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
     }
     drop(transcript);
 
-    if scrolled && lines.len() < available {
-        let new_output = if state.new_output_count == 0 {
-            String::new()
-        } else {
-            format!(
-                "{}{} new",
-                semantic_separator(&state.theme),
-                state.new_output_count
-            )
-        };
-        let arrow = if state.theme.unicode() { "↑" } else { "^" };
-        let padding = " ".repeat(usize::from(
-            state.theme.layout().block_padding_x.unwrap_or(0),
-        ));
-        let unit = super::plural(scroll, "row", "rows");
-        // Pi compatibility reference: packages/coding-agent/src/modes/interactive/
-        // tui-renderer.ts:30-33 uses one latest-message instruction and its key.
-        // Native viewport ownership keeps our PageDown binding and row counter.
-        let separator = semantic_separator(&state.theme);
-        let hint =
-            format!("{arrow} {scroll} {unit} back{new_output}{separator}PageDown for latest");
-        lines.push(fit_line(
-            &format!(
-                "{padding}{}",
-                state.theme.apply_semantic_role("scroll_hint", &hint)
-            ),
-            width,
-        ));
-    }
     lines
 }
 
