@@ -69,17 +69,8 @@ pub(super) fn project_source(
     projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
     projected.prefix("Codemode\n");
     if hidden > 0 {
-        let ellipsis = if theme.unicode() { "…" } else { "..." };
-        let unit = super::plural(hidden, "row", "rows");
-        let separator = if theme.unicode() { " · " } else { " - " };
-        let long = format!("{ellipsis} {hidden} script {unit} hidden{separator}Ctrl+O");
-        let short = format!("{ellipsis}+{hidden} Ctrl+O");
         let available = usize::from(width).saturating_sub(indent);
-        let hint = if visible_width(&long) <= available {
-            long
-        } else {
-            short
-        };
+        let hint = super::tool_render::tool_omission_hint(theme, hidden, "script", available);
         projected.decoration(fit_line(
             &format!("{continuation}{}", subdued_text(theme, &hint)),
             width,
@@ -154,7 +145,7 @@ pub(super) fn project_output(
     output.retain_rows(&(0..output.lines.len()).collect::<Vec<_>>());
     if hidden {
         for row in wrap_hanging(
-            &theme.fg("tool_output", "(output preview; Ctrl+O for full output)"),
+            &theme.fg("tool_output", "(output hidden · Ctrl+O)"),
             "",
             "",
             width,
@@ -168,7 +159,7 @@ pub(super) fn project_output(
 pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
     let (mut text, hidden) = output_preview(panel, expanded);
     if hidden {
-        text.push_str("\n(output preview; Ctrl+O for full output)");
+        text.push_str("\n(output hidden · Ctrl+O)");
     }
     text
 }
@@ -240,7 +231,7 @@ mod tests {
         for output in ["one\ntwo\nthree\nfour\nfive\nsix".into(), "雪".repeat(2000)] {
             let p = panel("return 1", &output, true, false);
             let preview = output_text(&p, false);
-            assert!(preview.contains("Ctrl+O for full output"));
+            assert!(preview.contains("output hidden · Ctrl+O"));
             assert!(preview.chars().count() < 700);
             assert_eq!(output_text(&p, true), output);
             assert_eq!(p.output, output);
@@ -301,7 +292,7 @@ mod tests {
         let preview = output_text(&p, false);
         assert!(!preview.starts_with("Script failed"));
         assert!(preview.contains("Wall time 0.0 seconds"));
-        assert!(preview.contains("Ctrl+O for full output"));
+        assert!(preview.contains("output hidden · Ctrl+O"));
         assert!(preview.chars().count() < 700);
         assert_eq!(
             output_text(&p, true),

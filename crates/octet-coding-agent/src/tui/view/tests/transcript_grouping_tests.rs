@@ -288,7 +288,7 @@ fn tool_output_tail_expands_with_global_ctrl_o_and_copy_stays_safe() {
     assert!(collapsed.contains("private result line 8"), "{collapsed}");
     assert!(collapsed.contains("private result line 1"), "{collapsed}");
     assert!(!collapsed.contains("private result line 4"), "{collapsed}");
-    assert!(collapsed.contains("4 output rows collapsed"), "{collapsed}");
+    assert!(collapsed.contains("4 output rows hidden"), "{collapsed}");
     assert_eq!(
         shell.debug_tool_output(&id).as_deref(),
         Some(secret.as_str())
@@ -387,7 +387,7 @@ fn bash_output_and_edit_write_diffs_expand_with_global_ctrl_o() {
     let collapsed = transcript(&shell);
     assert!(collapsed.contains("BASH MATCH 1"), "{collapsed}");
     assert!(!collapsed.contains("BASH MATCH 3"), "{collapsed}");
-    assert!(collapsed.contains("4 output rows collapsed"), "{collapsed}");
+    assert!(collapsed.contains("4 output rows hidden"), "{collapsed}");
     assert!(collapsed.contains("BASH MATCH 8"), "{collapsed}");
     assert!(
         !collapsed.contains("EDIT DIFF FINAL SENTINEL"),
@@ -465,7 +465,7 @@ fn ctrl_o_toggles_tool_and_chrome_blocks_without_revealing_thinking() {
     assert!(!collapsed.contains("private reasoning body"), "{collapsed}");
     assert!(collapsed.contains("tool output 1"), "{collapsed}");
     assert!(!collapsed.contains("tool output 3"), "{collapsed}");
-    assert!(collapsed.contains("2 output rows collapsed"), "{collapsed}");
+    assert!(collapsed.contains("2 output rows hidden"), "{collapsed}");
     assert!(collapsed.contains("tool output 6"), "{collapsed}");
     assert!(!collapsed.contains("shell output 1"), "{collapsed}");
     assert!(collapsed.contains("shell output 6"), "{collapsed}");

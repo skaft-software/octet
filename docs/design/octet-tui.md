@@ -205,7 +205,7 @@ fixed while one Markdown block continues to grow, increments the new-output
 state, and exposes one concise return-to-live instruction:
 `↑ N rows back · M new · PageDown for latest` (the new counter appears only
 when nonzero). Separators and arrows use the theme's Unicode/ASCII glyphs. Transcript count nouns
-use singular at one (`1 row back`, `1 queued row hidden`, `1 output row collapsed`)
+use singular at one (`1 row back`, `1 queued row hidden`, `1 output row hidden`)
 and plural at zero or multiple; the noun-free `1 new` counter stays compact.
 
 Terminal-owned modes retain native selection and ordinary append scrollback,
@@ -512,7 +512,10 @@ the output's ownership visible without adding another indentation level.
 Bash and PowerShell headers wrap at whitespace where possible and hard-wrap
 oversized words by terminal cell width without splitting graphemes. Collapsed
 headers show up to twelve rendered command rows with an exact hidden-row count;
-Ctrl+O reveals the complete retained command. Generic tool headers retain their
+Ctrl+O reveals the complete retained command. All retained command/input and
+output omissions use `hidden` and advertise `Ctrl+O`; compact widths use
+`+N Ctrl+O`. Capture loss instead says `unavailable to expand` without promising
+that discarded bytes can be recovered. Generic tool headers retain their
 selected argument with newlines intact and use the same twelve-row preview, rather
 than truncating at a fixed character count. Semantic copy preserves the full
 sanitized input, never the raw argument envelope. Collapsed output keeps

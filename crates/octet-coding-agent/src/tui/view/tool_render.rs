@@ -179,22 +179,34 @@ pub(super) fn tool_input_preview(
     }
     let hidden = rows.len() - COMPACT_TOOL_INPUT_ROWS;
     rows.truncate(COMPACT_TOOL_INPUT_ROWS);
-    let ellipsis = if theme.unicode() { "…" } else { "..." };
-    let separator = if theme.unicode() { " · " } else { " - " };
-    let unit = super::plural(hidden, "row", "rows");
-    let long = format!("{ellipsis} {hidden} {kind} {unit} hidden{separator}Ctrl+O");
-    let short = format!("+{hidden} Ctrl+O");
     let available = usize::from(width).saturating_sub(visible_width(continuation));
-    let hint = if visible_width(&long) <= available {
-        long
-    } else {
-        short
-    };
+    let hint = tool_omission_hint(theme, hidden, kind, available);
     rows.push(fit_line(
         &format!("{continuation}{}", subdued_text(theme, &hint)),
         width,
     ));
     rows
+}
+
+/// UI-hidden retained rows always advertise the same disclosure key. Capture
+/// loss has separate wording because disclosure cannot recover discarded bytes.
+// Pi compatibility reference: packages/coding-agent/src/core/tools/renderers/
+// bash.ts:64-67 and read.ts:132 include an expansion key with omitted lines.
+pub(super) fn tool_omission_hint(
+    theme: &OctetTheme,
+    hidden: usize,
+    kind: &str,
+    available: usize,
+) -> String {
+    let ellipsis = if theme.unicode() { "…" } else { "..." };
+    let separator = super::semantic_separator(theme);
+    let unit = super::plural(hidden, "row", "rows");
+    let long = format!("{ellipsis} {hidden} {kind} {unit} hidden{separator}Ctrl+O");
+    if visible_width(&long) <= available {
+        long
+    } else {
+        format!("+{hidden} Ctrl+O")
+    }
 }
 
 pub(super) fn bounded_tool_failure_reason(panel: &ToolPanel) -> Option<String> {
@@ -355,7 +367,11 @@ pub(super) fn project_diff(
             DiffRemainder::Unknown => "more diff content hidden".to_owned(),
         };
         projected.retain_rows(&(0..COMPACT_DIFF_LINES).collect::<Vec<_>>());
-        projected.decoration(subdued_text(theme, &format!("{output_indent}{hint}")));
+        let separator = super::semantic_separator(theme);
+        projected.decoration(fit_line(
+            &subdued_text(theme, &format!("{output_indent}{hint}{separator}Ctrl+O")),
+            width,
+        ));
     }
     projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
     projected

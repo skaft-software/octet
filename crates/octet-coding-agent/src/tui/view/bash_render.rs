@@ -333,16 +333,16 @@ fn project_bash_output_body(
         .chain(tail_start..projected.lines.len())
         .collect::<Vec<_>>();
     projected.retain_rows(&retained);
-    let mut details = loss_details;
-    if hidden_rows > 0 {
-        let unit = super::plural(hidden_rows, "row", "rows");
-        details.push(if theme.is_compiled_default() {
-            format!("{hidden_rows} output {unit} collapsed")
-        } else {
-            format!("{hidden_rows} middle visual {unit} hidden")
-        });
+    let available = usize::from(width).saturating_sub(visible_width(output_indent));
+    let mut detail = if hidden_rows > 0 {
+        super::tool_render::tool_omission_hint(theme, hidden_rows, "output", available)
+    } else {
+        ellipsis.to_owned()
+    };
+    if !loss_details.is_empty() {
+        detail.push_str(super::semantic_separator(theme));
+        detail.push_str(&loss_details.join(super::semantic_separator(theme)));
     }
-    let detail = format!("{ellipsis} {}", details.join(" · "));
     projected.lines.insert(
         head,
         fit_line(
@@ -713,7 +713,7 @@ mod tests {
             let plain = plain_rows(&tail);
             assert_eq!(&plain[..2], ["1", "2"]);
             assert_eq!(&plain[3..], ["7", "8"]);
-            assert!(plain[2].contains("4 output rows collapsed"));
+            assert!(plain[2].contains("4 output rows hidden"));
             assert_eq!(
                 render_compact_bash_output(&panel, &theme, 100, true, "").len(),
                 8

@@ -648,7 +648,7 @@ fn bash_output_and_hidden_metadata_share_a_terminal_content_gutter() {
     let label_column = visible_width(&rendered[0][..label_byte]);
     let hidden = rendered
         .iter()
-        .find(|line| line.contains("4 output rows collapsed"))
+        .find(|line| line.contains("4 output rows hidden"))
         .expect("synthetic hidden-line metadata");
     let output = rendered
         .iter()
@@ -895,7 +895,7 @@ fn failed_bash_output_keeps_a_bounded_excerpt_before_expansion() {
     assert!(collapsed.contains("failed output line 1"), "{collapsed}");
     assert!(!collapsed.contains("failed output line 4"), "{collapsed}");
     assert!(collapsed.contains("failed output line 8"), "{collapsed}");
-    assert!(collapsed.contains("output rows collapsed"), "{collapsed}");
+    assert!(collapsed.contains("output rows hidden"), "{collapsed}");
 
     let expanded = render_block(
         None,

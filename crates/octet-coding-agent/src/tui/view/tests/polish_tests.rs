@@ -86,3 +86,38 @@ fn polish_working_row_uses_the_theme_separator() {
         "• Working (0s · Esc to interrupt)"
     );
 }
+
+fn tool_panel(name: &str, args: serde_json::Value, output: &str, finished: bool) -> ToolPanel {
+    ToolPanel::new(
+        ToolCallId("polish-tool".into()),
+        name.into(),
+        args.to_string(),
+        summarize_tool(name, &args),
+        output.into(),
+        finished,
+        false,
+        None,
+        None,
+    )
+}
+
+#[test]
+fn polish_tool_omissions_share_hidden_word_and_shortcut() {
+    let theme = crate::tui::theme::test_theme();
+    let output = (1..=8)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let panel = tool_panel(
+        "bash",
+        serde_json::json!({"command":"run tests"}),
+        &output,
+        true,
+    );
+    let rows = render_compact_bash_output(&panel, &theme, 100, false, "");
+    let dump = screen_dump(&rows, 100);
+    assert_eq!(
+        dump.lines().nth(2).unwrap(),
+        "… 4 output rows hidden · Ctrl+O"
+    );
+}
