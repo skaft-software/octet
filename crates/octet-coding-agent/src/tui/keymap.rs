@@ -11,6 +11,21 @@ pub use sexy_tui_rs::TextEditAction as EditAction;
 
 pub mod keybindings;
 
+/// Transcript rows one wheel or trackpad notch moves. One row keeps scrolling
+/// proportional to the gesture; Alt scrolls a larger step.
+pub(crate) const WHEEL_SCROLL_ROWS: i16 = 1;
+/// Rows one Alt+wheel notch moves.
+pub(crate) const ALT_WHEEL_SCROLL_ROWS: i16 = 15;
+
+/// Rows a wheel notch moves with the given modifiers.
+pub(crate) fn wheel_scroll_rows(modifiers: KeyModifiers) -> i16 {
+    if modifiers.contains(KeyModifiers::ALT) {
+        ALT_WHEEL_SCROLL_ROWS
+    } else {
+        WHEEL_SCROLL_ROWS
+    }
+}
+
 /// Actions produced by the pure terminal-event translator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -299,18 +314,10 @@ pub fn translate_with_bindings(
         Event::FocusLost => InputAction::FocusLost,
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => {
-                InputAction::ScrollLines(if mouse.modifiers.contains(KeyModifiers::ALT) {
-                    -15
-                } else {
-                    -3
-                })
+                InputAction::ScrollLines(-wheel_scroll_rows(mouse.modifiers))
             }
             MouseEventKind::ScrollDown => {
-                InputAction::ScrollLines(if mouse.modifiers.contains(KeyModifiers::ALT) {
-                    15
-                } else {
-                    3
-                })
+                InputAction::ScrollLines(wheel_scroll_rows(mouse.modifiers))
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 InputAction::TranscriptPointer(PointerGesture::Begin {
@@ -1451,7 +1458,7 @@ mod tests {
                 false,
                 ""
             ),
-            InputAction::ScrollLines(-3)
+            InputAction::ScrollLines(-WHEEL_SCROLL_ROWS)
         );
         assert_eq!(
             translate(

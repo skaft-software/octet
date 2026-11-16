@@ -966,11 +966,7 @@ impl InteractiveShell {
                 }
                 match mouse.kind {
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                        let step = if mouse.modifiers.contains(KeyModifiers::ALT) {
-                            15
-                        } else {
-                            3
-                        };
+                        let step = crate::tui::keymap::wheel_scroll_rows(mouse.modifiers);
                         self.scroll_lines(if mouse.kind == MouseEventKind::ScrollUp {
                             -step
                         } else {

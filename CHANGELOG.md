@@ -23,6 +23,7 @@
 
 ### Changed
 
+- Mouse wheel and trackpad scrolling move the transcript one row per step; Alt+wheel still moves 15.
 - Recorded-audio guidance documents input paths, durable media and separate transport-acceptance and recognition checks.
 
 - Recorded media reuses prepared bytes across turns and resumes from session data; Gemini audio uses Files uploads when inline requests grow.
