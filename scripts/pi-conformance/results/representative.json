@@ -1,0 +1,1474 @@
+{
+  "schema_version": 1,
+  "run": {
+    "schema_version": 1,
+    "head": "f49b9d3e83b80ef0e926e9bd2fed29142b225ae3",
+    "source_dirty": true,
+    "platform": "Linux-7.0.0-43-generic-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "node": "v25.9.0",
+    "octet_binary": "<repo>/target/ci-test/octet",
+    "octet_sha256": "219768707d67bd349c890df4ec0aecf3268b8614e0704bc487fdec89c152ab88",
+    "pi_version": "1.5.0",
+    "pi_cli_sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+    "dependency_lock_sha256": "77ac82c3352722eaf853d7b02d107dd325293425521eba567c7ae473ce0d56ed",
+    "harness_sha256": {
+      "conformance.py": "40daddc7100167c9938c74a1d17c0f381ac694085c2c2939a021e456dfdf8149",
+      "drive.py": "91a34f0a6e9b2d19e18609f3a0b47d2a79f0142cb6a38864cccc4accde4f3a7c",
+      "render.mjs": "348760a26225260e9afca252f039bf4e5cd003f503e7975fe11cda4b6a5940e8",
+      "journeys.json": "ed4990ed9b7a2b945428b1ed68f1e411491d353af0801804d83be17b7131d3ca"
+    },
+    "started_utc": "2026-11-16T21:00:00Z",
+    "pi_source_revision": "9c9ce8547e5a88cbe834a53e9a6d83a789d08e47",
+    "extensions": [
+      {
+        "path": "<repo>/scripts/pi-conformance/fixtures/compaction.mjs",
+        "sha256": "25ae988fff4811723bdec662d2d06283d44d6e7e576afc04d1d854bed21f6df8"
+      },
+      {
+        "path": "<repo>/scripts/pi-conformance/fixtures/input-handled.mjs",
+        "sha256": "83effec7415584d48d6f39604339b1017a32eee59b904a534fa5d2294edd6974"
+      },
+      {
+        "path": "<repo>/scripts/pi-conformance/fixtures/model-switch.mjs",
+        "sha256": "8e4e9e3eae281ae4f04ed05c6c3e38e5ccddbbbfe0275bd5ecf9eced3b62e713"
+      },
+      {
+        "path": "<repo>/scripts/pi-conformance/fixtures/pipeline.mjs",
+        "sha256": "6db948931f8934500df4d2640cf58f02efe9eee7f72f7c257beaaa0e4e1d1e2b"
+      },
+      {
+        "path": "<repo>/scripts/pi-conformance/fixtures/sessions.mjs",
+        "sha256": "1d84ffb7f7d2d5e8079d1fc8d70f6fae585ea31004284d15d77cadb26f66bb4b"
+      },
+      {
+        "path": "<pi>/examples/extensions/commands.ts",
+        "sha256": "36716b53da169936c7e1360a4fde1e2fc0c3356a6505f177235f09c5538c6e4f"
+      },
+      {
+        "path": "<pi>/examples/extensions/custom-footer.ts",
+        "sha256": "1e5f17bec95a48d407fbcc092faf7e1f6021c30cee4a66ec09bc120412292cb2"
+      },
+      {
+        "path": "<pi>/examples/extensions/hello.ts",
+        "sha256": "0aa4e9800c2526914d4c1edb00b2cfa9bd9dd6da5218289994cccd5f5bfa4934"
+      },
+      {
+        "path": "<pi>/examples/extensions/overlay-test.ts",
+        "sha256": "801b7c2eeec57c3569187b4b4d851f2159223ec6e9772e406ec65ed728ca6db9"
+      },
+      {
+        "path": "<pi>/examples/extensions/rainbow-editor.ts",
+        "sha256": "f95f17ba8a0376180bd23510c20151e83aadc74142e989f14227bf5c4196883f"
+      },
+      {
+        "path": "<pi>/examples/extensions/rpc-demo.ts",
+        "sha256": "3d54a396eee12eb04ea12d0ea03716a6edd3e8743502b6a529e3b8d429ae640d"
+      },
+      {
+        "path": "<pi>/examples/extensions/status-line.ts",
+        "sha256": "26e27b1158e980551f63f46e55dad055ac613779c2b8c39df4cddc11be26103d"
+      },
+      {
+        "path": "<pi>/examples/extensions/widget-placement.ts",
+        "sha256": "ffabd33cf58efb908de2025aac4cb41daf13dbeee24b5ad8dcd0361b43eff6d7"
+      },
+      {
+        "path": "<pi>/examples/extensions/with-deps/index.ts",
+        "sha256": "8d4dbc7028c891eac7f0386d25eecea3e9ac0de7fd841b5bb08137e2ec5ab443"
+      }
+    ],
+    "journeys": [
+      "hook-pipeline",
+      "input-handled",
+      "model-switch",
+      "session-operations",
+      "compaction",
+      "with-deps",
+      "rpc-demo",
+      "hello",
+      "commands",
+      "status-line",
+      "custom-footer",
+      "widget-placement",
+      "rainbow-editor",
+      "overlay-test"
+    ],
+    "scope": "isolated offline PTYs; unchanged examples and synthetic callback fixtures"
+  },
+  "counts": {
+    "pass": 14,
+    "fail": 0,
+    "blocked": 0,
+    "skipped": 0
+  },
+  "comparisons": 90,
+  "journeys": {
+    "hook-pipeline": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.turn_finished",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.two_requests",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.payload_chain",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.header_chain",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.system_prompt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.context_applied",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.input_chain",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.input_before_prompt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.tool_arguments_applied",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.response_hooks",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.tool_result_applied",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 2,
+            "current": 2
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {
+              "conformance_echo": {
+                "description": "Side-effect-free conformance echo",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "current": {
+              "conformance_echo": {
+                "description": "Side-effect-free conformance echo",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "CONFORMANCE_CONTEXT"
+              ],
+              [
+                "assistant_tool_calls",
+                [
+                  [
+                    "conformance_echo",
+                    {
+                      "value": "payload"
+                    }
+                  ]
+                ]
+              ],
+              [
+                "tool",
+                "ECHO:payload:CALL:RESULT"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "CONFORMANCE_CONTEXT"
+              ],
+              [
+                "assistant_tool_calls",
+                [
+                  [
+                    "conformance_echo",
+                    {
+                      "value": "payload"
+                    }
+                  ]
+                ]
+              ],
+              [
+                "tool",
+                "ECHO:payload:CALL:RESULT"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "input hooks",
+        "context hooks",
+        "provider hooks",
+        "tools"
+      ],
+      "pi_source": [
+        "packages/coding-agent/src/core/extensions/runner.ts:1190-1246",
+        "packages/coding-agent/src/core/extensions/runner.ts:1305-1426",
+        "packages/coding-agent/src/core/extensions/runner.ts:1525-1574"
+      ]
+    },
+    "input-handled": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.handled_notice",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.handled_no_request",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.later_turn",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.later_transform",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 1,
+            "current": 1
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {},
+            "current": {}
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "CONFORMANCE_LATER:TRANSFORMED"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "CONFORMANCE_LATER:TRANSFORMED"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "input hooks"
+      ],
+      "pi_source": [
+        "packages/coding-agent/src/core/extensions/runner.ts:1525-1574"
+      ]
+    },
+    "model-switch": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.selected_notice",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.later_turn",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.selection_receipt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.selection_event",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.wire_model",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 1,
+            "current": 1
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {},
+            "current": {}
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "after model switch"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "after model switch"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "model switching"
+      ],
+      "pi_source": [
+        "packages/coding-agent/src/core/agent-session.ts:2542-2581",
+        "packages/coding-agent/src/core/agent-session.ts:3509-3513"
+      ]
+    },
+    "session-operations": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.first_turn",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.state_notice",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.cancel_notice",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.new_notice",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.state_receipt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.cancel_receipt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.new_setup_receipt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.switch_receipt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.later_turn",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.private_not_in_context",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 2,
+            "current": 2
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {},
+            "current": {}
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "original session"
+              ],
+              [
+                "assistant",
+                "all done"
+              ],
+              [
+                "user",
+                "later session turn"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "original session"
+              ],
+              [
+                "assistant",
+                "all done"
+              ],
+              [
+                "user",
+                "later session turn"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json",
+          "sessions/--tmp-tmp.LHbezztiyI-conf-pi-nfcn3bcm-ws--",
+          "sessions/--tmp-tmp.LHbezztiyI-conf-pi-nfcn3bcm-ws--/2026-11-16T21-00-48-502Z_01a1e629-99f6-704a-9179-8b887f1712d2.jsonl"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "session operations"
+      ],
+      "pi_source": [
+        "packages/coding-agent/src/core/agent-session-runtime.ts:199-260",
+        "packages/coding-agent/src/core/extensions/runner.ts:1095-1128"
+      ]
+    },
+    "compaction": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.first_turn",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.compaction_notice",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.void_return",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.before_hook",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.durable_compaction",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.completion_callback",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.later_turn",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 5,
+            "current": 5
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {},
+            "current": {}
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "The conversation history before this point was compacted into the following summary: <summary> all done --- **Turn Context (split turn):** all done </summary>"
+              ],
+              [
+                "assistant",
+                "all done"
+              ],
+              [
+                "user",
+                "after compaction"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "The conversation history before this point was compacted into the following summary: <summary> all done --- **Turn Context (split turn):** all done </summary>"
+              ],
+              [
+                "assistant",
+                "all done"
+              ],
+              [
+                "user",
+                "after compaction"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "compaction"
+      ],
+      "pi_source": [
+        "packages/coding-agent/src/core/agent-session.ts:2849-2961",
+        "packages/coding-agent/src/core/agent-session.ts:3535-3546"
+      ]
+    },
+    "with-deps": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.turn_finished",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.tool_result_in_transcript",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 2,
+            "current": 2
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {
+              "parse_duration": {
+                "description": "Parse a human-readable duration string (e.g., '2 days', '1h', '5m') to milliseconds",
+                "parameters": {
+                  "type": "object",
+                  "required": [
+                    "duration"
+                  ],
+                  "properties": {
+                    "duration": {
+                      "type": "string",
+                      "description": "Duration string like '2 days', '1h', '5m'"
+                    }
+                  }
+                }
+              }
+            },
+            "current": {
+              "parse_duration": {
+                "description": "Parse a human-readable duration string (e.g., '2 days', '1h', '5m') to milliseconds",
+                "parameters": {
+                  "properties": {
+                    "duration": {
+                      "description": "Duration string like '2 days', '1h', '5m'",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "duration"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "how long is two days"
+              ],
+              [
+                "assistant_tool_calls",
+                [
+                  [
+                    "parse_duration",
+                    {
+                      "duration": "2 days"
+                    }
+                  ]
+                ]
+              ],
+              [
+                "tool",
+                "2 days = 172800000 milliseconds"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "how long is two days"
+              ],
+              [
+                "assistant_tool_calls",
+                [
+                  [
+                    "parse_duration",
+                    {
+                      "duration": "2 days"
+                    }
+                  ]
+                ]
+              ],
+              [
+                "tool",
+                "2 days = 172800000 milliseconds"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "dependency-bearing installs",
+        "tools"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/with-deps/index.ts:8-32"
+      ]
+    },
+    "rpc-demo": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.widget_shown",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.input_dialog",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.input_notified",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.editor_prefilled",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "UI dialogs",
+        "editor prefill"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/rpc-demo.ts:27-115"
+      ]
+    },
+    "hello": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.turn_finished",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.tool_result_in_transcript",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 2,
+            "current": 2
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {
+              "hello": {
+                "description": "A simple greeting tool",
+                "parameters": {
+                  "type": "object",
+                  "required": [
+                    "name"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Name to greet"
+                    }
+                  }
+                }
+              }
+            },
+            "current": {
+              "hello": {
+                "description": "A simple greeting tool",
+                "parameters": {
+                  "properties": {
+                    "name": {
+                      "description": "Name to greet",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "say hello"
+              ],
+              [
+                "assistant_tool_calls",
+                [
+                  [
+                    "hello",
+                    {
+                      "name": "octet"
+                    }
+                  ]
+                ]
+              ],
+              [
+                "tool",
+                "Hello, octet!"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "say hello"
+              ],
+              [
+                "assistant_tool_calls",
+                [
+                  [
+                    "hello",
+                    {
+                      "name": "octet"
+                    }
+                  ]
+                ]
+              ],
+              [
+                "tool",
+                "Hello, octet!"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "tools"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/hello.ts:8-30"
+      ]
+    },
+    "commands": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.dialog_opened",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.lists_commands",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.source_prompt",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.path_notified",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.dialog_closed",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "commands",
+        "UI dialogs"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/commands.ts:15-71"
+      ]
+    },
+    "status-line": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.ready_below_editor",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.turn_complete_below_editor",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 1,
+            "current": 1
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {},
+            "current": {}
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "plain question"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "plain question"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "UI components",
+        "lifecycle hooks"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/status-line.ts:13-31"
+      ]
+    },
+    "custom-footer": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.cost_in_footer",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.custom_footer_removed",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "UI components"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/custom-footer.ts:15-64"
+      ]
+    },
+    "widget-placement": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.above_widget_above_editor",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.below_widget_below_editor",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "UI panels"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/widget-placement.ts:4-8"
+      ]
+    },
+    "rainbow-editor": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.text_in_editor",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.per_character_truecolor",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.erased",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.submitted_reaches_model",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.requests",
+          "values": {
+            "pi": 1,
+            "current": 1
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.tools",
+          "values": {
+            "pi": {},
+            "current": {}
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "model.conversation",
+          "values": {
+            "pi": [
+              [
+                "user",
+                "submit through the custom editor"
+              ]
+            ],
+            "current": [
+              [
+                "user",
+                "submit through the custom editor"
+              ]
+            ]
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "custom editors"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/rainbow-editor.ts:32-88"
+      ]
+    },
+    "overlay-test": {
+      "status": "pass",
+      "rows": [
+        {
+          "key": "obs.overlay_shown",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.overlay_has_items",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        },
+        {
+          "key": "obs.result_notified",
+          "values": {
+            "pi": true,
+            "current": true
+          },
+          "current_matches_pi": true
+        }
+      ],
+      "agent_dir_safety": {
+        "extra_writes": [],
+        "protected_changed": [],
+        "ok": true,
+        "pi_touched": [
+          "models-store.json"
+        ],
+        "current_touched": []
+      },
+      "failures": [],
+      "surfaces": [
+        "UI components",
+        "UI panels"
+      ],
+      "pi_source": [
+        "packages/coding-agent/examples/extensions/overlay-test.ts:15-25"
+      ]
+    }
+  },
+  "supplemental": {
+    "adapter": {
+      "passed": 1617,
+      "failed": 0,
+      "skipped": 33
+    },
+    "coding_agent_lib": {
+      "passed": 3344,
+      "failed": 0,
+      "ignored": 4,
+      "rust_min_stack": 16777216
+    },
+    "session_oracle": {
+      "passed": 1,
+      "failed": 0
+    },
+    "intentional_deviation": {
+      "surface": "terminal input hang limit",
+      "state": "asserted",
+      "test": "native_pi_terminal_input_hung_handler_fails_open_once_without_freezing_typing",
+      "pi_source": "packages/tui/src/tui.ts:1095-1110",
+      "register": "docs/pi-compat-deviations.md:75"
+    }
+  },
+  "limitations": [
+    "Working-tree harness run; exact harness digests retained. Runtime fixes are committed at recorded HEAD.",
+    "Not full third-party inventory, OAuth, provider_stream_event or pixel-level UI qualification.",
+    "Independent human reproduction and live providers not run."
+  ]
+}

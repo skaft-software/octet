@@ -1,0 +1,16 @@
+{
+  "hook-pipeline": {"surfaces": ["input hooks", "context hooks", "provider hooks", "tools"], "pi_source": ["packages/coding-agent/src/core/extensions/runner.ts:1190-1246", "packages/coding-agent/src/core/extensions/runner.ts:1305-1426", "packages/coding-agent/src/core/extensions/runner.ts:1525-1574"]},
+  "input-handled": {"surfaces": ["input hooks"], "pi_source": ["packages/coding-agent/src/core/extensions/runner.ts:1525-1574"]},
+  "model-switch": {"surfaces": ["model switching"], "pi_source": ["packages/coding-agent/src/core/agent-session.ts:2542-2581", "packages/coding-agent/src/core/agent-session.ts:3509-3513"]},
+  "session-operations": {"surfaces": ["session operations"], "pi_source": ["packages/coding-agent/src/core/agent-session-runtime.ts:199-260", "packages/coding-agent/src/core/extensions/runner.ts:1095-1128"]},
+  "compaction": {"surfaces": ["compaction"], "pi_source": ["packages/coding-agent/src/core/agent-session.ts:2849-2961", "packages/coding-agent/src/core/agent-session.ts:3535-3546"]},
+  "hello": {"surfaces": ["tools"], "pi_source": ["packages/coding-agent/examples/extensions/hello.ts:8-30"]},
+  "with-deps": {"surfaces": ["dependency-bearing installs", "tools"], "pi_source": ["packages/coding-agent/examples/extensions/with-deps/index.ts:8-32"]},
+  "commands": {"surfaces": ["commands", "UI dialogs"], "pi_source": ["packages/coding-agent/examples/extensions/commands.ts:15-71"]},
+  "rpc-demo": {"surfaces": ["UI dialogs", "editor prefill"], "pi_source": ["packages/coding-agent/examples/extensions/rpc-demo.ts:27-115"]},
+  "custom-footer": {"surfaces": ["UI components"], "pi_source": ["packages/coding-agent/examples/extensions/custom-footer.ts:15-64"]},
+  "widget-placement": {"surfaces": ["UI panels"], "pi_source": ["packages/coding-agent/examples/extensions/widget-placement.ts:4-8"]},
+  "status-line": {"surfaces": ["UI components", "lifecycle hooks"], "pi_source": ["packages/coding-agent/examples/extensions/status-line.ts:13-31"]},
+  "rainbow-editor": {"surfaces": ["custom editors"], "pi_source": ["packages/coding-agent/examples/extensions/rainbow-editor.ts:32-88"]},
+  "overlay-test": {"surfaces": ["UI components", "UI panels"], "pi_source": ["packages/coding-agent/examples/extensions/overlay-test.ts:15-25"]}
+}

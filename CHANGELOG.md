@@ -19,6 +19,7 @@
 - Share Codex authentication and private storage through octet-ai with in-memory credentials and caller-owned login presentation.
 
 - Document the reusable provider boundary and explicit caller ownership of storage, login interaction and inference.
+- Pi conformance reports compare 14 source-cited offline journeys across commands, hooks, tools, UI, sessions, compaction and models.
 - Pi compatibility checks record long-session snapshot transitions, process exits and memory observations with isolated offline fixtures.
 - Pi session checks cover repeated tools, compaction, process restart and resume with durable private state and later turns.
 - Pi compatibility checks cover hook faults, history isolation, ownership, streaming cancellation and descendant cleanup.

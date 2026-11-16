@@ -1,55 +1,93 @@
 # Pi conformance harness
 
-Test-only, not wired into CI. It runs Pi's own unchanged example extensions through native Pi
-(interactive mode on a PTY) and through the octet binary with the `octet-pi-compat` adapter, both
-against a loopback mock provider (nothing leaves the machine), and compares what the user sees
-and what the model is offered.
+Runs native Pi and the actual octet CLI/adapter on PTYs against a loopback scripted
+provider. No live providers, user credentials or ambient Pi configuration are used.
+This extends [#720](https://github.com/skaft-software/octet/pull/720)'s existing
+example driver, VT replay and migration-safety checks; its original commits and
+attribution remain intact.
 
-Setup (once):
+## Reproduce
 
-```sh
-npm install --prefix scripts/pi-conformance      # Pi 1.5.0 + @xterm/headless
-cargo build --release -p octet-coding-agent --bin octet
-```
-
-Run, with an isolated HOME and Node 22.19.0 first on PATH:
+Requires Unix, Python 3, Node 22.19+ and the Rust toolchain. Dependency installation
+needs registry access once; execution is offline. From a clean source checkout:
 
 ```sh
-export HOME=/tmp/conformance-home PI_OFFLINE=1
-python3 scripts/pi-conformance/conformance.py --all-examples --out /tmp/conformance-out
+npm ci --prefix scripts/pi-conformance --ignore-scripts --no-audit --no-fund
+npm ci --prefix extensions/octet-pi-compat --ignore-scripts --no-audit --no-fund
+cargo build -p octet-coding-agent --bin octet --profile ci-test --locked
+target=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+HOME=$(mktemp -d) TMPDIR=$(mktemp -d) E2E_OCTET="$target/ci-test/octet" \
+  python3 -B scripts/pi-conformance/conformance.py --representative --out /absolute/new/evidence
+python3 -B scripts/pi-conformance/selftest.py
 ```
 
-Environment: `E2E_OCTET` (binary, default `target/release/octet`), `E2E_NODE_BIN` (Node bin dir),
-`E2E_PI_ROOT` (a directory whose `node_modules` holds Pi 1.5.0 and `@xterm/headless`; default this
-directory), `E2E_TMP`, `E2E_WIRE=<prefix>` (tap the extension wire into `<prefix>.current`).
-Options: `--only a,b`, `--hosts pi,current`, `--all-examples`, `--skip-core`.
+The 14 representative journeys have explicit success assertions, not just equality.
+They cover nine unchanged Pi examples and five small callback fixtures: commands,
+tools, dependency resolution, input transformation/handling, context, all three HTTP
+provider hooks, dialogs, footer/status/widgets/overlay, a custom editor, session
+append/name/cancellation/new/setup/switch-back, actual compaction with callbacks and
+a later turn, and model switching with a later request. `journeys.json` maps each
+journey to surfaces and **Pi source file:line** at the reviewed reference. Optional
+`--pi-source /reviewed/source-snapshot` records its `REVISION` file without executing
+source. The published npm Pi 1.5.0 CLI is the executable oracle.
 
-Output: `conformance.json` and `conformance.md`. A row compares `current` with Pi. A journey
-passes only when both hosts execute, every boolean observation succeeds, every row matches and
-the migration-safety check below holds. Equal failures are failures, not parity. Reference crashes
-and historical `BLOCKED` notes never waive a failure; only explicit offline prerequisites in `SKIP`
-produce skips. `--hosts` is diagnostic only: an unpaired run cannot pass conformance.
+For a narrow retry use `--only hook-pipeline,model-switch`. Use a fresh `--out` each
+run. `--all-examples` retains #720's generic load/startup/tool-catalog corpus; it does
+**not** turn each example into a fully exercised journey. Offline prerequisites in
+`SKIP` are explicit skips. Errors in native Pi are failures, not automatic skips.
+Historical `BLOCKED` notes are diagnostic context, never blanket waivers.
+`--hosts pi` or `--hosts current` is diagnostic only; an unpaired run cannot pass.
 
-Run the offline scoring regressions with `python3 -B scripts/pi-conformance/selftest.py`.
-Agent-directory fingerprints begin before startup, including startup-time writes.
+To measure a reviewed local factory through the same generic journey:
 
-## Scenarios
+```sh
+HOME=$(mktemp -d) TMPDIR=$(mktemp -d) E2E_OCTET="$target/ci-test/octet" \
+  python3 -B scripts/pi-conformance/conformance.py --skip-core \
+  --extension /absolute/reviewed/factory.ts --out /absolute/new/local-evidence
+```
 
-* Core scenarios (`SCENARIOS`): hello, commands, status-line, custom-footer, widget-placement,
-  session-name, custom-header, rainbow-editor, question, overlay-test, project-trust, and the
-  offline scenarios for examples the generic one cannot judge: `auto-commit-on-exit` (a temp git
-  repo with an uncommitted file; asserts the exit commit), `with-deps` (the example copied with its
-  `ms` dependency linked from the Pi install, no network), `rpc-demo` (input dialog, notify,
-  prefill), `custom-provider-*` (registration only, no inference).
-* `--all-examples` adds a generic scenario for every other example: it loads, shows the same
-  startup text and offers the model the same extension tools.
-* Cannot run offline: `gondolin` (imports `@earendil-works/gondolin`, which is not installed, and
-  needs a VM).
+This executes that factory and its imports with OS permissions, on both hosts.
+Review it first: offline provider fixtures do not sandbox extension-owned network,
+filesystem or process effects. Its dependencies must already resolve locally.
+Generic results qualify loading and the offered tool catalog, not arbitrary commands
+or the user's whole setup. Each leg gets its own HOME, TMPDIR, workspace and agent
+directory. Existing Pi settings, auth and sessions are never imported.
+
+Environment: `E2E_OCTET` (default `target/release/octet`), `E2E_NODE_BIN`,
+`E2E_PI_ROOT` (directory containing Pi 1.5.0 and `@xterm/headless` in `node_modules`),
+`E2E_TMP`, `E2E_WIRE=<prefix>` (fixture wire trace), `E2E_CPUS` (optional Linux CPU
+set, applied to the correct executable on both hosts).
+
+## Evidence format (schema 1)
+
+- `run.json`: source HEAD/dirty flag, binary SHA-256, platform/runtime versions,
+  Pi version/CLI digest, dependency lock and harness digests, exact factory set with
+  digests, optional reviewed source revision and start time.
+- `conformance.json`: per-journey status, per-observation values on both hosts,
+  equality, failures, source citations, surfaces, final screen rows and safety.
+- `conformance.md`: short human-readable comparison.
+- `coverage.json`: counts and surface × journey status.
+- `legs/<journey>/<host>/`: raw terminal bytes, provider requests, callback trace
+  when present and leg result. These are synthetic fixture data, not user sessions.
+
+A pass requires both hosts to execute, every boolean assertion to succeed, every
+comparison to match and migration safety to hold. Equal false observations fail.
+Exit status is nonzero for failed journeys. Skips never count as passes. Shared
+underlying prompt/compaction text is compared after whitespace normalization;
+canonical requests and raw terminal bytes remain available. Native chrome/layout
+is not compared pixel-for-pixel. A transient resumed-session notification can be
+erased by Pi's transcript hydration, so switch-back grades its callback receipt.
+
+The [recorded run](results/representative.json) and
+[coverage notes](results/README.md) state exact scope and supplemental regression
+checks. This is representative evidence, not extension certification or closure of
+all [compatibility deviations](../../docs/pi-compat-deviations.md). Independent
+human reproduction of a third-party user's setup remains separate acceptance.
 
 ## Migration safety
 
-For every scenario on both hosts the isolated Pi agent directory is seeded with an `auth.json` and
-a saved session, fingerprinted (path and sha256 of every file, symlinks by target) before the run
-and after the process exits. For `current` the set of added, changed and deleted paths must be a
-subset of what the native Pi run of the same scenario changed, and `auth.json` and `sessions/` must
-be byte-identical. A violation fails the example (`agent dir writes` row).
+Each isolated Pi agent directory is seeded with fake `auth.json` and a saved
+session. Fingerprints (paths and hashes; symlinks by target) begin **before CLI
+startup**, after reviewed configuration. Octet may touch only paths Pi touched in
+the paired journey, and may never change the seeded auth/sessions. The adapter's
+review/configure phase is not included in this startup fingerprint window.

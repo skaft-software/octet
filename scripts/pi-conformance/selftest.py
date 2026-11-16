@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Offline scoring regressions; no CLIs or extension factories are executed."""
+import json
+from pathlib import Path
 import unittest
-from conformance import compare, verdict
+from unittest.mock import patch
+from conformance import SCENARIOS, compare, s_generic, start, verdict
 
 
 class Scoring(unittest.TestCase):
@@ -36,6 +39,35 @@ class Scoring(unittest.TestCase):
 
     def test_success(self):
         self.assertEqual(verdict(self.columns())['status'], 'pass')
+
+    def test_start_waits_for_native_extension_readiness_not_only_editor_rules(self):
+        class Terminal:
+            screens = 0
+            def pump(self, _seconds):
+                pass
+            def screen(self):
+                self.screens += 1
+                return '\n'.join(['─' * 40, 'Loading your Pi setup…' if self.screens == 1 else '', '─' * 40])
+        terminal = Terminal()
+        with patch('conformance.drive.Term', return_value=terminal):
+            start(object())
+        self.assertEqual(terminal.screens, 2)
+
+    def test_generic_journey_requires_a_completed_turn(self):
+        with patch('conformance.settle', return_value=''), patch('conformance.ask', return_value=False):
+            observations, _ = s_generic(object(), object())
+        self.assertIs(observations.get('turn_finished'), False)
+
+    def test_representative_matrix_names_executable_source_cited_journeys(self):
+        matrix = json.loads(Path(__file__).with_name('journeys.json').read_text())
+        self.assertTrue(set(matrix) <= set(SCENARIOS))
+        surfaces = {surface for row in matrix.values() for surface in row['surfaces']}
+        self.assertTrue({'commands', 'tools', 'input hooks', 'context hooks', 'provider hooks',
+                         'custom editors', 'UI components', 'UI panels', 'session operations',
+                         'compaction', 'model switching'} <= surfaces)
+        for row in matrix.values():
+            self.assertTrue(row['pi_source'])
+            self.assertTrue(all(':' in citation for citation in row['pi_source']))
 
 
 if __name__ == '__main__':

@@ -11,7 +11,7 @@ usage: conformance.py [--out DIR] [--only name,name] [--all-examples] [--hosts p
 Environment: E2E_OCTET (octet binary), E2E_NODE_BIN (Node 22.19.0 bin dir), E2E_PI_ROOT (see README.md).
 Writes DIR/conformance.json and DIR/conformance.md.
 """
-import argparse, hashlib, json, os, re, shutil, sys, tempfile, time
+import argparse, hashlib, json, os, platform, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -44,16 +44,18 @@ class PiEnv:
         os.makedirs(self.ws + '/.pi', exist_ok=True)
         open(self.ws + '/.pi/settings.json', 'w').write('{}')  # the octet harness workspace has it too; same project resources on both hosts
         json.dump({'providers': {'mock': {'baseUrl': provider_url.rstrip('/'), 'api': 'openai-completions', 'apiKey': 'x',
-                   'models': [{'id': 'probe', 'name': 'probe', 'contextWindow': 32768, 'maxTokens': 4096}]}}}, open(self.agent + '/models.json', 'w'))
+                   'models': [{'id': name, 'name': name, 'contextWindow': 32768, 'maxTokens': 4096} for name in ('probe', 'probe-next')]}}}, open(self.agent + '/models.json', 'w'))
         json.dump({'defaultProvider': 'mock', 'defaultModel': 'probe', 'quietStartup': True, 'enableInstallTelemetry': False,
                    'collapseChangelog': True, 'lastChangelogVersion': '99.0.0'}, open(self.agent + '/settings.json', 'w'))
         self.examples = [x if os.path.isabs(x) else os.path.join(EXAMPLES, x) for x in examples]
-        self.env = {'PATH': drive.NODE_BIN + ':/usr/bin:/bin', 'HOME': self.home, 'PWD': self.ws, 'TERM': 'xterm-256color', 'LANG': 'C.UTF-8',
+        tmp = self.root + '/tmp'
+        os.makedirs(tmp)
+        self.env = {'TMPDIR': tmp, 'PATH': drive.NODE_BIN + ':/usr/bin:/bin', 'HOME': self.home, 'PWD': self.ws, 'TERM': 'xterm-256color', 'LANG': 'C.UTF-8',
                     'PI_OFFLINE': '1', 'PI_SKIP_VERSION_CHECK': '1', 'PI_CODING_AGENT_DIR': self.agent,
                     'COLUMNS': str(drive.COLUMNS), 'LINES': str(drive.ROWS)}
 
     def args(self, *extra):
-        argv = ['node', PI_CLI, '--offline', '--no-context-files', '--no-skills', '--no-themes', '--no-prompt-templates', '--model', 'mock/probe', '--no-session'] + (['--approve'] if self.approve else [])  # --approve = octet's --workspace-trusted (trust override: no project_trust event)
+        argv = ['node', PI_CLI, '--offline', '--no-context-files', '--no-skills', '--no-themes', '--no-prompt-templates', '--model', 'mock/probe'] + ([] if getattr(self, 'persist_session', False) else ['--no-session']) + (['--approve'] if self.approve else [])  # --approve = octet's --workspace-trusted (trust override: no project_trust event)
         for path in self.examples:
             argv += ['-e', path]
         return argv + list(extra)
@@ -176,7 +178,8 @@ def start(env):
     end = time.time() + 40
     while time.time() < end:
         term.pump(0.5)
-        if len([line for line in rows(term.screen()) if RULE.match(line)]) >= 2:
+        screen = term.screen()
+        if len([line for line in rows(screen) if RULE.match(line)]) >= 2 and 'Loading your Pi setup' not in screen:
             break
     term.pump(2.0)
     return term
@@ -383,7 +386,105 @@ def mock_tool(tool, args):
     return lambda: drive.MockProvider(tool, args)
 
 
+def trace_rows(term):
+    path = term.env.ws + '/conformance-trace.jsonl'
+    return [json.loads(line) for line in open(path)] if os.path.isfile(path) else []
+
+
+def s_pipeline(term, mock):
+    obs = {'turn_finished': ask(term, 'CONFORMANCE_INPUT', 'all done')}
+    settle(term, 1)
+    obs['two_requests'] = len(mock.requests) == 2
+    obs['payload_chain'] = bool(mock.requests) and all(r.get('max_tokens') == 78 for r in mock.requests)
+    obs['header_chain'] = bool(mock.headers) and all(next((v for k, v in h.items() if k.lower() == 'x-conformance'), None) == 'first:second' for h in mock.headers)
+    obs['system_prompt'] = bool(mock.requests) and any(message_text(m) == 'CONFORMANCE_SYSTEM' for m in mock.requests[0].get('messages', []) if m.get('role') == 'system')
+    obs['context_applied'] = bool(mock.requests) and any(message_text(m) == 'CONFORMANCE_CONTEXT' for m in mock.requests[0].get('messages', []) if m.get('role') == 'user')
+    trace = trace_rows(term)
+    obs['input_chain'] = {'stage': 'input', 'text': 'CONFORMANCE_INPUT:INPUT1'} in trace
+    obs['input_before_prompt'] = {'stage': 'prompt', 'text': 'CONFORMANCE_INPUT:INPUT1:INPUT2'} in trace
+    obs['tool_arguments_applied'] = any(row == {'stage': 'execute', 'value': 'payload:CALL'} for row in trace)
+    obs['response_hooks'] = len([row for row in trace if row == {'stage': 'response', 'status': 200}]) == 2
+    obs['tool_result_applied'] = len(mock.requests) == 2 and any(m.get('role') == 'tool' and message_text(m) == 'ECHO:payload:CALL:RESULT' for m in mock.requests[-1].get('messages', []))
+    return obs, ['conformance_echo']
+
+
+def s_input_handled(term, mock):
+    obs = {'handled_notice': ask(term, 'CONFORMANCE_HANDLE', 'CONFORMANCE_HANDLED')}
+    settle(term, 1)
+    obs['handled_no_request'] = not mock.requests
+    obs['later_turn'] = ask(term, 'CONFORMANCE_LATER', 'all done')
+    obs['later_transform'] = len(mock.requests) == 1 and any(message_text(m) == 'CONFORMANCE_LATER:TRANSFORMED' for m in mock.requests[0].get('messages', []) if m.get('role') == 'user')
+    return obs, []
+
+
+def s_model_switch(term, mock):
+    obs = {'selected_notice': command(term, '/conform-model', 'CONFORMANCE_MODEL_SELECTED')}
+    obs['later_turn'] = ask(term, 'after model switch', 'all done')
+    trace = trace_rows(term)
+    obs['selection_receipt'] = {'stage': 'selected', 'selected': True, 'id': 'probe-next'} in trace
+    obs['selection_event'] = {'stage': 'select', 'id': 'probe-next', 'previous': 'probe', 'source': 'set'} in trace
+    obs['wire_model'] = len(mock.requests) == 1 and mock.requests[0].get('model') == 'probe-next'
+    return obs, []
+
+
+def s_sessions(term, mock):
+    obs = {'first_turn': ask(term, 'original session', 'all done')}
+    for name, marker in [('state', 'STATE'), ('cancel', 'CANCELLED'), ('new', 'NEW')]:
+        obs[name + '_notice'] = command(term, '/conform-' + name, 'CONFORMANCE_' + marker, 25)
+    # Pi hydrates the resumed transcript after withSession and can erase its notice.
+    # Grade the callback's receipt, not a transient screen message.
+    command(term, '/conform-return')
+    trace = trace_rows(term)
+    obs['state_receipt'] = {'stage': 'state', 'named': True, 'appended': True, 'leaf': True} in trace
+    obs['cancel_receipt'] = {'stage': 'cancel', 'cancelled': True, 'same': True} in trace
+    obs['new_setup_receipt'] = {'stage': 'new', 'changed': True, 'setup': True} in trace
+    obs['switch_receipt'] = {'stage': 'return', 'same': True, 'restored': True} in trace
+    # The previous completion remains on screen after a switch; wait for an actual new request.
+    command(term, 'later session turn')
+    settle(term, 2)
+    obs['later_turn'] = len(mock.requests) == 2 and any('later session turn' in message_text(m) for m in mock.requests[-1].get('messages', []))
+    obs['private_not_in_context'] = all('PRIVATE_SENTINEL' not in json.dumps(r) for r in mock.requests)
+    return obs, []
+
+
+def session_env(env):
+    env.persist_session = True
+s_sessions.configure_env = session_env
+
+
+def s_compaction(term, mock):
+    obs = {'first_turn': ask(term, 'first compaction turn', 'all done')}
+    command(term, 'second compaction turn')
+    settle(term, 1)
+    obs['compaction_notice'] = command(term, '/conform-compact', 'CONFORMANCE_COMPACTED', 25)
+    trace = trace_rows(term)
+    obs['void_return'] = {'stage': 'return', 'void': True} in trace
+    obs['before_hook'] = {'stage': 'before'} in trace
+    obs['durable_compaction'] = any(row.get('stage') == 'compacted' and row.get('durable') and 'all done' in row.get('summary', '') for row in trace)
+    obs['completion_callback'] = any(row.get('stage') == 'complete' and 'all done' in row.get('summary', '') for row in trace)
+    command(term, 'after compaction')
+    settle(term, 2)
+    obs['later_turn'] = len(mock.requests) >= 4 and 'after compaction' in json.dumps(mock.requests[-1])
+    return obs, []
+
+
+def compaction_env(env):
+    env.env['OCTET_COMPACTION_KEEP_RECENT_TOKENS'] = '1'
+    env.env['OCTET_COMPACTION_MODE'] = 'local'
+    if env.mode == 'pi':
+        path = env.agent + '/settings.json'
+        settings = json.load(open(path))
+        settings['compaction'] = {'enabled': False, 'keepRecentTokens': 1, 'reserveTokens': 1024}
+        json.dump(settings, open(path, 'w'))
+s_compaction.configure_env = compaction_env
+
+
 SCENARIOS = {
+    'hook-pipeline': ([HERE + '/fixtures/pipeline.mjs'], mock_tool('conformance_echo', {'value': 'payload'}), s_pipeline),
+    'input-handled': ([HERE + '/fixtures/input-handled.mjs'], None, s_input_handled),
+    'model-switch': ([HERE + '/fixtures/model-switch.mjs'], None, s_model_switch),
+    'session-operations': ([HERE + '/fixtures/sessions.mjs'], None, s_sessions),
+    'compaction': ([HERE + '/fixtures/compaction.mjs'], None, s_compaction),
     'project-trust': (['project-trust.ts'], drive.MockProvider, s_project_trust),
     'auto-commit-on-exit': ([os.path.join(EXAMPLES, 'auto-commit-on-exit.ts')], drive.MockProvider, s_auto_commit),
     'with-deps': (['with-deps/index.ts'], lambda: drive.MockProvider('parse_duration', {'duration': '2 days'}), s_with_deps),
@@ -410,7 +511,7 @@ def s_generic(term, mock):
     r = regions(screen)
     obs = {'startup_text': [notice_text(x) for x in r['above'] + r['below'] if squash(x) and not CHROME.search(x)],
            'load_error': next((squash(x)[:120] for x in rows(screen) if re.search(r'failed to load|extension error|Cannot find|ERR_|at registeredHandler|TypeError|ReferenceError', x, re.I)), '')}
-    ask(term, 'plain question', 'all done', 20)
+    obs['turn_finished'] = ask(term, 'plain question', 'all done', 20)
     return obs, None
 
 
@@ -453,7 +554,7 @@ def discover_examples():
     return names
 
 
-def run_one(host, examples, mock_factory, fn):
+def run_one(host, examples, mock_factory, fn, evidence=None):
     mock = (mock_factory or drive.MockProvider)()
     env = None
     result = {}
@@ -462,6 +563,8 @@ def run_one(host, examples, mock_factory, fn):
         env = make_env(host, examples, mock.url, not getattr(fn, 'trust_prompt', False))
         if getattr(fn, 'setup', None):
             fn.setup(env.ws)
+        if getattr(fn, 'configure_env', None):
+            fn.configure_env(env)
         before = fingerprint(env.agent)
         term = start(env)
         try:
@@ -479,6 +582,15 @@ def run_one(host, examples, mock_factory, fn):
         result = {'error': f'{type(error).__name__}: {str(error)[:300]}'}
     finally:
         mock.close()
+        if evidence is not None:
+            os.makedirs(evidence, exist_ok=True)
+            json.dump(mock.requests, open(evidence + '/requests.json', 'w'), indent=2)
+            if env is not None:
+                for source, target in ((env.root + '/raw.bin', 'terminal.bin'),
+                                       (env.ws + '/conformance-trace.jsonl', 'trace.jsonl')):
+                    if os.path.isfile(source):
+                        shutil.copyfile(source, evidence + '/' + target)
+            json.dump(result, open(evidence + '/result.json', 'w'), indent=2)
         if env is not None:
             env.cleanup()
     return result
@@ -521,18 +633,51 @@ def fmt(value):
     return text if len(text) <= 60 else text[:57] + '...'
 
 
+def run_metadata(plan, pi_source=None):
+    repo = os.path.dirname(os.path.dirname(HERE))
+    def git(*args):
+        return subprocess.check_output(['git', *args], cwd=repo, text=True).strip()
+    def digest(path):
+        return hashlib.sha256(open(path, 'rb').read()).hexdigest()
+    entries = sorted({path if os.path.isabs(path) else os.path.join(EXAMPLES, path)
+                      for examples, _, _ in plan.values() for path in examples})
+    reference = json.load(open(os.path.join(PI_DIR, 'package.json')))
+    return {'schema_version': 1, 'head': git('rev-parse', 'HEAD'),
+            'source_dirty': bool(git('status', '--porcelain', '--untracked-files=normal')),
+            'platform': platform.platform(), 'python': platform.python_version(),
+            'node': subprocess.check_output([NODE, '--version'], text=True).strip(),
+            'octet_binary': drive.OCTET, 'octet_sha256': digest(drive.OCTET),
+            'pi_version': reference['version'], 'pi_cli_sha256': digest(PI_CLI),
+            'dependency_lock_sha256': digest(HERE + '/package-lock.json'),
+            'harness_sha256': {name: digest(HERE + '/' + name) for name in
+                               ('conformance.py', 'drive.py', 'render.mjs', 'journeys.json')},
+            'started_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'pi_source_revision': open(os.path.join(pi_source, 'REVISION')).read().strip() if pi_source else None,
+            'extensions': [{'path': path, 'sha256': digest(path)} for path in entries],
+            'journeys': list(plan), 'scope': 'isolated offline PTYs; unchanged examples and synthetic callback fixtures'}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=TMP + '/conformance')
     ap.add_argument('--only')
+    ap.add_argument('--representative', action='store_true', help='run the source-cited surface matrix in journeys.json')
+    ap.add_argument('--pi-source', help='optional reviewed Pi source directory containing REVISION (provenance only)')
+    ap.add_argument('--extension', action='append', default=[], help='reviewed local factory to add as a generic load/tool-catalog journey')
     ap.add_argument('--all-examples', action='store_true', help='also run every other Pi example with a generic load/registration scenario')
-    ap.add_argument('--skip-core', action='store_true', help='with --all-examples: only the generic ones')
+    ap.add_argument('--skip-core', action='store_true', help='omit built-in scenarios; use with --all-examples or --extension')
     ap.add_argument('--hosts', default=','.join(ALL_HOSTS))
     args = ap.parse_args()
     global HOSTS
     HOSTS = args.hosts.split(',')
+    if any(host not in ALL_HOSTS for host in HOSTS) or len(set(HOSTS)) != len(HOSTS):
+        ap.error('--hosts must contain distinct pi/current hosts')
+    if os.path.exists(args.out + '/conformance.json'):
+        ap.error('use a fresh --out directory to retain earlier evidence')
     os.makedirs(args.out, exist_ok=True)
-    plan = {name: spec for name, spec in SCENARIOS.items() if not args.only or name in args.only.split(',')}
+    coverage = json.load(open(HERE + '/journeys.json'))
+    plan = {name: spec for name, spec in SCENARIOS.items()
+            if (not args.only or name in args.only.split(',')) and (not args.representative or name in coverage)}
     if args.skip_core:
         plan = {}
     if args.all_examples:
@@ -540,6 +685,17 @@ def main():
         for name in discover_examples():
             if name not in covered and (not args.only or name in args.only.split(',')):
                 plan[name] = ([name], None, s_generic)
+    for entry in args.extension:
+        path = os.path.realpath(entry)
+        if not os.path.isfile(path):
+            ap.error('--extension must name an existing reviewed factory')
+        plan['external-' + os.path.basename(path)] = ([path], None, s_generic)
+    if not plan:
+        ap.error('no journeys selected')
+    if args.only and set(args.only.split(',')) - set(plan):
+        ap.error('unknown/unselected journey in --only')
+    metadata = run_metadata(plan, args.pi_source)
+    json.dump(metadata, open(args.out + '/run.json', 'w'), indent=2)
     skipped = {name: SKIP[name.split('/')[0]] for name in list(plan) if name.split('/')[0] in SKIP}
     for name in skipped:
         plan.pop(name)
@@ -547,18 +703,21 @@ def main():
     for name, (examples, mock_factory, fn) in plan.items():
         columns = {}
         for host in HOSTS:
-            columns[host] = run_one(host, examples, mock_factory, fn)
+            evidence = os.path.join(args.out, 'legs', name.replace('/', '_'), host)
+            columns[host] = run_one(host, examples, mock_factory, fn, evidence)
             print(f'{name:28} {host:8} load={os.getloadavg()[0]:.1f}', 'ERROR ' + columns[host]['error'][:100] if 'error' in columns[host] else 'ok', flush=True)
         pi = columns.get('pi', {})
         diffs = {h: frame_diff(pi.get('final_rows', []), columns[h].get('final_rows', [])) for h in ('current',) if 'final_rows' in columns.get(h, {})}
-        results[name] = {**verdict(columns), 'frame_diff': diffs}
+        results[name] = {**verdict(columns), 'frame_diff': diffs, **coverage.get(name, {'surfaces': ['generic load/catalog only'], 'pi_source': []})}
         # Historical BLOCKED notes are diagnostic context, never blanket waivers.
         blocked = BLOCKED.get(name) or BLOCKED.get(name.split('/')[0])
         if blocked and results[name]['status'] == 'fail':
             results[name]['reason'] = blocked
         json.dump(results, open(args.out + '/conformance.json', 'w'), indent=1, ensure_ascii=False)
     json.dump(results, open(args.out + '/conformance.json', 'w'), indent=1, ensure_ascii=False)
-    lines = ['| example / observation | Pi | current | current = Pi |', '|---|---|---|---|']
+    lines = [f'# Pi conformance: {metadata["head"]}',
+             f'Pi {metadata["pi_version"]}; {metadata["platform"]}; dirty source: {metadata["source_dirty"]}.',
+             '', '| example / observation | Pi | current | current = Pi |', '|---|---|---|---|']
     for name, res in results.items():
         if res['status'] == 'skipped':
             lines.append(f'| **{name}** | skipped | | {res["reason"][:90]} |')
@@ -574,6 +733,11 @@ def main():
             lines.append(f'| {row["key"]} | {fmt(v["pi"])} | {fmt(v["current"])} | {"yes" if row["current_matches_pi"] else "NO"} |')
     open(args.out + '/conformance.md', 'w').write('\n'.join(lines) + '\n')
     counts = {s: sum(1 for r in results.values() if r['status'] == s) for s in ('pass', 'fail', 'blocked', 'skipped')}
+    surface_results = {}
+    for name, result in results.items():
+        for surface in result.get('surfaces', []):
+            surface_results.setdefault(surface, {})[name] = result['status']
+    json.dump({'schema_version': 1, 'counts': counts, 'surfaces': surface_results}, open(args.out + '/coverage.json', 'w'), indent=2)
     print(json.dumps(counts), 'load', os.getloadavg()[0])
     return 1 if counts['fail'] else 0
 

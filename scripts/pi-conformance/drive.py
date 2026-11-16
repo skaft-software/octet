@@ -26,6 +26,7 @@ class MockProvider:
 
     def __init__(self, tool='hello', tool_args=None):
         self.requests = []
+        self.headers = []
         self.tool, self.tool_args = tool, tool_args or {'name': 'octet'}
         outer = self
 
@@ -36,6 +37,7 @@ class MockProvider:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 outer.requests.append(body)
+                outer.headers.append(dict(self.headers.items()))
                 called = any(m.get('role') == 'tool' for m in body.get('messages', []))
                 offered = any(t.get('function', {}).get('name') == outer.tool for t in body.get('tools') or [])
                 if called or not offered:
@@ -78,13 +80,15 @@ class Env:
         os.symlink(THIN, f'{self.agent}/install/releases/{version}')
         credential = self.home + '/.octet/credentials/custom.json'
         json.dump({'base_url': provider_url, 'api_key': '', 'api_name': 'probe', 'headers': [],
-                   'auto_discover': False, 'models': [{'api_name': 'probe', 'context_window': 32768}]}, open(credential, 'w'))
+                   'auto_discover': False, 'models': [{'api_name': name, 'context_window': 32768} for name in ('probe', 'probe-next')]}, open(credential, 'w'))
         os.chmod(credential, 0o600)
-        self.env = {'PATH': NODE_BIN + ':/usr/bin:/bin', 'HOME': self.home, 'PWD': self.ws, 'TERM': 'xterm-256color', 'LANG': 'C.UTF-8',
+        tmp = os.path.join(self.root, 'tmp')
+        os.makedirs(tmp)
+        self.env = {'TMPDIR': tmp, 'PATH': NODE_BIN + ':/usr/bin:/bin', 'HOME': self.home, 'PWD': self.ws, 'TERM': 'xterm-256color', 'LANG': 'C.UTF-8',
                     'PI_OFFLINE': '1', 'COLUMNS': str(COLUMNS), 'LINES': str(ROWS)}
         paths = [name if os.path.isabs(name) else os.path.join(EXAMPLES, name) for name in examples]
         done = subprocess.run(['node', ADAPTER + '/configure.mjs', '--reviewed', '--output', self.ext + '/octet-pi-compat', *paths],
-                              cwd=self.ws, env=self.env, capture_output=True, text=True)
+                              cwd=self.ws, env=self.env, capture_output=True, text=True, timeout=60)
         self.configure_output = done.stdout + done.stderr
         if done.returncode != 0:
             raise SystemExit('configure failed: ' + self.configure_output)
@@ -117,7 +121,11 @@ class Term:
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(env.ws)
-            os.execve('/usr/bin/taskset', ['taskset', '-c', os.environ['E2E_CPUS'], OCTET, *env.args(*extra)[1:]], env.env) if os.environ.get('E2E_CPUS') else os.execve(getattr(env, 'exe', OCTET), env.args(*extra), env.env)
+            executable = getattr(env, 'exe', OCTET)
+            argv = env.args(*extra)
+            if os.environ.get('E2E_CPUS'):
+                os.execve('/usr/bin/taskset', ['taskset', '-c', os.environ['E2E_CPUS'], executable, *argv[1:]], env.env)
+            os.execve(executable, argv, env.env)
         self.pid, self.fd = pid, fd
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLUMNS, 0, 0))
         os.kill(pid, signal.SIGWINCH)
@@ -144,7 +152,7 @@ class Term:
 
     def screen(self):
         out = subprocess.run(['node', HERE + '/render.mjs', self.raw, str(COLUMNS), str(ROWS)], cwd=THIN, env=self.env.env,
-                             capture_output=True, text=True, check=True)
+                             capture_output=True, text=True, check=True, timeout=10)
         return out.stdout
 
     def wait_for(self, text, timeout=25):
@@ -177,5 +185,7 @@ class Term:
             os.waitpid(self.pid, 0)
         except (ProcessLookupError, ChildProcessError):
             pass
+        self.log.close()
+        os.close(self.fd)
 
 
