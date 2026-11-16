@@ -283,10 +283,7 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         .collect::<Vec<_>>();
     assert_eq!(rendered.len(), 3, "{rendered:?}");
     assert!(rendered[0].is_empty(), "{rendered:?}");
-    assert!(
-        rendered[1].starts_with("• Working ("),
-        "{rendered:?}"
-    );
+    assert!(rendered[1].starts_with("• Working ("), "{rendered:?}");
     assert!(rendered[2].is_empty(), "{rendered:?}");
     assert!(!rendered[1].contains("Ctrl+O"), "{rendered:?}");
 

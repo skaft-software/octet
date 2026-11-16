@@ -203,10 +203,9 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
     // And the new turn's own status row is still the last thing in the
     // transcript, so the working indicator is not displaced.
     assert!(
-        replayed
-            .trim_end()
-            .lines().last().is_some_and(|line| line.contains("Working (") && line.ends_with(" • Esc to interrupt)"))
-            || replayed.trim_end().ends_with("Working"),
+        replayed.trim_end().lines().last().is_some_and(
+            |line| line.contains("Working (") && line.ends_with(" • Esc to interrupt)")
+        ) || replayed.trim_end().ends_with("Working"),
         "the new turn's status row must remain the transcript tail: {replayed}"
     );
     // Nothing below the new prompt belongs to the settled team: the correction
@@ -373,10 +372,9 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
             .join("\n")
     };
     let ends_with_working = |rendered: &str| {
-        rendered
-            .trim_end()
-            .lines().last().is_some_and(|line| line.contains("Working (") && line.ends_with(" • Esc to interrupt)"))
-            || rendered.trim_end().ends_with("Working")
+        rendered.trim_end().lines().last().is_some_and(|line| {
+            line.contains("Working (") && line.ends_with(" • Esc to interrupt)")
+        }) || rendered.trim_end().ends_with("Working")
     };
 
     // Turn one is interrupted before the delegation is ever published live.

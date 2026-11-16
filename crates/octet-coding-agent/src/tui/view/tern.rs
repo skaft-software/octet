@@ -1136,12 +1136,7 @@ fn block_node(
                             } else if block.finished {
                                 block.reasoning_elapsed.map_or_else(
                                     || "Thoughts".into(),
-                                    |elapsed| {
-                                        format!(
-                                            "Thought for {}",
-                                            format_duration(elapsed)
-                                        )
-                                    },
+                                    |elapsed| format!("Thought for {}", format_duration(elapsed)),
                                 )
                             } else {
                                 "Thinking".into()
@@ -1337,9 +1332,11 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
         .unwrap_or(&label);
     let age = run.elapsed_at(now).as_millis() as u64;
     let mut node = octet_tern::scene::working_row("work", &sanitize_for_terminal(label), age, None);
-    if let Some(elapsed) = node.c.as_mut().and_then(|children| {
-        children.iter_mut().find(|child| child.id == "work.elapsed")
-    }) {
+    if let Some(elapsed) = node
+        .c
+        .as_mut()
+        .and_then(|children| children.iter_mut().find(|child| child.id == "work.elapsed"))
+    {
         *elapsed = Node::new(
             "work.elapsed",
             Kind::Text,

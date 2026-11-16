@@ -17,10 +17,7 @@ fn active_run_starts_with_working_until_reasoning_is_observed() {
         .collect::<Vec<_>>();
     assert_eq!(rendered.len(), 3, "{rendered:?}");
     assert!(rendered[0].is_empty(), "{rendered:?}");
-    assert!(
-        rendered[1].starts_with("• Working ("),
-        "{rendered:?}"
-    );
+    assert!(rendered[1].starts_with("• Working ("), "{rendered:?}");
     assert!(rendered[2].is_empty(), "{rendered:?}");
 }
 

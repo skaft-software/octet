@@ -609,10 +609,7 @@ mod inference_tests {
         let text = status_telemetry(&state, Instant::now());
         assert!(text.contains("Server timing  unavailable"), "{text}");
         assert!(text.contains("no client-derived substitute"), "{text}");
-        assert!(
-            text.contains("answer 800ms, reasoning 100ms"),
-            "{text}"
-        );
+        assert!(text.contains("answer 800ms, reasoning 100ms"), "{text}");
         assert!(text.contains("2 output events (not tokens)"), "{text}");
         assert!(!text.contains("tok/s generation"), "{text}");
     }
