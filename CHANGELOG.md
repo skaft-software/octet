@@ -4,65 +4,23 @@
 
 ### Changed
 
-- Composer overflow counts sit in centered, subdued border labels, leaving more
-  room for draft text while preserving model-coloured rules and custom chrome.
-
-- Codex uses provider-default context budgets instead of a universal 272K cap,
-  preserving GPT-6.1 Sol and Terra's advertised 500K defaults through discovery,
-  caching, registration and compaction. Explicit budgets use provider maxima
-  without a Pro-plan gate or cost-cliff acknowledgement; menus retain those
-  source limits. Old normalized caches refresh. Large windows no
-  longer fabricate unknown-usage records. Codex subscription pricing and the
-  direct-API long-context tariffs are unchanged.
-
-- Completed shell-tool rows show their recorded duration. Native TOML themes can
-  customize the `tool_duration` text or hide it with an empty string; timing stays
-  out of copied output.
-
-- The default splash pairs the canonical 8×2 mark with `octet  v<version>`
-  and `<access> · /changelog`, without duplicate discovery or exit help.
-  Narrow/custom layouts and full custom-header replacement remain supported.
-  Clicking the native compact mark blinks its eyes and sweeps a highlight;
-  rapid clicks build rainbow colour that settles back to the normal palette.
-  Explicit splash colours, reduced motion and lower-colour terminals are respected.
+- Composer overflow counts sit in centered border labels, leaving more room for draft text.
+- Codex uses provider-default context budgets, keeping GPT-6.1 Sol and Terra's advertised 500K windows.
+- Completed shell-tool rows show their recorded duration; themes can restyle or hide it.
+- The default splash is a compact two-line mark with the version, access mode and `/changelog`.
 
 ### Fixed
 
 - Update quinn-udp to fix a receive loop that can spin after a truncated datagram. ([#735](https://github.com/skaft-software/octet/pull/735) by [@gafiatulin](https://github.com/gafiatulin))
-
 - Provider request traces count signed Google parts by kind without exposing signatures.
-
-- Restore whole-second live activity timers (`28s`, `1m49s`, `1h01m01s`)
-  instead of fractional seconds or decimal minutes.
-
-- Responses screenshot retention updates only new replay items and the retained
-  image window instead of rescanning settled history on every screenshot turn.
-  Native computer-call screenshots and immutable snapshots remain intact.
-
-- Provider-context hook projections validate target-normalized replay, avoiding
-  cross-protocol reasoning refusals without changing the saved conversation.
-  Newly introduced media remains subject to strict validation.
-- Responses replay bounds ordinary tool-result screenshots, retaining opaque
-  output and native computer-call screenshots required by their wire shape.
-- Opt-in request tracing reports the final Google contents role using a bounded
-  vocabulary, including changes made by encoded payload hooks.
-
-- TUI shortcut hints, pickers and `/hotkeys` consistently use `Ctrl+T`-style
-  labels instead of mixing lowercase, title case and caret notation. Key
-  bindings are unchanged, and Shift remains an explicit modifier.
-
-- Fullscreen scrolling and selection reuse unchanged row-to-copy mappings instead
-  of re-aligning long answers on every event. Partial mappings extend for later
-  rows, and width, theme, disclosure and content changes invalidate stale work.
-  Captured scrollbar drags and selection-edge scrolling survive their own scroll
-  changes between paints; fresh presses still require matching frame geometry.
-  Frame pacing counts render/write time toward the interval instead of adding
-  another interval after a slow frame.
-
-- Google-compatible continuation requests no longer end with a `model` turn,
-  avoiding HTTP 400 on routes such as `opencode-go-google`. A wire-only user cue
-  preserves the existing history, thought signatures and function responses.
-
+- Live activity timers show whole seconds again (`28s`, `1m49s`, `1h01m01s`).
+- Responses screenshot retention updates only new replay items instead of rescanning settled history.
+- Provider-context hook projections validate target-normalized replay, avoiding cross-protocol reasoning refusals.
+- Responses replay bounds ordinary tool-result screenshots while keeping native computer-call screenshots.
+- Opt-in request tracing reports the final Google contents role, including changes made by payload hooks.
+- TUI shortcut hints, pickers and `/hotkeys` consistently use `Ctrl+T`-style labels.
+- Fullscreen scrolling and selection reuse unchanged row mappings instead of re-aligning long answers on every event.
+- Google-compatible continuation requests no longer end with a `model` turn, avoiding HTTP 400 on OpenCode Go.
 - Tool labels use available terminal width while keeping their selected values readable.
 
 ## [0.10.4] - 2026-11-12
