@@ -1,5 +1,6 @@
 // Selection is published only from an authoritative Rust-host receipt.
 import { bounded, fields, invalid } from './errors.mjs';
+import { currentModel } from './providers.mjs';
 
 const levels = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 function publish(store, result) {
@@ -35,12 +36,23 @@ export function setModel(runtime, store, model) {
   runtime.require('session_control_v1'); runtime.assertOwner(store);
   if (!model || typeof model !== 'object') invalid('model');
   bounded(model.provider, 'provider', 256); bounded(model.id, 'model id', 256);
+  const previousModel = currentModel(store.state.host, runtime);
   return runtime.track(runtime.hostCall('model/select', {
     resource_owner: store.state.owner,
     selection: { operation: 'model', provider: model.provider, id: model.id },
-  }, store).then(result => {
+  }, store).then(async result => {
     store.controller.signal.throwIfAborted(); runtime.assertOwner(store);
-    return publish(store, result);
+    const selected = publish(store, result);
+    // Pi packages/coding-agent/src/core/agent-session.ts:2542-2581 emits and
+    // awaits model_select after committing a changed identity. Native model/select
+    // receipts do not emit a lifecycle notification; the Pi event belongs here.
+    if (selected && !result.queued) {
+      const model = currentModel(store.state.host, runtime);
+      if (model?.provider !== previousModel?.provider || model?.id !== previousModel?.id) {
+        await runtime.runEvent('model_select', { type: 'model_select', model, previousModel, source: 'set' }, store);
+      }
+    }
+    return selected;
   }), store);
 }
 

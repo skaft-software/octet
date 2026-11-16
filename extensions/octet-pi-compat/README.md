@@ -656,6 +656,12 @@ No canonical request or synthetic completion substitutes for an HTTP boundary.
 Native delegates still refuse package-supplied response/header callbacks that
 lack wire forwarding; undefined optional callback fields remain accepted.
 
+An idle `await pi.setModel(model)` delivers `model_select` after the authoritative
+native receipt and before resolving, with Pi model objects, the previous model and
+`source: "set"`. Selecting the same provider/model identity emits nothing. A refused
+or merely queued selection emits no applied event. The adapter owns this Pi event;
+it does not add a native protocol method or select a model optimistically.
+
 `modelRegistry.getAll()` and `find()` use the host's full native and extension
 model inventory, including models without configured authentication.
 `getAvailable()` is the separately filtered configured-auth inventory, not a
@@ -1094,7 +1100,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The isolated rebased-candidate adapter run, with two test files in parallel, is
-**1649 tests: 1616 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1650 tests: 1617 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the

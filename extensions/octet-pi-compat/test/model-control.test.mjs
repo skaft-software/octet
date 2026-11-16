@@ -11,6 +11,7 @@ function fixture() {
   const store = { id: 17, live: true, controller, state: { owner, host: structuredClone(host) } };
   const calls = [];
   const runtime = {
+    runEvent: async (event, value) => { calls.push({ event, value }); },
     stopping: false, active: new Map([[17, { controller }]]),
     require: feature => assert.equal(feature, 'session_control_v1'),
     assertOwner: value => assert.equal(value, store),
@@ -47,6 +48,29 @@ test('model and nullable measured usage publish atomically, invalid receipts lea
   assert.equal(store.state.host.context_usage, null);
 });
 
+// Pi packages/coding-agent/src/core/agent-session.ts:2542-2581 awaits
+// model_select only when provider/id changes, before setModel resolves.
+test('model_select follows the authoritative receipt and precedes setModel resolution', async () => {
+  const { runtime, store, calls } = fixture();
+  const before = structuredClone(store.state.host.model_view);
+  runtime.reply = Promise.resolve(receipt);
+  runtime.runEvent = async (event, value, current) => {
+    assert.equal(event, 'model_select');
+    assert.equal(current, store);
+    assert.equal(current.state.host.model_view.id, 'chosen-model');
+    assert.equal(value.model.id, 'chosen-model');
+    assert.equal(value.previousModel.id, before.id);
+    assert.equal(value.source, 'set');
+    await new Promise(resolve => setImmediate(resolve));
+    calls.push('delivered');
+  };
+  assert.equal(await setModel(runtime, store, { provider: 'test', id: 'chosen-model' }), true);
+  assert.ok(calls.includes('delivered'));
+  calls.length = 0;
+  await setModel(runtime, store, { provider: 'test', id: 'chosen-model' });
+  assert.ok(!calls.includes('delivered'), 'same identity does not emit twice');
+});
+
 test('unknown models and host failures cannot fabricate selection', async () => {
   const { runtime, store } = fixture();
   runtime.reply = Promise.resolve({ selected: false });
@@ -79,6 +103,7 @@ test('real adapter command completes async model and synchronous thinking receip
   const directory = mkdtempSync(join(tmpdir(), 'octet-model-controls-'));
   const entry = join(directory, 'probe.ts'), trace = join(directory, 'trace.json');
   writeFileSync(entry, `import {writeFileSync} from 'node:fs'; export default pi => {
+    pi.on('model_select', e => writeFileSync(${JSON.stringify(trace + '.event')}, JSON.stringify({id:e.model.id, previous:e.previousModel.id, source:e.source})));
     pi.registerCommand('select', {handler:async (_,ctx) => {
       const selected=await pi.setModel({...ctx.model,id:'chosen-model'});
       pi.setThinkingLevel('high');
@@ -97,6 +122,7 @@ test('real adapter command completes async model and synchronous thinking receip
   const response = await command.response;
   assert.ok(response.result, JSON.stringify(response));
   assert.deepEqual(JSON.parse(readFileSync(trace,'utf8')), {selected:true,id:'chosen-model',level:'low'});
+  assert.deepEqual(JSON.parse(readFileSync(trace + '.event','utf8')), {id:'chosen-model',previous:'test-model',source:'set'});
   await adapter.close();
 });
 

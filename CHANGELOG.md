@@ -105,6 +105,7 @@
 - Cache accounting honors explicit final zero counters and counts one-hour writes once in session reports.
 - Payload hooks retain unchanged request bytes and field order across turns, preserving stable cache prefixes.
 - Pi conformance journeys require successful observations on both hosts and include startup writes in migration-safety checks.
+- Pi model selection delivers `model_select` with the current and previous models before an applied `pi.setModel()` resolves.
 
 ## [0.10.4] - 2026-11-12
 
