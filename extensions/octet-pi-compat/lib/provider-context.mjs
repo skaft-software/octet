@@ -401,25 +401,34 @@ export async function projectContext(runtime, params, store) {
           continue;
         }
         live();
-        if (result !== undefined) { record(result, ['messages'], 'context_with_system result'); full = result.messages != null ? array(result.messages, 'context_with_system messages') : visible; }
-        else full = visible;
-        const leading = full[0]?.role === 'system' ? full[0] : undefined;
-        if (!leading && originalTools !== '[]') unsupported('context_with_system removed tool declarations', 'native preparation cannot replace the advertised tool snapshot');
-        if (leading) {
-          record(leading, ['role', 'content', 'toolsAdded', 'sections', 'toolsRemoved', 'timestamp'], 'system message');
-          if (JSON.stringify(leading.toolsAdded ?? []) !== originalTools || leading.toolsRemoved?.length) unsupported('context_with_system tool changes', 'native preparation cannot replace the advertised tool snapshot');
-          const content = typeof leading.content === 'string' ? text(leading.content) : array(leading.content, 'system content').map(part => {
-            record(part, ['type', 'text'], 'system text part'); if (part.type !== 'text') invalid('system content must be text'); return text(part.text);
-          }).join('\n');
-          const sections = leading.sections ?? {}; if (!sections || typeof sections !== 'object' || Array.isArray(sections)) invalid('system sections');
-          system = [content, ...Object.values(sections).filter(value => value !== null).map(text)].filter(value => value.length).join('\n\n');
-        } else {
-          system = null;
-          runtime.backgroundError(new Error('context_with_system handler removed the leading system message'));
+        // Pi runner.ts:1337-1360 reports per-handler failures and continues.
+        // Validate the complete candidate before publishing any of its fields.
+        try {
+          let candidate, candidateSystem = system;
+          if (result !== undefined) { record(result, ['messages'], 'context_with_system result'); candidate = result.messages != null ? array(result.messages, 'context_with_system messages') : visible; }
+          else candidate = visible;
+          const leading = candidate[0]?.role === 'system' ? candidate[0] : undefined;
+          if (!leading && originalTools !== '[]') unsupported('context_with_system removed tool declarations', 'native preparation cannot replace the advertised tool snapshot');
+          if (leading) {
+            record(leading, ['role', 'content', 'toolsAdded', 'sections', 'toolsRemoved', 'timestamp'], 'system message');
+            if (JSON.stringify(leading.toolsAdded ?? []) !== originalTools || leading.toolsRemoved?.length) unsupported('context_with_system tool changes', 'native preparation cannot replace the advertised tool snapshot');
+            const content = typeof leading.content === 'string' ? text(leading.content) : array(leading.content, 'system content').map(part => {
+              record(part, ['type', 'text'], 'system text part'); if (part.type !== 'text') invalid('system content must be text'); return text(part.text);
+            }).join('\n');
+            const sections = leading.sections ?? {}; if (!sections || typeof sections !== 'object' || Array.isArray(sections)) invalid('system sections');
+            candidateSystem = [content, ...Object.values(sections).filter(value => value !== null).map(text)].filter(value => value.length).join('\n\n');
+          } else {
+            candidateSystem = null;
+            runtime.backgroundError(new Error('context_with_system handler removed the leading system message'));
+          }
+          const candidateMessages = leading ? candidate.slice(1) : candidate;
+          if (candidateMessages.some(message => message.role === 'system')) unsupported('context_with_system later system messages', 'native canonical messages cannot represent mid-transcript system changes');
+          piToCanonical(candidateMessages);
+          full = candidate; messages = candidateMessages; system = candidateSystem;
+        } catch (error) {
+          live(); if (store.errors.includes(error)) throw error;
+          runtime.reportCallbackError('context_with_system', entry.factory, error, store.state);
         }
-        messages = leading ? full.slice(1) : full;
-        if (messages.some(message => message.role === 'system')) unsupported('context_with_system later system messages', 'native canonical messages cannot represent mid-transcript system changes');
-        piToCanonical(messages);
       }
       fullBudget.finish();
     }

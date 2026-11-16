@@ -99,7 +99,11 @@ for (const reason of ['manual', 'threshold', 'overflow']) test(`real session com
   const payload = { kind: 'before_compact', reason, first_kept: 'kept', preparation: { messages: [], turn_prefix_messages: [], previous_summary: null, details: { read_files: [], modified_files: [] } }, branch_entries: [entry], custom_instructions: null };
   const reply = await peer.request('hook/run', operation(peer, 'session_before_compact', payload)).response;
   assert.deepEqual(reply.result.session_operation, reason === 'manual' ? { action: 'replace_compaction', replacement: { summary: 'real replacement', first_kept: 'kept' } } : { action: 'cancel' });
-  if (reason === 'manual') assert.match((await peer.request('hook/run', operation(peer, 'session_before_compact', payload, 'extra')).response).error.message, /tokensBefore/);
+  if (reason === 'manual') {
+    const skipped = await peer.request('hook/run', operation(peer, 'session_before_compact', payload, 'extra')).response;
+    assert.equal(skipped.result.session_operation.action, 'continue');
+    assert.match(peer.seen.find(frame => frame.method === 'notification')?.params.message, /session_before_compact hook called an API octet does not support, so the hook was skipped/);
+  }
   await peer.close();
 });
 test('real tree callback carries its live leaf and append waits for a known native receipt', async t => {

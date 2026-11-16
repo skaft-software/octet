@@ -198,6 +198,7 @@ async function beforeReplacement(hook, payload, handlers) {
     metadata: () => ({ hooks: [hook] }), bind: () => {}, assertOwner: () => {}, assertSessionOwner: () => {},
     sessionFacts: runtimeStore => runtimeStore.state.host,
     queued: (_store, callback) => callback(), scope: { run: (_store, callback) => callback() },
+    reportCallbackError: () => {},
     events: new Map([[hook, handlers.map(handler => ({ factory: 0, handler }))]]), flush: async () => {},
   };
   return sessionReplacement(runtime, { hook, payload, context: { resource_owner: owner } }, store);
@@ -231,6 +232,7 @@ test('before-fork exposes entry and position and consumes cancellation', async (
   assert.equal(result.disposition.action, 'deny');
 });
 
-test('before-replacement rejects nonboolean cancellation', async () => {
-  await assert.rejects(beforeReplacement('session_before_switch', { reason: 'new' }, [() => ({ cancel: 'yes' })]), /cancel/);
+test('before-replacement skips nonboolean cancellation', async () => {
+  const result = await beforeReplacement('session_before_switch', { reason: 'new' }, [() => ({ cancel: 'yes' })]);
+  assert.equal(result.disposition.action, 'continue');
 });

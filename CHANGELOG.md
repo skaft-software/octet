@@ -43,6 +43,7 @@
 - Pi prompt hooks preserve valid results around malformed prompt replacements.
 - Static models use provider-scoped catalog audio metadata when their declarations are silent.
 - Extension reverse requests remain available beyond 65,536 calls with bounded in-flight correlation.
+- Pi context, tool-result and session-operation hooks preserve accepted results when a sibling returns malformed data.
 
 ## [0.10.4] - 2026-11-12
 

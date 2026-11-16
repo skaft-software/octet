@@ -89,3 +89,17 @@ test('caught host append failures remain fatal at the session-operation boundary
   assert.equal((await call.response).error.code, -32002);
   await peer.close();
 });
+
+for (const hook of ['session_before_compact', 'session_before_tree', 'session_before_switch', 'session_before_fork']) test(`${hook} skips malformed results before a later veto`, async t => {
+  const peer = await fixture(t, `export default pi => {
+    pi.on('${hook}', () => ({cancel:'invalid'}));
+    pi.on('${hook}', () => ({cancel:true}));
+    pi.on('${hook}', () => { throw new Error('ran after deny'); });
+  };`);
+  const payload = hook === 'session_before_compact' ? before() : hook === 'session_before_tree' ? {kind:'before_tree',target_id:'kept',old_head:'old'} : hook === 'session_before_switch' ? {reason:'new'} : {entryId:'kept',position:'at'};
+  const reply = await request(peer, hook, payload).response;
+  assert.ok(reply.result, JSON.stringify(reply));
+  assert.equal(reply.result.session_operation?.action ?? reply.result.disposition.action, hook === 'session_before_compact' || hook === 'session_before_tree' ? 'cancel' : 'deny');
+  assert.match(peer.seen.find(frame => frame.method === 'notification')?.params.message, new RegExp(hook+' hook failed and was skipped'));
+  await peer.close();
+});

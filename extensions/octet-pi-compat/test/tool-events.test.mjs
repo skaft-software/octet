@@ -259,7 +259,18 @@ test('tool_result: fixture quotes, backslashes, newlines and code remain data', 
   assert.deepEqual(reply.result.tool_result.metadata.pi_details, details);
 });
 
-test('tool_result: invalid usage is rejected at the boundary', async t => {
+test('tool_result: invalid usage is skipped at the boundary', async t => {
   const reply = await afterToolCall(t, `export default pi => pi.on('tool_result', () => ({usage:{...fixtureData.usage,input:-1}}));`, {}, { usage });
-  assert.equal(reply.error.code, -32602);
+  assert.ok(reply.result);
+  assert.equal(reply.result.tool_result, undefined);
+});
+
+for (const bad of ['{content:42}', '{content:[{type:"text",text:"leak"}],details:()=>{}}', '{content:[{type:"text",text:"leak"}],usage:{}}']) test(`tool_result skips malformed replacement atomically: ${bad}`, async t => {
+  const reply = await afterToolCall(t, `export default pi => {
+    pi.on('tool_result', e => ({content:[{type:'text',text:'accepted'}]}));
+    pi.on('tool_result', e => { e.content[0].text = 'unaccepted'; return ${bad}; });
+    pi.on('tool_result', e => ({content:[{type:'text',text:e.content[0].text+' later'}]}));
+  };`, {});
+  assert.ok(reply.result, JSON.stringify(reply));
+  assert.deepEqual(reply.result.tool_result, {content:['accepted later']});
 });

@@ -205,13 +205,12 @@ export function setActiveTools(runtime, factory, names) {
   }, { parent: store.live ? store.id : undefined, signal: store.controller.signal });
 }
 
-export async function toolContent(runtime, content, store) {
+export function validateToolContent(runtime, content) {
   if (!Array.isArray(content) || content.length > 64) invalid('tool content must be an array of at most 64 parts');
-  const parts = [];
   for (const part of content) {
     if (part?.type === 'text') {
       fields(part, ['type', 'text'], 'tool text');
-      parts.push({ type: 'text', text: bounded(part.text, 'tool output', 524288, { controls: true }) });
+      bounded(part.text, 'tool output', 524288, { controls: true });
     } else if (part?.type === 'image') {
       fields(part, ['type', 'data', 'mimeType'], 'tool image'); runtime.require('artifacts');
       // Base64 expands by 4/3. This admits a 5 MiB screenshot, which the host
@@ -220,6 +219,17 @@ export async function toolContent(runtime, content, store) {
       bounded(part.data, 'tool image data', 8 * 1024 * 1024, { controls: true });
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(part.data)) invalid('tool image must be base64');
       if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(part.mimeType)) invalid('tool image mimeType');
+    } else unsupported('tool content type', 'Pi supports text and image content');
+  }
+}
+
+export async function toolContent(runtime, content, store) {
+  validateToolContent(runtime, content);
+  const parts = [];
+  for (const part of content) {
+    if (part?.type === 'text') {
+      parts.push({ type: 'text', text: bounded(part.text, 'tool output', 524288, { controls: true }) });
+    } else if (part?.type === 'image') {
       const bytes = Buffer.from(part.data, 'base64');
       const artifact = await runtime.hostCall('artifact/publish', {
         mime_type: part.mimeType, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),

@@ -10,7 +10,7 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node
 import { bounded, facade, fields, invalid, namedAPI, ownerKey, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { createAPI, createContext, extensionDisplayName, followingEvents, hookEvents, notificationEvents, textOnly } from './api.mjs';
 import { commandCompletions, ensureCompletionChain, retireAutocomplete, startCompletionChain } from './completions.mjs';
-import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent } from './tools.mjs';
+import { BUILTIN_TOOL_NAMES, toolWire, executeRegisteredTool, prepareRegisteredArguments, createToolContext, toolContent, validateToolContent } from './tools.mjs';
 import { discoverResources } from './resources.mjs';
 import { cancellable, projectContext } from './provider-context.mjs';
 import { customProviderHttp, customProviderHttpChunk, nativeProviderEvent, nativeProviderPayload, checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream } from './providers.mjs';
@@ -888,7 +888,7 @@ export class Runtime {
   // Pi's emitToolResult: handlers chain, a throwing handler is reported and
   // skipped, and content replaced without structuredContent drops the old one.
   async runToolResult(payload, store) {
-    const event = { type: 'tool_result', toolName: payload.name, toolCallId: payload.tool_call_id,
+    let event = { type: 'tool_result', toolName: payload.name, toolCallId: payload.tool_call_id,
       ...(payload.parent_tool_call_id == null ? {} : { parentToolCallId: payload.parent_tool_call_id }),
       input: payload.arguments, content: structuredClone(payload.pi_content ?? [{ type: 'text', text: payload.output }]),
       details: payload.metadata?.pi_details, ...(payload.structured_content === undefined ? {} : { structuredContent: payload.structured_content }), isError: payload.is_error,
@@ -899,8 +899,9 @@ export class Runtime {
       store.controller.signal.throwIfAborted();
       const childStore = { ...store, factory: entry.factory };
       let result;
+      const visible = structuredClone(event);
       try {
-        const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(event, createContext(this, childStore))));
+        const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(visible, createContext(this, childStore))));
         if (!run.ran) continue; // a stalled result observer must not hold the tool result
         result = run.value;
       }
@@ -911,18 +912,33 @@ export class Runtime {
       }
       store.controller.signal.throwIfAborted();
       if (!result) continue;
-      fields(result, ['content', 'details', 'structuredContent', 'isError', 'usage'], 'tool_result result');
-      if (result.usage !== undefined) {
-        fields(result.usage, ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens', 'cost'], 'tool usage');
-        for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']) if (!Number.isSafeInteger(result.usage[key]) || result.usage[key] < 0) invalid(`tool usage ${key}`);
-        fields(result.usage.cost, ['input', 'output', 'cacheRead', 'cacheWrite', 'total'], 'tool usage cost');
-        for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total']) if (!Number.isFinite(result.usage.cost[key]) || result.usage.cost[key] < 0) invalid(`tool usage cost ${key}`);
-        event.usage = plainJSON(result.usage, 'tool usage'); changed.add('usage');
+      // Pi runner.ts:1190-1233 chains accepted results and isolates failures.
+      const candidate = structuredClone(event), candidateChanged = new Set(changed);
+      try {
+        fields(result, ['content', 'details', 'structuredContent', 'isError', 'usage'], 'tool_result result');
+        if (result.usage !== undefined) {
+          fields(result.usage, ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens', 'cost'], 'tool usage');
+          for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']) if (!Number.isSafeInteger(result.usage[key]) || result.usage[key] < 0) invalid(`tool usage ${key}`);
+          fields(result.usage.cost, ['input', 'output', 'cacheRead', 'cacheWrite', 'total'], 'tool usage cost');
+          for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total']) if (!Number.isFinite(result.usage.cost[key]) || result.usage.cost[key] < 0) invalid(`tool usage cost ${key}`);
+          candidate.usage = plainJSON(result.usage, 'tool usage'); candidateChanged.add('usage');
+        }
+        if (result.content !== undefined) { candidate.content = result.content; candidateChanged.add('content'); if (result.structuredContent === undefined) { delete candidate.structuredContent; candidateChanged.delete('structuredContent'); } }
+        if (result.details !== undefined) { candidate.details = result.details; candidateChanged.add('details'); }
+        if (result.structuredContent !== undefined) { candidate.structuredContent = result.structuredContent; candidateChanged.add('structuredContent'); }
+        if (result.isError !== undefined) { candidate.isError = Boolean(result.isError); candidateChanged.add('isError'); }
+        if (result.content !== undefined) {
+          if (Array.isArray(candidate.content) && candidate.content.every(part => part?.type === 'text')) textOnly(candidate.content);
+          else validateToolContent(this, candidate.content);
+        }
+        if (result.details !== undefined) candidate.details = plainJSON(candidate.details, 'tool details', 65536, { omitUndefined: true });
+        if (result.structuredContent !== undefined) candidate.structuredContent = plainJSON(candidate.structuredContent, 'structured content', 262144);
+        event = candidate; changed.clear(); for (const key of candidateChanged) changed.add(key);
+      } catch (error) {
+        store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
+        if (store.errors.includes(error)) throw error;
+        this.reportCallbackError('tool_result', entry.factory, error, store.state);
       }
-      if (result.content !== undefined) { event.content = result.content; changed.add('content'); if (result.structuredContent === undefined) { delete event.structuredContent; changed.delete('structuredContent'); } }
-      if (result.details !== undefined) { event.details = result.details; changed.add('details'); }
-      if (result.structuredContent !== undefined) { event.structuredContent = result.structuredContent; changed.add('structuredContent'); }
-      if (result.isError !== undefined) { event.isError = Boolean(result.isError); changed.add('isError'); }
     }
     budget.finish();
     if (!changed.size) return undefined;

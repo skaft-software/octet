@@ -328,8 +328,10 @@ transform is reported and skipped, leaving the last valid input for later handle
 Native authority failures and cancellation still stop the operation. Coded callback
 exceptions in `before_agent_start` are isolated in the same way. Malformed
 `before_agent_start` replacements are skipped atomically; later handlers see the
-last accepted prompt. A malformed context messages array is likewise skipped;
-unsupported context changes and native replay checks remain authoritative.
+last accepted prompt. Malformed `context_with_system`, tool-result and session-operation
+replacements are also skipped atomically with an extension-and-stage warning; later
+handlers continue and valid explicit vetoes still apply. Native replay, authority
+and mutation-receipt checks remain authoritative.
 
 The source checkout's `scripts/pi-eval/prompts.py` comparison loop checks these
 paths against real Pi CLIs using isolated synthetic factories and a local

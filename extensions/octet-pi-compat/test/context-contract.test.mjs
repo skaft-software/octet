@@ -402,8 +402,11 @@ test('dropping a leading system with no tools clears the native prompt and repor
   const { result, errors } = await fullContext([event => ({ messages: event.messages.slice(1) })]);
   assert.equal(result.provider_context.system, null); assert.equal(errors.length, 1);
 });
-test('unsupported tool changes fail explicitly, not silently ignored', async () => {
-  await assert.rejects(fullContext([event => { event.messages[0].toolsAdded = []; }], [{ name: 'read', description: 'Read', parameters: { type: 'object' } }]), /cannot replace the advertised tool snapshot/);
+test('unsupported tool changes warn and retain the admitted tool snapshot', async () => {
+  const { result, errors } = await fullContext([event => { event.messages[0].toolsAdded = []; }], [{ name: 'read', description: 'Read', parameters: { type: 'object' } }]);
+  assert.equal(result.provider_context.system, 'base');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /context_with_system hook called an API octet does not support, so the hook was skipped/);
 });
 
 test('input preserves authoritative host failures', async () => {

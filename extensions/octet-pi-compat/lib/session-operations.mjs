@@ -1,4 +1,6 @@
 // Awaited native Session operations, never advisory lifecycle notifications.
+// Pi packages/coding-agent/src/core/extensions/runner.ts:1093-1122 catches
+// individual session handlers; only a valid cancellation result vetoes.
 import { bounded, facade, fields, invalid, ownerKey, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
@@ -23,15 +25,21 @@ export async function sessionReplacement(runtime, params, store) {
     for (const entry of [...runtime.events.get(hook) || []]) {
       signal.throwIfAborted(); runtime.assertSessionOwner(store);
       const child = { ...store, factory: entry.factory };
-      const result = await cancellable(runtime.scope.run(child, () => entry.handler(
-        facade({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
-      signal.throwIfAborted();
-      if (result === undefined) continue;
-      fields(result, hook === 'session_before_switch' ? ['cancel'] : ['cancel', 'skipConversationRestore'], `${hook} result`);
-      for (const name of ['cancel', 'skipConversationRestore']) if (result[name] !== undefined && typeof result[name] !== 'boolean') invalid(`${hook} ${name}`);
-      // Pi 1.0.2 AgentSessionRuntime consumes cancel only; its before-fork
-      // result does not propagate skipConversationRestore into replacement.
-      if (result.cancel) { disposition = { action: 'deny', reason: 'Session replacement cancelled' }; break; }
+      try {
+        const result = await cancellable(runtime.scope.run(child, () => entry.handler(
+          facade({ type: hook, ...payload }, `${hook} event`), createContext(runtime, child))), signal);
+        signal.throwIfAborted();
+        if (result === undefined) continue;
+        fields(result, hook === 'session_before_switch' ? ['cancel'] : ['cancel', 'skipConversationRestore'], `${hook} result`);
+        for (const name of ['cancel', 'skipConversationRestore']) if (result[name] !== undefined && typeof result[name] !== 'boolean') invalid(`${hook} ${name}`);
+        // Pi 1.0.2 AgentSessionRuntime consumes cancel only; its before-fork
+        // result does not propagate skipConversationRestore into replacement.
+        if (result.cancel) { disposition = { action: 'deny', reason: 'Session replacement cancelled' }; break; }
+      } catch (error) {
+        signal.throwIfAborted(); runtime.assertSessionOwner(store);
+        if (error?.code === -32800 || error?.code === -32002 || store.errors?.includes(error)) throw error;
+        runtime.reportCallbackError(hook, entry.factory, error, store.state);
+      }
     }
     await cancellable(runtime.flush(store), signal);
     return { disposition, context: [], notifications: [] };
@@ -107,17 +115,22 @@ export async function sessionOperation(runtime, params, store) {
         continue;
       }
       live();
-      if (result === undefined) continue;
-      if (!['session_before_compact', 'session_before_tree'].includes(hook)) unsupported(`${hook} result`, 'observation follows actual commit');
-      fields(result, hook === 'session_before_compact' ? ['cancel', 'compaction'] : ['cancel'], `${hook} result`);
-      if (result.cancel !== undefined && typeof result.cancel !== 'boolean') invalid('session cancellation boolean');
-      if (result.cancel) { decision = { action: 'cancel' }; break; }
-      if (result.compaction !== undefined) {
-        fields(result.compaction, ['summary', 'firstKeptEntryId'], 'native compaction replacement');
-        const summary = bounded(result.compaction.summary, 'compaction summary', 262144, { controls: true });
-        const first_kept = bounded(result.compaction.firstKeptEntryId, 'compaction first kept entry', 256);
-        if (!summary.trim() || !body.branch_entries.some(entry => entry.id === first_kept)) invalid('compaction replacement anchor');
-        decision = { action: 'replace_compaction', replacement: { summary, first_kept } };
+      try {
+        if (result === undefined) continue;
+        if (!['session_before_compact', 'session_before_tree'].includes(hook)) unsupported(`${hook} result`, 'observation follows actual commit');
+        fields(result, hook === 'session_before_compact' ? ['cancel', 'compaction'] : ['cancel'], `${hook} result`);
+        if (result.cancel !== undefined && typeof result.cancel !== 'boolean') invalid('session cancellation boolean');
+        if (result.cancel) { decision = { action: 'cancel' }; break; }
+        if (result.compaction !== undefined) {
+          fields(result.compaction, ['summary', 'firstKeptEntryId'], 'native compaction replacement');
+          const summary = bounded(result.compaction.summary, 'compaction summary', 262144, { controls: true });
+          const first_kept = bounded(result.compaction.firstKeptEntryId, 'compaction first kept entry', 256);
+          if (!summary.trim() || !body.branch_entries.some(entry => entry.id === first_kept)) invalid('compaction replacement anchor');
+          decision = { action: 'replace_compaction', replacement: { summary, first_kept } };
+        }
+      } catch (error) {
+        live(); if (store.errors.includes(error)) throw error;
+        runtime.reportCallbackError(hook, entry.factory, error, store.state);
       }
     }
     await cancellable(runtime.flush(store), signal); live();

@@ -491,3 +491,19 @@ test('malformed context result preserves previous projection and later handlers'
   assert.deepEqual(result.provider_context.messages, [user('good'), user('later')]);
   assert.equal(reports.length, 1); assert.equal(reports[0][0], 'context');
 });
+
+for (const replacement of [42, { messages: 42 }, { messages: [{ role: 'system', content: 42 }] }]) test(`context_with_system skips malformed result ${JSON.stringify(replacement)} atomically`, async () => {
+  const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
+  runtime.uninstallChildren(); runtime.features.add('session_entries');
+  const reports = []; runtime.reportCallbackError = (...args) => reports.push(args);
+  const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
+  const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
+  params.payload.request.tools = [];
+  runtime.events.set('context_with_system', [
+    { factory: 0, handler(e) { e.messages[0].content = 'unaccepted'; return replacement; } },
+    { factory: 0, handler(e) { assert.equal(e.messages[0].content, 'real system'); e.messages.push({ role: 'user', content: 'later' }); } },
+  ]);
+  const result = await projectContext(runtime, params, store);
+  assert.deepEqual(result.provider_context, { system: 'real system', messages: [user('original'), user('later')] });
+  assert.equal(reports.length, 1); assert.equal(reports[0][0], 'context_with_system');
+});
