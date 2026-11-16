@@ -3290,6 +3290,18 @@ fn openrouter_models_from_response(
         let entry = described.as_ref().unwrap_or(entry);
         let snapshot =
             octet_ai::model_metadata::model_capability_metadata(declaration.id, api_name);
+        let audio_assertion = has_metadata_assertion(entry, MODALITY_FIELDS).then(|| {
+            asserted_capability(entry, &["audio"]).unwrap_or_else(|| {
+                input_modalities_from_entry(entry).contains(octet_ai::Modality::Audio)
+            })
+        });
+        let (audio, audio_source) = octet_ai::model_metadata::resolve_audio_input(
+            route.protocol,
+            audio_assertion,
+            snapshot.as_ref().map(|record| {
+                input_modalities_from_entry(record).contains(octet_ai::Modality::Audio)
+            }),
+        );
         let reasoning_metadata = builtin_discovery_reasoning(entry, Some(declaration))?;
         let enriched = snapshot
             .as_ref()
@@ -3321,11 +3333,18 @@ fn openrouter_models_from_response(
         if !has_metadata_assertion(entry, MODALITY_FIELDS) && model_id_implies_vision(api_name) {
             input_modalities = input_modalities.with(octet_ai::Modality::Image);
         }
+        input_modalities = input_modalities.without(octet_ai::Modality::Audio);
+        if audio {
+            input_modalities = input_modalities.with(octet_ai::Modality::Audio);
+        }
         let supports_tools = model_metadata_supports_tools(entry);
 
         models.push(ModelSpec {
             context_window_options: None,
-            preset: Default::default(),
+            preset: octet_ai::ModelPreset {
+                audio_input_source: Some(audio_source),
+                ..Default::default()
+            },
             id: ModelId(format!("{}/{api_name}", declaration.id)),
             endpoint: EndpointId(route.endpoint_id.into()),
             api_name: api_name.into(),

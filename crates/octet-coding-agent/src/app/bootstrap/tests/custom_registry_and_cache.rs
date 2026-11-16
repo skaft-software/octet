@@ -216,7 +216,7 @@ async fn custom_model_preset_registry_discovery_cache_and_wire_preserve_only_con
             audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Absent),
             ..Default::default()
         },
-        "provider inventory cannot grant request overrides"
+        "provider inventory cannot grant request overrides; audio provenance is not a wire control"
     );
     let public = serde_json::to_string(&*model.spec).unwrap();
     assert!(!public.contains(secret));

@@ -174,3 +174,41 @@ fn openrouter_anthropic_routes_enable_anthropic_cache_markers() {
         Some(octet_ai::CacheControlFormat::Anthropic)
     );
 }
+
+#[test]
+fn openrouter_audio_resolution_retains_authority_before_catalog_registration() {
+    use octet_ai::model_metadata::AudioInputSource;
+    for (assertion, source, supported) in [
+        (
+            Some(serde_json::json!(["text", "audio"])),
+            AudioInputSource::Declaration,
+            true,
+        ),
+        (
+            Some(serde_json::json!(["text"])),
+            AudioInputSource::Declaration,
+            false,
+        ),
+        (
+            Some(serde_json::Value::Null),
+            AudioInputSource::Declaration,
+            false,
+        ),
+        (None, AudioInputSource::Absent, false),
+    ] {
+        let mut entry = serde_json::json!({"id": "fixture/new-audio", "context_length": 32000, "max_output_tokens": 4096});
+        if let Some(assertion) = assertion {
+            entry["input_modalities"] = assertion;
+        }
+        let models = openrouter_models_from_response(
+            &crate::providers::OPENROUTER,
+            &serde_json::json!({"data": [entry]}),
+        )
+        .unwrap();
+        assert_eq!(models[0].preset.audio_input_source, Some(source));
+        assert_eq!(
+            models[0].supports_audio_input(octet_ai::AudioFormat::Wav),
+            supported
+        );
+    }
+}

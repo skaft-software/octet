@@ -308,11 +308,10 @@ pub(crate) fn register_discovered_model_at_route(
     let mut capabilities = capabilities;
     let (audio, source) = octet_ai::model_metadata::resolve_audio_input(
         route.protocol,
-        Some(
-            capabilities
-                .input_modalities
-                .contains(octet_ai::Modality::Audio),
-        ),
+        capabilities
+            .input_modalities
+            .contains(octet_ai::Modality::Audio)
+            .then_some(true),
         None,
     );
     capabilities.input_modalities = capabilities
@@ -1277,7 +1276,7 @@ mod tests {
         assert_eq!(
             model.spec.preset,
             octet_ai::ModelPreset {
-                audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Declaration),
+                audio_input_source: Some(octet_ai::model_metadata::AudioInputSource::Absent),
                 ..Default::default()
             },
             "resolved audio provenance adds no reasoning or request controls"

@@ -230,7 +230,13 @@ look slightly off. Other terminals show text.
 
 Offline fixtures exercise every supported audio format through composer
 attachment, built-in `read`, tool continuation, later turns and session resume,
-checking exact bytes, MIME/format and ordering on both audio codecs. This proves
+checking exact bytes, MIME/format and ordering on both audio codecs. The same
+fixtures take OpenRouter, OpenCode, Gemini and Vertex metadata through catalog
+registration, the picker's effective capability projection, attachment admission
+and actual loopback HTTP requests. Fresh and raw-cache replay inventories include
+new IDs absent from the pinned models.dev snapshot; explicit text-only, false or
+malformed assertions stay authoritative over catalog fallback. Custom normalized
+cache tests retain configured positive and negative audio assertions. This proves
 local wire construction, not provider acceptance or recognition.
 
 ## Privacy and remote reads
