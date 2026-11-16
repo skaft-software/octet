@@ -145,3 +145,88 @@ fn polish_output_window_keeps_two_head_and_two_nonblank_tail_rows() {
         );
     }
 }
+
+#[test]
+fn polish_completed_tool_cards_end_with_one_recorded_duration() {
+    let theme = crate::tui::theme::test_theme();
+    let renderer = theme.rich_renderer();
+    for name in [
+        "read",
+        "edit",
+        "write",
+        "custom",
+        "codemode",
+        "bash",
+        "exec",
+        "powershell",
+    ] {
+        let mut panel = tool_panel(
+            name,
+            serde_json::json!({"path":"a.rs", "command":"true", "code":"return 1"}),
+            "ok",
+            true,
+        );
+        panel.duration = Some(Duration::from_millis(635));
+        for expanded in [false, true] {
+            for failed in [false, true] {
+                panel.is_error = failed;
+                panel.failure_reason = failed.then(|| "permission denied".into());
+                let rows = transcript_render::render_tool(
+                    &panel,
+                    &theme,
+                    &renderer,
+                    100,
+                    expanded,
+                    "tool_output",
+                );
+                let dump = screen_dump(&rows.lines, 100);
+                assert_eq!(
+                    dump.lines().last().unwrap().trim_start_matches([' ', '└']),
+                    "Took 635ms",
+                    "{name}"
+                );
+                assert_eq!(dump.matches("Took 635ms").count(), 1);
+                assert!(rows.copy_rows.last().unwrap().is_none());
+                assert!(!rows.text.contains("Took"));
+            }
+        }
+    }
+}
+
+#[test]
+fn polish_tool_duration_theme_is_shared_by_non_shell_cards() {
+    let mut panel = tool_panel("read", serde_json::json!({"path":"a.rs"}), "", true);
+    panel.duration = Some(Duration::from_millis(635));
+    for (template, expected) in [
+        ("finished in {duration}", "Read  a.rs\n└ finished in 635ms"),
+        ("", "Read  a.rs"),
+        ("  ", "Read  a.rs"),
+    ] {
+        let theme = crate::tui::theme::test_theme_from_source(&format!(
+            "[tokens]\ntool_duration = {template:?}\n"
+        ));
+        let rows = transcript_render::render_tool(
+            &panel,
+            &theme,
+            &theme.rich_renderer(),
+            100,
+            false,
+            "tool_output",
+        );
+        assert_eq!(screen_dump(&rows.lines, 100), expected);
+    }
+    let theme = crate::tui::theme::test_theme();
+    for (finished, duration) in [(false, panel.duration), (true, None)] {
+        panel.finished = finished;
+        panel.duration = duration;
+        let rows = transcript_render::render_tool(
+            &panel,
+            &theme,
+            &theme.rich_renderer(),
+            100,
+            false,
+            "tool_output",
+        );
+        assert!(!screen_dump(&rows.lines, 100).contains("635ms"));
+    }
+}

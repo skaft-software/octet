@@ -477,7 +477,12 @@ raw provider envelopes or headers.
 
 ## Tool presentation
 
-Tool calls expose deterministic intent and lifecycle rows. Event-margin dots
+Tool calls expose deterministic intent and lifecycle rows. Every completed native
+tool card with recorded timing ends its nested result block with the same subdued
+`Took <duration>` row, after output/diff/media/error evidence and outside output
+preview budgets. The theme's `tool_duration` template can restyle or hide it;
+unfinished cards and older results without recorded timing never invent a duration.
+Duration decoration is not copied as tool output. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning
 and activity dots keep a solid, fixed-size glyph. The `Working` dot shares its

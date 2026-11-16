@@ -290,6 +290,24 @@ pub(super) fn render_tool(
     for row in panel.image_rows(nested_width) {
         output_lines.decoration(row);
     }
+    // Native tool cards own terminal geometry, so duration decoration is shared
+    // here rather than supplied by the optional adapter. Pi compatibility source:
+    // packages/coding-agent/src/core/tools/render-utils.ts:142-163 prefers the
+    // recorded final duration; renderers/bash.ts:91 puts it after result output.
+    if let Some(duration) = panel.duration.filter(|_| panel.finished) {
+        let template = theme
+            .resolve::<String>("tool_duration")
+            .unwrap_or_else(|| "Took {duration}".into());
+        if !template.trim().is_empty() {
+            let text = template.replace(
+                "{duration}",
+                &crate::presentation::format_duration(duration),
+            );
+            for row in wrap_hanging(&subdued_text(theme, &text), "", "", nested_width) {
+                output_lines.decoration(row);
+            }
+        }
+    }
     let indent = tool_output_indent(theme, width);
     for row in output_lines.copy_rows.iter_mut().flatten() {
         row.left = row.left.saturating_add(indent);
