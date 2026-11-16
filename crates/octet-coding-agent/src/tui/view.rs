@@ -9366,7 +9366,8 @@ impl InteractiveShell {
     }
 
     /// Terminal protocol colors cannot touch the draft or modal input owner.
-    /// Repaint only the generated Pi palette, keeping every transcript source.
+    /// Resolve pending Auto contrast and the generated Pi palette from the
+    /// ordinary input stream, keeping every transcript source.
     pub(crate) fn terminal_theme_handler(&self) -> crate::tui::terminal::ThemeColorHandler {
         let state = self.state.clone();
         let render = self.render_tx.clone();
@@ -9377,16 +9378,30 @@ impl InteractiveShell {
                 crate::tui::theme::ThemeSource::CompiledPi
             ) && state.theme.capabilities().color
                 != crate::tui::terminal::ColorDepth::None;
-            if colors == state.theme.terminal_colors() {
+            let auto_background = (state.theme.is_compiled_default()
+                && state.theme.background() == crate::tui::theme::TerminalBackground::Unknown
+                && state.theme.capabilities().color != crate::tui::terminal::ColorDepth::None)
+                .then_some(colors.background)
+                .flatten();
+            if colors == state.theme.terminal_colors() && auto_background.is_none() {
                 return generated;
             }
+            if let Some((red, green, blue)) = auto_background {
+                let background = crate::tui::theme::background_from_terminal_rgb(red, green, blue);
+                state.theme =
+                    crate::tui::theme::default_theme_for(background, state.theme.capabilities());
+                if let Some(lab) = state.model_lab {
+                    crate::tui::theme::apply_model_lab(&mut state.theme, lab);
+                }
+            }
             state.theme = state.theme.clone().with_terminal_colors(colors);
-            if generated {
+            let repaint = generated || auto_background.is_some();
+            if repaint {
                 state.theme_epoch = state.theme_epoch.wrapping_add(1);
                 state.invalidate_rich_text();
             }
             drop(state);
-            if generated {
+            if repaint {
                 if let Some(tx) = render.lock().expect("render sender poisoned").as_ref() {
                     let _ = tx.try_send(renderer_runtime::RenderCommand::Render);
                 }

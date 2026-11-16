@@ -126,8 +126,10 @@ and session changes, and nothing is written to plain, print or RPC output. The
 first title shares the synchronized transaction with the resolved frame; a
 terminal or multiplexer can still present its heading later. When auto-theme
 detection needs an OSC 11 background-color reply, the probe starts alongside
-initialization, without waiting before the first paint. A changed background triggers a repaint, and a
-timeout or an unsupported reply keeps the initial theme.
+initialization, without waiting before the first paint or submission. Late
+replies use the ordinary input owner to resolve Auto contrast without changing
+the draft or layout. Missing or unsupported replies keep the initial theme;
+explicit contrast and file-theme selections remain authoritative.
 
 </details>
 

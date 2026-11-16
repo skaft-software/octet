@@ -79,6 +79,45 @@ emits title and frame in the same syscall (0 ms separation). The reported
 133 ms visual heading lag therefore cannot be attributed to a delayed octet
 title emission from this evidence. No terminal implementation was changed.
 
+## Auto appearance: removing a cosmetic readiness wait
+
+After the coalesced ready frame, Auto appearance still awaited a missing OSC 11
+reply for 120 ms before entering the first native submission boundary. Startup
+now leaves late replies to the existing input owner. It resolves only pending
+compiled-default Auto contrast, preserves the model accent and draft, and keeps
+explicit contrast/file themes authoritative. There is no extra input reader,
+network request, layout change or wait. Explicit interactive appearance selection
+keeps its existing bounded probe; ordinary startup does not await it.
+
+Reproduce with the binaries before and after that change:
+
+```sh
+python3 scripts/bench-startup-handoff.py /path/to/octet-auto-before target/ci-test/octet \
+  --theme auto --trials 5 --output /path/to/new-auto-capture-directory
+```
+
+Auto mode deliberately sends **no** OSC 11 reply and waits for the recorded
+`submission.ready` before typing, so the observation cannot accidentally shorten
+the old wait by sending a key. Both binaries must expose that trace boundary.
+[All 40 numeric samples and hashes](startup-auto.jsonl) retain five matched
+cold/warm pairs per binary and activation cell, with the same fixture, build and
+observer qualifications as above. All 20 new candidate captures pass strict
+per-write VT100 auditing.
+
+| Cell | Spawn → submission before → after (ms, median) | Prepared ready → submission before → after (ms) |
+| --- | ---: | ---: |
+| Bare cold | 169.475 → 45.392 | 123.173 → 1.346 |
+| Bare warm | 166.790 → 45.927 | 122.809 → 1.424 |
+| Extension cold | 335.154 → 342.012 | 291.405 → 291.382 |
+| Extension warm | 292.571 → 337.307 | 243.084 → 294.794 |
+
+The cosmetic timeout leaves the bare critical path. The extension cell remains
+bounded by actual process initialization/hooks; its variation is retained, not
+claimed as an improvement or hidden behind a longer first-paint delay. First
+resolved paint remains 45–52 ms in these Auto medians. Late-reply tests verify
+contrast changes preserve draft text, caret, revision and rendered text/geometry.
+The gated PTY suite still covers slow discovery editing and cancellation.
+
 ## Owner real-terminal check (NOT RUN here)
 
 1. Record the same pane geometry at high frame rate, bare and with the actual

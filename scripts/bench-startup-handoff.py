@@ -42,7 +42,7 @@ for line in sys.stdin:
 '''
 
 
-def prepare(home, extension):
+def prepare(home, extension, theme):
     config = home / ".octet"
     (config / "credentials").mkdir(parents=True)
     (config / "credentials/custom.json").write_text(json.dumps({
@@ -50,7 +50,7 @@ def prepare(home, extension):
         "headers": [], "auto_discover": False,
         "models": [{"api_name": "startup-probe", "context_window": 32768}]}))
     (config / "credentials/custom.json").chmod(0o600)
-    (config / "config.toml").write_text('theme = "dark"\nmodel = "custom/startup-probe"\n'
+    (config / "config.toml").write_text(f'theme = "{theme}"\nmodel = "custom/startup-probe"\n'
         + ('enabled_extensions = ["startup-probe"]\n' if extension else ''))
     if extension:
         bundle = config / "extensions/startup-probe"
@@ -67,7 +67,7 @@ hooks = ["session_start", "session_end"]
 ''')
 
 
-def sample(binary, home, artifact, extension):
+def sample(binary, home, artifact, extension, wait_submission):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
     original = termios.tcgetattr(slave)
@@ -99,7 +99,7 @@ def sample(binary, home, artifact, extension):
                 traces = Path(str(artifact) + '.stderr').read_text()
                 settled = ('frame.settled-written' in traces or 'extensions.hooks-settled' in traces
                            or (not extension and ready))
-                if ready and settled:
+                if ready and settled and (not wait_submission or 'submission.ready' in traces):
                     break
             if not ready:
                 raise RuntimeError(f'no ready frame: {output[-500:]!r}; {traces}')
@@ -175,6 +175,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binaries', type=Path, nargs='+')
     parser.add_argument('--trials', type=int, default=3)
+    parser.add_argument('--theme', choices=['dark', 'auto'], default='dark')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     args.output = args.output.resolve()
@@ -186,11 +187,11 @@ def main():
             with tempfile.TemporaryDirectory(prefix='octet-handoff-') as tmp:
                 for binary in binaries[::1 if trial % 2 == 0 else -1]:
                     home = Path(tmp) / binary.name
-                    prepare(home, extension)
+                    prepare(home, extension, args.theme)
                     for temperature in ['cold', 'warm']:
                         name = f'{binary.name}-{extension}-{trial}-{temperature}'
-                        row = {'binary': binary.name, 'extension': extension, 'trial': trial,
-                               'temperature': temperature, **sample(binary, home, args.output / name, extension)}
+                        row = {'binary': binary.name, 'extension': extension, 'trial': trial, 'theme': args.theme,
+                               'temperature': temperature, **sample(binary, home, args.output / name, extension, args.theme == 'auto')}
                         rows.append(row)
                         print(json.dumps(row), flush=True)
     (args.output / 'summary.json').write_text(json.dumps({'sha256': {

@@ -1440,7 +1440,7 @@ fn apply_required_surfaces(theme: &mut OctetTheme, background: TerminalBackgroun
     }
 }
 
-fn default_theme_for(
+pub(crate) fn default_theme_for(
     background: TerminalBackground,
     capabilities: TerminalCapabilities,
 ) -> OctetTheme {

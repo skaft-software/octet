@@ -406,3 +406,41 @@ fn silent_startup_keeps_an_unframed_editable_composer_in_both_viewport_modes() {
         }
     }
 }
+
+#[test]
+fn late_auto_background_reply_resolves_without_waiting_or_changing_the_draft() {
+    let mut shell = pending_shell();
+    let capabilities = shell.theme().capabilities();
+    shell.set_theme(test_theme_for(TerminalBackground::Unknown, capabilities));
+    shell.extension_set_editor_at("retained 雪 draft".into(), Some(4));
+    let draft = shell.extension_editor_snapshot();
+    shell.finish_startup();
+    let before = plain(&ShellComponent::new(shell.state.clone(), false).render(96));
+    let colors = crate::tui::terminal::TerminalThemeColors {
+        background: Some((255, 255, 255)),
+        ..Default::default()
+    };
+    assert!(
+        !shell.terminal_theme_handler()(colors),
+        "only Pi selects full-palette refresh"
+    );
+    assert_eq!(shell.theme().background(), TerminalBackground::Light);
+    let after = plain(&ShellComponent::new(shell.state.clone(), false).render(96));
+    assert_eq!(
+        before, after,
+        "appearance replies cannot shift geometry or text"
+    );
+    let retained = shell.extension_editor_snapshot();
+    assert_eq!(
+        (retained.text, retained.cursor, retained.revision),
+        (draft.text, draft.cursor, draft.revision)
+    );
+
+    // An already selected contrast is authoritative, even if an old Auto reply
+    // arrives after the user chose Dark or Light.
+    for background in [TerminalBackground::Dark, TerminalBackground::Light] {
+        shell.set_theme(test_theme_for(background, capabilities));
+        shell.terminal_theme_handler()(colors);
+        assert_eq!(shell.theme().background(), background);
+    }
+}

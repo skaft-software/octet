@@ -164,6 +164,7 @@ text docs/benchmarks/idle-model-switch-2026-10-22/samples.json
 text docs/benchmarks/startup-phase-audit.py
 text docs/benchmarks/startup-handoff.md
 text docs/benchmarks/startup-handoff.jsonl
+text docs/benchmarks/startup-auto.jsonl
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/.gitignore
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/README.md
 text docs/benchmarks/swe-bench-live-lite-v0.6.3/data/agent_tasks.jsonl

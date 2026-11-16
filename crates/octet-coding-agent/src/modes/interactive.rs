@@ -11667,6 +11667,10 @@ where
         return false;
     };
     let background = background_from_terminal_rgb(red, green, blue);
+    if shell.theme().background() == background {
+        // The ordinary reply handler may already have published this contrast.
+        return false;
+    }
     shell.set_theme(load_theme_for_background(config, background));
     true
 }
@@ -12014,11 +12018,8 @@ async fn run_interactive_without_model(
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
     shell.render();
-    // Terminal appearance is cosmetic. The bounded OSC 11 probe must never
-    // delay the first editable frame or provider/session readiness.
-    if apply_detected_terminal_background(shell, input, &boot.config).await {
-        shell.render();
-    }
+    // Late OSC replies are handled by the ordinary input owner. Cosmetic
+    // discovery must not add a timeout before the native command boundary.
 
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -13406,9 +13407,8 @@ async fn run_interactive_once(
     crate::app::bootstrap::startup_phase("frame.ready");
     shell.finish_startup();
     shell.render();
-    if apply_detected_terminal_background(&mut shell, &mut input, &app.config).await {
-        shell.render();
-    }
+    // The existing input owner applies late Auto replies. Never await the
+    // cosmetic probe's 120ms timeout before admitting the first submission.
 
     let mut pending_actions = VecDeque::new();
     let mut goal_deadline = recovered_goal_deadline(&app)?;
