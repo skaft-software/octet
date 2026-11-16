@@ -72,7 +72,7 @@ fn responses_replay_cache_advances_suffix_without_copying_settled_payloads() {
             .unwrap()
             .unwrap();
         let full = session
-            .rebuild_responses_replay(&endpoint, &model)
+            .rebuild_responses_replay(&endpoint, &model, &mut Default::default())
             .unwrap()
             .unwrap();
         assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));
@@ -153,7 +153,7 @@ fn responses_replay_cache_invalidates_routes_branches_compactions_and_repairs_ga
         replay_debug_json(&local),
         replay_debug_json(
             &session
-                .rebuild_responses_replay(&endpoint, &model)
+                .rebuild_responses_replay(&endpoint, &model, &mut Default::default())
                 .unwrap()
                 .unwrap()
         )
@@ -452,6 +452,264 @@ fn replay_debug_json(
         .collect()
 }
 
+fn screenshot() -> octet_ai::Media {
+    octet_ai::Media::image_bytes(
+        bytes::Bytes::from_static(b"screenshot"),
+        "image/png".parse().unwrap(),
+    )
+}
+
+fn screenshot_result(call_id: &str) -> EntryValue {
+    EntryValue::Message(Message::User(UserMessage {
+        content: vec![UserPart::ToolResult(ToolResult {
+            tool_call_id: ToolCallId(call_id.to_owned()),
+            content: vec![octet_ai::ToolResultPart::Media(screenshot())],
+            is_error: false,
+            added_tool_names: None,
+            tool_name: None,
+        })],
+    }))
+}
+
+#[test]
+fn replay_screenshot_retention_work_is_independent_of_settled_history() {
+    for turns in [16, 64, 256] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::create(directory.path().join("images.jsonl")).unwrap();
+        let endpoint = EndpointId("responses".into());
+        let model = ModelId("m".into());
+        session.append(user("settled prefix")).unwrap();
+        session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap();
+        crate::session::replay::REPLAY_IMAGE_WORK.with(|work| work.set(0));
+        for turn in 0..turns {
+            session
+                .append_assistant_turn(
+                    AssistantMessage {
+                        content: vec![],
+                        model: model.clone(),
+                        protocol: Protocol::OpenAiResponses,
+                    },
+                    endpoint.clone(),
+                    model.clone(),
+                    Usage::default(),
+                    None,
+                    StopReason::EndTurn,
+                    Some(responses_output(&format!("output-{turn}"))),
+                )
+                .unwrap();
+            session
+                .append(screenshot_result(&format!("call-{turn}")))
+                .unwrap();
+            session
+                .responses_replay_snapshot(&endpoint, &model)
+                .unwrap();
+        }
+        let work = crate::session::replay::REPLAY_IMAGE_WORK.with(|work| work.replace(0));
+        assert!(
+            work <= turns * (2 + MODEL_VISIBLE_TOOL_IMAGE_LIMIT),
+            "{turns} screenshot turns visited {work} replay items; only the suffix and retained image window may be revisited"
+        );
+        let replay = session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap()
+            .unwrap();
+        let full = session
+            .rebuild_responses_replay(&endpoint, &model, &mut Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));
+    }
+}
+
+#[test]
+fn replay_image_window_preserves_adjacent_media_and_immutable_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("mixed.jsonl")).unwrap();
+    let endpoint = EndpointId("responses".into());
+    let model = ModelId("m".into());
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            // A prompt attachment never consumes the tool image budget.
+            content: vec![
+                UserPart::Text("prompt".into()),
+                UserPart::Media(screenshot()),
+            ],
+        })))
+        .unwrap();
+    let EntryValue::Message(Message::User(mut mixed)) = screenshot_result("mixed") else {
+        unreachable!()
+    };
+    let UserPart::ToolResult(result) = &mut mixed.content[0] else {
+        unreachable!()
+    };
+    result.content = vec![octet_ai::ToolResultPart::Media(screenshot()); 6];
+    mixed
+        .content
+        .extend([UserPart::Media(screenshot()), UserPart::Media(screenshot())]);
+    session
+        .append(EntryValue::Message(Message::User(mixed)))
+        .unwrap();
+    let snapshot = session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap()
+        .unwrap();
+    let original = replay_debug_json(&snapshot);
+    assert_eq!(
+        serde_json::to_string(&original)
+            .unwrap()
+            .matches(TOOL_IMAGE_PLACEHOLDER)
+            .count(),
+        4
+    );
+    for index in 0..3 {
+        session
+            .append(screenshot_result(&format!("later-{index}")))
+            .unwrap();
+        session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap();
+    }
+    let replay = session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        replay_debug_json(&snapshot),
+        original,
+        "retained snapshots are immutable"
+    );
+    let octet_ai::ResponsesReplayItem::User(prompt) = &replay[0] else {
+        unreachable!()
+    };
+    assert!(matches!(prompt.content[1], UserPart::Media(_)));
+    let octet_ai::ResponsesReplayItem::User(mixed) = &replay[1] else {
+        unreachable!()
+    };
+    assert_eq!(
+        mixed.content.len(),
+        2,
+        "only the newest adjacent screenshot remains"
+    );
+    assert!(matches!(mixed.content[1], UserPart::Media(_)));
+    let UserPart::ToolResult(result) = &mixed.content[0] else {
+        unreachable!()
+    };
+    assert_eq!(result.content.len(), 7);
+    assert!(result.content.iter().all(|part| matches!(part,
+        octet_ai::ToolResultPart::Text(text) if text == TOOL_IMAGE_PLACEHOLDER)));
+    let full = session
+        .rebuild_responses_replay(&endpoint, &model, &mut Default::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));
+}
+
+#[test]
+fn replay_image_state_rebuilds_across_branch_route_compaction_and_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("boundaries-images.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let endpoint = EndpointId("responses".into());
+    let model = ModelId("m".into());
+    let root = session.append(user("root")).unwrap();
+    session.append_assistant_turn(
+        AssistantMessage { content: vec![], model: model.clone(), protocol: Protocol::OpenAiResponses },
+        endpoint.clone(), model.clone(), Usage::default(), None, StopReason::EndTurn,
+        Some(octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(
+            serde_json::json!({"type":"computer_call", "call_id":"reused", "action":{"type":"screenshot"}})
+        ).unwrap()])),
+    ).unwrap();
+    // Protect the result even when the call and result arrive in separate suffixes.
+    session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap();
+    session.append(screenshot_result("reused")).unwrap();
+    for index in 0..6 {
+        session
+            .append(screenshot_result(&format!("old-{index}")))
+            .unwrap();
+        session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap();
+    }
+    let replay = session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap()
+        .unwrap();
+    let octet_ai::ResponsesReplayItem::User(native) = &replay[2] else {
+        unreachable!()
+    };
+    let UserPart::ToolResult(result) = &native.content[0] else {
+        unreachable!()
+    };
+    assert!(matches!(
+        result.content[0],
+        octet_ai::ToolResultPart::Media(_)
+    ));
+    // Abandon the native call. Its ID must not protect an ordinary result on a new branch.
+    session.checkout(root).unwrap();
+    let kept = session.append(screenshot_result("reused")).unwrap();
+    session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap();
+    for index in 0..6 {
+        session
+            .append(screenshot_result(&format!("new-{index}")))
+            .unwrap();
+        session
+            .responses_replay_snapshot(&endpoint, &model)
+            .unwrap();
+    }
+    for endpoint in [&endpoint, &EndpointId("another-route".into())] {
+        let replay = session
+            .responses_replay_snapshot(endpoint, &model)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&replay_debug_json(&replay))
+                .unwrap()
+                .matches(TOOL_IMAGE_PLACEHOLDER)
+                .count(),
+            3
+        );
+    }
+    session.compact("summary", kept.clone()).unwrap();
+    session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap();
+    session
+        .append(screenshot_result("after-compaction"))
+        .unwrap();
+    let replay = session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap()
+        .unwrap();
+    let full = session
+        .rebuild_responses_replay(&endpoint, &model, &mut Default::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));
+    drop(session);
+    let mut session = Session::open(&path).unwrap();
+    let reopened = session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay_debug_json(&replay), replay_debug_json(&reopened));
+    // Checkout must restore images omitted from the later projection, not reuse its window.
+    session.checkout(kept).unwrap();
+    let replay = session
+        .responses_replay_snapshot(&endpoint, &model)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.len(), 2);
+    assert!(!serde_json::to_string(&replay_debug_json(&replay))
+        .unwrap()
+        .contains(TOOL_IMAGE_PLACEHOLDER));
+}
+
 #[test]
 fn replay_bounds_function_screenshots_but_preserves_native_computer_results() {
     for incremental in [false, true] {
@@ -539,7 +797,7 @@ fn replay_bounds_function_screenshots_but_preserves_native_computer_results() {
             7
         );
         let full = session
-            .rebuild_responses_replay(&endpoint, &model_id)
+            .rebuild_responses_replay(&endpoint, &model_id, &mut Default::default())
             .unwrap()
             .unwrap();
         assert_eq!(replay_debug_json(&replay), replay_debug_json(&full));

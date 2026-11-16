@@ -357,7 +357,11 @@ window would ignore it. The host never silently drops provider replay state to
 make a projection appear to work. Responses replay bounds ordinary tool-result
 images in both cold and incremental projections, but retains native computer-call
 screenshots and opaque output because their wire shapes cannot carry the ordinary
-text placeholder. Effective request estimates are planning data,
+text placeholder. The replay cache indexes native call IDs and at most four
+ordinary-image turns. Appends inspect only the new suffix and those retained
+turns; checkout, route changes and compaction rebuild the index with the replay
+window. Retained snapshots remain immutable via copy-on-write, and wire encoding
+still visits the complete input. Effective request estimates are planning data,
 never a sound provider input upper bound: finite token/cost ceilings still refuse
 before dispatch when that authoritative bound is unavailable.
 

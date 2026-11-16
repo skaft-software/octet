@@ -6,7 +6,9 @@
 //! history, so this is a *second* projection with its own cache key and
 //! its own fallback to canonical history.
 
-use super::context::compaction_parts;
+use std::collections::{HashSet, VecDeque};
+
+use super::context::{bound_tool_result_turn, compaction_parts};
 use super::*;
 
 impl Session {
@@ -108,13 +110,10 @@ impl Session {
                         &mut suffix,
                     )? {
                         if !suffix.is_empty() {
-                            let adds_images = suffix.iter().any(|item| matches!(item,
-                                octet_ai::ResponsesReplayItem::User(user) if super::context::turn_has_tool_images(user)));
                             let items = Arc::make_mut(items);
+                            let start = items.len();
                             items.extend(suffix);
-                            if adds_images {
-                                bound_replay_images(items);
-                            }
+                            current.images.extend(items, start);
                         }
                     } else {
                         // Cache the fallback too: a permanent legacy gap must
@@ -134,14 +133,16 @@ impl Session {
             self.responses_replay_work.get().0 + 1,
             self.responses_replay_work.get().1,
         ));
+        let mut images = ResponsesReplayImages::default();
         let items = self
-            .rebuild_responses_replay(endpoint, model)?
+            .rebuild_responses_replay(endpoint, model, &mut images)?
             .map(Arc::new);
         *cache = Some(ResponsesReplayCache {
             endpoint: endpoint.clone(),
             model: model.clone(),
             head: self.head(),
             items: items.clone(),
+            images,
         });
         Ok(items)
     }
@@ -150,6 +151,7 @@ impl Session {
         &self,
         endpoint: &EndpointId,
         model: &ModelId,
+        images: &mut ResponsesReplayImages,
     ) -> Result<Option<Vec<octet_ai::responses::ResponsesReplayItem>>, SessionError> {
         let branch = self.active_branch_entries()?;
         if branch.is_empty() {
@@ -211,7 +213,7 @@ impl Session {
         };
 
         if self.append_responses_replay(&branch[start..], &branch, endpoint, model, &mut replay)? {
-            bound_replay_images(&mut replay);
+            images.extend(&mut replay, 0);
             Ok(Some(replay))
         } else {
             Ok(None)
@@ -386,66 +388,96 @@ impl Session {
     }
 }
 
-// Keep native computer outputs intact: their paired wire item carries a
-// screenshot rather than the text-capable function-output shape. Opaque
-// provider output is authoritative and is never modified here.
-fn bound_replay_images(replay: &mut [octet_ai::ResponsesReplayItem]) {
-    use octet_ai::ResponsesReplayItem;
-    let mut computer_calls = std::collections::HashSet::new();
-    let mut protected = HashMap::new();
-    for (index, item) in replay.iter().enumerate() {
-        match item {
-            ResponsesReplayItem::Output(output) | ResponsesReplayItem::Compacted(output) => {
-                for part in output.items() {
-                    let value = part.as_json();
-                    if value.get("type").and_then(serde_json::Value::as_str)
-                        == Some("computer_call")
-                    {
-                        if let Some(id) = value.get("call_id").and_then(serde_json::Value::as_str) {
-                            computer_calls.insert(id.to_owned());
+#[cfg(test)]
+thread_local! {
+    pub(super) static REPLAY_IMAGE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Image-retention state for exactly one cached replay window. Rebuild it with
+/// the projection whenever branching, route changes or compaction change indices.
+#[derive(Default)]
+pub(super) struct ResponsesReplayImages {
+    // Native computer outputs require screenshots, not text placeholders. Keep
+    // their call identities across suffixes, including a call/result split.
+    // This set is bounded by the native calls in the session's replay window.
+    computer_calls: HashSet<String>,
+    // Oldest first; at most MODEL_VISIBLE_TOOL_IMAGE_LIMIT turns, since every
+    // retained turn owns at least one ordinary image. Protected-only turns never
+    // enter this queue. Remember protection at each turn's original position.
+    recent: VecDeque<(usize, HashSet<String>)>,
+}
+
+impl ResponsesReplayImages {
+    /// Inspect only the appended suffix and turns still holding ordinary images.
+    /// Opaque output and the durable journal are never modified.
+    fn extend(&mut self, replay: &mut [octet_ai::ResponsesReplayItem], start: usize) {
+        use octet_ai::ResponsesReplayItem;
+        for index in start..replay.len() {
+            #[cfg(test)]
+            REPLAY_IMAGE_WORK.with(|work| work.set(work.get() + 1));
+            let (prefix, suffix) = replay.split_at_mut(index);
+            match &mut suffix[0] {
+                ResponsesReplayItem::Output(output) | ResponsesReplayItem::Compacted(output) => {
+                    for part in output.items() {
+                        let value = part.as_json();
+                        if value.get("type").and_then(serde_json::Value::as_str)
+                            == Some("computer_call")
+                        {
+                            if let Some(id) =
+                                value.get("call_id").and_then(serde_json::Value::as_str)
+                            {
+                                self.computer_calls.insert(id.to_owned());
+                            }
                         }
                     }
                 }
-            }
-            ResponsesReplayItem::LocalAssistant(assistant) => {
-                for part in &assistant.content {
-                    if let octet_ai::AssistantPart::ToolCall(call) = part {
-                        if call.name == "computer_use_preview" {
-                            computer_calls.insert(call.id.0.clone());
+                ResponsesReplayItem::LocalAssistant(assistant) => {
+                    for part in &assistant.content {
+                        if let octet_ai::AssistantPart::ToolCall(call) = part {
+                            if call.name == "computer_use_preview" {
+                                self.computer_calls.insert(call.id.0.clone());
+                            }
                         }
                     }
                 }
-            }
-            ResponsesReplayItem::User(user) => {
-                let calls: std::collections::HashSet<_> = user
-                    .content
-                    .iter()
-                    .filter_map(|part| {
-                        if let UserPart::ToolResult(result) = part {
-                            computer_calls
-                                .contains(&result.tool_call_id.0)
-                                .then(|| result.tool_call_id.0.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if !calls.is_empty() {
-                    protected.insert(index, calls);
+                ResponsesReplayItem::User(user) => {
+                    if !super::context::turn_has_tool_images(user) {
+                        continue;
+                    }
+                    let protected = user
+                        .content
+                        .iter()
+                        .filter_map(|part| {
+                            if let UserPart::ToolResult(result) = part {
+                                self.computer_calls
+                                    .contains(&result.tool_call_id.0)
+                                    .then(|| result.tool_call_id.0.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let mut kept = 0;
+                    bound_tool_result_turn(user, &mut kept, &protected);
+                    if kept == 0 {
+                        continue;
+                    }
+                    let mut retained = 0;
+                    for (previous, protected) in self.recent.iter().rev() {
+                        #[cfg(test)]
+                        REPLAY_IMAGE_WORK.with(|work| work.set(work.get() + 1));
+                        let ResponsesReplayItem::User(user) = &mut prefix[*previous] else {
+                            unreachable!("retained image turns are user replay items")
+                        };
+                        let before = kept;
+                        bound_tool_result_turn(user, &mut kept, protected);
+                        retained += usize::from(kept > before);
+                    }
+                    self.recent.drain(..self.recent.len() - retained);
+                    self.recent.push_back((index, protected));
                 }
+                ResponsesReplayItem::ConfigurationUpdate(_) => {}
             }
-            _ => {}
-        }
-    }
-    let mut kept = 0;
-    let empty = std::collections::HashSet::new();
-    for (index, item) in replay.iter_mut().enumerate().rev() {
-        if let ResponsesReplayItem::User(user) = item {
-            super::context::bound_tool_result_turn(
-                user,
-                &mut kept,
-                protected.get(&index).unwrap_or(&empty),
-            );
         }
     }
 }

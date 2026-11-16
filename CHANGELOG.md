@@ -23,6 +23,10 @@
 
 ### Fixed
 
+- Responses screenshot retention updates only new replay items and the retained
+  image window instead of rescanning settled history on every screenshot turn.
+  Native computer-call screenshots and immutable snapshots remain intact.
+
 - Provider-context hook projections validate target-normalized replay, avoiding
   cross-protocol reasoning refusals without changing the saved conversation.
   Newly introduced media remains subject to strict validation.

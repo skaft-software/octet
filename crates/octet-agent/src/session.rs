@@ -1456,6 +1456,7 @@ struct ResponsesReplayCache {
     model: ModelId,
     head: Option<EntryId>,
     items: Option<Arc<Vec<octet_ai::responses::ResponsesReplayItem>>>,
+    images: replay::ResponsesReplayImages,
 }
 
 /// An append-only JSONL session file.
