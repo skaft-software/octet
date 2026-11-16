@@ -300,8 +300,9 @@ by that transport limit. Capture explicitly requests cell coordinates (SGR 1006)
 clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
 (1007); octet does not infer cells from pixel reports.
 
-Inline, PageUp pins the view above the tail while output grows, and shows when
-there's new output. PageDown returns to live output. Wheel history that octet doesn't capture stays with your terminal,
+In the semantic viewport, scrolling up pins the reader's position while output
+streams; at the live tail, the view follows new output. Inline, PageUp also shows
+when there's new output, and PageDown returns to live output. Wheel history that octet doesn't capture stays with your terminal,
 because portable protocols can't report its position.
 
 The renderer uses a complete retained frame, synchronized frames, and exact

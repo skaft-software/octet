@@ -24,6 +24,7 @@
 - Tool labels use available terminal width while keeping their selected values readable.
 - Pi input hooks skip coded callback faults and malformed transforms while preserving later handlers and native authority.
 - Opaque Responses replay refusals identify the route and unsupported context projection with guidance for retrying safely.
+- Scrolling preserves the reader's position during streamed output and follows new output at the live tail.
 
 ## [0.10.4] - 2026-11-12
 

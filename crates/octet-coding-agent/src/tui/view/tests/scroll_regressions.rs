@@ -109,6 +109,34 @@ fn first_scroll_reveals_one_older_row_and_returns_to_live_without_resizing() {
 }
 
 #[test]
+fn live_tail_follows_streamed_output() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(WIDTH, HEIGHT);
+    for index in 0..100 {
+        shell.notice(format!("{HISTORY}-{index:03}"));
+    }
+    let run = shell.begin_run("openai");
+    for index in 0..12 {
+        let marker = format!("live-stream-marker-{index:03}");
+        shell.on_run_event(
+            run,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: format!("\n\n{marker}"),
+            },
+        );
+        let rows = render_shell_viewport_at(&shell.state.borrow(), WIDTH, Instant::now());
+        assert!(
+            rows.iter().any(|row| row.contains(&marker)),
+            "{marker}: {rows:?}"
+        );
+        let state = shell.state.borrow();
+        assert!(state.follow_tail);
+        assert_eq!(state.scroll_from_bottom.get(), 0);
+    }
+}
+
+#[test]
 fn semantic_scroll_holds_anchor_through_tool_and_model_lifecycle() {
     use octet_agent::ToolOutput;
 
