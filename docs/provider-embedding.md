@@ -3,8 +3,9 @@
 `octet-ai` is the provider dependency. It has no dependency on the agent,
 frontend, terminal renderer, sessions, tools or extension processes. Use a Git
 revision containing the provider extraction, not an unpublished install command.
-The authentication/catalog implementation is introduced through `4480306a`;
-the accompanying independent consumer is `examples/provider-only`.
+Pin implementation/fixture revision
+`11c5954e2e7d3278ab9eca3b37fca9904eb34e22` or a reviewed descendant. No optional
+feature flags are required. The independent consumer is `examples/provider-only`.
 
 ## Explicit effects
 
@@ -127,6 +128,23 @@ entry point in a frontend-owned configuration type; only pure budget resolution
 is delegated into AI, which never publishes process environment settings.
 The agent's existing `secure_fs` path re-exports the shared
 filesystem primitive, preserving its public source API.
+
+## Ultra's downstream boundary
+
+Ultra may separately depend on `octet-agent` for its tools and extension
+infrastructure, but must not run its agent loop or call `Agent::prompt`.
+That independent dependency does not permit a reverse dependency from
+`octet-ai`, or require the coding frontend, bootstrap or terminal initialization.
+The provider-only fixture remains an `octet-ai`-only consumer. There is no blanket
+tool/extension extraction or public infrastructure API migration in this work.
+
+Ultra retains its one reducer, durable writer, deterministic scheduler,
+approvals, budgets and settlement authority. Jev/TypeSafe remains its first
+decision step; synthesis remains proposal-only. Provider responses, including tool
+calls, are data for the caller, not authority to execute or continue a turn.
+Delivering this prerequisite does not resume Ultra or update its dependency:
+its owner must separately authorize integration and any live OAuth/inference
+qualification. Renderer work and separate releases are not prerequisites.
 
 See the [ownership map](maintainers/provider-boundary.md) and
 [AI architecture](design/octet-ai.md) for the extraction and transport contracts.

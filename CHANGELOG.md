@@ -4,6 +4,8 @@
 
 ### Added
 
+- Document independent tool and extension use while retaining caller control flow outside the agent loop.
+
 - Add a provider-only loopback consumer and embedding notes for shared Codex storage, catalogs and one-request inference.
 
 - Opt-in fullscreen input traces report event-to-publication and completed-frame timing without recording input text.
