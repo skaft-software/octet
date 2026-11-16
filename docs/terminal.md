@@ -365,7 +365,7 @@ Ctrl+O, which owns tool and shell output. In native Tern, each key also resets
 only its own mode's section clicks, preserving the other mode's disclosure.
 
 Each run shows a shimmering `Working` row, and a trailing
-`Working (<elapsed> • Esc to interrupt)` stays until the run settles. Retry
+`Working (<elapsed> · Esc to interrupt)` stays until the run settles. Retry
 status keeps the interrupt hint but leaves out the run-elapsed counter, even
 after its backoff countdown reaches zero, so two clocks never compete on one
 row. While the model reasons, the bold `Thinking` label shimmers more quietly

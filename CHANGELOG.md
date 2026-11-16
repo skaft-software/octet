@@ -55,7 +55,7 @@
 - Completed tool cards share one final duration row with a documented tool_duration theme setting.
 - Shell and Codemode output previews keep deliberate head and tail windows with exact omitted-middle counts.
 - ANSI tool command and output omissions use consistent hidden wording and Ctrl+O disclosure hints.
-- Working and Thinking timers use the shared inline metadata separator.
+- Working and Thinking timers and their terminal examples use the shared inline metadata separator.
 - Scrolled transcripts show one concise PageDown instruction alongside the new-output counter.
 - Transcript scroll, queue and omission counts use singular nouns for one row or byte.
 - Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.
