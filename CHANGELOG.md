@@ -7,6 +7,7 @@
 - Share Codex authentication and private storage through octet-ai with in-memory credentials and caller-owned login presentation.
 
 - Document the reusable provider boundary and explicit caller ownership of storage, login interaction and inference.
+- Pi compatibility checks record long-session snapshot transitions, process exits and memory observations with isolated offline fixtures.
 
 ### Changed
 

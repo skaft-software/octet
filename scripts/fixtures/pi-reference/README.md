@@ -30,3 +30,34 @@ it must not reinstall the adapter between those suites and remove the fixture.
 
 Change the pinned version only together with the supported Pi range and the
 shim inventory; Dependabot does not manage this directory.
+
+## Reduced long-session crash probe
+
+After installing both locked Node fixtures (and the adapter's native editor peer
+as in CI), run from the repository root:
+
+```sh
+python3 -B scripts/pi-eval/crash_probe_selftest.py
+python3 -B scripts/pi-eval/crash_probe.py --out /absolute/new/private-evidence
+```
+
+The supervisor records host PID, observed exit code or signal, its own timeout or
+output-limit intervention, sampled Linux host RSS (unavailable elsewhere), and a
+64 KiB stderr tail. Each leg retains bounded stdout/stderr and `result.json`.
+Node diagnostics record oracle/adapter child PID, wait status, RSS and live heap,
+plus snapshot begin/end or applied revision/head transitions. EOF alone never
+establishes OOM. RSS samples are evidence, not a memory-growth acceptance bound.
+The reduced corpus uses Pi 1.5.0's published SessionManager: 1,200 entries,
+compaction, branch checkout, reopen, new/switch, and six routed adapter revisions
+including mid-transfer cancellation and later successful hooks. No providers,
+user factories, user sessions or user configuration are loaded.
+
+The existing `session-driver.mjs` accepts optional per-case `checkpoints` (zero-based
+operation indexes) and `diagnostics: true`. Every operation executes, but only the
+selected observations are retained. Default paired tests still observe every
+operation. Retaining all large snapshots can itself exhaust the harness's JSON
+output limit; that is not evidence of an adapter crash. CI runs the oracle probe;
+the adapter leg also runs in the normal Node suite.
+
+Full-inventory acceptance on the owner's real setup is **NOT RUN**. These probes
+neither reproduce nor diagnose a historical full-inventory process exit.

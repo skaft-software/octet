@@ -431,6 +431,13 @@ This runs code from your installed Pi (`@earendil-works/pi-coding-agent`,
 
 ## Qualification and reproduction
 
+The [reduced long-session probe](../scripts/fixtures/pi-reference/README.md#reduced-long-session-crash-probe)
+checks the pinned Pi 1.5.0 session oracle and routed adapter snapshots with
+isolated offline fixtures. It retains observed host/child exits and signals,
+stderr tails, RSS/heap observations and snapshot transitions, including recovery
+after cancellation. These checks are separate from version admission and the
+API inventory; full-inventory acceptance on the owner's real setup is **NOT RUN**.
+
 The automated adapter suite uses a synthetic host. A run with all four original
 entrypoints explicitly supplied passed **22 tests, zero skips**, including Doom
 WASM animation/resume, drawing mouse export, owner-retained powerline snapshots,

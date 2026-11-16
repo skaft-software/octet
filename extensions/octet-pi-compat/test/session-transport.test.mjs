@@ -2,7 +2,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch, owner, root } from './helper.mjs';
@@ -239,6 +241,55 @@ test('routed hook hydrates the complete document and refuses a cancelled transfe
   await servedAgain;
   assert.deepEqual(replyAgain.result.provider_context.messages, [{ User: { content: [{ Text: 'count:40' }] } }]);
   await peer.close();
+});
+
+test('long Pi-reference history survives repeated routed snapshots and cancellation', { timeout: 60000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'session-long-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const operations = Array.from({ length: 1200 }, (_, index) => ({ op: 'message',
+    message: { role: 'user', content: `${index}:` + 'x'.repeat(2048), timestamp: 0 } }));
+  const oracle = spawnSync(process.execPath, [new URL('../../../scripts/fixtures/pi-reference/session-driver.mjs', import.meta.url).pathname, '1.5.0'], {
+    input: JSON.stringify({ directory, cases: [{ name: 'adapter-seed', operations, checkpoints: [1199] }], diagnostics: true }),
+    encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(oracle.status, 0, oracle.stderr);
+  assert.equal(oracle.signal, null);
+  const state = JSON.parse(oracle.stdout).results[0].steps[0].state;
+  const entries = state.entries.map(entry => message(entry.id, entry.parentId, entry.message.content));
+  assert.equal(entries.length, 1200);
+  const longFactory = countingFactory.replace("return { messages:", `
+    if (ctx.sessionManager.getLeafId() !== branch.at(-1).id || branch[0].message.content[0].text !== '0:' + 'x'.repeat(2048)) throw new Error('wrong branch identity');
+    console.error(JSON.stringify({stage:'hook_snapshot', pid:process.pid, rss:process.memoryUsage().rss, heap_used:process.memoryUsage().heapUsed}));
+    return { messages:`);
+  const peer = launch(t, [fixture(directory, longFactory)]);
+  await peer.init(features, offer);
+  await peer.start();
+  for (let revision = 1; revision <= 6; revision++) {
+    const parts = descriptors(entries, revision);
+    const params = contextParams(peer, parts, revision);
+    if (revision === 3) {
+      const pending = peer.request('hook/run', params);
+      await peer.wait(f => f.method === 'session/snapshot/read' && f.params.transfer_id === parts.snapshot.descriptor.transfer_id);
+      peer.notify('$/cancelRequest', { id: pending.id, reason: 'long-session checkpoint cancelled' });
+      assert.equal((await pending.response).error?.code, -32800);
+      continue;
+    }
+    const buffers = new Map([[parts.snapshot.descriptor.transfer_id, parts.snapshot.bytes], [parts.invocation.descriptor.transfer_id, parts.invocation.bytes]]);
+    const served = serveAll(peer, buffers, [...buffers.keys()]);
+    const reply = await peer.request('hook/run', params).response;
+    await served;
+    assert.deepEqual(reply.result?.provider_context?.messages, [{ User: { content: [{ Text: `count:${entries.length}` }] } }], JSON.stringify(reply));
+    t.diagnostic(JSON.stringify({ stage: 'snapshot_applied', revision, entries: entries.length, head: parts.preparation.head, child_pid: peer.child.pid }));
+    entries.push(message(`later-${revision}`, entries.at(-1).id, 'later turn'));
+  }
+  const closed = once(peer.child, 'close');
+  await peer.close();
+  const [code, signal] = await closed;
+  t.diagnostic(JSON.stringify({ host: { pid: process.pid, rss: process.memoryUsage().rss }, child: { pid: peer.child.pid, code, signal }, oracle: { code: oracle.status, signal: oracle.signal, stderr_tail: oracle.stderr }, stderr_tail: peer.stderr() }));
+  assert.deepEqual([code, signal], [0, null]);
+  const observations = peer.stderr().trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(observations.length, 5);
+  assert.ok(observations.every(row => row.pid === peer.child.pid && row.rss > 0 && row.heap_used > 0));
 });
 
 test('routed hydration refuses a document whose identity does not match', async t => {

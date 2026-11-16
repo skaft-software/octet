@@ -219,6 +219,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --prefix scripts/fixtures/pi-reference --ignore-scripts --no-audit --no-fund
+          node --test scripts/fixtures/pi-reference/endurance.test.mjs
           mkdir -p extensions/octet-pi-compat/node_modules/@earendil-works
           ln -s "$PWD/scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-ai" \
             extensions/octet-pi-compat/node_modules/@earendil-works/pi-ai

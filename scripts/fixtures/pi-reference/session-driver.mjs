@@ -14,7 +14,18 @@ const { SessionManager } = await import(new URL('dist/core/session-manager.js', 
 const { convertToLlm } = await import(new URL('dist/core/messages.js', base));
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
-const { cases, directory } = JSON.parse(input);
+const { cases, directory, diagnostics = false } = JSON.parse(input);
+
+// Opt-in crash evidence for reduced long-session probes. The ordinary paired
+// harness still checkpoints every operation. Emit begin before any observation:
+// EOF without end/exit evidence is not an OOM diagnosis.
+function diagnostic(stage, test, index, manager) {
+  if (!diagnostics) return;
+  const memory = process.memoryUsage();
+  process.stderr.write(JSON.stringify({ stage, case: test.name, index, pid: process.pid,
+    leaf: manager.getLeafId(), entries: manager.getEntryCount(), rss: memory.rss,
+    heap_used: memory.heapUsed, max_rss: process.resourceUsage().maxRSS }) + '\n');
+}
 
 function snapshot(manager) {
   const entries = manager.getEntries();
@@ -123,6 +134,10 @@ for (const test of cases) {
       error = 'rejected';
     }
     if (op.reject) assert.equal(error, 'rejected', 'Pi accepted an expected-invalid operation');
+    // Select observations, not operations: every append/checkout still executes.
+    // This avoids retaining an entire session copy after every long-session turn.
+    if (test.checkpoints && !test.checkpoints.includes(index)) continue;
+    diagnostic('snapshot_begin', test, index, manager);
     const aliases = Object.fromEntries([...ids].map(([name, id]) => [id, name]));
     const state = { ...snapshot(manager), aliases };
     let disk = null;
@@ -135,6 +150,7 @@ for (const test of cases) {
       assert.deepEqual(readFileSync(copy), before, 'opening a current Pi file changed its bytes');
     }
     steps.push({ state, error, disk });
+    diagnostic('snapshot_end', test, index, manager);
   }
   results.push({ name: test.name, file: manager.getSessionFile(), steps });
 }
