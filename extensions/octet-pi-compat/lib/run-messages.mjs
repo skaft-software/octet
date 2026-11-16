@@ -5,7 +5,42 @@ import { messageEntry } from './model-turns.mjs';
 
 const MAX_MESSAGES = 8192, MAX_BYTES = 4 * 1024 * 1024;
 export const runMessageMethods = new Set(['turn/started', 'turn/settled', 'message/started', 'message/updated', 'message/settled']);
-const copy = value => JSON.parse(JSON.stringify(value)); // Also snapshots strict message proxies.
+// Copy containers, not immutable transcript strings. Pi's
+// packages/agent/src/agent-loop.ts:434-450
+// shallow-copies messages and shares their nested partial; keep that alias within
+// an event, while retaining octet's stronger isolation across callbacks/events.
+function copy(value, seen = new Map()) {
+  if (value === null || typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
+  const result = Array.isArray(value) ? [] : {};
+  seen.set(value, result);
+  for (const key of Object.keys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    // Stream argument getters close over an immutable prefix. Materialize only
+    // if a consumer actually reads it, never for an unrelated text/delta read.
+    if (descriptor.get) {
+      let ready = false, item;
+      Object.defineProperty(result, key, { enumerable: true, configurable: true,
+        get() { if (!ready) { item = copy(descriptor.get()); ready = true; } return item; },
+        set(value) { item = value; ready = true; } });
+    } else Object.defineProperty(result, key, { value: copy(value[key], seen), enumerable: true, configurable: true, writable: true });
+  }
+  return result;
+}
+// Raw argument prefixes stay ropes until a full-arguments consumer requests one.
+// Retain completed-prefix candidates so invalid later input preserves the last
+// parseable value, just as the previous eager JSON.parse-on-every-delta did.
+function argumentsAt(prefix) {
+  for (let candidate = prefix; candidate; candidate = candidate.previous) {
+    try { return JSON.parse(candidate.text); } catch { }
+  }
+  return {};
+}
+function growPartial(run, bytes) {
+  const next = run.partialBytes + bytes;
+  check(run, next);
+  run.partialBytes = next;
+}
 const size = value => Buffer.byteLength(JSON.stringify(value));
 function check(run, bytes, count = 1) {
   if (run.invalid || run.bytes + bytes > MAX_BYTES || run.messages.length + count > MAX_MESSAGES) {
@@ -30,11 +65,12 @@ export function assistantObservation(message) {
 }
 async function emit(runtime, store, type, fields = {}) {
   // Later deltas or callbacks must not mutate an earlier observation/history.
-  // Restore unavailable-field refusals after JSON snapshots strip the proxies.
+  // Restore unavailable-field refusals after copying strips the proxies.
   const snapshot = copy(fields);
+  const sharedPartial = snapshot.message && snapshot.message === snapshot.assistantMessageEvent?.partial;
   if (snapshot.message) snapshot.message = assistantObservation(snapshot.message);
   if (snapshot.messages) snapshot.messages = snapshot.messages.map(assistantObservation);
-  if (snapshot.assistantMessageEvent?.partial) snapshot.assistantMessageEvent.partial = assistantObservation(snapshot.assistantMessageEvent.partial);
+  if (snapshot.assistantMessageEvent?.partial) snapshot.assistantMessageEvent.partial = sharedPartial ? snapshot.message : assistantObservation(snapshot.assistantMessageEvent.partial);
   await runtime.runEvent(type, facade({ type, ...snapshot }, `${type} event`), store);
 }
 export function rememberPrompt(store, payload) {
@@ -68,7 +104,8 @@ async function startPartial(runtime, store) {
   const partial = { role: 'assistant', content: [], timestamp: Date.now(),
     ...(host.model ? { model: host.model } : {}), ...(model ? { api: model.api, provider: model.provider } : {}),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'pending' };
-  check(run, size(partial)); run.partial = partial;
+  run.partialBytes = size(partial);
+  check(run, run.partialBytes); run.partial = partial;
   await emit(runtime, store, 'message_start', { message: partial });
 }
 export async function settleStreamedPartial(runtime, store) {
@@ -187,16 +224,25 @@ export async function handleRunMessage(runtime, method, payload, store) {
     const calls = run.streamCalls ??= new Map();
     if (phase === 'start') {
       const contentIndex = partial.content.length;
-      calls.set(index, { contentIndex, text: '' });
-      partial.content.push({ type: 'toolCall', id, name, arguments: {} });
+      const part = { type: 'toolCall', id, name, arguments: {} };
+      growPartial(run, size(part) + (partial.content.length ? 1 : 0));
+      calls.set(index, { contentIndex, text: '', prefix: undefined });
+      partial.content.push(part);
       await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_start', contentIndex, partial } });
     } else {
       const call = calls.get(index);
       if (!call) return;
       const { contentIndex } = call;
       if (phase === 'delta') {
+        bounded(delta, 'tool argument delta', 8192, { controls: true });
+        growPartial(run, size(delta) - 2);
         call.text += delta;
-        try { partial.content[contentIndex].arguments = JSON.parse(call.text); } catch { }
+        // Only object/array/string/number/literal endings can parse. Avoid
+        // keeping every interior string chunk as a fallback candidate.
+        if (/[}\]"0-9el]\s*$/.test(delta)) call.prefix = { text: call.text, previous: call.prefix };
+        const prefix = { text: call.text, previous: call.prefix };
+        Object.defineProperty(partial.content[contentIndex], 'arguments', { enumerable: true, configurable: true,
+          get: () => argumentsAt(prefix) });
         await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_delta', contentIndex, delta, partial } });
       } else {
         await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_end', contentIndex, toolCall: partial.content[contentIndex], partial } });
@@ -207,9 +253,10 @@ export async function handleRunMessage(runtime, method, payload, store) {
   if (method === 'message/updated') {
     const delta = bounded(payload.delta, 'message delta', 8192, { controls: true });
     const partial = run.partial;
+    const startBytes = partial.content.length ? 0 : size({ type: 'text', text: '' });
     if (!partial.content.length) partial.content.push({ type: 'text', text: '' });
+    growPartial(run, startBytes + size(delta) - 2);
     partial.content[0].text += delta;
-    check(run, size(partial));
     await emit(runtime, store, 'message_update', { message: partial,
       assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta, partial } });
   }

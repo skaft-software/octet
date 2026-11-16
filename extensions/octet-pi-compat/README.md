@@ -461,6 +461,15 @@ usage, available cost and supported stop reasons to `message_end`, `turn_end` an
 `agent_end`. Current model selection and aggregate session usage are never used
 for these final facts. Custom message payloads pass through unchanged.
 
+Streaming observations copy mutable containers while sharing immutable strings, and
+account for new delta bytes without serializing the accumulated partial. Tool
+arguments materialize lazily when a callback consumes them; delta-only observers
+need not parse the whole argument prefix. Retained events remain isolated from
+later deltas and callback mutations. Full-message consumers still pay for the
+content they read. `test/stream-work.test.mjs` counts serializer/parser input at
+10, 100 and 1000 deltas; these counts are not RSS or wire-traffic measurements.
+The native delta wire is unchanged.
+
 A stream starts with Pi 1.0.2's provisional zero usage and `pending` stop reason.
 When no committed observation is available (including projection failures),
 settlement removes those placeholders and selected-model identity rather than
@@ -1058,9 +1067,9 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The isolated Pi-theme working-candidate adapter run is **932 tests: 912 passed, 0
-failed, 20 optional skips**, exit 0, with the freshly built native editor test host
-and a read-only Pi reference checkout.
+The isolated working-candidate adapter run is **1616 tests: 1583 passed, 0
+failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+and the pinned Pi provider fixture.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing
