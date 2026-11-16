@@ -276,7 +276,7 @@ If native rendering fails, the ANSI fallback restores the requested mouse policy
 report overlays do not change the ordinary ANSI launch default.
 
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
-three rows per event (Alt/Option: fifteen); bursts accumulate without changing
+one row per event (Alt/Option: fifteen); bursts accumulate without changing
 composer history. Each event keeps that fixed step: the terminal already applies
 its own acceleration, so octet does not add a second curve. Dragging the
 scrollbar keeps the pointer until you release it; wheel events still move the

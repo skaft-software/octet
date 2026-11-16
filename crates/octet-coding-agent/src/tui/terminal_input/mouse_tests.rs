@@ -55,7 +55,7 @@ async fn wheel_matrix(master: &mut std::fs::File, input: &mut TerminalInput) {
                 let step = if modifiers.contains(KeyModifiers::ALT) {
                     15
                 } else {
-                    3
+                    1
                 };
                 let direction = if button == 64 { -step } else { step };
                 assert_eq!(
