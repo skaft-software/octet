@@ -429,6 +429,85 @@ export default pi => {
 };
 "#;
 
+// Pi awaits setup before finishing replacement (packages/coding-agent/src/core/
+// agent-session-runtime.ts:226-260).
+// The actual idle loop refreshes resources between lifecycle requests, unlike a
+// command pump that keeps borrowing the App across the entire setup sequence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_setup_defers_resource_refresh_until_setup_completes() {
+    struct RefreshingFrontend<'a> {
+        shell: &'a mut InteractiveShell,
+        input: futures_util::stream::Pending<std::io::Result<Event>>,
+    }
+    impl crate::extensions::ExtensionConfirmationHandler for RefreshingFrontend<'_> {
+        fn command_shell(&mut self) -> Option<&mut InteractiveShell> {
+            Some(self.shell)
+        }
+        fn confirm<'a>(
+            &'a mut self,
+            _: &'a str,
+            _: &'a octet_agent::extension_process::ConfirmationRequest,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + 'a>> {
+            Box::pin(std::future::ready(Ok(false)))
+        }
+    }
+    impl InteractiveCommandFrontend for RefreshingFrontend<'_> {
+        fn apply_lifecycle<'a>(
+            &'a mut self,
+            app: &'a mut App,
+            request: ExtensionSessionLifecycleRequest,
+        ) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+            Box::pin(async move {
+                let replaced =
+                    execute_command_session_lifecycle(app, self.shell, &mut self.input, request)
+                        .await;
+                let diagnostics = resource_paths::refresh_resource_paths_reporting(
+                    app,
+                    self.shell,
+                    &mut self.input,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    diagnostics.is_empty(),
+                    "resource refresh interrupted setup: {diagnostics:?}"
+                );
+                replaced
+            })
+        }
+    }
+    let (directory, mut app) = pi_app(SETUP_SESSION);
+    let parent = app.agent.session().path().to_str().unwrap().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    let mut input = futures_util::stream::pending();
+    resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input)
+        .await
+        .unwrap();
+    let mut frontend = RefreshingFrontend {
+        shell: &mut shell,
+        input,
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        run_interactive_extension_command(
+            &mut app,
+            &mut frontend,
+            Some("octet-pi-compat"),
+            "probe",
+            vec![parent],
+            false,
+            0,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(step(&trace(&directory), "with-options")["oldRetired"]
+        .as_bool()
+        .unwrap());
+    app.executable_extensions.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_new_session_parent_and_writable_setup_commit_to_the_real_replacement() {
     let (directory, mut app) = pi_app(SETUP_SESSION);

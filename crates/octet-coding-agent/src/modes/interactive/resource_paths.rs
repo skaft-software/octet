@@ -145,6 +145,13 @@ async fn refresh_resource_paths_until_closed<S>(
 where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
+    // Pi agent-session-runtime.ts:226-260 awaits writable setup before finishing
+    // replacement. Native discovery cannot run before setup releases session_start:
+    // it would withdraw/rebuild the fleet and invalidate the command's setup owner.
+    // Keep the phase pending while the sole idle owner serves setup mutations.
+    if app.executable_extensions.session_setup_pending() {
+        return Ok(Vec::new());
+    }
     let resources_pending = app.resource_paths_pending();
     if shell.close_requested()
         || (!resources_pending && !app.executable_extensions.has_pending_session_starts())

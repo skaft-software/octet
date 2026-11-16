@@ -778,7 +778,9 @@ at its idle boundary. A request made while a turn is busy waits for that turn to
 settle; it never takes its session writer. The old session's end precedes writable
 setup, and the new session's start follows setup's durable writes. Only the
 original live command can consume the host's creation receipt, with its exact
-process instance/generation and cancellation lifetime. Captured old contexts stay
+process instance/generation and cancellation lifetime. Native resource refresh stays
+pending between writable setup requests, so it cannot withdraw the replacement's
+extension owner before setup completes. Captured old contexts stay
 retired; the setup manager closes before `withSession`. Parent linkage is stored
 in the replacement's durable header, not inferred from a foreground UI context.
 

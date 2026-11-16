@@ -106,6 +106,7 @@
 - Payload hooks retain unchanged request bytes and field order across turns, preserving stable cache prefixes.
 - Pi conformance journeys require successful observations on both hosts and include startup writes in migration-safety checks.
 - Pi model selection delivers `model_select` with the current and previous models before an applied `pi.setModel()` resolves.
+- Pi session setup retains its extension owner across idle resource refreshes, allowing replacement and later commands to complete.
 
 ## [0.10.4] - 2026-11-12
 

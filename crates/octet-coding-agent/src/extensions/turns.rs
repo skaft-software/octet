@@ -428,6 +428,11 @@ impl ExecutableExtensions {
         }
     }
 
+    /// Resource discovery waits while a replacement's writable setup owns the session.
+    pub(crate) fn session_setup_pending(&self) -> bool {
+        self.pending_session_setup.is_some()
+    }
+
     /// Validate every setup mutation against its original parent and live owner.
     pub fn session_setup_is_current(
         &self,
