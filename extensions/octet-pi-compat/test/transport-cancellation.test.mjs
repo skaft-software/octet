@@ -31,7 +31,7 @@ async function droppedSyncRequest(t, drop) {
   await peer.init(['active_tools', 'before_prompt_state_v1']);
   const start = peer.request('hook/run', { hook: 'session_start', payload: { binding: owner }, context: peer.context() }).response;
   const snapshot = await peer.wait(frame => frame.method === 'tools/snapshot');
-  assert.match(String(snapshot.id), /^pi:/);
+  assert.ok(Number.isSafeInteger(snapshot.id) && snapshot.id > 0);
   drop(peer, snapshot);
   await start;
   assert.equal(peer.child.exitCode, null, `extension exited: ${peer.stderr()}`);

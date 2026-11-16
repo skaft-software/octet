@@ -1103,9 +1103,14 @@ late child replies.
 
 Every extension-originated request ID is either an unsigned 64-bit integer or
 a string of at most 256 UTF-8 bytes. IDs are unique among outstanding child
-requests and cannot be reused within a process generation. At most 128 child
-requests may be outstanding and at most 65,536 distinct child IDs may be used
-in one generation.
+requests and must not be reused within a process generation. The host tracks
+outstanding IDs, keeps a bounded recent replay window, and admits at most 128
+child requests at once. Extension
+authors must issue fresh IDs even after timeout or cancellation, so late work
+cannot be mistaken for a later request. The host uses IDs below 2^52; the Pi
+adapter uses the upper half of the JavaScript-safe integer range so cancellation
+notifications cannot alias host parent IDs. Process and owner generation fences
+keep retired-generation work separate from replacement processes.
 
 ### 2.1 `notification`
 

@@ -42,6 +42,7 @@
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Pi prompt hooks preserve valid results around malformed prompt replacements.
 - Static models use provider-scoped catalog audio metadata when their declarations are silent.
+- Extension reverse requests remain available beyond 65,536 calls with bounded in-flight correlation.
 
 ## [0.10.4] - 2026-11-12
 

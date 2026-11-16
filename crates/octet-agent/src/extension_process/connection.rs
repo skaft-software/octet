@@ -1104,7 +1104,16 @@ impl ProcessConnection {
                 resource_owner.as_ref(),
                 &mut params,
             )?;
-            let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
+            // The upper portable-integer half is reserved for reverse IDs,
+            // keeping bidirectional cancellation IDs unambiguous.
+            let id = connection
+                .next_id
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                    (id < (1_u64 << 52)).then_some(id + 1)
+                })
+                .map_err(|_| {
+                    ExtensionRuntimeError::Protocol("extension request identity exhausted".into())
+                })?;
             let _views = session_leaf::transport::attach(
                 &connection,
                 id,

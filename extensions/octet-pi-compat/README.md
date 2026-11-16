@@ -1000,8 +1000,8 @@ explicitly.
 Stdout is exclusively a captured serialized RPC writer. Console and direct
 plain `process.stdout.write` calls are bounded stderr diagnostics. Transport has
 1 MiB input/output frames, 128 writer slots/4 MiB queued bytes, latest-wins UI
-snapshots, 128 outstanding reverse requests, 65,536 unique reverse IDs, 30-second
-reverse deadlines, at most 8 host requests and 16 surfaces. Worker inbound transfer
+snapshots, 128 outstanding reverse requests, monotonic safe-integer reverse IDs,
+30-second reverse deadlines, at most 8 host requests and 16 surfaces. Worker inbound transfer
 is bounded to 256 frames/4 MiB (128 while synchronous append is blocked), allowing
 an editor's unchanged 128-event initial burst plus control frames. A synchronous
 append timeout requests cancellation but waits for the known result; a final

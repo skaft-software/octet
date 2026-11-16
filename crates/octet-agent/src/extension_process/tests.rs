@@ -123,7 +123,7 @@ pub(super) fn protocol_read_state_for_test(
             declared,
             writer,
             child_requests: Arc::new(StdMutex::new(HashMap::new())),
-            seen_child_request_ids: StdMutex::new(HashSet::new()),
+            recent_child_ids: StdMutex::new(RecentChildIds::default()),
             child_work_slots: Arc::new(Semaphore::new(MAX_CHILD_WORKERS)),
             tombstones: Arc::new(StdMutex::new(RequestTombstones::default())),
             protocol: Arc::new(StdRwLock::new(ExtensionNegotiatedProtocol::api_0_1(
@@ -3082,16 +3082,35 @@ async fn artifact_publication_requires_and_preserves_the_host_owner() {
 }
 
 #[test]
-fn child_request_ids_are_unique_for_the_process_generation() {
+fn child_request_endurance_over_65536() {
+    let (events, _events_rx) = broadcast::channel(4);
+    let (state, _frames) = protocol_read_state_for_test(ManifestContributions::default(), events);
+    for n in 0..65_537 {
+        let id = ExtensionRequestId::Number(n);
+        insert_child_request(&state, id.clone(), None, None).expect("register child");
+        assert!(settle_child_request(&state.child_requests, &id));
+    }
+    assert!(lock_std_mutex(&state.child_requests).is_empty());
+    assert_eq!(lock_std_mutex(&state.recent_child_ids).len(), 1024);
+}
+
+#[test]
+fn child_request_ids_reject_in_flight_duplicates() {
     let (events, _events_rx) = broadcast::channel(4);
     let (state, _frames) = protocol_read_state_for_test(ManifestContributions::default(), events);
     let id = ExtensionRequestId::String("py:1".into());
-    register_child_request(&state, id.clone(), Some(1), methods::INPUT_REQUEST).expect("first ID");
+    insert_child_request(&state, id.clone(), None, None).expect("first ID");
+    assert_eq!(
+        insert_child_request(&state, id.clone(), None, None)
+            .err()
+            .unwrap(),
+        "duplicate in-flight extension-originated request id"
+    );
     assert!(settle_child_request(&state.child_requests, &id));
-    let error = register_child_request(&state, id, Some(1), methods::INPUT_REQUEST)
-        .err()
-        .expect("ID reuse must fail");
-    assert_eq!(error, "reused extension-originated request id");
+    assert_eq!(
+        insert_child_request(&state, id, None, None).err().unwrap(),
+        "reused extension-originated request id"
+    );
 }
 
 #[test]
@@ -3134,11 +3153,7 @@ fn child_arriving_after_parent_cancellation_is_terminal_not_fatal() {
     assert_eq!(response["id"], "late-input");
     assert_eq!(response["error"]["code"], JSON_RPC_REQUEST_CANCELLED);
     assert!(lock_std_mutex(&state.child_requests).is_empty());
-    assert!(lock_std_mutex(&state.seen_child_request_ids)
-        .contains(&ExtensionRequestId::String("late-input".into())));
-
-    let reuse = handle_protocol_line(line, &state)
-        .expect_err("terminal child IDs remain consumed for the generation");
+    let reuse = handle_protocol_line(line, &state).expect_err("recent child ID replay must fail");
     assert_eq!(reuse, "reused extension-originated request id");
 }
 
@@ -7653,6 +7668,21 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
     .await
     .expect("supervisor did not activate a replacement");
     assert!(first.closed.load(Ordering::Acquire));
+    // A reused numeric ID in the replacement cannot receive the old generation's reply.
+    let replacement = read_std_lock(&process.inner.connection).clone();
+    let id = ExtensionRequestId::Number(1);
+    lock_std_mutex(&replacement.child_requests).insert(id.clone(), child_request(0, CHILD_ACTIVE));
+    let error = process
+        .respond_to_extension_request(
+            id.clone(),
+            first.generation,
+            ExtensionRequestOutcome::Ok(serde_json::json!({})),
+        )
+        .await
+        .expect_err("stale reply must be rejected");
+    assert!(error.to_string().contains("stale generation"));
+    assert!(lock_std_mutex(&replacement.child_requests).contains_key(&id));
+    lock_std_mutex(&replacement.child_requests).remove(&id);
     assert_eq!(
         std::fs::read_to_string(temp.path().join("restarted.marker")).unwrap(),
         "first\n"

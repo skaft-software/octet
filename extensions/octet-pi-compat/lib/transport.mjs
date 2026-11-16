@@ -1,6 +1,7 @@
 import { Console } from 'node:console';
 import { Writable } from 'node:stream';
 import { Worker } from 'node:worker_threads';
+import { debuglog } from 'node:util';
 import { fields, invalid, rpcError, unsupportedAPI } from './errors.mjs';
 import { notificationIntent } from './desktop-notifications.mjs';
 
@@ -13,6 +14,10 @@ export const SYNC_UNKNOWN = 3;
 export const SYNC_CANCELLED = 4;
 export const MAX_SYNC_UI_CLOSED_BYTES = 32768;
 const MAX_QUEUE = 128, MAX_QUEUE_BYTES = 4194304;
+const debug = debuglog('octet-pi-transport');
+const MAX_RECENT_CANCELLED = 1024;
+// Split the numeric wire namespace so cancel notifications cannot alias host parents.
+const CHILD_ID_BASE = 2 ** 52;
 // A worker that cannot be stopped (pending inherited-pipe read) must not hold
 // shutdown open; see Transport.close().
 const TERMINATE_DEADLINE = 250;
@@ -98,7 +103,7 @@ export class Transport {
     this.writer = writer;
     this.onMessage = onMessage; this.onLost = onLost;
     this.queue = []; this.bytes = 0; this.writing = false; this.closed = false;
-    this.children = new Map(); this.childId = 0; this.syncIds = new Set();
+    this.children = new Map(); this.childId = CHILD_ID_BASE - 1; this.recentCancelled = new Set();
     this.buffer = Buffer.alloc(0); this.bufferBytes = 0;
     this.idleWaiters = [];
     this.transfers = new Map(); this.transferId = 0; this.transferBytes = 0;
@@ -212,8 +217,7 @@ export class Transport {
     if (!Number.isSafeInteger(p.sequence) || p.sequence < 1) invalid('composition update sequence');
     const child = this.children.get(p.request_id);
     if (!child) {
-      const match = typeof p.request_id === 'string' && /^pi:([1-9][0-9]*)$/.exec(p.request_id);
-      if (!match || Number(match[1]) > this.childId || this.syncIds.has(p.request_id)) invalid('composition update request id');
+      if (!Number.isSafeInteger(p.request_id) || p.request_id < 1) invalid('composition update request id');
       return; // Settled/cancelled requests cannot deliver late callbacks.
     }
     if (child.method !== 'composition/call' || !child.onUpdate) invalid('unsolicited composition update');
@@ -221,13 +225,22 @@ export class Transport {
     child.sequence = p.sequence;
     try { child.onUpdate(p.result); } catch (error) { child.cancel(error); }
   }
+  nextChildId() {
+    if (this.childId >= Number.MAX_SAFE_INTEGER) throw rpcError(-32012, 'host request identity exhausted');
+    return ++this.childId;
+  }
+  rememberCancelled(id) {
+    this.recentCancelled.add(id);
+    if (this.recentCancelled.size > MAX_RECENT_CANCELLED) this.recentCancelled.delete(this.recentCancelled.values().next().value);
+  }
   request(method, params, { parent, signal, timeout = 30000, onUpdate } = {}) {
-    if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
+    if (this.children.size >= 128) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();
-    const id = `pi:${++this.childId}`;
+    const id = this.nextChildId();
     return new Promise((resolve, reject) => {
       const cancel = reason => {
         if (!this.children.delete(id)) return;
+        this.rememberCancelled(id);
         nativeClearTimeout(timer); signal?.removeEventListener('abort', abort);
         reject(reason);
         if (!this.closed) this.notify('$/cancelRequest', { id, reason: 'cancelled' }).catch(error => this.fail(error));
@@ -242,9 +255,9 @@ export class Transport {
   response(message) {
     const child = this.children.get(message.id);
     if (!child) {
-      const match = typeof message.id === 'string' && /^pi:([1-9][0-9]*)$/.exec(message.id);
-      if (!match || Number(match[1]) > this.childId || this.syncIds.has(message.id)) throw rpcError(-32600, 'unknown host response id');
-      return; // Known async cancelled/settled child IDs are never reused.
+      if (!Number.isSafeInteger(message.id) || message.id < 1) throw rpcError(-32600, 'invalid host response id');
+      debug('%s host response id %d', this.recentCancelled.has(message.id) ? 'late' : 'unknown', message.id);
+      return;
     }
     this.children.delete(message.id); nativeClearTimeout(child.timer);
     child.signal?.removeEventListener('abort', child.abort);
@@ -304,14 +317,13 @@ export class Transport {
   requestSync(method, params, { parent, signal, onCancel, onUiClosed, timeout = 30000 } = {}) {
     if (!['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(method)) unsupportedAPI(`synchronous request ${method}`, 'only a reviewed synchronous host contract may block the factory thread');
     if (!this.worker || this.closed) throw rpcError(-32002, 'synchronous transport is unavailable');
-    if (this.children.size >= 128 || this.childId >= 65536) throw rpcError(-32012, 'bounds_exceeded host request catalog');
+    if (this.children.size >= 128) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();
     if (Atomics.load(this.syncHeader, 0) === 1) throw rpcError(-32012, 'synchronous request already in flight');
-    const id = `pi:${++this.childId}`, message = { jsonrpc: '2.0', id, method, params };
+    const id = this.nextChildId(), message = { jsonrpc: '2.0', id, method, params };
     const size = Buffer.byteLength(JSON.stringify(message));
     if (size > this.maxFrame) throw rpcError(-32602, 'bounds_exceeded output frame');
     if (this.transfers.size >= MAX_QUEUE || this.transferBytes + size > MAX_QUEUE_BYTES) throw rpcError(-32012, 'bounds_exceeded worker transfer queue');
-    this.syncIds.add(id);
     Atomics.store(this.syncHeader, 2, 0);
     Atomics.store(this.syncHeader, 3, 0);
     Atomics.store(this.syncHeader, 1, 0); Atomics.store(this.syncHeader, 0, 1);
@@ -334,7 +346,7 @@ export class Transport {
     // A dropped read-only request has no commitment to learn: it is cancelled,
     // and the healthy connection keeps serving. Durable/effectful requests
     // instead keep waiting for their native outcome (the watchdog above).
-    if (status === SYNC_CANCELLED) throw rpcError(reply.code, reply.message);
+    if (status === SYNC_CANCELLED) { this.rememberCancelled(id); throw rpcError(reply.code, reply.message); }
     this.validate(reply);
     if (status !== SYNC_REPLY || reply.id !== id) { const error = rpcError(-32600, 'invalid synchronous response identity'); this.fail(error); throw error; }
     const closedBytes = Atomics.load(this.syncHeader, 3);

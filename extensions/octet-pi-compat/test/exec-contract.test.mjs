@@ -64,7 +64,7 @@ test('abort asks native executor to kill but waits for its real partial result',
   f.runtime.hostCall = () => { ++f.runtime.transport.childId; return new Promise(resolve => { settle = resolve; }); };
   const pending = exec(f.runtime, f.store, '/bin/sh', [], { signal: controller.signal });
   controller.abort();
-  assert.deepEqual(f.notices, [['process/exec/cancel', { id: 'pi:1' }]]);
+  assert.deepEqual(f.notices, [['process/exec/cancel', { id: 1 }]]);
   settle({ stdout: 'partial', stderr: '', code: 0, killed: true });
   assert.equal((await pending).stdout, 'partial');
 });

@@ -428,6 +428,33 @@ pub(super) fn register_unparented_api_v03_child_request(
     insert_child_request(state, id, None, None)
 }
 
+// A bounded replay window protects recently completed requests without a
+// generation-lifetime allocation. Peers must still never reuse an ID.
+#[derive(Default)]
+pub(super) struct RecentChildIds {
+    order: VecDeque<ExtensionRequestId>,
+    ids: HashSet<ExtensionRequestId>,
+}
+
+impl RecentChildIds {
+    fn reserve(&mut self, id: &ExtensionRequestId) -> Result<(), String> {
+        if !self.ids.insert(id.clone()) {
+            return Err("reused extension-originated request id".into());
+        }
+        self.order.push_back(id.clone());
+        if self.order.len() > 1024 {
+            self.ids
+                .remove(&self.order.pop_front().expect("nonempty replay window"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.order.len()
+    }
+}
+
 pub(super) fn register_child_request(
     state: &ProtocolReadState,
     id: ExtensionRequestId,
@@ -444,12 +471,14 @@ pub(super) fn register_child_request(
         .get(&parent)
         .filter(|pending| pending.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
     else {
-        reserve_child_request_id(state, &id)?;
+        if lock_std_mutex(&state.child_requests).contains_key(&id) {
+            return Err("duplicate in-flight extension-originated request id".into());
+        }
+        lock_std_mutex(&state.recent_child_ids).reserve(&id)?;
         drop(pending);
         // Parent settlement can legitimately win the wire race with an
-        // extension-originated child request. Consume the child ID for this
-        // generation and terminalize it when possible; this is not a fatal
-        // framing or protocol violation.
+        // extension-originated child request. Terminalize it when possible;
+        // this is not a fatal framing or protocol violation.
         let _ = queue_writer_value(
             &state.writer,
             &state.frame_limit,
@@ -473,22 +502,6 @@ pub(super) fn register_child_request(
     Ok(Some(registered))
 }
 
-pub(super) fn reserve_child_request_id(
-    state: &ProtocolReadState,
-    id: &ExtensionRequestId,
-) -> Result<(), String> {
-    let mut seen = lock_std_mutex(&state.seen_child_request_ids);
-    if seen.len() >= MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION {
-        return Err(format!(
-            "extension-originated request ID limit {MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION} exceeded"
-        ));
-    }
-    if !seen.insert(id.clone()) {
-        return Err("reused extension-originated request id".into());
-    }
-    Ok(())
-}
-
 pub(super) fn insert_child_request(
     state: &ProtocolReadState,
     id: ExtensionRequestId,
@@ -502,7 +515,10 @@ pub(super) fn insert_child_request(
             "extension-originated request limit {MAX_CHILD_REQUESTS} exceeded"
         ));
     }
-    reserve_child_request_id(state, &id)?;
+    if children.contains_key(&id) {
+        return Err("duplicate in-flight extension-originated request id".into());
+    }
+    lock_std_mutex(&state.recent_child_ids).reserve(&id)?;
     let response_state = Arc::new(ChildResponseState {
         state: AtomicU8::new(CHILD_ACTIVE),
         changed: Notify::new(),
@@ -523,7 +539,7 @@ pub(super) fn insert_child_request(
             });
         }
         std::collections::hash_map::Entry::Occupied(_) => {
-            unreachable!("seen request IDs make an occupied child entry impossible");
+            unreachable!("duplicate in-flight request IDs are rejected");
         }
     }
     Ok(RegisteredChildRequest {

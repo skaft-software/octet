@@ -18,7 +18,7 @@ export async function exec(runtime, store, command, args, options = {}) {
   // so Pi receives real partial stdout/stderr and killed instead of a fake result.
   const work = runtime.hostCall('process/exec', { resource_owner: store.state.owner,
     command, args, cwd, timeout_ms: options.timeout || null, cancelled: options.signal?.aborted ?? false }, store);
-  const id = `pi:${runtime.transport.childId}`;
+  const id = runtime.transport.childId;
   const cancel = () => runtime.transport.notify('process/exec/cancel', { id }).catch(error => runtime.backgroundError(error));
   options.signal?.addEventListener('abort', cancel, { once: true });
   try {

@@ -157,7 +157,7 @@ export function streamRegistryModel(runtime, model, context, options = {}) {
     external?.addEventListener('abort', cancel, { once: true });
     store.controller.signal.addEventListener('abort', cancel, { once: true });
     const work = runtime.hostCall('provider/infer', { inference_id: job.id, model: selected, request: input }, store, { signal: new AbortController().signal });
-    job.requestId = `pi:${runtime.transport.childId}`;
+    job.requestId = runtime.transport.childId;
     launched = true;
     runtime.track((async () => {
       try {

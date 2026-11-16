@@ -370,7 +370,6 @@ pub use self::process_group::EXTENSION_MANIFEST_FILENAME;
 pub use self::process_group::MAX_EXTENSION_AUTOCOMPLETE_ITEMS;
 pub use self::process_group::MAX_EXTENSION_AUTOCOMPLETE_TEXT_BYTES;
 pub use self::process_group::MAX_EXTENSION_BASH_COMMAND_BYTES;
-pub use self::process_group::MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION;
 pub use self::process_group::MAX_EXTENSION_COMPOSER_TEXT_BYTES;
 pub use self::process_group::MAX_EXTENSION_CONTEXT_ACTIVE_SKILLS;
 pub use self::process_group::MAX_EXTENSION_CONTEXT_LABEL_BYTES;

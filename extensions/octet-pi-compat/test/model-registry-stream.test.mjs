@@ -82,7 +82,7 @@ test('caller abort cancels the native attempt but waits for its accounted termin
   controller.abort();
   await Promise.resolve();
   assert.equal(value.frames[1].method, 'provider/infer/cancel');
-  assert.equal(value.frames[1].params.id, 'pi:1');
+  assert.equal(value.frames[1].params.id, 1);
   let finished = false;
   stream.result().then(() => { finished = true; });
   await Promise.resolve();
@@ -115,8 +115,8 @@ test('parent abort through real Runtime and Transport waits for native settlemen
     await new Promise(setImmediate);
     assert.equal(finished, false);
     assert.equal(value.frames[1].method, 'provider/infer/cancel');
-    assert.equal(value.frames[1].params.id, 'pi:1');
-    transport.response({ jsonrpc: '2.0', id: 'pi:1', result: { cancelled: true } });
+    assert.equal(value.frames[1].params.id, 2 ** 52);
+    transport.response({ jsonrpc: '2.0', id: 2 ** 52, result: { cancelled: true } });
     assert.equal((await stream.result()).stopReason, 'aborted');
   } finally { transport.fail(new Error('test complete')); }
 });
@@ -134,7 +134,7 @@ test('an authoritative native child cancellation is an aborted Pi terminal', asy
   const stream = value.registry.streamSimple(model, context);
   assert.equal(value.frames[0]?.method, 'provider/infer');
   try {
-    transport.cancel('pi:1');
+    transport.cancel(2 ** 52);
     assert.equal((await stream.result()).stopReason, 'aborted');
   } finally { transport.fail(new Error('test complete')); }
 });

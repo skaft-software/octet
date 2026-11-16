@@ -322,11 +322,6 @@ pub(super) const SUPERVISOR_POLL: Duration = Duration::from_millis(100);
 
 pub(super) static NEXT_EXTENSION_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Maximum distinct extension-originated JSON-RPC IDs in one process
-/// generation. IDs are never reusable inside the generation, preventing a
-/// delayed frontend answer from targeting a later request with the same ID.
-pub const MAX_EXTENSION_CHILD_REQUEST_IDS_PER_GENERATION: usize = 65_536;
-
 /// Maximum queued active-host session lifecycle requests shared by trusted
 /// executable extensions. The product drains this queue only at an idle
 /// boundary.

@@ -44,24 +44,18 @@ const output = new Writable({
 });
 let sync, sequence = 0, bytes = 0;
 const forwarded = new Map(), pendingClosed = new Map();
-// Async request ids this extension issued. Ids are never reused, so this is
-// also the tombstone set for replies that arrive after an async request was
-// cancelled or settled (the factory thread drops known ids).
-const issuedAsync = new Set();
-// Settled or host-cancelled synchronous request ids, bounded oldest-first. A
-// reply for one of these is dropped here: the factory thread has no channel for
-// a reply it no longer waits on, so forwarding it would be a protocol error.
-const MAX_SETTLED_SYNC = 4096;
+// Only cancelled synchronous requests need recent diagnostic tombstones.
+const MAX_SETTLED_SYNC = 1024;
 const settledSync = new Set();
 function tombstoneSync(id) {
-  if (id === undefined || settledSync.has(id)) return;
+  if (id === undefined) return;
   settledSync.add(id);
   if (settledSync.size > MAX_SETTLED_SYNC) settledSync.delete(settledSync.values().next().value);
 }
 const activeParents = new Set(), cancelledParents = new Set();
 let shutdownRequested = false;
 function complete(value, status) {
-  tombstoneSync(sync?.id);
+  if (status === SYNC_CANCELLED) tombstoneSync(sync?.id);
   if (Atomics.load(header, 0) !== 1) return;
   clearTimeout(sync?.timer); clearTimeout(sync?.watchdog);
   const encoded = Buffer.from(JSON.stringify(value));
@@ -113,11 +107,11 @@ const transport = new Transport({ write: output.write.bind(output), output }, {
 });
 transport.response = message => {
   if (sync && message.id === sync.id) { complete(message, SYNC_REPLY); return; }
-  // A late reply for a settled or host-cancelled synchronous request is
-  // dropped here; it is not a protocol error. Unknown ids still terminalize.
+  // A recently cancelled synchronous request is dropped here. Other numeric
+  // replies go to the factory, which drops unknown and settled IDs.
   if (settledSync.has(message.id)) return;
-  if (issuedAsync.has(message.id)) { forward(message); return; }
-  throw rpcError(-32600, 'unknown host response id');
+  if (Number.isSafeInteger(message.id) && message.id > 0) { forward(message); return; }
+  throw rpcError(-32600, 'invalid host response id');
 };
 parentPort.on('message', packet => {
   try {
@@ -140,10 +134,6 @@ parentPort.on('message', packet => {
     }
     if (packet.kind === 'send' && !packet.message.method && packet.message.id !== undefined) {
       activeParents.delete(packet.message.id); cancelledParents.delete(packet.message.id);
-    }
-    if (packet.kind === 'send' && packet.message.method && packet.message.id !== undefined) {
-      if (issuedAsync.size >= 65536 || issuedAsync.has(packet.message.id)) throw rpcError(-32600, 'invalid host request identity');
-      issuedAsync.add(packet.message.id);
     }
     const work = packet.kind === 'send' ? transport.send(packet.message, packet.key) : packet.kind === 'idle' ? transport.idle() : Promise.reject(rpcError(-32600, 'unknown worker command'));
     work.then(() => parentPort.postMessage({ kind: 'ack', token: packet.token }), error => {
