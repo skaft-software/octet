@@ -118,6 +118,7 @@ pub use inference::{
     InferenceMetrics, OutputRateSample, ReportedTimingUnit, ServerGenerationMetrics,
     ServerTimingSource, ServerTimingUnavailable,
 };
+pub use protocol::google::cache::{GoogleCacheLimits, GoogleCacheSession, GoogleCachedContent};
 
 pub use images::{
     GeneratedImage, ImageApi, ImageCancellation, ImageGenerationOptions, ImageGenerationRequest,

@@ -1062,6 +1062,9 @@ counters retain their start values. OpenAI/Codex subtract reported cached tokens
 from total prompt input; Google subtracts `cachedContentTokenCount` and reports
 no generation-time cache writes. Missing write counters are not estimated.
 
+Rust embedders can opt into [bounded provider-native cache operations](native-cache.md)
+for Gemini create/refresh/delete and awaited session-end cleanup. Construction
+makes no cache-service calls; ordinary CLI requests do not enable this API.
 
 With cache retention enabled, Anthropic Messages marks eligible tools, system
 and final content. Large tool batches also retain the preceding user breakpoint so it

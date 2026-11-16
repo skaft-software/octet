@@ -30,6 +30,12 @@ with `/skills load release`. Global activation uses `~/.octet/prompts` and
 [Instructions, prompt templates and skills](../instructions.md) for discovery,
 trust, and bounds.
 
+## Qualification
+
+- [Opt-in live cache checklist](cache-live-qualification.md): separately approved
+  provider accounting, native lifecycle and cleanup evidence; offline fixtures do
+  not authorize live requests.
+
 ## Prompts
 
 | File | Purpose |

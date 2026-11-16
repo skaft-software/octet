@@ -4,6 +4,8 @@
 //! and SSE response shapes. Endpoint construction and authentication remain in
 //! provider registration; this module only maps the bounded canonical request.
 
+pub(crate) mod cache;
+
 use std::collections::HashMap;
 
 use serde::Deserialize;

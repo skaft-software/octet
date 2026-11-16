@@ -22,6 +22,7 @@
 - Pi compatibility checks record long-session snapshot transitions, process exits and memory observations with isolated offline fixtures.
 - Pi session checks cover repeated tools, compaction, process restart and resume with durable private state and later turns.
 - Pi compatibility checks cover hook faults, history isolation, ownership, streaming cancellation and descendant cleanup.
+- Rust embedders can explicitly create, refresh and delete bounded Gemini caches with session-end cleanup and finite TTLs.
 
 ### Changed
 

@@ -62,6 +62,12 @@ system and tool cache markers and adaptive reasoning shape/effort. Budget
 thinking cannot fit a one-token cap and is rejected rather than rewritten.
 These deterministic contracts are not live cache-hit qualification.
 
+Explicit `GoogleCacheSession` owners offer direct Gemini create/refresh/delete,
+checked prefix projection and awaited `close()` cleanup under finite entry,
+operation, TTL, body and deadline ceilings. Construction is local; no CLI cache
+creation or automatic resource maintenance is enabled. See [native cache
+operations](../../docs/native-cache.md) and the separate opt-in live checklist.
+
 ## Proxy environment
 
 The default client snapshots `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and

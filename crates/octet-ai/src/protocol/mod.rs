@@ -89,6 +89,8 @@ pub(crate) fn cache_control(
     if req.cache_retention == CacheRetention::None {
         return None;
     }
+    // Pi packages/ai/src/api/anthropic-messages.ts:84-98: Long selects
+    // one hour only with route support; Short and unsupported Long omit TTL.
     Some(CacheControl {
         kind: "ephemeral",
         ttl: (req.cache_retention == CacheRetention::Long && compatibility.supports_long_retention)
