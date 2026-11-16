@@ -21,6 +21,8 @@
 
 ### Changed
 
+- Recorded-audio guidance documents input paths, durable media and separate transport-acceptance and recognition checks.
+
 - Recorded media reuses prepared bytes across turns and resumes from session data; Gemini audio uses Files uploads when inline requests grow.
 
 - First sessions can continue after cancellation and resume with their saved model.

@@ -237,7 +237,9 @@ and actual loopback HTTP requests. Fresh and raw-cache replay inventories includ
 new IDs absent from the pinned models.dev snapshot; explicit text-only, false or
 malformed assertions stay authoritative over catalog fallback. Custom normalized
 cache tests retain configured positive and negative audio assertions. This proves
-local wire construction, not provider acceptance or recognition.
+local wire construction, not provider acceptance or recognition. See the
+[separately authorized qualification checklist](maintainers/recorded-audio-qualification.md)
+for per-route transport and recognition evidence; inaccessible routes stay untested.
 
 ## Privacy and remote reads
 
