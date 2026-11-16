@@ -241,6 +241,7 @@ text docs/linux.md
 text docs/maintainers/README.md
 text docs/maintainers/conventions.md
 text docs/maintainers/provider-boundary.md
+text docs/maintainers/recorded-audio-qualification.md
 text docs/maintainers/pi-v0.10-candidate.md
 text docs/maintainers/prompts/cl.md
 text docs/maintainers/prompts/is.md
