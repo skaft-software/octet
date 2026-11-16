@@ -316,6 +316,95 @@ fn trailing_model_turn_gets_a_wire_only_user_continuation() {
     }
 }
 
+// Endpoint fixtures mirror the declared Google-wire routes. No request is sent.
+fn assert_route_continuation(endpoint: &str, base_url: &str) {
+    let mut model = model_with_api_name("gemini-4-argon");
+    std::sync::Arc::make_mut(&mut model.spec).endpoint = EndpointId(endpoint.into());
+    let route = std::sync::Arc::make_mut(&mut model.endpoint);
+    route.id = EndpointId(endpoint.into());
+    route.base_url = url::Url::parse(base_url).unwrap();
+    let request = Request {
+        messages: vec![
+            Message::User(UserMessage {
+                content: vec![UserPart::Text("Start".into())],
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![
+                    AssistantPart::ProviderMetadata(ProviderPartMetadata::GoogleThoughtSignature {
+                        signature: "c2lnLys=".into(),
+                    }),
+                    AssistantPart::ToolCall(ToolCall {
+                        async_execution: false,
+                        id: ToolCallId("call-1".into()),
+                        name: "lookup".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                    }),
+                ],
+                model: model.spec.id.clone(),
+                protocol: Protocol::GoogleGenerativeAi,
+            }),
+            Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: ToolCallId("call-1".into()),
+                    content: vec![ToolResultPart::Text("result".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                    tool_name: None,
+                })],
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("Done".into())],
+                model: model.spec.id.clone(),
+                protocol: Protocol::GoogleGenerativeAi,
+            }),
+        ],
+        ..base_request()
+    };
+    let original = serde_json::to_value(&request).unwrap();
+    let encoded = build_request(&model, &request).unwrap();
+    assert_eq!(
+        encoded.url.as_str(),
+        format!("{base_url}models/gemini-4-argon:streamGenerateContent?alt=sse")
+    );
+    let body: Value = serde_json::from_slice(&encoded.body).unwrap();
+    assert_eq!(
+        body["contents"],
+        serde_json::json!([
+            {"role": "user", "parts": [{"text": "Start"}]},
+            {"role": "model", "parts": [{"thoughtSignature": "c2lnLys=", "functionCall": {"id": "call-1", "name": "lookup", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"id": "call-1", "name": "lookup", "response": {"output": "result"}}}]},
+            {"role": "model", "parts": [{"text": "Done"}]},
+            {"role": "user", "parts": [{"text": "Continue."}]}
+        ]),
+        "{endpoint}"
+    );
+    assert_eq!(serde_json::to_value(&request).unwrap(), original);
+}
+
+#[test]
+fn trailing_model_continuation_on_google_route() {
+    assert_route_continuation(
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta/",
+    );
+}
+
+#[test]
+fn trailing_model_continuation_on_vertex_route() {
+    assert_route_continuation("vertex", "https://us-central1-aiplatform.googleapis.com/v1/projects/placeholder/locations/us-central1/publishers/google/");
+}
+
+#[test]
+fn trailing_model_continuation_on_opencode_route() {
+    assert_route_continuation("opencode-google", "https://opencode.ai/zen/v1/");
+}
+
+#[test]
+fn trailing_model_continuation_on_opencode_go_route() {
+    assert_route_continuation("opencode-go-google", "https://opencode.ai/inference/go/v1/");
+}
+
 #[test]
 fn existing_user_turn_needs_no_continuation() {
     let request = Request {
