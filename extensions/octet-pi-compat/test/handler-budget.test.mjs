@@ -288,7 +288,7 @@ test('a stalled factory is reported by name when the bridge starts', async t => 
   const metadata = JSON.parse(inspectWith([stalledFactory, healthy], { OCTET_PI_HANDLER_BUDGET_MS: '300' }).stdout).result;
   const peer = launch(t, [stalledFactory, healthy], { metadata, env: { OCTET_PI_HANDLER_BUDGET_MS: '300' } }); await peer.init(features);
   const issue = await peer.wait(frame => frame.method === 'notification' && /^Octet Pi Compat: /.test(frame.params?.message ?? ''));
-  assert.equal(issue.params.level, 'warning');
+  assert.equal(issue.params.level, 'error');
   assert.match(issue.params.message, /skipped: setup did not finish within [0-9.]+ s\. Check that its services are reachable, or disable\./);
   await peer.close();
 });

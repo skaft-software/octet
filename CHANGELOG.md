@@ -93,7 +93,7 @@
 - Pi editors acknowledge completed no-op input across native panel focus changes while preserving the draft and stale-write fences.
 - Wheel bursts publish promptly after ready input drains, preserving every scroll delta without a second frame-period wait.
 - Pi terminal listeners retain their one-second fail-open deadline with dispatcher supervision, keeping subsequent typing responsive.
-- Pi extension load failures appear as grouped, actionable errors while healthy sibling factories continue.
+- Pi extension load failures and discarded stalled factories appear as grouped, actionable errors while healthy siblings continue.
 
 ## [0.10.4] - 2026-11-12
 

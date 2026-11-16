@@ -317,7 +317,8 @@ going is left out of the mirror, named in `[Extension issues]`, and tried again
 the next time octet starts. A factory that throws during live load or reload is
 marked failed and its registrations are removed. Skipped factories are grouped in
 an error notice naming each extension and an action to take (check dependencies
-and settings, or disable); warnings describe degraded but still available features.
+and settings, or disable). This includes setup timeouts that discard a factory;
+warnings describe degraded but still available features.
 Sibling factories continue. Source-review and native authority
 refusals stay authoritative; review-only capture remains strict for a lone factory.
 
