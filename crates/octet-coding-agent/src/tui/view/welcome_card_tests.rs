@@ -3,6 +3,64 @@ use crate::tui::view::InteractiveShell;
 use sexy_tui_rs::strip_terminal_sequences;
 
 #[test]
+fn pi_welcome_uses_compact_identity_without_duplicate_help() {
+    use crate::extensions::resource_paths::pi_theme;
+    let imported = pi_theme::native_source(
+        std::path::Path::new("pi-fixture.json"),
+        &pi_theme::fixture("Pi palette", "#00aaff").to_string(),
+    )
+    .unwrap()
+    .into_owned();
+    for source in [
+        "[metadata]\nprofile = 'pi'\n",
+        "startup = 'pi'\n",
+        &imported,
+    ] {
+        let shell = InteractiveShell::test_shell_with_theme(
+            crate::tui::theme::test_theme_from_source(source),
+        );
+        let mut state = shell.state.borrow_mut();
+        state.startup_card_started_at = Some(Instant::now());
+        state.model = "custom/probe".into();
+        state.model_display = "Splash model must stay in the footer".into();
+        for safe in [false, true] {
+            state.safe_mode = safe;
+            for width in [24, 36, 80, 120] {
+                for budget in [2, 3, 7, 10] {
+                    let rows = render_welcome_card(&state, width, budget, Instant::now());
+                    let plain = strip_terminal_sequences(&rows.join("\n"));
+                    assert!(
+                        plain.contains(if safe { "safe mode" } else { "full access" }),
+                        "{plain}"
+                    );
+                    assert!(!plain.contains("Ctrl+C"), "{plain}");
+                    assert!(!plain.contains("what's new"), "{plain}");
+                    assert!(!plain.contains("loaded resources"), "{plain}");
+                    assert!(!plain.contains("Splash model"), "{plain}");
+                    assert!(rows
+                        .iter()
+                        .all(|row| sexy_tui_rs::visible_width(row) <= usize::from(width)));
+                    if width >= 80 && budget >= 7 {
+                        assert_eq!(rows.len(), 4, "{plain}");
+                        assert_eq!(
+                            rows.iter()
+                                .filter(|row| strip_terminal_sequences(row).contains('█'))
+                                .count(),
+                            2,
+                            "{plain}"
+                        );
+                        assert!(
+                            strip_terminal_sequences(&rows[2]).contains("/changelog"),
+                            "{plain}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn default_welcome_omits_duplicate_help_across_layouts() {
     let shell = InteractiveShell::test_shell();
     let state = shell.state.borrow();
@@ -39,6 +97,7 @@ fn placeholder_geometry_matches_materialized_rows() {
         "[colors]\nsplash_compact = true\nsplash_box = '#d97757'\n",
         "[colors]\nsplash_compact = true\n",
         "startup = ' pI '\n",
+        "[metadata]\nprofile = 'pi'\n",
         "[colors]\ncontent_max_width = 32\n[layout]\ntranscript_inset = 4\ncomposer_padding = 3\nshow_header = true\n",
     ] {
         themes.push(crate::tui::theme::test_theme_from_source(source));
@@ -247,6 +306,7 @@ fn changelog_splash_tip_stays_bounded_without_moving_the_byte() {
 fn welcome_exit_hint_includes_ctrl_c_across_layouts() {
     for theme in [
         crate::tui::theme::test_theme(),
+        crate::tui::theme::test_theme_from_source("[metadata]\nprofile = 'pi'\n"),
         crate::tui::theme::test_theme_from_source("[metadata]\nname = 'Plain'\n"),
         crate::tui::theme::test_theme_from_source(
             "[colors]\nsplash = '#d97757'\nsplash_box = '#d97757'\n",
@@ -256,9 +316,9 @@ fn welcome_exit_hint_includes_ctrl_c_across_layouts() {
         for (width, budget) in [(24, 3), (24, 7), (80, 10), (160, 10)] {
             let rows = render_welcome_content(&shell.state.borrow(), width, budget);
             let plain = strip_terminal_sequences(&rows.join("\n"));
-            assert!(
-                plain.contains("Ctrl+C / Ctrl+D to exit")
-                    == !shell.state.borrow().theme.is_compiled_default(),
+            assert_eq!(
+                plain.contains("Ctrl+C / Ctrl+D to exit"),
+                !compact_welcome(&shell.state.borrow()),
                 "{width}/{budget}: {plain}"
             );
             assert!(rows
@@ -671,27 +731,30 @@ fn splash_model_adaptive_token_keeps_the_model_blended_gradient() {
 
 #[test]
 fn splash_compact_token_selects_default_splash_geometry() {
-    for (compact, logo_rows) in [(true, 2), (false, 6)] {
-        let source = format!(
-            r##"
+    for profile in ["octet", "pi"] {
+        for (compact, logo_rows) in [(true, 2), (false, 6)] {
+            let source = format!(
+                r##"
                 [metadata]
                 name = "Compact fixture"
+                profile = "{profile}"
                 adaptive = false
                 [colors]
                 splash = "#d97757"
                 splash_compact = {compact}
             "##,
-        );
-        let shell = InteractiveShell::test_shell_with_theme(
-            crate::tui::theme::test_theme_from_source(&source),
-        );
-        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
-        let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
-        let marked = rendered
-            .iter()
-            .filter(|line| strip_terminal_sequences(line).contains('█'))
-            .count();
-        assert_eq!(marked, logo_rows, "compact={compact}: {rendered:?}");
+            );
+            let shell = InteractiveShell::test_shell_with_theme(
+                crate::tui::theme::test_theme_from_source(&source),
+            );
+            shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+            let rendered = render_welcome_card(&shell.state.borrow(), 80, 10, Instant::now());
+            let marked = rendered
+                .iter()
+                .filter(|line| strip_terminal_sequences(line).contains('█'))
+                .count();
+            assert_eq!(marked, logo_rows, "compact={compact}: {rendered:?}");
+        }
     }
 }
 

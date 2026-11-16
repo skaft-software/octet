@@ -554,10 +554,10 @@ splash_box = "#d97757"
                 .map(|row| strip_terminal_sequences(row))
                 .collect::<Vec<_>>();
             assert!(rows.len() <= height);
-            assert!(plain[0].starts_with("octet v"));
-            assert!(plain[1].contains(UPDATE_COMMAND));
+            assert!(plain[1].contains("octet  v"));
+            assert!(plain[2].contains(UPDATE_COMMAND));
             assert!(!plain.join("\n").contains("/changelog"));
-            assert_eq!(rows.len(), 6);
+            assert_eq!(rows.len(), 4);
             assert!(!plain.join("\n").contains('`'));
         }
     }

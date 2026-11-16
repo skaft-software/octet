@@ -289,6 +289,10 @@ assistant text, and an 80 ms braille spinner beside a non-shimmering working
 label (ASCII fallback without Unicode; reduced motion keeps a static native
 marker). Completed tool fills use the palette's success/error colors. Imported
 Pi JSON and newly generated adapter snapshots use the same presentation policy.
+The native welcome uses the compact 8×2 mark with `octet  v<version>` and
+`<access> · /changelog`, without duplicate model, discovery or exit help.
+Pi palette colors stay unchanged; custom extension headers still replace the
+entire native welcome.
 Tern requests native tool cards and rules around the real editor; its renderer
 still owns pixels, fonts and widget padding. Octet keeps its controls, settings
 and input ownership, so this is not a cell-for-cell copy of Pi's UI. Reviewed

@@ -9,12 +9,11 @@ use crate::tui::layout::PresentationLayout;
 // arrays use these sizes so geometry cannot drift from their row cardinality.
 const DEFAULT_TEXT_ROWS: usize = 2;
 const FILE_TEXT_ROWS: usize = 6;
-const PI_STARTUP_ROWS: usize = 6;
 // Keep the complete access label and changelog command beside the mark.
 const MIN_SPLASH_TEXT_WIDTH: u16 = 24;
 
 fn changelog_hint(state: &ShellState, width: u16) -> String {
-    let tip = if state.theme.is_compiled_default() {
+    let tip = if compact_welcome(state) {
         "/changelog"
     } else if state.theme.unicode() {
         "/changelog · what's new"
@@ -162,29 +161,6 @@ pub(super) fn restart_welcome_animation(state: &mut ShellState) {
     }
 }
 
-fn render_pi_startup(state: &ShellState, width: u16) -> Vec<String> {
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let accent = |text: &str| state.theme.fg("accent", text);
-    let muted = |text: &str| state.theme.dim(text);
-    let mut lines: [String; PI_STARTUP_ROWS] = [
-        format!("{} {}", accent("octet"), muted(&version)),
-        changelog_hint(state, width),
-        muted("Esc interrupt · Ctrl+C/Ctrl+D clear/exit · / commands · ! bash · Ctrl+O more"),
-        muted("Press Ctrl+O to show full startup help and loaded resources."),
-        String::new(),
-        muted(
-            "octet can explain its own features and look up its docs. Ask it how to use or extend octet.",
-        ),
-    ];
-    if let Some(hint) = super::startup_update::update_hint(state, width) {
-        lines[1] = hint;
-    }
-    lines
-        .into_iter()
-        .map(|line| fit_line(&line, width))
-        .collect()
-}
-
 pub(super) fn render_welcome_card(
     state: &ShellState,
     width: u16,
@@ -239,7 +215,6 @@ pub(super) fn welcome_placeholder_separator_rows(
     let (_, _, text_width) = splash_geometry(state, width);
     usize::from(
         max_rows < 7
-            || pi_startup(state)
             || text_width < MIN_SPLASH_TEXT_WIDTH
             || max_rows < splash_card_rows(state)
             || state.theme.role_rgb("splash_box").is_some(),
@@ -252,24 +227,14 @@ fn welcome_content_rows(state: &ShellState, width: u16, max_rows: usize) -> usiz
     }
     if max_rows < 7 {
         // Identity/permissions and setup or release hint; custom themes keep help.
-        return max_rows.min(if state.theme.is_compiled_default() {
-            2
-        } else {
-            3
-        });
-    }
-    if pi_startup(state) {
-        return PI_STARTUP_ROWS.min(max_rows);
+        return max_rows.min(if compact_welcome(state) { 2 } else { 3 });
     }
     let (_, _, text_width) = splash_geometry(state, width);
     if text_width < MIN_SPLASH_TEXT_WIDTH || max_rows < splash_card_rows(state) {
         // One wordmark or two logo rows, identity, hint and permissions.
         // File themes additionally retain the model/reasoning identity row.
-        return (1
-            + usize::from(width >= 8)
-            + 3
-            + 2 * usize::from(!state.theme.is_compiled_default()))
-        .min(max_rows);
+        return (1 + usize::from(width >= 8) + 3 + 2 * usize::from(!compact_welcome(state)))
+            .min(max_rows);
     }
     splash_card_rows(state)
 }
@@ -278,12 +243,24 @@ fn splash_card_rows(state: &ShellState) -> usize {
     // Two-column cards have breathing/frame rows around their text column.
     // The footer owns model identity for the default; file themes keep that
     // row and its following spacer, even with a compact logo.
-    let text_rows = if state.theme.is_compiled_default() {
+    let text_rows = if compact_welcome(state) {
         DEFAULT_TEXT_ROWS
     } else {
         FILE_TEXT_ROWS
     };
     text_rows + 2
+}
+
+// Native startup geometry belongs to the host, including Pi palette projections.
+// Keep palette/model policy independent and other file-theme layouts intact.
+fn compact_welcome(state: &ShellState) -> bool {
+    state.theme.is_compiled_default()
+        || pi_startup(state)
+        || (state.theme.metadata().profile == "pi"
+            && state
+                .theme
+                .resolve::<bool>("splash_compact")
+                .unwrap_or(true))
 }
 
 fn pi_startup(state: &ShellState) -> bool {
@@ -296,7 +273,7 @@ fn pi_startup(state: &ShellState) -> bool {
 /// Layout decisions shared by measurement and materialization. Colours and
 /// strings are intentionally absent: reserving invisible rows must not paint.
 fn splash_geometry(state: &ShellState, width: u16) -> (usize, usize, u16) {
-    let compact = state.theme.is_compiled_default()
+    let compact = compact_welcome(state)
         || state
             .theme
             .resolve::<bool>("splash_compact")
@@ -390,7 +367,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         return [
             identity,
             detail,
-            if state.theme.is_compiled_default() {
+            if compact_welcome(state) {
                 state.theme.dim("Ctrl+C / Ctrl+D to exit")
             } else {
                 format!(
@@ -401,19 +378,9 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             },
         ]
         .into_iter()
-        .take(max_rows.min(if state.theme.is_compiled_default() {
-            2
-        } else {
-            3
-        }))
+        .take(max_rows.min(if compact_welcome(state) { 2 } else { 3 }))
         .map(|line| fit_line(&line, width))
         .collect();
-    }
-    if pi_startup(state) {
-        return render_pi_startup(state, width)
-            .into_iter()
-            .take(max_rows)
-            .collect();
     }
 
     // Custom themes can opt into the compiled default's smaller splash
@@ -514,15 +481,13 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             ),
             width,
         ));
-        compact.push(
-            if state.theme.is_compiled_default() && model.trim().is_empty() {
-                fit_line(&state.theme.fg("warning", &identity), width)
-            } else {
-                super::startup_update::update_hint(state, width)
-                    .unwrap_or_else(|| changelog_hint(state, width))
-            },
-        );
-        if !state.theme.is_compiled_default() {
+        compact.push(if compact_welcome(state) && model.trim().is_empty() {
+            fit_line(&state.theme.fg("warning", &identity), width)
+        } else {
+            super::startup_update::update_hint(state, width)
+                .unwrap_or_else(|| changelog_hint(state, width))
+        });
+        if !compact_welcome(state) {
             compact.push(fit_line(&splash_text(&identity), width));
         }
         let access = if state.safe_mode {
@@ -555,7 +520,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
                 splash_text("to exit")
             )
         };
-        if !compiled_default {
+        if !compact_welcome(state) {
             compact.push(fit_line(&exit, width));
         }
         // The update action and setup/permission state outrank the changelog
@@ -569,7 +534,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         compact.truncate(max_rows);
         return compact;
     }
-    let mut text = if state.theme.is_compiled_default() {
+    let mut text = if compact_welcome(state) {
         let access = state.theme.bold(&state.theme.fg(
             if state.safe_mode { "accent" } else { "warning" },
             if state.safe_mode {
@@ -657,7 +622,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
         Vec::from(text)
     };
 
-    if !state.theme.is_compiled_default() {
+    if !compact_welcome(state) {
         if let Some(hint) = super::startup_update::update_hint(state, text_width) {
             text[1] = hint;
         }
