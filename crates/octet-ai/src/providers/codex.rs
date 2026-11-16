@@ -462,14 +462,6 @@ pub fn fallback_codex_models() -> Vec<DiscoveredCodexModel> {
         .collect()
 }
 
-/// Inventory requests carry account credentials, so they never follow redirects.
-fn inventory_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .build()
-}
-
 pub fn codex_models_url() -> anyhow::Result<url::Url> {
     let mut url = url::Url::parse(super::contract::CODEX.base_url)?.join("models")?;
     url.query_pairs_mut()
@@ -718,7 +710,8 @@ pub async fn discover_inventory_with(
         http::header::USER_AGENT,
         http::HeaderValue::from_str(&codex_user_agent())?,
     );
-    let response = inventory_client(Duration::from_secs(10))?
+    let client = discovery_http_client(Duration::from_secs(10))?;
+    let response = client
         .get(codex_models_url()?)
         .headers(headers)
         .send()
@@ -758,34 +751,10 @@ pub async fn discover_inventory_with(
     ))
 }
 
-#[cfg(test)]
-mod inventory_client_tests {
-    use super::inventory_client;
-    use std::time::Duration;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    #[tokio::test]
-    async fn inventory_client_does_not_follow_authenticated_redirects() {
-        let origin = MockServer::start().await;
-        let destination = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/models"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("location", format!("{}/stolen", destination.uri())),
-            )
-            .mount(&origin)
-            .await;
-        let status = inventory_client(Duration::from_secs(2))
-            .unwrap()
-            .get(format!("{}/models", origin.uri()))
-            .header("authorization", "Bearer inventory-secret")
-            .send()
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, reqwest::StatusCode::FOUND);
-        assert!(destination.received_requests().await.unwrap().is_empty());
-    }
+/// Construct a bounded no-redirect inventory client without making requests.
+pub fn discovery_http_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
 }

@@ -536,8 +536,11 @@ mod tests {
         let body = response.text().await.unwrap();
         assert!(body.contains("Signed in to octet."));
         assert!(body.contains("You can close this page and return to your terminal."));
-        assert!(body.contains("prefers-color-scheme"));
-        assert!(body.contains("data-bit=\"0\""));
+        // Presentation assertions live with the frontend browser_page callback.
+        assert!(
+            !body.contains("<html"),
+            "AI fallback carries only public labels"
+        );
         assert!(!body.contains("browser-secret"));
         assert_eq!(server.await.unwrap().unwrap(), BrowserSignIn::Saved);
         let saved = store.load().unwrap().unwrap();

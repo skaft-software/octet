@@ -250,6 +250,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_callback_page_preserves_native_presentation() {
+        let body = browser_page(
+            "Signed in to octet",
+            "Signed in to octet.",
+            "You can close this page and return to your terminal.",
+        );
+        assert!(body.contains("Signed in to octet."));
+        assert!(body.contains("prefers-color-scheme"));
+        assert!(body.contains("data-bit=\"0\""));
+    }
+
+    #[test]
     fn ssh_and_no_opener_default_to_device_without_disabling_browser_choice() {
         assert_eq!(default_method(false, false, true), LoginMethod::Browser);
         assert_eq!(default_method(false, true, true), LoginMethod::Device);

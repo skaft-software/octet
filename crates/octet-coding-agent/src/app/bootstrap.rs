@@ -510,6 +510,9 @@ fn strict_env(name: &str) -> anyhow::Result<Option<String>> {
     strict_env_value(name, octet_ai::auth::read_bounded_env(name))
 }
 
+#[cfg(test)]
+use octet_ai::providers::codex::discovery_http_client as discovery_client;
+
 fn blocking_discovery_client(timeout: Duration) -> reqwest::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
