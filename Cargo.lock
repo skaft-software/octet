@@ -531,7 +531,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1404,7 +1404,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-typescript",
  "unicode-segmentation",
- "unicode-width 0.2.2",
+ "unicode-width 0.2.3",
  "url",
  "vt100",
  "windows-sys 0.61.2",
@@ -1621,7 +1621,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1844,7 +1844,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2059,7 +2059,7 @@ dependencies = [
  "tempfile",
  "toml 1.1.6+spec-1.1.0",
  "unicode-segmentation",
- "unicode-width 0.2.2",
+ "unicode-width 0.2.3",
  "vt100",
 ]
 
@@ -2262,10 +2262,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2335,9 +2335,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.3"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -2651,9 +2651,9 @@ checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "unsafe-libyaml"
@@ -3251,27 +3251,27 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zstd"
-version = "0.14.3"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+checksum = "ad5020ab8f27bfc0024ad0a07aed6bf022a16208f479686fbed4fdd0c85eb0b3"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "8.2.0"
+version = "8.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+checksum = "5a9ea9cc2576c2fcc104e9cec04f46e3ede564f4fbc206831e4ef7e859a4140d"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.2+zstd.1.5.7"
+version = "2.1.3+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+checksum = "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d"
 dependencies = [
  "cc",
  "pkg-config",
