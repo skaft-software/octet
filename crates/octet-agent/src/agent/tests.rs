@@ -3101,6 +3101,8 @@ fn unsupported_tool_audio_is_an_error_without_media_or_indicator() {
     assert!(accepted.is_empty());
     assert!(is_error);
     assert!(text.contains("OpenAiResponses does not accept Wav audio input"));
+    assert!(text.contains(&responses.spec.endpoint.0));
+    assert!(text.contains(&responses.spec.api_name));
     assert_eq!(message.content.len(), 1);
 
     let chat = tool_media_model(

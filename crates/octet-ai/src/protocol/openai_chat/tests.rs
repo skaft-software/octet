@@ -1406,7 +1406,11 @@ fn test_build_request_audio_input() {
     };
     let req = Request {
         messages: vec![Message::User(UserMessage {
-            content: vec![UserPart::Media(crate::types::Media::Audio(audio_media))],
+            content: vec![
+                UserPart::Text("before".into()),
+                UserPart::Media(crate::types::Media::Audio(audio_media)),
+                UserPart::Text("after".into()),
+            ],
         })],
         ..base_request()
     };
@@ -1417,9 +1421,11 @@ fn test_build_request_audio_input() {
     let messages = body_val["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 1);
     let content = messages[0]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 1);
-    assert_eq!(content[0]["type"], "input_audio");
-    let input_audio = &content[0]["input_audio"];
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0]["text"], "before");
+    assert_eq!(content[1]["type"], "input_audio");
+    assert_eq!(content[2]["text"], "after");
+    let input_audio = &content[1]["input_audio"];
     assert_eq!(input_audio["format"], "wav");
     assert_eq!(input_audio["data"], "AAECAw==");
 }

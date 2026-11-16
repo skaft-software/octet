@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- Audio read errors identify the provider and model when the selected route cannot accept the clip.
+
 - Update quinn-udp to fix a receive loop that can spin after a truncated datagram. ([#735](https://github.com/skaft-software/octet/pull/735) by [@gafiatulin](https://github.com/gafiatulin))
 - Provider request traces count signed Google parts by kind without exposing signatures.
 - Live activity timers show whole seconds again (`28s`, `1m49s`, `1h01m01s`).

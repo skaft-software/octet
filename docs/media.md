@@ -64,7 +64,8 @@ request fits the provider's total request limit.
 - TUI paste, drop and `@` completion attach recognized local audio as typed media;
   typing a path alone does not attach it. `read` can return structured audio from
   local files or explicitly enabled HTTPS reads. A tool result remains media, not
-  a transcript, and is replayed with the conversation.
+  a transcript, and is replayed with the conversation. If the selected route
+  cannot accept the clip, the tool result reports the provider and model.
 - The native host accepts ordered typed `media` paths; its legacy `image_paths`
   field is image-only. The separate line-oriented RPC prompt `images` field is
   also image-only; it is not a native audio upload interface. A prompt can name a

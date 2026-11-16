@@ -355,12 +355,14 @@ pub(super) fn lower_tool_media_part(
                 .input_modalities
                 .contains(octet_ai::Modality::Audio)
             {
-                omissions
-                    .push("[audio omitted: the active model does not accept audio input]".into());
+                omissions.push(format!(
+                    "[audio omitted: provider {} model {} does not accept audio input]",
+                    model.spec.endpoint.0, model.spec.api_name
+                ));
             } else if !model.spec.supports_audio_input(audio.format) {
                 omissions.push(format!(
-                    "[audio omitted: {:?} does not accept {:?} audio input]",
-                    model.spec.protocol, audio.format
+                    "[audio omitted: {:?} does not accept {:?} audio input (provider {}, model {})]",
+                    model.spec.protocol, audio.format, model.spec.endpoint.0, model.spec.api_name
                 ));
             } else {
                 accepted_kinds.push(ToolOutputMediaKind::Audio);
