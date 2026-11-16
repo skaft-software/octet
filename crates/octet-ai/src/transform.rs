@@ -42,8 +42,7 @@ fn audio_fallback_text(audio: &crate::types::AudioMedia, placeholder: &str) -> S
 /// the input slice is never changed. The transform:
 ///
 /// - replaces unsupported images and audio with visible placeholders;
-/// - converts non-empty cross-model reasoning text into ordinary assistant
-///   text while dropping opaque/empty cross-model reasoning;
+/// - drops cross-model reasoning, including readable text and opaque state;
 /// - normalizes tool-call IDs to the common provider-safe wire shape; and
 /// - inserts synthetic error results for tool calls that have no result before
 ///   the next assistant message (or the end of history), except async calls
@@ -461,21 +460,10 @@ fn transform_assistant_part(
                 return Some(AssistantPart::Reasoning(reasoning.clone()));
             }
 
-            let redacted = reasoning.state.as_ref().is_some_and(|state| {
-                matches!(
-                    state.kind,
-                    crate::types::ReasoningStateKind::AnthropicRedacted { .. }
-                )
-            });
-            if redacted {
-                return None;
-            }
-            reasoning
-                .text
-                .as_ref()
-                .filter(|text| !text.trim().is_empty())
-                .cloned()
-                .map(AssistantPart::Text)
+            // Pi compatibility: packages/ai/src/api/transform-messages.ts:127-137.
+            // Foreign thinking is not a visible reply and its signatures are
+            // only valid for the producing model. The saved history is untouched.
+            None
         }
         AssistantPart::Media(Media::Image(_)) => {
             Some(AssistantPart::Text(ASSISTANT_IMAGE_PLACEHOLDER.to_string()))
@@ -517,18 +505,9 @@ fn transform_assistant_part_owned(
             if same_model {
                 return Some(AssistantPart::Reasoning(reasoning));
             }
-            if reasoning.state.as_ref().is_some_and(|state| {
-                matches!(
-                    state.kind,
-                    crate::types::ReasoningStateKind::AnthropicRedacted { .. }
-                )
-            }) {
-                return None;
-            }
-            reasoning
-                .text
-                .filter(|text| !text.trim().is_empty())
-                .map(AssistantPart::Text)
+            // Same rule as the borrowed transform; never turn foreign thinking
+            // into assistant text on the owned dispatch path.
+            None
         }
         AssistantPart::Media(Media::Image(_)) => {
             Some(AssistantPart::Text(ASSISTANT_IMAGE_PLACEHOLDER.to_string()))

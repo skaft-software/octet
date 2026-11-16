@@ -49,6 +49,7 @@
 - Model discovery and custom audio declarations retain capability provenance through catalog registration and cached inventories.
 - Pi session mirrors index single-entry reads and maintain ordinary appends without rescanning earlier history.
 - Prompts continue while an extension append process restarts, and fresh callbacks use the current generation.
+- Resumed sessions drop foreign-model thinking from provider requests while preserving saved reasoning and normalizing tool-call IDs.
 
 ## [0.10.4] - 2026-11-12
 

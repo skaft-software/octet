@@ -12593,3 +12593,6 @@ mod responses_prewarm;
 
 #[path = "cache_audit/agent.rs"]
 mod cache_audit;
+
+#[path = "agent_run/cross_model_resume.rs"]
+mod cross_model_resume;

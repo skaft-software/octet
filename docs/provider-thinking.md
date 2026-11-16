@@ -124,9 +124,14 @@ the same model/protocol. Fragmented signatures remain exact. Redacted stream
 chunks are decoded separately before their bytes are combined. A tool result
 comes from the supplied result message, not a guessed success response.
 
-Malformed or unsigned Bedrock reasoning blocks fail. Strict mode rejects
-incompatible continuation state; Lossy mode drops it with diagnostics rather
-than turning opaque state into plaintext. Buffers remain under the existing
+When a session switches models or protocols, encoding drops the previous
+model's reasoning (including readable thinking) and normalizes tool-call IDs.
+Same-model signed and redacted blocks stay available for continuation, even with
+empty text. The saved session retains the original reasoning and tool IDs.
+
+Malformed or unsigned same-model Bedrock reasoning blocks fail. Strict mode
+rejects incompatible continuation state; Lossy mode drops it with diagnostics
+rather than turning opaque state into plaintext. Buffers remain under the existing
 aggregate response limit. Opaque replay fields serialize unchanged for durable
 continuation, but their Debug representations are redacted.
 

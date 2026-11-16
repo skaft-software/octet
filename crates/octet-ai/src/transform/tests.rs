@@ -74,7 +74,7 @@ fn call(id: &str) -> AssistantPart {
 }
 
 #[test]
-fn cross_model_reasoning_becomes_text_but_empty_and_redacted_are_dropped() {
+fn cross_model_reasoning_is_dropped_without_becoming_visible_text() {
     let messages = vec![Message::Assistant(AssistantMessage {
         model: ModelId("source".to_string()),
         protocol: Protocol::AnthropicMessages,
@@ -107,11 +107,15 @@ fn cross_model_reasoning_becomes_text_but_empty_and_redacted_are_dropped() {
     let Message::Assistant(assistant) = &transformed[0] else {
         panic!("expected assistant")
     };
-    assert_eq!(assistant.content.len(), 1);
-    assert!(matches!(
-        &assistant.content[0],
-        AssistantPart::Text(text) if text == "use the cache"
-    ));
+    assert!(assistant.content.is_empty());
+    let owned = transform_request_messages_owned(
+        messages.clone(),
+        &model("target", Protocol::OpenAiResponses, false),
+    );
+    assert_eq!(
+        serde_json::to_value(&transformed).unwrap(),
+        serde_json::to_value(owned).unwrap()
+    );
     // The canonical source is immutable.
     let Message::Assistant(source) = &messages[0] else {
         unreachable!()
@@ -128,23 +132,25 @@ fn same_model_reasoning_state_is_preserved() {
             signature: "sig".to_string(),
         },
     };
-    let messages = vec![Message::Assistant(AssistantMessage {
-        model: ModelId("same".to_string()),
-        protocol: Protocol::AnthropicMessages,
-        content: vec![AssistantPart::Reasoning(ReasoningPart {
-            text: Some("thought".to_string()),
-            state: Some(state),
-        })],
-    })];
-    let transformed = transform_messages(
-        &messages,
-        &model("same", Protocol::AnthropicMessages, false),
-    );
-    assert!(matches!(
-        &transformed[0],
-        Message::Assistant(AssistantMessage { content, .. })
-            if matches!(&content[0], AssistantPart::Reasoning(_))
-    ));
+    for text in [Some("thought".to_string()), Some(String::new()), None] {
+        let messages = vec![Message::Assistant(AssistantMessage {
+            model: ModelId("same".to_string()),
+            protocol: Protocol::AnthropicMessages,
+            content: vec![AssistantPart::Reasoning(ReasoningPart {
+                text,
+                state: Some(state.clone()),
+            })],
+        })];
+        let transformed = transform_messages(
+            &messages,
+            &model("same", Protocol::AnthropicMessages, false),
+        );
+        assert!(matches!(
+            &transformed[0],
+            Message::Assistant(AssistantMessage { content, .. })
+                if matches!(&content[0], AssistantPart::Reasoning(_))
+        ));
+    }
 }
 
 #[test]
