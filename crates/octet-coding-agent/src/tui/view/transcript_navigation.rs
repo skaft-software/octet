@@ -1999,7 +1999,8 @@ mod tests {
         // cell of a frame the input owner must not guess at.
         shell.scroll_lines(-4);
         assert!(shell.state.borrow().pointer_render_geometry().is_none());
-        shell.begin_transcript_selection(2, 4, false);
+        // Row 1 is a notice text row; row 2 is its non-selectable separator.
+        shell.begin_transcript_selection(1, 4, false);
         {
             let state = shell.state.borrow();
             assert!(state.pending_selection_anchor.is_none());

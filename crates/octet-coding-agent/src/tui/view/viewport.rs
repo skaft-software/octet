@@ -19,18 +19,10 @@ pub(super) fn transcript_lines(state: &ShellState, width: u16) -> Ref<'_, Vec<St
     state.rendered_transcript(width)
 }
 
-pub(super) fn transcript_viewport_capacity(available: usize, scrolled: bool) -> usize {
-    if available == 0 {
-        return 0;
-    }
-    // Keep the transcript visually separate from the pinned surfaces whenever
-    // there is room. A scrolled viewport also owns one row for its navigation
-    // indicator, leaving every other row for semantic transcript content.
-    let breathing_row = 1;
-    // On a two-row transcript surface the navigation indicator temporarily
-    // occupies the breathing row so one semantic row remains inspectable.
-    let indicator_row = usize::from(scrolled && available > 2);
-    available.saturating_sub(breathing_row + indicator_row)
+pub(super) fn transcript_viewport_capacity(available: usize, _scrolled: bool) -> usize {
+    // Reuse the breathing row for the scroll hint so entering or leaving
+    // scrollback never changes the transcript capacity or consumes a scroll step.
+    available.saturating_sub(1)
 }
 
 pub(super) fn max_scroll_for_available(transcript_len: usize, available: usize) -> usize {
@@ -713,6 +705,26 @@ pub(super) fn render_shell_viewport_update(
 #[cfg(test)]
 mod tests {
     use super::wrap_overlay_text;
+
+    #[test]
+    fn scroll_hint_keeps_transcript_capacity_and_first_row_motion_stable() {
+        for available in [0, 1, 2, 3, 20] {
+            let live = super::transcript_viewport_capacity(available, false);
+            let scrolled = super::transcript_viewport_capacity(available, true);
+            assert_eq!(live, available.saturating_sub(1));
+            assert_eq!(scrolled, live, "scroll hint must reuse the breathing row");
+            if live > 0 {
+                let total = 100usize;
+                let live_start = total - live;
+                let scrolled_start = total - 1 - scrolled;
+                assert_eq!(scrolled_start + 1, live_start);
+                assert_eq!(
+                    super::max_scroll_for_available(total, available),
+                    total - live
+                );
+            }
+        }
+    }
 
     #[test]
     fn overlay_truecolor_does_not_leak_a_background_to_following_rows() {

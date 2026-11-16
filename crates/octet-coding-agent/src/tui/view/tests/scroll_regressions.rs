@@ -83,6 +83,32 @@ fn worker_history_shell() -> InteractiveShell {
 }
 
 #[test]
+fn first_scroll_reveals_one_older_row_and_returns_to_live_without_resizing() {
+    let mut shell = worker_history_shell();
+    let capacity = {
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, WIDTH, Instant::now());
+        transcript_viewport_capacity(chrome.transcript_rows, false)
+    };
+    let render = |shell: &InteractiveShell| {
+        render_shell_viewport_at(&shell.state.borrow(), WIDTH, Instant::now())
+            .into_iter()
+            .take(capacity)
+            .collect::<Vec<_>>()
+    };
+    let live = render(&shell);
+    shell.scroll_lines(-1);
+    let scrolled = render(&shell);
+    assert!(capacity > 1);
+    assert_eq!(scrolled.len(), live.len());
+    assert_eq!(&scrolled[1..], &live[..live.len() - 1]);
+    assert_eq!(shell.state.borrow().scroll_from_bottom.get(), 1);
+    shell.scroll_lines(1);
+    assert_eq!(render(&shell), live);
+    assert!(shell.state.borrow().follow_tail);
+}
+
+#[test]
 fn semantic_scroll_holds_anchor_through_tool_and_model_lifecycle() {
     use octet_agent::ToolOutput;
 
