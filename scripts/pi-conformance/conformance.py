@@ -386,9 +386,9 @@ def mock_tool(tool, args):
 SCENARIOS = {
     'project-trust': (['project-trust.ts'], drive.MockProvider, s_project_trust),
     'auto-commit-on-exit': ([os.path.join(EXAMPLES, 'auto-commit-on-exit.ts')], drive.MockProvider, s_auto_commit),
-    'with-deps': ([fixture_dir('with-deps')], lambda: drive.MockProvider('parse_duration', {'duration': '2 days'}), s_with_deps),
+    'with-deps': (['with-deps/index.ts'], lambda: drive.MockProvider('parse_duration', {'duration': '2 days'}), s_with_deps),
     'rpc-demo': (['rpc-demo.ts'], None, s_rpc_demo),
-    'custom-provider-anthropic': ([fixture_dir('custom-provider-anthropic')], None, s_provider_registration('custom-anthropic')),
+    'custom-provider-anthropic': (['custom-provider-anthropic/index.ts'], None, s_provider_registration('custom-anthropic')),
     'custom-provider-gitlab-duo': (['custom-provider-gitlab-duo/index.ts'], None, s_provider_registration('gitlab-duo')),
     'hello': (['hello.ts'], mock_tool('hello', {'name': 'octet'}), s_hello),
     'commands': (['commands.ts'], None, s_commands),
@@ -458,11 +458,12 @@ def run_one(host, examples, mock_factory, fn):
     env = None
     result = {}
     try:
+        examples = [fixture_dir(path.split('/')[0]) if path in ('with-deps/index.ts', 'custom-provider-anthropic/index.ts') else path for path in examples]
         env = make_env(host, examples, mock.url, not getattr(fn, 'trust_prompt', False))
         if getattr(fn, 'setup', None):
             fn.setup(env.ws)
-        term = start(env)
         before = fingerprint(env.agent)
+        term = start(env)
         try:
             obs, tools = fn(term, mock)
             screen = term.screen()
@@ -499,6 +500,22 @@ def compare(columns):
     return table
 
 
+def verdict(columns):
+    """Equality alone cannot certify a journey both hosts failed to execute."""
+    table = compare(columns)
+    safe = safety(columns)
+    failures = [f'{host}: {columns.get(host, {}).get("error", "host not executed")}'
+                for host in ALL_HOSTS if host not in columns or 'error' in columns[host]]
+    for host, column in columns.items():
+        failures += [f'{host}: {key} was false' for key, value in column.get('obs', {}).items()
+                     if value is False]
+    if safe is not None and not safe['ok']:
+        failures.append('Pi agent directory safety failed')
+    passed = bool(table) and not failures and all(row['current_matches_pi'] for row in table)
+    return {'status': 'pass' if passed else 'fail', 'rows': table,
+            'agent_dir_safety': safe, 'failures': failures, 'columns': columns}
+
+
 def fmt(value):
     text = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
     return text if len(text) <= 60 else text[:57] + '...'
@@ -533,15 +550,12 @@ def main():
             columns[host] = run_one(host, examples, mock_factory, fn)
             print(f'{name:28} {host:8} load={os.getloadavg()[0]:.1f}', 'ERROR ' + columns[host]['error'][:100] if 'error' in columns[host] else 'ok', flush=True)
         pi = columns.get('pi', {})
-        if 'error' in pi:
-            results[name] = {'status': 'skipped', 'reason': 'native Pi cannot run it offline: ' + pi['error'][:200], 'columns': columns}
-            continue
-        table = compare(columns)
-        diffs = {h: frame_diff(pi['final_rows'], columns[h].get('final_rows', [])) for h in ('current',) if 'final_rows' in columns.get(h, {})}
+        diffs = {h: frame_diff(pi.get('final_rows', []), columns[h].get('final_rows', [])) for h in ('current',) if 'final_rows' in columns.get(h, {})}
+        results[name] = {**verdict(columns), 'frame_diff': diffs}
+        # Historical BLOCKED notes are diagnostic context, never blanket waivers.
         blocked = BLOCKED.get(name) or BLOCKED.get(name.split('/')[0])
-        safe = safety(columns)
-        passed = bool(table) and (safe is None or safe['ok']) and all(row['current_matches_pi'] for row in table) and 'error' not in columns.get('current', {})
-        results[name] = {'status': 'pass' if passed else ('blocked' if blocked else 'fail'), **({'reason': blocked} if blocked and not passed else {}), 'rows': table, 'agent_dir_safety': safe, 'frame_diff': diffs, 'columns': columns}
+        if blocked and results[name]['status'] == 'fail':
+            results[name]['reason'] = blocked
         json.dump(results, open(args.out + '/conformance.json', 'w'), indent=1, ensure_ascii=False)
     json.dump(results, open(args.out + '/conformance.json', 'w'), indent=1, ensure_ascii=False)
     lines = ['| example / observation | Pi | current | current = Pi |', '|---|---|---|---|']

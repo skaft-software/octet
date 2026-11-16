@@ -24,10 +24,14 @@ Environment: `E2E_OCTET` (binary, default `target/release/octet`), `E2E_NODE_BIN
 directory), `E2E_TMP`, `E2E_WIRE=<prefix>` (tap the extension wire into `<prefix>.current`).
 Options: `--only a,b`, `--hosts pi,current`, `--all-examples`, `--skip-core`.
 
-Output: `conformance.json` and `conformance.md`. A row passes when `current` equals Pi. An example
-passes when every row passes and the migration-safety check below holds. `blocked` marks a known
-difference with its reason in `BLOCKED`; `skipped` is an example that cannot run offline (reason
-in `SKIP`) or that native Pi itself cannot load offline.
+Output: `conformance.json` and `conformance.md`. A row compares `current` with Pi. A journey
+passes only when both hosts execute, every boolean observation succeeds, every row matches and
+the migration-safety check below holds. Equal failures are failures, not parity. Reference crashes
+and historical `BLOCKED` notes never waive a failure; only explicit offline prerequisites in `SKIP`
+produce skips. `--hosts` is diagnostic only: an unpaired run cannot pass conformance.
+
+Run the offline scoring regressions with `python3 -B scripts/pi-conformance/selftest.py`.
+Agent-directory fingerprints begin before startup, including startup-time writes.
 
 ## Scenarios
 

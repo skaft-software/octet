@@ -104,6 +104,7 @@
 - Pi streaming observers receive subsequent events as soon as their handler settles, independently of dispatcher status delivery.
 - Cache accounting honors explicit final zero counters and counts one-hour writes once in session reports.
 - Payload hooks retain unchanged request bytes and field order across turns, preserving stable cache prefixes.
+- Pi conformance journeys require successful observations on both hosts and include startup writes in migration-safety checks.
 
 ## [0.10.4] - 2026-11-12
 
