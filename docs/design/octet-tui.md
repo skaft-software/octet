@@ -482,10 +482,12 @@ tool card with recorded timing ends its nested result block with the same subdue
 `Took <duration>` row, after output/diff/media/error evidence and outside output
 preview budgets. The theme's `tool_duration` template can restyle or hide it;
 unfinished cards and older results without recorded timing never invent a duration.
-Duration decoration is not copied as tool output. Running shell-tool cards end
-with a static `Running · Esc to interrupt` row in the same result block instead
-of a bare ellipsis or ambiguous waiting placeholder. Live ellipsis-only output
-rows are replaced by that state; completed literal ellipses remain output. Local
+Duration decoration is not copied as tool output. Empty running shell-tool cards
+show a static `Running · Esc to interrupt` row instead of an ambiguous waiting
+placeholder. Live ellipsis-only output rows are replaced by that state; completed
+literal ellipses remain output. Substantive live output uses the existing active
+event marker and Working indicator, without an extra row that could crowd the
+latest progress out of a short terminal. Local
 `!` shell headings use `[running]`. No additional animation or clock is created. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning

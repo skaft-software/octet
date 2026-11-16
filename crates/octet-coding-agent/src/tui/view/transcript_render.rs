@@ -317,7 +317,14 @@ pub(super) fn render_tool(
             }
         }
     }
-    if !panel.finished && is_shell_tool(panel.name.as_str()) {
+    if !panel.finished
+        && is_shell_tool(panel.name.as_str())
+        && (output_lines.lines.is_empty()
+            || panel
+                .output
+                .lines()
+                .any(|line| matches!(line.trim(), "..." | "…")))
+    {
         // Pi compatibility source: packages/coding-agent/src/core/tools/
         // render-utils.ts:142-163 exposes partial execution through Elapsed.
         // Native cards use a static state, without another timer/animation.

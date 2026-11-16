@@ -238,6 +238,7 @@ fn polish_running_shell_cards_never_end_with_bare_ellipsis() {
     for (output, expected) in [
         ("...", "Bash  sleep 1\n└ Running · Esc to interrupt"),
         ("", "Bash  sleep 1\n└ Running · Esc to interrupt"),
+        ("step", "Bash  sleep 1\n└ step"),
         (
             "step\n...",
             "Bash  sleep 1\n└ step\n  Running · Esc to interrupt",
