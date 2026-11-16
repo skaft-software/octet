@@ -250,6 +250,114 @@ async fn remote_editor_checkpoints_fence_owner_mount_revision_and_native_changes
 }
 
 #[tokio::test]
+async fn remote_editor_completed_noop_can_ack_after_panel_takes_focus() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, _) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(&mut extensions, &mut frontend, &["editor"]).await;
+    // The event was issued to the component before the native panel opened.
+    // A release/consumed input completes with the existing draft, not an edit.
+    assert!(extensions.route_remote_ui_event(
+        &mut frontend.shell,
+        &key(
+            KeyCode::Char('a'),
+            KeyEventKind::Release,
+            KeyModifiers::NONE
+        ),
+        false,
+    ));
+    let (owner, ack) = checkpoint(&extensions, 1, 1);
+    frontend
+        .shell
+        .show_overlay_text("Extension management".into());
+    let native = frontend.shell.extension_editor_snapshot();
+    assert!(!native.focused);
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &ack, native.text.clone(), &mut frontend.shell)
+        .expect("completed no-op input does not ask to take ownership from the panel");
+    let after = frontend.shell.extension_editor_snapshot();
+    assert_eq!(after.text, native.text);
+    assert_eq!(after.revision, native.revision);
+    assert_eq!(after.cursor, native.cursor);
+    assert!(!after.focused);
+    // The receipt grants no write, stale-input, mount or owner authority.
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &ack, native.text.clone(), &mut frontend.shell,)
+        .is_err());
+    let mut next = ack.clone();
+    next.checkpoint_revision += 1;
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(
+            &owner,
+            &next,
+            "must not replace the user's draft".into(),
+            &mut frontend.shell,
+        )
+        .is_err());
+    let mut stale = next.clone();
+    stale.input_revision = 0;
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &stale, native.text.clone(), &mut frontend.shell,)
+        .is_err());
+    let mut foreign = owner.clone();
+    foreign.process_generation += 1;
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&foreign, &next, native.text.clone(), &mut frontend.shell,)
+        .is_err());
+    // The same mounted component can edit again after the panel releases focus.
+    frontend.shell.close_overlay();
+    input(&mut extensions, &mut frontend, 'b');
+    next.input_revision = 2;
+    let continued = format!("{}b", native.text);
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &next, continued.clone(), &mut frontend.shell)
+        .unwrap();
+    assert_eq!(frontend.shell.pending(), continued);
+    next.checkpoint_revision += 1;
+    // No-op text alone is insufficient if the native caret revision moved.
+    frontend
+        .shell
+        .extension_set_editor_at(continued.clone(), Some(0));
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &next, continued, &mut frontend.shell,)
+        .is_err());
+    // New native text is likewise protected, even if the component echoes it.
+    frontend.shell.extension_paste_editor("-native".into());
+    let edited = frontend.shell.extension_editor_snapshot();
+    assert!(extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &next, edited.text.clone(), &mut frontend.shell,)
+        .is_err());
+    retire(&mut extensions, &mut frontend);
+    assert_eq!(frontend.shell.pending(), edited.text);
+    assert!(!frontend
+        .shell
+        .debug_snapshot()
+        .contains("were not acknowledged"));
+    assert_eq!(
+        frontend.shell.extension_editor_snapshot().cursor,
+        edited.cursor
+    );
+    frontend.shell.extension_paste_editor("!".into());
+    assert_eq!(
+        frontend.shell.pending(),
+        format!(
+            "{}!{}",
+            &edited.text[..edited.cursor],
+            &edited.text[edited.cursor..]
+        )
+    );
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
 async fn remote_editor_noop_and_release_checkpoints_are_not_lost_edit_claims() {
     let temp = tempfile::tempdir().unwrap();
     let (mut extensions, _) = fixture(&temp).await;
@@ -628,9 +736,20 @@ async fn remote_editor_host_clear_is_one_shot_and_never_grants_panel_writes() {
     assert!(
         extensions
             .remote_ui
-            .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+            .checkpoint_editor(&owner, &clear, "new draft".into(), &mut frontend.shell)
             .is_err(),
-        "clear permission is one-shot"
+        "clear permission is one-shot and never grants a new draft write"
     );
+    // A later empty checkpoint is now a read-only receipt, not a second clear.
+    let native = frontend.shell.extension_editor_snapshot();
+    extensions
+        .remote_ui
+        .checkpoint_editor(&owner, &clear, String::new(), &mut frontend.shell)
+        .unwrap();
+    let after = frontend.shell.extension_editor_snapshot();
+    assert_eq!(after.revision, native.revision);
+    assert_eq!(after.cursor, native.cursor);
+    assert_eq!(after.text, native.text);
+    assert!(!after.focused);
     extensions.shutdown().await;
 }

@@ -417,6 +417,11 @@ and mount/handle/revision/owner fences; Up/Down and Tab stay host-owned.
 The 193 immutable Pi 1.0.2 Editor/history cases and separate ownership guard pass
 against the compiled production Rust service. Real App/adapter tests separately
 qualify admission and custom-editor registry completion/clear/retirement.
+A completed no-op or key release may acknowledge the unchanged draft after a
+native panel takes focus. That receipt changes no text, caret or input ownership.
+New draft writes still require composer focus; changed native revisions and stale
+owner, mount, input or checkpoint identities are rejected. Closing the panel lets
+the same component continue editing, with no replay of uncertain input.
 
 Raw extension terminal writes are not allowed into frames. The adapter recognizes
 allowlisted mouse-mode writes as capture intent and bounded complete OSC 777

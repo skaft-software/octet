@@ -114,8 +114,8 @@ struct EditorRecovery {
     /// Native draft revision the component's next checkpoint answers.
     composer_revision: u64,
     // The host cleared the slot: an admitted command may move focus into a
-    // panel before its editor answers, so permit only that acknowledged empty
-    // clear checkpoint and nothing else while focus is elsewhere.
+    // panel before its editor answers, so permit that acknowledged empty
+    // clear receipt while focus is elsewhere, but never a new draft write.
     expected_clear: bool,
 }
 
@@ -856,23 +856,33 @@ impl RemoteUi {
         }
         // The host cleared the slot and the component answers that exact clear.
         // A native command can move focus into a panel before the answer
-        // arrives, so only this acknowledged empty replacement is admitted
+        // arrives, so admit the acknowledged empty replacement as a receipt
         // without focus; an unrelated draft still cannot write while a panel
         // owns input.
         let admitted_clear = text.is_empty()
             && editor.expected_clear
             && checkpoint.input_revision == editor.acknowledged_input_revision
             && checkpoint.checkpoint_revision > editor.checkpoint_revision;
-        if (!snapshot.focused && !admitted_clear) || snapshot.revision != editor.composer_revision {
+        // A completed no-op/release can arrive after a native panel takes
+        // focus. Acknowledge only the unchanged recovery snapshot, without
+        // moving text, caret or focus. Pi retains editor text across dialogs:
+        // packages/coding-agent/src/modes/interactive/interactive-mode.ts:2938-2957;
+        // packages/tui/src/tui.ts:1153-1158 routes new input only to current focus.
+        // Rust must distinguish a receipt from a write across the process boundary.
+        let unchanged_receipt = !snapshot.focused && text == snapshot.text;
+        if (!snapshot.focused && !admitted_clear && !unchanged_receipt)
+            || snapshot.revision != editor.composer_revision
+        {
             return Err(invalid(
                 "native composer changed or has another input owner",
             ));
         }
         // The process guard excludes concurrent cancellation and retirement;
         // the same shell owner serializes rescue, local edits and focus changes.
-        let committed = if admitted_clear {
-            // This is the receipt for the host's already-applied clear, not
-            // another text decision. Re-clearing here creates an echo loop.
+        let committed = if admitted_clear || unchanged_receipt {
+            // A receipt for existing native state is not another text decision.
+            // Re-clearing creates an echo loop; an unfocused no-op must not
+            // acquire text/caret authority from its component's local state.
             snapshot
         } else {
             let cursor = mount

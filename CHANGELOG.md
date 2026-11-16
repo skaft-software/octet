@@ -76,6 +76,7 @@
 - Model labels consistently show full IDs and distinct display names across the footer, picker, splash and session views.
 - Enabling Pi compatibility returns editable control while factories load with a visible status and hook-readiness tracing.
 - Model discovery keeps capability, pricing and audio provenance together during route registration.
+- Pi editors acknowledge completed no-op input across native panel focus changes while preserving the draft and stale-write fences.
 
 ## [0.10.4] - 2026-11-12
 
