@@ -47,7 +47,13 @@ impl CodexResolver {
         }
     }
 
-    pub fn with_refresh_lock_wait(
+    pub(crate) fn with_lock_wait(mut self, wait: std::time::Duration) -> Self {
+        self.refresh_lock_wait = wait;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_refresh_lock_wait(
         store: CredentialStore,
         refresh_lock_wait: std::time::Duration,
     ) -> Self {
@@ -140,7 +146,9 @@ impl CodexResolver {
     ///
     /// Discovery runs before the normal AI client exists, but it must still use
     /// the same refresh, account routing, and plan detection as inference.
-    pub async fn discovery_headers(&self) -> Result<(http::HeaderMap, oauth::SubscriptionClaims)> {
+    pub(crate) async fn discovery_headers(
+        &self,
+    ) -> Result<(http::HeaderMap, oauth::SubscriptionClaims)> {
         let cred = self.load_valid().await?;
         let claims = oauth::subscription_claims(&cred.tokens.access_token)?;
         let mut headers = http::HeaderMap::new();

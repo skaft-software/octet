@@ -1778,3 +1778,25 @@ fn codex_model_cache_fails_closed_when_stale_future_dated_or_incomplete() {
         assert!(load_codex_model_cache(&store, &claims).is_err(), "{name}");
     }
 }
+
+#[tokio::test]
+async fn frontend_catalog_binding_rejects_replaced_account_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("codex.json");
+    write_codex_credential(&path, false, "plus");
+    let store = crate::auth::codex::CredentialStore::new(&path);
+    let mut catalog = ModelCatalog::default();
+    register_openai_codex(&mut catalog, store, true).unwrap();
+    let model = catalog
+        .resolve(&ModelId("codex/gpt-6.1-sol".into()))
+        .unwrap();
+    let Auth::Dynamic(resolver) = &model.endpoint.auth else {
+        panic!("shared dynamic resolver required")
+    };
+    assert!(resolver.resolve().await.is_ok());
+    write_codex_credential(&path, false, "pro");
+    assert!(
+        resolver.resolve().await.is_err(),
+        "a new account/plan needs a new catalog binding"
+    );
+}

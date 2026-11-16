@@ -21,6 +21,7 @@
 - The default splash is a compact two-line mark with the version, access mode and `/changelog`.
 - Document audio input paths, capability sources and provider wire formats.
 - Agent and subagent turns handle large tool-call batches in bounded concurrent waves while preserving explicit budgets.
+- Use shared Codex login, discovery and route binding in the frontend while retaining native presentation and model-selection policy.
 
 ### Fixed
 

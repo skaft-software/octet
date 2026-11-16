@@ -9,3 +9,11 @@ pub mod inventory_metadata;
 pub mod models;
 pub mod pricing;
 pub mod reasoning;
+
+/// Credential-free definitions; does not initialize providers or access storage.
+pub fn builtin_provider_definitions() -> Vec<contract::ProviderDefinition> {
+    contract::ALL_PROVIDER_DECLARATIONS
+        .iter()
+        .map(contract::ProviderDeclaration::definition)
+        .collect()
+}

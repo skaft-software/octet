@@ -1269,39 +1269,6 @@ where
     .ok()
 }
 
-async fn bounded_discovery_json_async(
-    response: reqwest::Response,
-    label: &str,
-) -> anyhow::Result<serde_json::Value> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DISCOVERY_BODY_BYTES as u64)
-    {
-        anyhow::bail!(
-            "{label} response exceeds the {}-byte limit",
-            MAX_DISCOVERY_BODY_BYTES
-        );
-    }
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if bytes
-            .len()
-            .checked_add(chunk.len())
-            .is_none_or(|length| length > MAX_DISCOVERY_BODY_BYTES)
-        {
-            anyhow::bail!(
-                "{label} response exceeds the {}-byte limit",
-                MAX_DISCOVERY_BODY_BYTES
-            );
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| anyhow::anyhow!("invalid {label} response: {error}"))
-}
-
 /// Conservative fallback for provider `/models` responses that omit
 /// architecture metadata. Gemini and Claude families are image-capable by
 /// contract, as are the explicitly listed open multimodal families below.
@@ -6048,6 +6015,7 @@ use octet_ai::providers::codex::codex_models_from_response;
 /// Decode an inventory, failing closed per model: an entry with malformed or
 /// unusable reasoning metadata is left out, never registered with guessed
 /// choices, and never costs the account its other models.
+#[cfg(test)]
 use octet_ai::providers::codex::codex_inventory_from_response;
 
 /// Report inventory entries left out for unusable reasoning metadata.
@@ -6220,6 +6188,7 @@ use octet_ai::providers::codex::conservative_offline_codex_models;
 
 use octet_ai::providers::codex::fallback_codex_models;
 
+#[cfg(test)]
 use octet_ai::providers::codex::codex_models_url;
 
 /// Wall-clock envelope for the SELECTED route's Codex inventory work.
@@ -6322,50 +6291,20 @@ fn discover_codex_models_with(
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        #[cfg(test)]
-        let resolver =
-            crate::auth::codex::CodexResolver::with_refresh_lock_wait(store, refresh_lock_wait);
-        #[cfg(not(test))]
-        let resolver = {
-            let _ = refresh_lock_wait;
-            crate::auth::codex::CodexResolver::new(store)
-        };
-        let (mut headers, claims) = resolver.discovery_headers().await?;
-        startup_phase("codex.credentials");
-        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("Codex model discovery cancelled before the inventory request");
-        }
-        let static_headers =
-            crate::providers::public_headers(crate::providers::CODEX.extra_headers)?;
-        for (name, value) in &static_headers {
-            headers.insert(name.clone(), value.clone());
-        }
-        headers.insert(
-            http::header::USER_AGENT,
-            http::HeaderValue::from_str(&codex_user_agent())?,
-        );
-
-        let url = codex_models_url()?;
-        startup_phase("codex.inventory");
-        let response = discovery_client(DISCOVERY_TIMEOUT)?
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?
-            .error_for_status()
-            .map_err(|error| anyhow::anyhow!("GET Codex models failed: {error}"))?;
-        let body = bounded_discovery_json_async(response, "Codex models").await?;
-        let inventory = codex_inventory_from_response(&body)?;
-        report_skipped_codex_models(&inventory.skipped);
-        Ok(CodexDiscovery {
-            claims,
-            models: inventory.models,
-        })
+        let (discovery, skipped) =
+            octet_ai::providers::codex::discover_inventory_with(&store, refresh_lock_wait, || {
+                startup_phase("codex.credentials");
+                if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    anyhow::bail!("Codex model discovery cancelled before the inventory request");
+                }
+                startup_phase("codex.inventory");
+                Ok(())
+            })
+            .await?;
+        report_skipped_codex_models(&skipped);
+        Ok(discovery)
     })
 }
-
-use octet_ai::providers::codex::codex_user_agent;
 
 /// Read the explicit opt-in Codex context-window override.
 ///
@@ -6448,6 +6387,7 @@ fn codex_context_record_note(
 /// Select the coding product's inference contract independently of inventory
 /// transport preferences. Like Pi, use ordinary Responses with parallel calls;
 /// explicitly selected Lite remains supported by `octet-ai` for SDK callers.
+#[cfg(test)]
 use octet_ai::providers::codex::codex_inference_capabilities;
 
 /// Register the OpenAI Codex (Sign in with ChatGPT) endpoint and discover the
@@ -6474,17 +6414,6 @@ fn register_openai_codex_with_notes(
 ) -> anyhow::Result<()> {
     use crate::auth::codex;
 
-    let declaration = &crate::providers::CODEX;
-    declaration.validate().map_err(|error| {
-        anyhow::anyhow!("invalid {} provider declaration: {error}", declaration.id)
-    })?;
-    let route = declaration.inventory_route().ok_or_else(|| {
-        anyhow::anyhow!(
-            "{} provider declaration has no subscription route",
-            declaration.id
-        )
-    })?;
-
     let Some(initial_claims) = codex::usable_subscription_claims(&store)? else {
         return Ok(());
     };
@@ -6502,77 +6431,22 @@ fn register_openai_codex_with_notes(
         cfg!(test),
         discover_codex_models_within_envelope,
     );
-    let resolver = std::sync::Arc::new(codex::CodexResolver::new(store));
-
-    let mut default_headers = crate::providers::public_headers(declaration.extra_headers)?;
-    default_headers.insert(
-        http::header::USER_AGENT,
-        http::HeaderValue::from_str(&codex_user_agent())?,
-    );
-
-    catalog.register_endpoint(Endpoint {
-        id: EndpointId(route.endpoint_id.into()),
-        base_url: url::Url::parse(declaration.base_url)?,
-        auth: Auth::dynamic(resolver),
-        default_headers,
-        // The declaration prefers the cached Responses WebSocket. AiClient
-        // retains HTTP/SSE as a conservative fallback for unavailable or
-        // provider-rejected sockets.
-        transport: route.transport,
-        runtime: route.runtime,
-        timeout: PROVIDER_RESPONSE_HEADER_TIMEOUT,
-    })?;
-
+    let resolver = std::sync::Arc::new(codex::CodexResolver::for_account(store, &initial_claims));
     let user_override = codex_context_override_from_env()?;
-
-    for model in models {
-        // GPT-6 routes are always namespaced so an OAuth selection cannot be
-        // confused with the public OpenAI route when credentials change. Other
-        // Codex ids retain their historical collision-based compatibility.
-        let catalog_id = if known_gpt_6_model(&model.id)
-            || catalog.resolve(&ModelId(model.id.clone())).is_ok()
-        {
-            ModelId(format!("{}/{}", declaration.id, model.id))
-        } else {
-            ModelId(model.id.clone())
-        };
-        let limits = {
-            let resolution = codex_context_resolve_for_registration(&model, user_override);
-            // Recording is not printing: the note is shown once, for the
-            // effective session model only (see `codex_context_note`).
-            codex_context_record_note(notes, &catalog_id, &model.id, &resolution);
+    octet_ai::providers::codex::register_codex_models(
+        catalog,
+        resolver,
+        &models,
+        PROVIDER_RESPONSE_HEADER_TIMEOUT,
+        |catalog_id, model| {
+            let resolution = codex_context_resolve_for_registration(model, user_override);
+            codex_context_record_note(notes, catalog_id, &model.id, &resolution);
             ModelLimits {
                 context_window: resolution.context_window,
                 max_output_tokens: resolution.max_output_tokens,
             }
-        };
-        let pricing = crate::providers::pricing_for(declaration, &model.id);
-        let capabilities = codex_inference_capabilities(&model);
-        // The declaration keeps application session identity separate from the
-        // resolver's credential/account routing.
-        let cache = crate::providers::cache_compatibility(
-            declaration.compatibility,
-            &model.id,
-            route.protocol,
-        );
-        catalog.register_model(ModelSpec {
-            context_window_options: Some(octet_ai::types::ContextWindowOptions {
-                default: model.default_context_window,
-                maximum: model.max_context_window,
-            }),
-            preset: Default::default(),
-            id: catalog_id,
-            endpoint: EndpointId(route.endpoint_id.into()),
-            api_name: model.id,
-            display_name: model.display_name,
-            protocol: route.protocol,
-            capabilities,
-            limits,
-            pricing,
-            cache,
-        })?;
-    }
-    Ok(())
+        },
+    )
 }
 
 pub(crate) fn register_offline_openrouter_model(

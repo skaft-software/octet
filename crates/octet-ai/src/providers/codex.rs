@@ -576,57 +576,13 @@ impl CodexCatalog {
     /// Explicit network authorization for this account's inventory and necessary credential refresh.
     /// No unrelated provider or metadata service is initialized. Publishes only an account-bound cache.
     pub async fn discover(store: &CredentialStore) -> anyhow::Result<Self> {
-        let claims = codex::local_subscription_claims(store)?
-            .ok_or_else(|| anyhow::anyhow!("Codex login required"))?;
-        let resolver = codex::CodexResolver::for_account(store.clone(), &claims);
-        let (mut headers, claims) = resolver.discovery_headers().await?;
-        headers.extend(super::headers::public_headers(
-            super::contract::CODEX.extra_headers,
-        )?);
-        headers.insert(
-            http::header::USER_AGENT,
-            http::HeaderValue::from_str(&codex_user_agent())?,
-        );
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(10))
-            .build()?;
-        let response = client
-            .get(codex_models_url()?)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|_| anyhow::anyhow!("Codex inventory transport failed"))?;
-        anyhow::ensure!(
-            response.status().is_success(),
-            "Codex inventory request refused"
-        );
-        use futures_util::StreamExt;
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| anyhow::anyhow!("Codex inventory body failed"))?;
-            anyhow::ensure!(
-                body.len().saturating_add(chunk.len()) <= 8 * 1024 * 1024,
-                "Codex inventory is too large"
-            );
-            body.extend_from_slice(&chunk);
-        }
-        let body = serde_json::from_slice(&body)
-            .map_err(|_| anyhow::anyhow!("invalid Codex inventory JSON"))?;
-        let models = codex_models_from_response(&body)?;
-        save_codex_model_cache(
-            store,
-            &CodexDiscovery {
-                claims: claims.clone(),
-                models: models.clone(),
-            },
-        )?;
+        let (discovery, _) =
+            discover_inventory_with(store, codex::REFRESH_LOCK_WAIT, || Ok(())).await?;
+        save_codex_model_cache(store, &discovery)?;
         Ok(Self {
-            models,
+            models: discovery.models,
             source: InventorySource::OnlineDiscovery,
-            claims: Some(claims),
+            claims: Some(discovery.claims),
         })
     }
 
@@ -732,4 +688,68 @@ pub fn register_codex_models(
         })?;
     }
     Ok(())
+}
+
+/// Explicit inventory operation. The callback may refuse after credential readiness,
+/// before any inventory request (for example a caller-owned cancellation envelope).
+pub async fn discover_inventory_with(
+    store: &CredentialStore,
+    refresh_lock_wait: Duration,
+    before_inventory: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<(CodexDiscovery, Vec<String>)> {
+    let claims = codex::local_subscription_claims(store)?
+        .ok_or_else(|| anyhow::anyhow!("Codex login required"))?;
+    let resolver =
+        codex::CodexResolver::for_account(store.clone(), &claims).with_lock_wait(refresh_lock_wait);
+    let (mut headers, claims) = resolver.discovery_headers().await?;
+    before_inventory()?;
+    headers.extend(super::headers::public_headers(
+        super::contract::CODEX.extra_headers,
+    )?);
+    headers.insert(
+        http::header::USER_AGENT,
+        http::HeaderValue::from_str(&codex_user_agent())?,
+    );
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let response = client
+        .get(codex_models_url()?)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|_| anyhow::anyhow!("GET Codex models failed: transport failure"))?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "GET Codex models failed: HTTP {}",
+        response.status().as_u16()
+    );
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|size| size <= 8 * 1024 * 1024),
+        "Codex models response exceeds byte limit"
+    );
+    use futures_util::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| anyhow::anyhow!("Codex models response body failed"))?;
+        anyhow::ensure!(
+            body.len().saturating_add(chunk.len()) <= 8 * 1024 * 1024,
+            "Codex models response exceeds byte limit"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    let body = serde_json::from_slice(&body)
+        .map_err(|_| anyhow::anyhow!("invalid Codex models response JSON"))?;
+    let inventory = codex_inventory_from_response(&body)?;
+    Ok((
+        CodexDiscovery {
+            claims,
+            models: inventory.models,
+        },
+        inventory.skipped,
+    ))
 }

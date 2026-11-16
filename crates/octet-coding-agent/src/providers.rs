@@ -27,12 +27,7 @@ pub use copilot::{
 
 /// Return generated built-in and subscription provider definitions without
 /// URLs, static headers, credentials, or credential-store handles.
-pub fn builtin_provider_definitions() -> Vec<ProviderDefinition> {
-    contract::ALL_PROVIDER_DECLARATIONS
-        .iter()
-        .map(ProviderDeclaration::definition)
-        .collect()
-}
+pub use octet_ai::providers::builtin_provider_definitions;
 
 #[cfg(test)]
 pub(crate) use auth::resolve_environment_with;

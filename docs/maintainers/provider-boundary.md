@@ -62,3 +62,16 @@ endpoint and a resolver pinned to the account/plan; replacement requires a new
 catalog. It never chooses direct OpenAI. Capabilities, defaults, unknown pricing
 and authoritative omissions retain their existing semantics. Context arithmetic
 is shared; environment publication and session notes remain frontend-owned.
+
+## Frontend delegation (item 32)
+
+CLI/TUI login and logout delegate to the shared credential store and OAuth
+flow; presentation, method choice, browser launch, signals and progress watch
+channels remain in the frontend. Bootstrap's Codex readiness worker now calls
+`discover_inventory_with`; registration calls `register_codex_models`. The
+picker and catalog contributors therefore consume the same declaration, parser,
+cache, pricing and dynamic route as independent callers. Frontend diagnostic
+checks, cache-first readiness, context override fallback/notes and default
+selection remain frontend policy. An account/plan replacement invalidates an
+existing resolver rather than spending a replacement account's credential.
+No tool-definition, schema-validation or extension-host API changes are made.
