@@ -137,13 +137,16 @@ pub(crate) fn build_request(
     request: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     let request = normalize_request_reasoning(request, &model.spec.capabilities);
-    let diagnostics = validate_request(
-        &request,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        Protocol::BedrockConverse,
-        &model.spec.id,
-        request.compatibility,
+    let diagnostics = crate::protocol::route_validation(
+        model,
+        validate_request(
+            &request,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::BedrockConverse,
+            &model.spec.id,
+            request.compatibility,
+        ),
     )?;
 
     let mut messages = Vec::new();

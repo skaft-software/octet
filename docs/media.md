@@ -65,7 +65,10 @@ request fits the provider's total request limit.
   typing a path alone does not attach it. `read` can return structured audio from
   local files or explicitly enabled HTTPS reads. A tool result remains media, not
   a transcript, and is replayed with the conversation. If the selected route
-  cannot accept the clip, the tool result reports the provider and model.
+  cannot accept the clip, admission and codec diagnostics name the provider and
+  model. Switching to an incompatible route keeps the saved media and uses a
+  route-named placeholder (or transcript) in that request; switch back to replay
+  the original clip.
 - The native host accepts ordered typed `media` paths; its legacy `image_paths`
   field is image-only. The separate line-oriented RPC prompt `images` field is
   also image-only; it is not a native audio upload interface. A prompt can name a
@@ -186,6 +189,13 @@ input. On Kitty-compatible terminals each takes at most 16 rows. If the terminal
 doesn't report cell size in pixels, octet assumes a 1:2 cell aspect rather than
 shrinking a screenshot to one cell, so fonts with unusual cell proportions may
 look slightly off. Other terminals show text.
+
+## Recorded-audio qualification
+
+Offline fixtures exercise every supported audio format through composer
+attachment, built-in `read`, tool continuation, later turns and session resume,
+checking exact bytes, MIME/format and ordering on both audio codecs. This proves
+local wire construction, not provider acceptance or recognition.
 
 ## Privacy and remote reads
 

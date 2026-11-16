@@ -27,13 +27,21 @@ const ASSISTANT_AUDIO_PLACEHOLDER: &str =
     "(assistant audio omitted: provider media reference is unavailable)";
 const MISSING_TOOL_RESULT: &str = "No result provided";
 
-fn audio_fallback_text(audio: &crate::types::AudioMedia, placeholder: &str) -> String {
-    audio
+fn audio_fallback_text(
+    audio: &crate::types::AudioMedia,
+    placeholder: &str,
+    target: &Model,
+) -> String {
+    let text = audio
         .transcript
         .as_ref()
         .filter(|transcript| !transcript.trim().is_empty())
         .cloned()
-        .unwrap_or_else(|| placeholder.to_owned())
+        .unwrap_or_else(|| placeholder.to_owned());
+    format!(
+        "{text} (provider {}, model {})",
+        target.endpoint.id.0, target.spec.api_name
+    )
 }
 
 /// Returns a target-compatible copy of canonical conversation history.
@@ -269,7 +277,7 @@ fn transform_user_part(part: &UserPart, target: &Model) -> UserPart {
                 if user_audio_is_replayable(audio, target) {
                     UserPart::Media(media.clone())
                 } else {
-                    UserPart::Text(audio_fallback_text(audio, AUDIO_PLACEHOLDER))
+                    UserPart::Text(audio_fallback_text(audio, AUDIO_PLACEHOLDER, target))
                 }
             }
             Media::Document(document) => {
@@ -321,7 +329,7 @@ fn transform_user_part_owned(part: UserPart, target: &Model) -> UserPart {
             if user_audio_is_replayable(&audio, target) {
                 UserPart::Media(Media::Audio(audio))
             } else {
-                let fallback = audio_fallback_text(&audio, AUDIO_PLACEHOLDER);
+                let fallback = audio_fallback_text(&audio, AUDIO_PLACEHOLDER, target);
                 UserPart::Text(fallback)
             }
         }
@@ -373,7 +381,7 @@ fn transform_tool_result_part(part: &ToolResultPart, target: &Model) -> ToolResu
                 }
             }
             Media::Audio(audio) => {
-                ToolResultPart::Text(audio_fallback_text(audio, TOOL_AUDIO_PLACEHOLDER))
+                ToolResultPart::Text(audio_fallback_text(audio, TOOL_AUDIO_PLACEHOLDER, target))
             }
             Media::Document(_) => ToolResultPart::Text(TOOL_DOCUMENT_PLACEHOLDER.to_string()),
         },
@@ -406,7 +414,7 @@ fn transform_tool_result_part_owned(part: ToolResultPart, target: &Model) -> Too
             }
         }
         ToolResultPart::Media(Media::Audio(audio)) => {
-            let fallback = audio_fallback_text(&audio, TOOL_AUDIO_PLACEHOLDER);
+            let fallback = audio_fallback_text(&audio, TOOL_AUDIO_PLACEHOLDER, target);
             ToolResultPart::Text(fallback)
         }
         ToolResultPart::Media(Media::Document(_)) => {
@@ -478,6 +486,7 @@ fn transform_assistant_part(
                 Some(AssistantPart::Text(audio_fallback_text(
                     audio,
                     ASSISTANT_AUDIO_PLACEHOLDER,
+                    target,
                 )))
             }
         }
@@ -519,7 +528,7 @@ fn transform_assistant_part_owned(
             if assistant_audio_is_replayable(&audio, target) {
                 Some(AssistantPart::Media(Media::Audio(audio)))
             } else {
-                let fallback = audio_fallback_text(&audio, ASSISTANT_AUDIO_PLACEHOLDER);
+                let fallback = audio_fallback_text(&audio, ASSISTANT_AUDIO_PLACEHOLDER, target);
                 Some(AssistantPart::Text(fallback))
             }
         }

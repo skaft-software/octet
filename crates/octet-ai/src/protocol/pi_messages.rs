@@ -414,13 +414,16 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
         return Err(UnsupportedError::ReasoningMode.into());
     }
     let lossy = req.compatibility == CompatibilityMode::Lossy;
-    let mut diagnostics = crate::validate::validate_request(
-        req,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        model.spec.protocol,
-        &model.spec.id,
-        req.compatibility,
+    let mut diagnostics = crate::protocol::route_validation(
+        model,
+        crate::validate::validate_request(
+            req,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            model.spec.protocol,
+            &model.spec.id,
+            req.compatibility,
+        ),
     )?;
     let drop = |diagnostics: &mut Vec<Diagnostic>,
                 error: UnsupportedError,

@@ -200,3 +200,30 @@ fn audio_requires_a_route_effectively_supporting_its_format() {
     .unwrap_err();
     assert!(error.to_string().contains("through OpenAiResponses"));
 }
+
+#[test]
+fn unsupported_audio_attachment_names_provider_and_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clip.wav");
+    std::fs::write(&path, b"RIFF\x04\0\0\0WAVEdata").unwrap();
+    for protocol in [
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+        Protocol::BedrockConverse,
+        Protocol::MistralConversations,
+        Protocol::PiMessages,
+        Protocol::ExtensionStream,
+    ] {
+        let mut request = base_request(dir.path().to_path_buf());
+        request.media.push(MediaInput::Audio { path: path.clone() });
+        let error = load_user_input(
+            &request,
+            "listen".into(),
+            &model_with_inputs(protocol, ModalitySet::none()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("test-provider"), "{error}");
+        assert!(error.contains("test-model"), "{error}");
+    }
+}

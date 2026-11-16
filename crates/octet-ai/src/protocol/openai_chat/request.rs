@@ -303,13 +303,16 @@ pub(crate) fn build_request(
     // 1. Normalize model-gated reasoning, then run validation.
     let defaults = crate::protocol::preset::request_defaults(model, req)?;
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
-    let diagnostics = validate_request(
-        &req,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        Protocol::OpenAiChat,
-        &model.spec.id,
-        req.compatibility,
+    let diagnostics = crate::protocol::route_validation(
+        model,
+        validate_request(
+            &req,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::OpenAiChat,
+            &model.spec.id,
+            req.compatibility,
+        ),
     )?;
     let mistral_profile = model.endpoint.runtime.openai_chat_profile
         == crate::types::OpenAiChatRuntimeProfile::Mistral;

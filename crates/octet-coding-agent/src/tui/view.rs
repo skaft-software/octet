@@ -6141,7 +6141,11 @@ impl InteractiveShell {
                                 _ => pasted,
                             },
                             Err(error) => {
-                                state.push_block(TranscriptBlock::Notice(error.to_string()));
+                                let message = format!(
+                                    "provider {} model {}: {error}",
+                                    state.provider, state.model
+                                );
+                                state.push_block(TranscriptBlock::Notice(message));
                                 pasted
                             }
                         };
@@ -6484,7 +6488,9 @@ impl InteractiveShell {
                 {
                     Ok(chip) => chip,
                     Err(error) => {
-                        state.push_block(TranscriptBlock::Notice(error.to_string()));
+                        let message =
+                            format!("provider {} model {}: {error}", state.provider, state.model);
+                        state.push_block(TranscriptBlock::Notice(message));
                         format!("@{} ", suggestion.completion)
                     }
                 }

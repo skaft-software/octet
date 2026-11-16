@@ -70,13 +70,16 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
     if matches!(&req.tool_choice, ToolChoice::Named(_)) {
         return Err(UnsupportedError::ToolChoice.into());
     }
-    let mut diagnostics = crate::validate::validate_request(
-        req,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        Protocol::MistralConversations,
-        &model.spec.id,
-        req.compatibility,
+    let mut diagnostics = crate::protocol::route_validation(
+        model,
+        crate::validate::validate_request(
+            req,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::MistralConversations,
+            &model.spec.id,
+            req.compatibility,
+        ),
     )?;
     let mut inputs = Vec::new();
     for message in &req.messages {

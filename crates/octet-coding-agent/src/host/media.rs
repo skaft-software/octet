@@ -85,7 +85,8 @@ pub(crate) fn load_user_input(
                 })?;
                 if !model.supports_audio_input(format) {
                     anyhow::bail!(
-                        "model {} does not support native {} audio input through {:?}; select an audio-capable model and a format supported by its route",
+                        "provider {} model {} does not support native {} audio input through {:?}; select an audio-capable model and a format supported by its route",
+                        model.endpoint.0,
                         model.id.0,
                         audio_format_name(format),
                         model.protocol

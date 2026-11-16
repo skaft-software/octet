@@ -232,17 +232,19 @@ fn audio_transcripts_replace_unreplayable_user_tool_and_assistant_media() {
     let Message::User(user) = &transformed[0] else {
         panic!("expected user")
     };
-    assert!(matches!(&user.content[0], UserPart::Text(text) if text == "user said hello"));
+    assert!(
+        matches!(&user.content[0], UserPart::Text(text) if text == "user said hello (provider test, model target)")
+    );
     let UserPart::ToolResult(result) = &user.content[1] else {
         panic!("expected tool result")
     };
     assert!(
-        matches!(&result.content[0], ToolResultPart::Text(text) if text == "tool heard a warning")
+        matches!(&result.content[0], ToolResultPart::Text(text) if text == "tool heard a warning (provider test, model target)")
     );
     assert!(matches!(
         &transformed[1],
         Message::Assistant(AssistantMessage { content, .. })
-            if matches!(&content[0], AssistantPart::Text(text) if text == "assistant spoke the answer")
+            if matches!(&content[0], AssistantPart::Text(text) if text == "assistant spoke the answer (provider test, model target)")
     ));
 
     let owned = transform_request_messages_owned(messages, &target);

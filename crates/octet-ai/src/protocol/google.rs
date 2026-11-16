@@ -30,13 +30,16 @@ pub(crate) fn build_request(
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     let req = normalize_request_reasoning(req, &model.spec.capabilities);
-    let diagnostics = validate_request(
-        &req,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        Protocol::GoogleGenerativeAi,
-        &model.spec.id,
-        req.compatibility,
+    let diagnostics = crate::protocol::route_validation(
+        model,
+        validate_request(
+            &req,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::GoogleGenerativeAi,
+            &model.spec.id,
+            req.compatibility,
+        ),
     )?;
 
     let mut root = Map::new();

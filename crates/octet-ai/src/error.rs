@@ -290,6 +290,18 @@ pub enum StreamProtocolError {
 /// Description of unsupported capabilities.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnsupportedError {
+    /// A media refusal annotated by the selected host-owned route.
+    #[error(
+        "provider {provider} model {model}: {capability}; select a compatible model or format"
+    )]
+    MediaRoute {
+        /// Selected endpoint identifier.
+        provider: String,
+        /// Selected wire model identifier.
+        model: String,
+        /// Unsupported media capability.
+        capability: Box<UnsupportedError>,
+    },
     /// The model's stream is produced by its own extension process; the host
     /// has no wire request or response codec for it.
     #[error("The model's stream is owned by its extension process")]

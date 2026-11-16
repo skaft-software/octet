@@ -503,13 +503,16 @@ pub(crate) fn build_request(
 ) -> Result<HttpRequestParts, AiError> {
     // 1. Normalize model-gated reasoning, then run validation.
     let req = normalize_request_reasoning(req, &model.spec.capabilities);
-    let diagnostics = validate_request(
-        &req,
-        &model.spec.capabilities,
-        &model.spec.limits,
-        Protocol::AnthropicMessages,
-        &model.spec.id,
-        req.compatibility,
+    let diagnostics = crate::protocol::route_validation(
+        model,
+        validate_request(
+            &req,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::AnthropicMessages,
+            &model.spec.id,
+            req.compatibility,
+        ),
     )?;
 
     // 2. Map system prompt and allocate one provider-compatible breakpoint.

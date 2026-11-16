@@ -374,3 +374,86 @@ mod inference_tests;
 
 #[cfg(test)]
 mod cache_audit_tests;
+
+/// Annotate media validation at the codec boundary, where both identities exist.
+pub(crate) fn route_validation(
+    model: &crate::Model,
+    result: Result<Vec<crate::Diagnostic>, AiError>,
+) -> Result<Vec<crate::Diagnostic>, AiError> {
+    match result {
+        Err(AiError::Unsupported(
+            capability @ (crate::UnsupportedError::Audio
+            | crate::UnsupportedError::AudioOutput
+            | crate::UnsupportedError::ToolResultMedia
+            | crate::UnsupportedError::ProviderMediaRef),
+        )) => Err(crate::UnsupportedError::MediaRoute {
+            provider: model.endpoint.id.0.clone(),
+            model: model.spec.api_name.clone(),
+            capability: Box::new(capability),
+        }
+        .into()),
+        Ok(mut diagnostics) => {
+            for diagnostic in &mut diagnostics {
+                if diagnostic.code.contains("audio") || diagnostic.code.contains("media") {
+                    diagnostic.message = format!(
+                        "provider {} model {}: {}",
+                        model.endpoint.id.0, model.spec.api_name, diagnostic.message
+                    );
+                }
+            }
+            Ok(diagnostics)
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod recorded_audio_tests {
+    use super::*;
+    use crate::{
+        AudioFormat, Media, Message, ModelCatalog, ModelId, Protocol, UserMessage, UserPart,
+    };
+
+    #[test]
+    fn unsupported_audio_codecs_name_provider_and_model() {
+        for protocol in [
+            Protocol::OpenAiChat,
+            Protocol::OpenAiResponses,
+            Protocol::AnthropicMessages,
+            Protocol::BedrockConverse,
+            Protocol::GoogleGenerativeAi,
+            Protocol::MistralConversations,
+            Protocol::PiMessages,
+        ] {
+            let mut model = ModelCatalog::builtin()
+                .unwrap()
+                .resolve(&ModelId("gpt-4o-mini".into()))
+                .unwrap();
+            std::sync::Arc::make_mut(&mut model.spec).protocol = protocol;
+            let request = crate::Request {
+                messages: vec![Message::User(UserMessage {
+                    content: vec![UserPart::Media(Media::audio_bytes(
+                        bytes::Bytes::from_static(b"sound"),
+                        AudioFormat::Wav,
+                    ))],
+                })],
+                ..crate::test_fixtures::base_request()
+            };
+            let result = match protocol {
+                Protocol::OpenAiChat => openai_chat::build_request(&model, &request),
+                Protocol::OpenAiResponses => openai_responses::build_request(&model, &request),
+                Protocol::AnthropicMessages => anthropic::build_request(&model, &request),
+                Protocol::BedrockConverse => bedrock::build_request(&model, &request),
+                Protocol::GoogleGenerativeAi => google::build_request(&model, &request),
+                Protocol::MistralConversations => {
+                    mistral_conversations::build_request(&model, &request)
+                }
+                Protocol::PiMessages => pi_messages::build_request(&model, &request),
+                Protocol::ExtensionStream => unreachable!(),
+            };
+            let error = result.err().expect("unsupported audio").to_string();
+            assert!(error.contains("openai"), "{protocol:?}: {error}");
+            assert!(error.contains("gpt-4o-mini"), "{protocol:?}: {error}");
+        }
+    }
+}

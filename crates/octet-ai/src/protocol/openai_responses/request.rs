@@ -401,13 +401,16 @@ pub(crate) fn build_request(
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);
     let mut effective_capabilities = model.spec.capabilities.clone();
     effective_capabilities.responses_features = model.responses_features();
-    let diagnostics = validate_request(
-        &req,
-        &effective_capabilities,
-        &model.spec.limits,
-        Protocol::OpenAiResponses,
-        &model.spec.id,
-        req.compatibility,
+    let diagnostics = crate::protocol::route_validation(
+        model,
+        validate_request(
+            &req,
+            &effective_capabilities,
+            &model.spec.limits,
+            Protocol::OpenAiResponses,
+            &model.spec.id,
+            req.compatibility,
+        ),
     )?;
     if req
         .responses
