@@ -203,10 +203,12 @@ quiet_tool_summaries = true
 thinking_expanded = false
 ```
 
-## Shell duration
+## Tool duration
 
-Completed shell-tool rows (`bash`, `exec`, `powershell`) show `Took 1.3s` in the
-terminal transcript when recorded timing is available, including after resume.
+Every completed native tool card shows `Took 1.3s` as its last nested result row
+when recorded timing is available, including after resume. This includes shell,
+read, edit, write, Codemode and extension tool cards; output preview budgets do
+not hide the duration.
 This is a final duration, not a live counter; it is decoration, excluded from
 copied command output. Values below 1 ms use microseconds (e.g. `812µs`),
 values below 1 s use milliseconds (e.g. `1.25ms`), and longer values use

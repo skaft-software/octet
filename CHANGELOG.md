@@ -52,7 +52,7 @@
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
 - Empty and ellipsis-only running shell cards show an explicit interruptible state while live progress keeps its available rows.
-- Completed tool cards share one final duration row and honor the tool_duration theme setting.
+- Completed tool cards share one final duration row with a documented tool_duration theme setting.
 - Shell and Codemode output previews keep deliberate head and tail windows with exact omitted-middle counts.
 - ANSI tool command and output omissions use consistent hidden wording and Ctrl+O disclosure hints.
 - Working and Thinking timers use the shared inline metadata separator.
