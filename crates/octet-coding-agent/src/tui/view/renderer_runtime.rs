@@ -1031,6 +1031,7 @@ pub(super) fn render_loop_with_terminal(
         // slow paint is paid out of the budget rather than added after it.
         let input_sequence = state.input_sequence();
         pacer.begin();
+        let frame_started = crate::tui::latency::begin_frame();
         let (pending, loading) = {
             let shell = state.borrow();
             (
@@ -1054,6 +1055,7 @@ pub(super) fn render_loop_with_terminal(
         }
         startup_trace.written(pending, loading);
         state.frame_written_at(tui.rendered_viewport_top());
+        crate::tui::latency::end_frame(input_sequence, frame_started);
         crate::tui::latency::painted(input_sequence);
         last_input_sequence = input_sequence;
         painted_resize_epoch = resize_epoch;
@@ -1897,14 +1899,18 @@ impl ShellComponent {
             }
         }
         if let Some(owner) = &self.owner {
+            let capture = sexy_tui_rs::render_metrics::Span::new(0);
             let model = RenderModel::capture(&mut state);
+            drop(capture);
             drop(state);
             // From here through parsing, layout, diffing and terminal writes,
             // the input owner is completely independent of renderer progress.
             #[cfg(test)]
             self.state.wait_at_render_gate();
             let mut owner = owner.borrow_mut();
+            let accept = sexy_tui_rs::render_metrics::Span::new(1);
             owner.accept(model);
+            drop(accept);
             RenderStateGuard::Private {
                 owner,
                 shared: &self.state,
@@ -1945,10 +1951,19 @@ impl Drop for RenderStateGuard<'_> {
         };
         let owner = &mut **owner;
         let started = trace.enabled.then(Instant::now);
+        let geometry_stage = sexy_tui_rs::render_metrics::Span::new(3);
         let mut geometry = super::renderer_geometry::RenderedGeometry::capture(
             &owner.state,
             owner.geometry_fence.expect("accepted model"),
         );
+        drop(geometry_stage);
+        crate::tui::latency::frame_geometry(
+            geometry.total_rows,
+            geometry.visible_start,
+            geometry.viewport_rows,
+            owner.state.transcript.len(),
+        );
+        sexy_tui_rs::render_metrics::record(|work| work.geometry += geometry.blocks_visited as u64);
         if let Some(started) = started {
             trace.observe(geometry.blocks_visited, started.elapsed());
         }

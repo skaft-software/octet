@@ -35,6 +35,7 @@ pub type HighlightedLine = Vec<HighlightedRegion>;
 /// 128-byte language label). Fall back to escaped literal source in that case.
 /// This function generates no styles, terminal escapes, or HTML.
 pub fn highlight_code(code: &str, language: &str) -> Option<Vec<HighlightedLine>> {
+    crate::render_metrics::record(|work| work.highlights += 1);
     if code.len() > 64 * 1024 || language.len() > 128 {
         return None;
     }

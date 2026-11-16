@@ -100,6 +100,36 @@ pub(crate) fn painted(sequence: u64) {
     }
 }
 
+thread_local! {
+    static GEOMETRY: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+pub(crate) fn begin_frame() -> Option<Instant> {
+    let enabled = trace().is_some();
+    sexy_tui_rs::render_metrics::enable(enabled);
+    if enabled {
+        sexy_tui_rs::render_metrics::reset();
+        Some(Instant::now())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn frame_geometry(total: usize, start: usize, rows: usize, blocks: usize) {
+    GEOMETRY.with(|slot| slot.set([total, start, rows, blocks]));
+}
+
+pub(crate) fn end_frame(sequence: u64, started: Option<Instant>) {
+    let Some(started) = started else { return };
+    let elapsed = started.elapsed().as_micros();
+    let work = sexy_tui_rs::render_metrics::snapshot();
+    let [total, start, rows, blocks] = GEOMETRY.with(std::cell::Cell::get);
+    eprintln!("octet-frame: sequence={sequence} duration_us={elapsed} scroll={} total_rows={total} blocks={blocks} laid_out={} mapped={} wrapped={} highlights={} geometry={} allocations={} allocated_bytes={} capture_us={} accept_us={} viewport_us={} geometry_us={}",
+        total.saturating_sub(start + rows), work.laid_out, work.mapped, work.wrapped,
+        work.highlights, work.geometry, work.allocations, work.allocated_bytes,
+        work.stage_us[0], work.stage_us[1], work.stage_us[2], work.stage_us[3]);
+}
+
 impl Trace {
     fn receive(&mut self, sequence: u64, kind: &'static str, received: Instant) {
         if self.pending.len() == CAPACITY {

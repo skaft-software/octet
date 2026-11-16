@@ -614,6 +614,7 @@ fn wrap_single_line(line: &str, width: usize) -> Vec<String> {
 }
 
 pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
+    crate::render_metrics::record(|work| work.wrapped += text.split('\n').count() as u64);
     if text.is_empty() {
         return vec![String::new()];
     }

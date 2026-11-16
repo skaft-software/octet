@@ -817,6 +817,7 @@ fn align_copy_row(
     super::fullscreen_work_tests::record(|work| work.rows_mapped += 1);
     #[cfg(test)]
     COPY_ROW_ALIGNMENTS.with(|work| work.set(work.get() + 1));
+    sexy_tui_rs::render_metrics::record(|work| work.mapped += 1);
     let plain = strip_terminal_sequences(line);
     let mut aligned = AlignedCopyRow {
         painted: line.to_owned(),

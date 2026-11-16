@@ -198,7 +198,7 @@ The offline Unix PTY driver uses a disposable home, a 100-model manual catalog,
 1,000 synthetic turns with paired tool cards and 100 inline PNGs, and 4 ms wheel,
 selection, slash-filter and arrow bursts. Its synthetic Ghostty capability profile
 exercises Kitty image commands (not a physical terminal). Separate settled wheel
-probes at 0/1/4 ms gaps report actual rows moved from the native scroll hint. It verifies trace counts, the final composer marker, clean exit,
+probes at 0/1/4 ms gaps report actual rows moved from completed-frame geometry, independently of the button label. It verifies trace counts, the final composer marker, clean exit,
 and terminal-mode restoration, retaining raw samples and per-kind p50/p95:
 
 ```sh
@@ -240,6 +240,59 @@ showed baseline → final median within-run p50 write times of 4.014 → 2.779 m
 0/1/4 ms probe preserved every event; publication p50 stayed below 0.015 ms in
 both final profiles. These are shared-host PTY observations, not physical display
 measurements or enough independent trials to establish extreme-tail guarantees.
+
+### Long-session scroll qualification
+
+The tables below were measured before the centered Jump to bottom control
+landed. Rebase checks preserve that control without requalifying these timings.
+
+The interaction driver accepts `--messages 100`, `1000` or `5000` (multiples of
+four). Each four-message turn contains a user prompt, tool call, long tool result
+and assistant answer with reasoning, long Markdown and highlighted Rust. Most
+cards are collapsed bash output; read cards include inline PNGs, including the
+measured tail. `Home` loads all deferred history before measurement; the trace
+must confirm the full block count. Resume's small hydrated tail alone is not a
+long-history qualification. Kitty command emission is asserted, not placement.
+
+```sh
+cargo build -p octet-coding-agent --example interaction-profile
+cargo build -p octet-coding-agent --example interaction-profile --release
+python3 scripts/bench-interaction-latency.py target/release/examples/interaction-profile --messages 5000 --rounds 40
+```
+
+The profiling example runs the real CLI with a System-allocator wrapper counting
+Rust allocation/reallocation requests only on the traced render thread. Normal
+binaries retain their allocator. `octet-frame` records add frame duration, row
+layout/alignment/wrapping, highlighter calls, geometry visits, allocation requests
+and requested bytes, plus capture/accept/viewport/geometry stage durations.
+Stages are coarse wall-clock attribution, not exclusive CPU sampling. Counters
+are thread-local, opt-in, reset each frame, and retain no transcript payloads.
+
+Scaling runs send 1,920 wheel reports at fixed 20/4/1 ms schedules, both ways,
+recording event-to-completed-write p50/p95/p99, frame variance, sequence merging,
+zero-motion frames and actual rows moved. All raw samples are retained in JSON.
+Linux `/proc` RSS is sampled across the run (including hydration), not measured
+live allocation bytes or a portable process-tree peak. Physical display, OS
+momentum, extensions and live-provider load remain separate owner tests.
+
+One shared-host baseline before tool-projection caching, 120×40, one run/cell:
+
+| Build | Messages | Event → write p50 / p95 / p99 (ms) | Frame variance (ms²) | Peak sampled RSS (KiB) |
+| --- | ---: | --- | ---: | ---: |
+| Debug | 100 | 3.727 / 26.882 / 34.300 | 21.498 | 113,688 |
+| Debug | 1,000 | 4.764 / 30.235 / 51.353 | 25.427 | 195,620 |
+| Debug | 5,000 | 5.509 / 43.940 / 72.209 | 54.999 | 536,156 |
+| Release | 100 | 0.537 / 2.715 / 4.077 | 0.581 | 64,496 |
+| Release | 1,000 | 0.560 / 2.811 / 3.142 | 0.573 | 145,760 |
+| Release | 5,000 | 0.600 / 3.114 / 4.528 | 0.622 | 487,912 |
+
+No report loss or zero-motion frame occurred; all runs moved 1,920 rows. Layout
+work stayed zero, but frames wrapped up to 2,004 lines, invoked highlighting twice
+and requested approximately 2.7 MB in 43,900 allocations. Rebuilding tool copy
+projections during geometry capture dominates those periodic spikes. These are
+within-run descriptive quantiles, not independent-trial tail guarantees. Linux
+`perf` sampling on this host is blocked by `perf_event_paranoid=4`; no flamegraph
+is claimed. Re-run sampling on an authorized profiling host.
 
 ### Terminal wheel granularity
 

@@ -128,6 +128,7 @@ impl RichRenderer {
     }
 
     pub(super) fn wrap_runs(&self, runs: &[RichRun], width: usize) -> Vec<RichLine> {
+        crate::render_metrics::record(|work| work.wrapped += 1);
         if width == 0 {
             return vec![RichLine::default()];
         }

@@ -315,6 +315,7 @@ impl ShellState {
                     let length = rendered.lines.len();
                     #[cfg(test)]
                     super::fullscreen_work_tests::record(|work| work.rows_laid_out += length);
+                    sexy_tui_rs::render_metrics::record(|work| work.laid_out += length as u64);
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
@@ -358,6 +359,7 @@ impl ShellState {
                     let length = rendered.lines.len();
                     #[cfg(test)]
                     super::fullscreen_work_tests::record(|work| work.rows_laid_out += length);
+                    sexy_tui_rs::render_metrics::record(|work| work.laid_out += length as u64);
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
@@ -404,6 +406,9 @@ impl ShellState {
                         super::fullscreen_work_tests::record(|work| {
                             work.rows_laid_out += update.replacement.len()
                         });
+                        sexy_tui_rs::render_metrics::record(|work| {
+                            work.laid_out += update.replacement.len() as u64
+                        });
                         let replacement_start = start.saturating_add(update.stable_rows);
                         first_changed = first_changed.min(replacement_start);
                         let new_length =
@@ -448,6 +453,7 @@ impl ShellState {
                     let new_length = rendered.lines.len();
                     #[cfg(test)]
                     super::fullscreen_work_tests::record(|work| work.rows_laid_out += new_length);
+                    sexy_tui_rs::render_metrics::record(|work| work.laid_out += new_length as u64);
                     cache
                         .lines
                         .splice(start..start + old_length, rendered.lines);

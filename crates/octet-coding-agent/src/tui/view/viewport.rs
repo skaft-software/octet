@@ -615,6 +615,7 @@ pub(super) fn render_shell_viewport_at(
     width: u16,
     now: Instant,
 ) -> Vec<String> {
+    let _stage = sexy_tui_rs::render_metrics::Span::new(2);
     let chrome = shell_chrome(state, width, now);
     let mut lines = if state.overlay.is_some() {
         let mut overlay = overlay_lines(state, width, chrome.transcript_rows);

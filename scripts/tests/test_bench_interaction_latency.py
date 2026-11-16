@@ -18,15 +18,16 @@ class LatencySummaryTests(unittest.TestCase):
         samples.append(dict(kind="arrow", updated_us=500, painted_us=2000))
         result = latency.summarize(samples)
         self.assertEqual(result["wheel"]["count"], 20)
-        self.assertEqual(result["wheel"]["painted_ms"], {"p50": 10, "p95": 19})
-        self.assertEqual(result["arrow"]["updated_ms"], {"p50": .5, "p95": .5})
+        self.assertEqual(result["wheel"]["painted_ms"], {"p50": 10, "p95": 19, "p99": 20})
+        self.assertEqual(result["arrow"]["updated_ms"], {"p50": .5, "p95": .5, "p99": .5})
 
     def test_empty_trace_has_no_fabricated_samples(self):
         self.assertEqual(latency.summarize([]), {})
 
-    def test_scroll_hint_reads_last_ansi_decorated_offset(self):
-        self.assertEqual(latency.scroll_hint(b"\x1b[2m3 rows back\x1b[0m\x1b[H64 rows back"), 64)
-        self.assertIsNone(latency.scroll_hint(b"no scroll hint"))
+    def test_scroll_offset_uses_completed_geometry_not_the_button_label(self):
+        self.assertEqual(latency.scroll_offset(
+            "octet-frame: sequence=1 scroll=3\noctet-frame: sequence=2 scroll=64\n"), 64)
+        self.assertIsNone(latency.scroll_offset("[ ↓ Jump to bottom ]"))
 
     def test_mixed_fixture_has_paired_tool_cards_and_valid_png_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -42,5 +43,15 @@ class LatencySummaryTests(unittest.TestCase):
             for part in result["content"]:
                 if "Media" in part:
                     images.append(base64.b64decode(part["Media"]["Image"]["source"]["Inline"]))
-        self.assertEqual(len(images), 2)
+        self.assertEqual(len(images), 3)
         self.assertTrue(all(image.startswith(b"\x89PNG\r\n\x1a\n") for image in images))
+
+
+    def test_frame_work_and_percentiles_keep_spikes_visible(self):
+        fields = "laid_out mapped wrapped highlights geometry allocations allocated_bytes capture_us accept_us viewport_us geometry_us".split()
+        frames = [dict.fromkeys(fields, 0) | {"duration_us": n * 1000} for n in range(1, 101)]
+        frames[-1]["mapped"] = 500
+        result = latency.frame_summary(frames)
+        self.assertEqual(result["p99_ms"], 99)
+        self.assertEqual(result["work_max"]["mapped"], 500)
+        self.assertGreater(result["variance_ms2"], 0)

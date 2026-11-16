@@ -13,6 +13,8 @@ pub mod images;
 pub mod layout;
 pub mod mouse;
 pub mod program_status;
+#[doc(hidden)]
+pub mod render_metrics;
 pub mod rich_text;
 pub mod sanitize;
 mod scrollback;
