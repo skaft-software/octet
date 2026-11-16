@@ -17,17 +17,29 @@ export class Dispatcher {
     // Bound their diagnostic retention without starving new healthy callbacks.
     if (this.callbacks.size >= 128) {
       const oldest = [...this.callbacks.values()].find(callback => callback.interrupted);
-      if (oldest) this.callbacks.delete(oldest.id);
+      if (oldest) {
+        oldest.store.controller.signal.removeEventListener('abort', oldest.onAbort);
+        this.callbacks.delete(oldest.id);
+      }
     }
     if (this.callbacks.size >= 128) invalid('dispatcher callback limit');
     const callback = { id: ++this.next, request_id: store.id, kind, extension,
       started: performance.now(), budget, store, interrupted: false };
+    // Pi awaits input handlers without a deadline (packages/coding-agent/src/
+    // core/extensions/runner.ts:1525-1574). Host request cancellation ends only
+    // this invocation's authority: retain interrupted diagnostics, never replay
+    // its handler, and let bounded retention admit the next prompt.
+    callback.onAbort = () => { this.interrupt(callback).catch(error => this.runtime.backgroundError(error)); };
+    const signal = store.controller.signal;
+    if (signal.aborted) callback.interrupted = true;
+    else signal.addEventListener('abort', callback.onAbort, {once:true});
     this.callbacks.set(callback.id, callback); this.lastDispatched = Date.now();
     await this.publish();
     return callback;
   }
   async finish(callback) {
     if (!callback) return;
+    callback.store.controller.signal.removeEventListener('abort', callback.onAbort);
     this.callbacks.delete(callback.id);
     this.lastCompleted = Date.now(); await this.publish();
   }

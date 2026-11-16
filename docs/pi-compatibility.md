@@ -287,7 +287,9 @@ system-prompt replacement or status. The context phases use 2 s per handler and
 4 s across their chain, resource discovery 4 s per handler and 4 s across its
 chain, and tool-call guards 10 s per handler and 10 s total. The transport does
 not end a prompt-phase wait on the extension's behalf: cancellation, owner
-generations and process supervision do.
+generations and process supervision do. Cancelled requests mark their outstanding
+callbacks interrupted, so retained diagnostics cannot exhaust dispatcher capacity.
+Those handlers are never replayed; an uncancelled user wait still has no deadline.
 A handler that outlives its share keeps running but is no longer waited for. It
 is named once in `[Extension issues]`, and later hooks skip it while it is still
 busy. Once its callback settles, the handler can receive the next event even

@@ -118,11 +118,44 @@ test('interrupted callback records cannot exhaust healthy dispatcher capacity', 
   const { Dispatcher } = await import('../lib/dispatcher.mjs');
   const dispatcher = new Dispatcher({initialized:false});
   for (let id=0;id<128;id++) {
-    const callback = await dispatcher.begin({id}, 'tool_call', 'failed.mjs', 1);
+    const callback = await dispatcher.begin({id, controller:new AbortController()}, 'tool_call', 'failed.mjs', 1);
     await dispatcher.interrupt(callback);
   }
-  const healthy = await dispatcher.begin({id:129}, 'tool_call', 'healthy.mjs', 1000);
+  const healthy = await dispatcher.begin({id:129, controller:new AbortController()}, 'tool_call', 'healthy.mjs', 1000);
   assert.equal(dispatcher.callbacks.size, 128);
   assert.ok(dispatcher.snapshot().callbacks.some(callback => callback.extension === 'healthy.mjs'));
   await dispatcher.finish(healthy);
+});
+
+test('200 cancelled never-settling inputs leave capacity for a healthy input', async t => {
+  const path = await fixture(t, `export default pi => {
+    let calls=0;
+    pi.on('input', async event => {
+      calls++;
+      if (event.text === 'healthy') return {action:'transform',text:'accepted:'+calls};
+      await new Promise(()=>{});
+    });
+  };`);
+  const peer = launch(t, [path]);
+  await peer.init(['input_transform_v1','dispatcher_liveness_v1']);
+  for (let index=0;index<200;index++) {
+    const pending = peer.request('hook/run', {hook:'before_prompt', context:peer.context(),
+      payload:{phase:'input',text:'cancel me',source:'interactive'}});
+    // Cancel only after the unbudgeted callback has actually started.
+    const entered = await Promise.race([
+      peer.wait(frame => frame.method === 'status/contribution'
+        && frame.params.liveness?.callbacks.some(c => c.request_id === pending.id)),
+      pending.response,
+    ]);
+    assert.equal(entered.method, 'status/contribution', `input ${index} must reach its callback`);
+    peer.notify('$/cancelRequest', {id:pending.id});
+    assert.equal((await pending.response).error?.code, -32800);
+  }
+  const healthy = await peer.request('hook/run', {hook:'before_prompt', context:peer.context(),
+    payload:{phase:'input',text:'healthy',source:'interactive'}}).response;
+  assert.equal(healthy.result.input_event.text, 'accepted:201', 'cancelled callbacks are never replayed');
+  const snapshot = await status(peer);
+  assert.ok(snapshot.callbacks.length <= 128);
+  assert.ok(snapshot.callbacks.every(callback => callback.interrupted));
+  await peer.close();
 });

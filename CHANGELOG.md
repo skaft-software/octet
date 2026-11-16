@@ -102,6 +102,7 @@
 - Ctrl+D exits preserve starting terminal settings under tmux after native input readiness, extension reload and resize.
 - Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
 - Pi dispatcher liveness preserves user waits, isolates stalled callbacks and factory failures, and reports disconnects without replay.
+- Cancelled Pi prompt callbacks release dispatcher capacity while user waits remain unbounded and interrupted handlers stay unreplayed.
 - Model labels consistently show full IDs and distinct display names across the footer, picker, splash and session views.
 - Enabling Pi compatibility returns editable control while factories load with a visible status and hook-readiness tracing.
 - Model discovery keeps capability, pricing and audio provenance together during route registration.
