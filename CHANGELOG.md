@@ -4,6 +4,8 @@
 
 ### Added
 
+- Document the tool and extension-host module dependencies for independent embedding.
+
 - Document independent tool and extension use while retaining caller control flow outside the agent loop.
 
 - Add a provider-only loopback consumer and embedding notes for shared Codex storage, catalogs and one-request inference.

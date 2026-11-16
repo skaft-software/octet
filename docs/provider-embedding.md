@@ -146,5 +146,8 @@ Delivering this prerequisite does not resume Ultra or update its dependency:
 its owner must separately authorize integration and any live OAuth/inference
 qualification. Renderer work and separate releases are not prerequisites.
 
+The [tool/extension module dependency map](maintainers/agent-feature-boundary.md)
+records the compilation coupling being separated for independent hosts.
+
 See the [ownership map](maintainers/provider-boundary.md) and
 [AI architecture](design/octet-ai.md) for the extraction and transport contracts.
