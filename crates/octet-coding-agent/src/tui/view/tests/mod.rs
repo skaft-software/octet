@@ -40,6 +40,7 @@ mod native_history_tests;
 mod overlay_and_completion_tests;
 mod pi_experience_tests;
 mod picker_and_panel_tests;
+mod polish_tests;
 mod prompt_card_and_chrome_tests;
 mod prompt_history_and_paste_tests;
 mod provider_retry_and_status_loop_tests;

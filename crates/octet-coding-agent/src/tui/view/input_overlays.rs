@@ -695,7 +695,10 @@ pub(super) fn render_pending_steering(
                 "{continuation}{}",
                 subdued_text(
                     &state.theme,
-                    &format!("{ellipsis} {hidden} queued rows hidden")
+                    &format!(
+                        "{ellipsis} {hidden} queued {} hidden",
+                        super::plural(hidden, "row", "rows")
+                    )
                 )
             ),
             width,

@@ -217,9 +217,10 @@ fn capture_loss_details(compact: &CompactBashOutput) -> Vec<String> {
         details.push("older live output was elided; unavailable to expand".to_owned());
     }
     for truncation in &compact.capture_truncations {
-        let omitted = truncation
-            .omitted_bytes
-            .map_or_else(|| "some bytes".to_owned(), |bytes| format!("{bytes} bytes"));
+        let omitted = truncation.omitted_bytes.map_or_else(
+            || "some bytes".to_owned(),
+            |bytes| format!("{bytes} {}", super::plural(bytes, "byte", "bytes")),
+        );
         details.push(format!(
             "{} capture omitted {omitted}; unavailable to expand",
             truncation.stream
@@ -334,7 +335,7 @@ fn project_bash_output_body(
     projected.retain_rows(&retained);
     let mut details = loss_details;
     if hidden_rows > 0 {
-        let unit = if hidden_rows == 1 { "row" } else { "rows" };
+        let unit = super::plural(hidden_rows, "row", "rows");
         details.push(if theme.is_compiled_default() {
             format!("{hidden_rows} output {unit} collapsed")
         } else {

@@ -181,7 +181,7 @@ pub(super) fn tool_input_preview(
     rows.truncate(COMPACT_TOOL_INPUT_ROWS);
     let ellipsis = if theme.unicode() { "…" } else { "..." };
     let separator = if theme.unicode() { " · " } else { " - " };
-    let unit = if hidden == 1 { "row" } else { "rows" };
+    let unit = super::plural(hidden, "row", "rows");
     let long = format!("{ellipsis} {hidden} {kind} {unit} hidden{separator}Ctrl+O");
     let short = format!("+{hidden} Ctrl+O");
     let available = usize::from(width).saturating_sub(visible_width(continuation));
@@ -337,7 +337,7 @@ pub(super) fn project_diff(
         let hint = match source_remainder {
             DiffRemainder::None => {
                 let remaining = projected.lines.len() - COMPACT_DIFF_LINES;
-                let unit = if remaining == 1 { "line" } else { "lines" };
+                let unit = super::plural(remaining, "line", "lines");
                 format!("{remaining} {unit} hidden")
             }
             DiffRemainder::Lines(omitted) => {
@@ -349,7 +349,7 @@ pub(super) fn project_diff(
                     .len()
                     .saturating_sub(COMPACT_DIFF_LINES)
                     .saturating_add(omitted);
-                let unit = if remaining == 1 { "line" } else { "lines" };
+                let unit = super::plural(remaining, "line", "lines");
                 format!("{remaining} {unit} hidden")
             }
             DiffRemainder::Unknown => "more diff content hidden".to_owned(),

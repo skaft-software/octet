@@ -3863,6 +3863,15 @@ pub(crate) fn semantic_separator(theme: &OctetTheme) -> &str {
     theme.glyph("separator")
 }
 
+/// Select a count noun for transcript counts, including zero.
+fn plural<'a>(count: impl PartialEq + From<u8>, singular: &'a str, multiple: &'a str) -> &'a str {
+    if count == 1.into() {
+        singular
+    } else {
+        multiple
+    }
+}
+
 /// Indent continuation rows to the first text cell after an activity marker.
 pub(crate) const ACTIVITY_DETAIL_INDENT: &str = "  ";
 
@@ -4148,7 +4157,7 @@ fn render_shell_output(
         COMPACT_EXEC_OUTPUT_ROWS,
         false,
         |hidden_rows| {
-            let unit = if hidden_rows == 1 { "row" } else { "rows" };
+            let unit = plural(hidden_rows, "row", "rows");
             fit_line(
                 &format!(
                     "{output_indent}{}",
@@ -5407,14 +5416,18 @@ impl InteractiveShell {
                             if *bytes > 0 {
                                 bounded_live_append(
                                     &mut panel.output,
-                                    &format!("... {bytes} bytes of live output elided ...\n"),
+                                    &format!(
+                                        "... {bytes} {} of live output elided ...\n",
+                                        plural(*bytes, "byte", "bytes")
+                                    ),
                                 );
                             }
                             if *events > 0 {
                                 bounded_live_append(
                                     &mut panel.output,
                                     &format!(
-                                        "... {events} session event(s) could not be recorded ...\n"
+                                        "... {events} session {} could not be recorded ...\n",
+                                        plural(*events, "event", "events")
                                     ),
                                 );
                             }

@@ -621,8 +621,9 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
         let padding = " ".repeat(usize::from(
             state.theme.layout().block_padding_x.unwrap_or(0),
         ));
+        let unit = super::plural(scroll, "row", "rows");
         let hint = format!(
-            "{arrow} {scroll} rows back{new_output} · Jump to latest · PageDown returns to live"
+            "{arrow} {scroll} {unit} back{new_output} · Jump to latest · PageDown returns to live"
         );
         lines.push(fit_line(
             &format!(

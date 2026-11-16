@@ -70,7 +70,7 @@ pub(super) fn project_source(
     projected.prefix("Codemode\n");
     if hidden > 0 {
         let ellipsis = if theme.unicode() { "…" } else { "..." };
-        let unit = if hidden == 1 { "row" } else { "rows" };
+        let unit = super::plural(hidden, "row", "rows");
         let separator = if theme.unicode() { " · " } else { " - " };
         let long = format!("{ellipsis} {hidden} script {unit} hidden{separator}Ctrl+O");
         let short = format!("{ellipsis}+{hidden} Ctrl+O");
