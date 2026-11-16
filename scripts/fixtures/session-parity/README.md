@@ -36,6 +36,23 @@ cargo test -p octet-coding-agent --lib session_parity --profile ci-test --locked
 `OCTET_PARITY_SEEDS` (default `1`) and `OCTET_PARITY_SEQUENCES` (default `12`)
 size the seeded random run.
 
+`endurance_cycles_match_pi` adds six reduced task/tool/private-state/compaction
+cycles, reopening after each cycle and switching to a new session and back. It
+compares every step on both pinned versions, including imports. The separate
+fixed checkout/fork fixtures retain their documented durable-head and
+pre-compaction-history divergences; the endurance test does not expand the ledger.
+
+The real App/Node counterpart runs three tool/compaction/restart/resume cycles:
+
+```sh
+cargo test -p octet-coding-agent --lib native_pi_endurance --profile ci-test --locked
+```
+
+Only inference is scripted on loopback. It requires a new adapter PID on restart,
+checks the resumed native head and append-only durable prefix, verifies private
+extension state and namespace isolation, and completes a later provider turn.
+This reduced corpus is not full-inventory acceptance (**NOT RUN**).
+
 ## Normalization
 
 Entry ids differ between implementations, so **append order is the identity**:

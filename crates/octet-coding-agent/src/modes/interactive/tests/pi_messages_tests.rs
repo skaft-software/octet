@@ -24,12 +24,29 @@ async fn app_with_provider(
         .and(path("/v1/messages"))
         .respond_with(move |request: &wiremock::Request| {
             let mut requests = capture.lock().unwrap();
-            let body = if tool && requests.is_empty() {
+            let wire: Value = serde_json::from_slice(&request.body).unwrap();
+            let repeated_tool =
+                wire["messages"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .is_some_and(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_array().is_some_and(|parts| {
+                                parts.iter().any(|part| {
+                                    part["type"] == "text"
+                                        && part["text"]
+                                            .as_str()
+                                            .is_some_and(|text| text.starts_with("ENDURANCE-"))
+                                })
+                            })
+                    });
+            let body = if tool && (requests.is_empty() || repeated_tool) {
                 first.clone()
             } else {
                 text_turn()
             };
-            requests.push(serde_json::from_slice(&request.body).unwrap());
+            requests.push(wire);
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(body)
@@ -635,4 +652,153 @@ export default pi => {{
         shell.hydrate(&reopened).unwrap();
         assert!(!shell.debug_snapshot().contains("INRUN_CUSTOM_CONTENT"));
     }
+}
+
+// Pi contract: packages/coding-agent/src/core/session-manager.ts:1272-1298
+// keeps compaction as a durable tree entry; :1590-1595 preserves branch ancestry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_endurance_tools_compaction_restart_and_resume() {
+    let (directory, mut app, _server, requests) = app_with_provider(
+        r#"
+export default pi => {
+  pi.on('session_before_compact', event => ({ compaction: {
+    summary: 'ENDURANCE_SUMMARY', firstKeptEntryId: event.preparation.firstKeptEntryId
+  }}));
+  pi.on('session_compact', event => pi.appendEntry('endurance-compacted', {
+    id: event.compactionEntry.id, summary: event.compactionEntry.summary
+  }));
+  pi.registerCommand('checkpoint', { handler: (_, ctx) => {
+    const branch = ctx.sessionManager.getBranch();
+    pi.appendEntry('endurance-state', { pid: process.pid,
+      session: ctx.sessionManager.getSessionId(), leaf: ctx.sessionManager.getLeafId(),
+      branch: branch.map(entry => entry.id), private: 'ENDURANCE_PRIVATE' });
+  }});
+};
+"#,
+        true,
+    )
+    .await;
+    app.config.compaction.keep_recent_tokens = 1;
+    let path = app.agent.session().path().to_owned();
+    let mut shell = InteractiveShell::test_shell();
+    let mut pids = Vec::new();
+    for cycle in 0..3 {
+        app.agent
+            .set_compaction_token_mode(AgentCompactionMode::Local, 0.8, 1)
+            .unwrap();
+        let before_requests = requests.lock().unwrap().len();
+        drive(
+            &mut app,
+            &mut shell,
+            UserInput::from(format!("ENDURANCE-{cycle}")),
+        )
+        .await;
+        assert_eq!(requests.lock().unwrap().len(), before_requests + 2);
+        let head = app.agent.session().head().unwrap();
+        command(&mut app, &mut shell, "checkpoint").await.unwrap();
+        let state = app
+            .agent
+            .session()
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                app.agent
+                    .session()
+                    .extension_entry(&entry.id, "octet-pi-compat")
+                    .filter(|entry| entry.entry_type == "endurance-state")
+            })
+            .unwrap();
+        assert_eq!(state.data["leaf"], head.0);
+        assert_eq!(
+            state.data["branch"].as_array().unwrap().last().unwrap(),
+            &json!(head.0)
+        );
+        assert_eq!(
+            state.data["session"],
+            path.file_stem().unwrap().to_str().unwrap()
+        );
+        pids.push(state.data["pid"].as_u64().unwrap());
+        let prefix = std::fs::read(&path).unwrap();
+        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(20),
+            compact_extension_session(
+                &mut app,
+                &mut shell,
+                &mut input,
+                None,
+                octet_agent::CancellationToken::default(),
+            ),
+        )
+        .await
+        .expect("repeated Pi compaction stalled")
+        .unwrap();
+        assert_eq!(receipt.summary, "ENDURANCE_SUMMARY");
+        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+        let head = app.agent.session().head();
+        let durable = std::fs::read(&path).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            app.executable_extensions.shutdown(),
+        )
+        .await
+        .unwrap();
+        app = rebuild_app(
+            app,
+            None,
+            None,
+            None,
+            Some(SessionSelection::OpenExisting(path.clone())),
+        )
+        .unwrap();
+        app.executable_extensions
+            .activate_session_lifecycle_driver();
+        assert_eq!(
+            app.agent.session().head(),
+            head,
+            "resume must retain branch identity"
+        );
+        assert!(std::fs::read(&path).unwrap().starts_with(&durable));
+        command(&mut app, &mut shell, "checkpoint").await.unwrap();
+    }
+    drive(&mut app, &mut shell, UserInput::from("LATER_TURN")).await;
+    app.executable_extensions.shutdown().await;
+    let reopened = Session::open_read_only(&path).unwrap();
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(&entry.value,
+        EntryValue::Compaction { summary, .. } if summary == "ENDURANCE_SUMMARY"))
+            .count(),
+        3
+    );
+    let states: Vec<_> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            reopened
+                .extension_entry(&entry.id, "octet-pi-compat")
+                .filter(|private| private.entry_type == "endurance-state")
+        })
+        .collect();
+    assert_eq!(states.len(), 6);
+    assert!(states
+        .iter()
+        .all(|state| state.data["private"] == "ENDURANCE_PRIVATE"));
+    assert!(reopened.entries().iter().all(|entry| reopened
+        .extension_entry(&entry.id, "unrelated-extension")
+        .is_none()));
+    assert!(
+        pids.windows(2).all(|pair| pair[0] != pair[1]),
+        "a real adapter process restart is required"
+    );
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 7);
+    assert!(captured.last().unwrap().to_string().contains("LATER_TURN"));
+    assert!(captured
+        .iter()
+        .all(|request| !request.to_string().contains("ENDURANCE_PRIVATE")));
+    assert!(directory.path().join("fixture.txt").is_file());
 }

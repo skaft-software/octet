@@ -627,3 +627,76 @@ fn minimal_prefix(
     }
     (case.operations.len(), Vec::new(), case.operations.clone())
 }
+
+/// Reduced repeated lifecycle sequence, using the same Pi oracle/native/import
+/// comparisons as the fixed corpus, including every durable checkpoint.
+// Pi contract: packages/coding-agent/src/core/session-manager.ts:1272-1298,
+// :1026-1054 (compaction and session replacement). Checkout/fork divergences
+// have separate fixed fixtures and ledger entries; do not conflate those with
+// repeated compaction or hide them behind this endurance sequence.
+#[test]
+fn endurance_cycles_match_pi() {
+    let mut operations = vec![json!({"op":"message", "as":"root", "message":{
+        "role":"user", "content":"root", "timestamp":0}})];
+    for cycle in 0..6 {
+        let kept = format!("kept-{cycle}");
+        let call = format!("call-{cycle}");
+        operations.extend([
+            json!({"op":"message", "as":kept, "message":{
+                "role":"user", "content":format!("task-{cycle}"), "timestamp":0}}),
+            json!({"op":"message", "message":{"role":"assistant", "api":"openai-completions",
+                "provider":"openai", "model":"fixture", "stopReason":"toolUse", "timestamp":0,
+                "content":[{"type":"toolCall", "id":call, "name":"read", "arguments":{"path":"fixture.txt"}}]}}),
+            json!({"op":"message", "message":{"role":"toolResult", "toolCallId":call,
+                "toolName":"read", "content":[{"type":"text", "text":format!("result-{cycle}")}],
+                "isError":false, "timestamp":0}}),
+            json!({"op":"message", "as":format!("answer-{cycle}"), "message":{"role":"assistant",
+                "api":"openai-completions", "provider":"openai", "model":"fixture", "stopReason":"stop",
+                "content":[{"type":"text", "text":format!("done-{cycle}")}], "timestamp":0}}),
+            json!({"op":"custom", "customType":"durable-state", "data":{"cycle":cycle,"private":"kept"}}),
+            json!({"op":"compaction", "as":format!("compact-{cycle}"), "summary":format!("summary-{cycle}"), "firstKept":kept}),
+            json!({"op":"reopen"}),
+            json!({"op":"context"}),
+            json!({"op":"custom", "customType":"branch-state", "data":{"cycle":cycle}}),
+            json!({"op":"reopen"}),
+        ]);
+    }
+    operations.extend([
+        json!({"op":"new", "slot":"original"}),
+        json!({"op":"message", "message":{"role":"user", "content":"replacement", "timestamp":0}}),
+        json!({"op":"message", "message":{"role":"assistant", "api":"openai-completions",
+            "provider":"openai", "model":"fixture", "stopReason":"stop", "timestamp":0,
+            "content":[{"type":"text", "text":"replacement answer"}]}}),
+        json!({"op":"switch", "slot":"original"}),
+        json!({"op":"reopen"}),
+        json!({"op":"context"}),
+    ]);
+    let case = Case {
+        name: "endurance-cycles".into(),
+        operations,
+    };
+    let repo = repo_root();
+    let scratch = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    let mut ledger = load_ledger(&repo);
+    for version in VERSIONS {
+        let directory = scratch.path().join(version);
+        let results = oracle::run(&repo, version, &directory, std::slice::from_ref(&case)).unwrap();
+        let compared = evaluate(
+            &case,
+            &results[&case.name],
+            &directory.join(&case.name),
+            &mut ledger,
+            &mut failures,
+            version,
+        );
+        assert_eq!(
+            compared,
+            case.operations.len(),
+            "every later operation must run"
+        );
+    }
+    if !failures.is_empty() {
+        fail(failures, Vec::new());
+    }
+}
