@@ -1,4 +1,10 @@
-export const rpcError = (code, message) => Object.assign(new Error(message), { code });
+const hostErrors = new WeakSet();
+export const rpcError = (code, message) => {
+  const error = Object.assign(new Error(message), { code });
+  hostErrors.add(error);
+  return error;
+};
+export const isHostError = error => error !== null && (typeof error === 'object' || typeof error === 'function') && hostErrors.has(error);
 // An API name this bridge (or the host) owns: a host method, a negotiated
 // feature, or a Pi context member an extension called. It is fixed vocabulary
 // from adapter/native source, so a user-visible notice may name it.

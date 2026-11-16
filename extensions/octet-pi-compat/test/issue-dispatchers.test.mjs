@@ -52,16 +52,17 @@ for (const event of events) test(`${event}: recoverable failures are private, ac
   await peer.close();
 });
 
-test('specialized issue reporting never converts coded refusals into successful hooks', async t => {
+test('coded callback faults are isolated in prompt hooks while other hook policies remain unchanged', async t => {
   const entries = fixtures(t, [`export default pi => {
     for (const event of ${JSON.stringify(events)}) pi.on(event, () => { throw Object.assign(new Error('host refused'), {code: -32002}); });
   };`]);
   const peer = launch(t, entries); await peer.init(features); await peer.start();
   for (const event of events) {
     const reply = await peer.request('hook/run', request(peer, event)).response;
-    assert.equal(reply.error?.code, -32002, event);
+    if (event === 'input' || event === 'before_agent_start') assert.ok(reply.result, event);
+    else assert.equal(reply.error?.code, -32002, event);
   }
-  assert.equal(peer.seen.filter(notice).length, 0);
+  assert.equal(peer.seen.filter(notice).length, 2);
   await peer.close();
 });
 

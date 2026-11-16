@@ -1,7 +1,7 @@
 // Pi 1.0.2 context facts and raw-input transforms. Rust supplies native facts;
 // Pi's no-project-resources trust signal does not change native resource admission.
 // Extension request cancellation is not a substitute for aborting the agent.
-import { bounded, facade, fields, invalid, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
+import { bounded, facade, fields, invalid, isHostError, plainJSON, rpcError, strict, unsupported, unsupportedAPI } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
 import { HookBudget } from './handler-budget.mjs';
@@ -90,22 +90,47 @@ export async function transformInput(runtime, payload, store) {
         result = run.value;
       } catch (error) {
         signal.throwIfAborted(); runtime.assertSessionOwner(store);
-        if (Number.isInteger(error?.code)) throw error;
+        // Pi 1.5.0 core/extensions/runner.js:1201-1231 reports each
+        // throwing input handler and continues. Host outcomes remain authoritative.
+        if (isHostError(error) || store.errors.includes(error)) throw error;
         runtime.reportCallbackError('input', entry.factory, error);
         continue;
       }
       signal.throwIfAborted(); runtime.assertSessionOwner(store);
       if (result === undefined) continue;
-      fields(result, ['action', 'text', 'images'], 'input result');
-      if (result.action === 'handled') {
+      let nextText, nextImages, action, resultText, resultImages, keys;
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        try {
+          keys = Object.keys(result);
+          action = result.action; resultText = result.text; resultImages = result.images;
+          if (action === 'transform' && resultImages != null) resultImages = structuredClone(resultImages);
+        } catch (error) {
+          signal.throwIfAborted(); runtime.assertSessionOwner(store);
+          if (isHostError(error) || store.errors.includes(error)) throw error;
+          runtime.reportCallbackError('input', entry.factory, error);
+          continue;
+        }
+      }
+      try {
+        if (!keys) invalid('input result must be an object');
+        fields(Object.fromEntries(keys.map(key => [key, null])), ['action', 'text', 'images'], 'input result');
+        if (action !== 'handled' && action !== 'continue' && action !== 'transform') invalid('input action');
+        if (action === 'transform') {
+          nextText = bounded(resultText, 'transformed input text', 262144, { controls: true });
+          // Pi's nullish fallback retains attachments; [] explicitly clears them.
+          nextImages = resultImages ?? images;
+          if (nextImages !== undefined) inputImages(nextImages);
+        }
+      } catch (error) {
+        signal.throwIfAborted(); runtime.assertSessionOwner(store);
+        runtime.reportCallbackError('input', entry.factory, error);
+        continue;
+      }
+      if (action === 'handled') {
         await cancellable(runtime.flush(store), signal);
         return { action: 'handled' };
       }
-      if (result.action === 'continue') continue;
-      if (result.action !== 'transform') invalid('input action');
-      text = bounded(result.text, 'transformed input text', 262144, { controls: true });
-      // Pi's nullish fallback retains attachments; [] explicitly clears them.
-      if (result.images != null) { inputImages(result.images); images = result.images; }
+      if (action === 'transform') { text = nextText; images = nextImages; }
     }
   } finally { budget.finish(); }
   await cancellable(runtime.flush(store), signal);

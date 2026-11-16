@@ -4,6 +4,7 @@ import { Runtime } from '../lib/runtime.mjs';
 import { createContext } from '../lib/api.mjs';
 import { contextFacts, getSettings, transformInput } from '../lib/context-api.mjs';
 import { projectContext } from '../lib/provider-context.mjs';
+import { rpcError } from '../lib/errors.mjs';
 import { owner } from './helper.mjs';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -403,4 +404,27 @@ test('dropping a leading system with no tools clears the native prompt and repor
 });
 test('unsupported tool changes fail explicitly, not silently ignored', async () => {
   await assert.rejects(fullContext([event => { event.messages[0].toolsAdded = []; }], [{ name: 'read', description: 'Read', parameters: { type: 'object' } }]), /cannot replace the advertised tool snapshot/);
+});
+
+test('input preserves authoritative host failures', async () => {
+  const { runtime, store } = harness();
+  const refusal = rpcError(-32002, 'host refusal');
+  let later = false;
+  runtime.events.set('input', [{ factory: 0, handler() { throw refusal; } },
+    { factory: 1, handler() { later = true; } }]);
+  await assert.rejects(transformInput(runtime, input, store), error => error === refusal);
+  assert.equal(later, false);
+});
+
+test('input skips coded callback faults and malformed transforms atomically', async () => {
+  const { runtime, store, errors } = harness();
+  const seen = [];
+  runtime.events.set('input', [
+    { factory: 0, handler() { throw Object.assign(new Error('private'), { code: -32002 }); } },
+    { factory: 0, handler() { return { action: 'transform', text: 'bad', images: [{}] }; } },
+    { factory: 1, handler(event) { seen.push(event.text, event.images[0].data); return { action: 'transform', text: 'good' }; } },
+  ]);
+  assert.deepEqual(await transformInput(runtime, input, store), { action: 'transform', text: 'good', images: [image] });
+  assert.deepEqual(seen, ['raw', 'eA==']);
+  assert.equal(errors.length, 1); // diagnostics are deduplicated per factory/stage
 });

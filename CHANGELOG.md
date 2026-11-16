@@ -22,6 +22,7 @@
 - Fullscreen scrolling and selection reuse unchanged row mappings instead of re-aligning long answers on every event.
 - Google-compatible continuation requests no longer end with a `model` turn, avoiding HTTP 400 on OpenCode Go.
 - Tool labels use available terminal width while keeping their selected values readable.
+- Pi input hooks skip coded callback faults and malformed transforms while preserving later handlers and native authority.
 
 ## [0.10.4] - 2026-11-12
 

@@ -323,7 +323,10 @@ order before template/skill expansion and `before_agent_start`. They report
 `source: "interactive"`, as Pi's print path does. A transformation supplies the
 subsequent handlers and prompt composition with its text/images; omitted images
 are retained. Returning `action: "handled"` stops submission before saving a
-user prompt or starting a provider request.
+user prompt or starting a provider request. A throwing input callback or malformed
+transform is reported and skipped, leaving the last valid input for later handlers.
+Native authority failures and cancellation still stop the operation. Coded callback
+exceptions in `before_agent_start` are isolated in the same way.
 
 The source checkout's `scripts/pi-eval/prompts.py` comparison loop checks these
 paths against real Pi CLIs using isolated synthetic factories and a local

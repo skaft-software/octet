@@ -1,4 +1,4 @@
-import { bounded, facade, fields, invalid } from './errors.mjs';
+import { bounded, facade, fields, invalid, isHostError } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { cancellable } from './provider-context.mjs';
 import { customMessage } from './custom-messages.mjs';
@@ -60,7 +60,8 @@ export async function beforeAgentStart(runtime, payload, store) {
         // apply, and only a quit preempting the hook leaves one unanswered.
         if (run.ran) result = run.value;
       } catch (error) {
-        if (Number.isInteger(error?.code) || store.controller.signal.aborted) throw error;
+        store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
+        if (isHostError(error) || store.errors.includes(error)) throw error;
         runtime.reportCallbackError('before_agent_start', entry.factory, error);
         continue;
       }
