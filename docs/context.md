@@ -106,6 +106,10 @@ the compaction reason before blaming the model for a low percentage.
 
 ## What is retained
 
+Press Escape to cancel an active task or compaction. You can send another task
+and later restart with `--continue`; a cancelled compaction does not replace the
+completed conversation with a summary. See [session resumption](sessions.md#resume-and-branch).
+
 Local compaction writes a bounded summary only at a safe, completed-turn
 boundary. It keeps a recent tail and the active skill state, and doesn't rewrite
 history. During one automatic capacity check, local compaction retries only at

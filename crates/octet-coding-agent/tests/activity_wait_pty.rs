@@ -203,6 +203,10 @@ struct Candidate {
 
 impl Candidate {
     fn spawn(api_url: &str, theme: &str, color: &str, mouse: &str) -> Self {
+        Self::spawn_with_setup(api_url, theme, color, mouse, false)
+    }
+
+    fn spawn_with_setup(api_url: &str, theme: &str, color: &str, mouse: &str, setup: bool) -> Self {
         let root = tempfile::tempdir().expect("PTY fixture tempdir");
         let canonical = root.path().canonicalize().expect("canonical fixture root");
         let home = canonical.join("home");
@@ -211,25 +215,94 @@ impl Candidate {
         fs::create_dir_all(home.join(".octet/credentials")).expect("credential directory");
         fs::create_dir_all(&workspace).expect("workspace directory");
         fs::create_dir_all(&sessions).expect("session directory");
-        let credential = home.join(".octet/credentials/custom.json");
-        let record = serde_json::json!({
-            "base_url": api_url,
-            "api_key": "",
-            "api_name": "probe",
-            "headers": [],
-            "models": [{"api_name": "probe", "context_window": 32768}],
-            "auto_discover": false,
-        });
-        fs::write(&credential, record.to_string()).expect("loopback credential fixture");
-        fs::set_permissions(&credential, fs::Permissions::from_mode(0o600))
-            .expect("credential permissions");
+        let binary = if setup {
+            let bin = home.join(".local/bin/octet");
+            fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            fs::copy(env!("CARGO_BIN_EXE_octet"), &bin).unwrap();
+            // Exercise the no-provider guidance before committing setup.
+            let missing = Command::new(&bin)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(&workspace)
+                .args(["--offline", "--print", "hello"])
+                .output()
+                .unwrap();
+            assert!(!missing.status.success());
+            let diagnostic = String::from_utf8_lossy(&missing.stderr);
+            assert!(diagnostic.contains("octet setup --help"), "{diagnostic}");
+            let migration = Command::new(&bin)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(&workspace)
+                .args([
+                    "--offline",
+                    "migrate",
+                    "pi",
+                    "--dry-run",
+                    "--json",
+                    "--pi-home",
+                ])
+                .arg(home.join(".pi/agent"))
+                .args(["--project", "."])
+                .output()
+                .unwrap();
+            assert!(
+                migration.status.success(),
+                "migration: {}",
+                String::from_utf8_lossy(&migration.stderr)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&migration.stdout).unwrap();
+            assert_eq!(report["mode"], "dry_run");
+            assert_eq!(report["package_code_executed"], false);
+            let output = Command::new(&bin)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(&workspace)
+                .args([
+                    "setup",
+                    "--endpoint",
+                    api_url,
+                    "--offline",
+                    "--manual-model",
+                    "probe",
+                    "--context-window",
+                    "32768",
+                    "--no-auth",
+                    "--yes",
+                ])
+                .output()
+                .expect("run offline setup");
+            assert!(
+                output.status.success(),
+                "setup: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            bin
+        } else {
+            let credential = home.join(".octet/credentials/custom.json");
+            let record = serde_json::json!({
+                "base_url": api_url,
+                "api_key": "",
+                "api_name": "probe",
+                "headers": [],
+                "models": [{"api_name": "probe", "context_window": 32768}],
+                "auto_discover": false,
+            });
+            fs::write(&credential, record.to_string()).expect("loopback credential fixture");
+            fs::set_permissions(&credential, fs::Permissions::from_mode(0o600))
+                .expect("credential permissions");
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_octet"))
+        };
 
         let pty = Pty::open(INITIAL_COLUMNS, INITIAL_ROWS);
         let tty_fd = pty.slave.as_ref().expect("open PTY slave").as_raw_fd();
         let stdin = duplicate_stdio(tty_fd);
         let stdout = duplicate_stdio(tty_fd);
         let stderr = duplicate_stdio(tty_fd);
-        let mut command = Command::new(env!("CARGO_BIN_EXE_octet"));
+        let mut command = Command::new(binary);
         command
             .args([
                 "--offline",
@@ -250,7 +323,6 @@ impl Candidate {
             .arg(&workspace)
             .arg("--session-dir")
             .arg(&sessions)
-            .args(["--model", "custom/probe"])
             .current_dir(&workspace)
             .env_clear()
             .env("HOME", &home)
@@ -263,6 +335,9 @@ impl Candidate {
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        if !setup {
+            command.args(["--model", "custom/probe"]);
+        }
         unsafe {
             command.pre_exec(move || {
                 if libc::setsid() == -1
@@ -313,7 +388,7 @@ impl Candidate {
         );
     }
 
-    fn shutdown(mut self) {
+    fn shutdown(&mut self) {
         trace_fixture("shutting down PTY child");
         self.pty.write_input(&[4]);
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
@@ -1303,4 +1378,85 @@ fn real_program_status_failure_remains_error_at_exit_pty_contract() {
             .map(String::as_str),
         Some("state=error:app=octet")
     );
+}
+
+#[test]
+fn first_session_setup_cancel_compact_and_resume() {
+    let _guard = pty_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let api = HeldApi::start();
+    let mut candidate = Candidate::spawn_with_setup(&api.url, "dark", "never", "app", true);
+    let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
+    let mut consumed = 0;
+    await_screen(&mut candidate, &mut parser, &mut consumed, "probe");
+    candidate.pty.write_input(b"cancel this first task\r");
+    api.wait_for_request(&mut candidate, 1);
+    candidate.pty.write_input(b"\x1b");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "interrupted");
+    api.release_response();
+    candidate.pty.write_input(b"remember journey marker\r");
+    api.wait_for_request(&mut candidate, 2);
+    api.release_response();
+    await_screen(&mut candidate, &mut parser, &mut consumed, "completed");
+    candidate.pty.write_input(b"/compact \r");
+    api.wait_for_request(&mut candidate, 3);
+    // Pi aborts compaction before appending its checkpoint: packages/coding-agent/src/core/agent-session.ts:2928-2932, 2519-2527.
+    candidate.pty.write_input(b"\x1b");
+    await_screen(
+        &mut candidate,
+        &mut parser,
+        &mut consumed,
+        "compaction cancelled",
+    );
+    api.release_response();
+    candidate.shutdown();
+    let root = candidate._root.path();
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    let sessions = root.join("sessions");
+    api.release_response();
+    let mut resumed = Command::new(home.join(".local/bin/octet"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&workspace)
+        .args([
+            "--offline",
+            "--no-context-files",
+            "--no-tools",
+            "--workspace",
+        ])
+        .arg(&workspace)
+        .arg("--session-dir")
+        .arg(&sessions)
+        .args(["--continue", "--print", "continue the journey"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("resume installed binary");
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    while resumed.try_wait().expect("poll resumed process").is_none() {
+        if Instant::now() >= deadline {
+            resumed.kill().expect("kill stalled resume");
+            let _ = resumed.wait();
+            panic!("resumed process did not exit");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let output = resumed.wait_with_output().expect("collect resumed process");
+    assert!(
+        output.status.success(),
+        "resume failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fixture response done"));
+    let bodies = api.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 4);
+    let resumed = String::from_utf8_lossy(&bodies[3]);
+    assert!(
+        resumed.contains("remember journey marker"),
+        "resumed request lost history: {resumed}"
+    );
+    assert!(resumed.contains("continue the journey"));
 }

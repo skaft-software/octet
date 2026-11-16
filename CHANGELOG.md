@@ -8,6 +8,7 @@
 
 ### Changed
 
+- First sessions can continue after cancellation and resume with their saved model.
 - Composer overflow counts sit in centered border labels, leaving more room for draft text.
 - Codex uses provider-default context budgets, keeping GPT-6.1 Sol and Terra's advertised 500K windows.
 - Completed shell-tool rows show their recorded duration; themes can restyle or hide it.
