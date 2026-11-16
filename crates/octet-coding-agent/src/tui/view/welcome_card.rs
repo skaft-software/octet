@@ -448,9 +448,6 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
                 adaptive_accent,
                 splash_color,
             );
-        } else if state.welcome_blink_closed {
-            logo =
-                crate::tui::splash::render_idle_blink(&state.theme, adaptive_accent, splash_color);
         }
     }
     let splash_text = |text: &str| {

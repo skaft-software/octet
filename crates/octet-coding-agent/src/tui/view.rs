@@ -2019,7 +2019,6 @@ pub(crate) struct ShellState {
     /// mutable until the first real conversation block.
     startup_card_started_at: Option<Instant>,
     welcome_reaction: Option<builtin_welcome_card::MarkReaction>,
-    welcome_blink_closed: bool,
 }
 
 impl Default for ShellState {
@@ -2361,7 +2360,6 @@ impl ShellState {
             startup_pending: Default::default(),
             startup_card_started_at: Default::default(),
             welcome_reaction: None,
-            welcome_blink_closed: false,
         }
     }
 

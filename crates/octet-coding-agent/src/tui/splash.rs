@@ -56,7 +56,7 @@ pub(crate) fn render_reaction(
         model_accent,
         solid_color,
         (strength, phase + rainbow_travel(elapsed, strength)),
-        blink_closed(elapsed),
+        true,
     )
 }
 
@@ -67,28 +67,10 @@ pub(crate) fn rainbow_travel(elapsed: f32, strength: f32) -> f32 {
     1.5 * t + 10.5 * strength * (t - t * t / (2.0 * DURATION))
 }
 
-/// Two brief synchronized closures, separated by a readable open pause.
+/// Two brief closures, separated by a readable open pause.
 /// Two states are enough at this scale: partial blocks look like flicker.
 fn blink_closed(elapsed: f32) -> bool {
     (0.04..0.12).contains(&elapsed) || (0.26..0.34).contains(&elapsed)
-}
-
-/// Idle blinking changes only geometry, never the settled palette.
-pub(crate) fn render_idle_blink(
-    theme: &OctetTheme,
-    model_accent: Option<(u8, u8, u8)>,
-    solid_color: Option<(u8, u8, u8)>,
-) -> Vec<String> {
-    render_mark(
-        theme,
-        8,
-        2,
-        DURATION,
-        model_accent,
-        solid_color,
-        (0.0, 0.0),
-        true,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -140,7 +122,9 @@ fn render_mark(
             let mut line = " ".repeat(left_pad);
             for (column, bit) in BYTE.iter().enumerate() {
                 let upper_eye = *bit == b'0' && row < top_pad + column_width;
-                if upper_eye && !blink {
+                // The right eye trails by one existing animation tick.
+                let eye_elapsed = elapsed - if column == 3 { 0.04 } else { 0.0 };
+                if upper_eye && !(blink && blink_closed(eye_elapsed)) {
                     line.push_str(&blank);
                     continue;
                 }
@@ -603,14 +587,25 @@ mod reaction_tests {
                 .map(|s| sexy_tui_rs::strip_terminal_sequences(&s))
                 .collect::<Vec<_>>()
         };
-        for elapsed in [0.08, 0.30] {
+        for elapsed in [0.10, 0.32] {
             let blink = plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None));
             assert_eq!(blink, ["████████", "████████"]);
         }
-        for elapsed in [0.0, 0.34, 0.85] {
+        for elapsed in [0.0, 0.40, 0.85] {
             assert_eq!(
                 plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None)),
                 [" ██ ████", "████████"]
+            );
+        }
+        for (elapsed, upper) in [
+            (0.06, "███ ████"),
+            (0.14, " ███████"),
+            (0.28, "███ ████"),
+            (0.36, " ███████"),
+        ] {
+            assert_eq!(
+                plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None)),
+                [upper, "████████"]
             );
         }
         for ms in 0..=1000 {
@@ -622,13 +617,9 @@ mod reaction_tests {
                 None,
                 None,
             ));
-            assert!(rows[0] == " ██ ████" || rows[0] == "████████");
+            assert!([" ██ ████", "███ ████", " ███████", "████████"].contains(&rows[0].as_str()));
             assert_eq!(rows[1], "████████");
         }
-        assert_eq!(
-            plain(render_idle_blink(&theme, None, None)),
-            ["████████", "████████"]
-        );
         let normal = render_logo(&theme, 8, 2, DURATION, None, None);
         assert_eq!(
             render_reaction(&theme, DURATION, 1.0, 0.0, None, None),
