@@ -62,7 +62,7 @@ fn install_extension(run: &Path) -> String {
         &extension.join("extension.toml"),
         r#"name = "restore-probe"
 version = "0.1.0"
-api_version = "0.1"
+api_version = "0.4"
 [entrypoint]
 command = "probe.sh"
 "#,
@@ -76,7 +76,7 @@ while IFS= read -r request; do
   id=$(printf '%s\n' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$request" in
     *'"method":"initialize"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"api_version":"0.1","tools":[],"commands":[]}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"api_version":"0.4","tools":[],"commands":[],"protocol":{{"version":"0.4","features":["request_cancellation","content_parts"],"limits":{{"max_concurrent_requests":1}}}}}}}}\n' "$id"
       echo started >> '{run}/started'
       ;;
     *'"method":"shutdown"'*)
@@ -183,7 +183,9 @@ fn ctrl_d_under_tmux_restores_starting_terminal_attributes() {
         assert!(started.status.success(), "tmux new-session: {started:?}");
         wait_for(
             "the first frame",
-            || tmux.screen(&session).contains("Ctrl+D to exit"),
+            // Model resolution proves the composer is ready without depending
+            // on optional welcome-card help text.
+            || tmux.screen(&session).contains("custom/probe"),
             &tmux,
             &session,
         );

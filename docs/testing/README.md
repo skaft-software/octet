@@ -152,6 +152,13 @@ digest.
 checks bytes and emulated terminal state instead of relying on a human
 terminal. See [startup-frame-pty.md](startup-frame-pty.md).
 
+With `tmux` installed, `cargo test -p octet-coding-agent --test terminal_restore_tmux
+--profile ci-test` also checks exact starting/final terminal attributes on Ctrl+D
+exit, including API 0.4 extension shutdown, reload and resize. Readiness comes from
+the resolved model in the footer, not optional splash help text. Each wait has a
+30-second deadline; Linux checks all attributes exposed by `stty`, while macOS
+also explicitly checks `PENDIN` restoration.
+
 **The Windows lane** builds real `octet.exe` and `octet-host.exe` with
 MinGW-w64 and exercises the native terminal frontend, ConPTY, private file
 access, extension launch, and Windows process control. Several parts of the
