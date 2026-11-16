@@ -165,6 +165,7 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
         if trimmed.is_empty()
             || trimmed == "(no output)"
             || (capture_was_truncated && trimmed == "...")
+            || (!panel.finished && matches!(trimmed, "..." | "…"))
             || (content.is_empty() && failure_reason.is_some_and(|reason| reason == trimmed))
         {
             continue;
@@ -249,11 +250,11 @@ pub(super) fn project_compact_bash_output(
         output_rows.extend(wrap_hanging(&text, output_indent, output_indent, width));
     }
     let mut projected = if output_rows.is_empty() {
-        let placeholder = if panel.finished {
-            "(no output)"
-        } else {
-            "(waiting for output)"
-        };
+        if !panel.finished {
+            // The shared card presenter supplies one explicit Running row.
+            return ToolRows::default();
+        }
+        let placeholder = "(no output)";
         let placeholder_rows = wrap_hanging(
             &subdued_text(theme, placeholder),
             output_indent,

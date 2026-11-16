@@ -230,3 +230,47 @@ fn polish_tool_duration_theme_is_shared_by_non_shell_cards() {
         assert!(!screen_dump(&rows.lines, 100).contains("635ms"));
     }
 }
+
+#[test]
+fn polish_running_shell_cards_never_end_with_bare_ellipsis() {
+    let theme = crate::tui::theme::test_theme();
+    let renderer = theme.rich_renderer();
+    for (output, expected) in [
+        ("...", "Bash  sleep 1\n└ Running · Esc to interrupt"),
+        ("", "Bash  sleep 1\n└ Running · Esc to interrupt"),
+        (
+            "step\n...",
+            "Bash  sleep 1\n└ step\n  Running · Esc to interrupt",
+        ),
+        (
+            "step\n…",
+            "Bash  sleep 1\n└ step\n  Running · Esc to interrupt",
+        ),
+    ] {
+        let panel = tool_panel(
+            "bash",
+            serde_json::json!({"command":"sleep 1"}),
+            output,
+            false,
+        );
+        for expanded in [false, true] {
+            let rows = transcript_render::render_tool(
+                &panel,
+                &theme,
+                &renderer,
+                100,
+                expanded,
+                "tool_output",
+            );
+            assert_eq!(screen_dump(&rows.lines, 100), expected);
+        }
+    }
+    let panel = tool_panel(
+        "bash",
+        serde_json::json!({"command":"printf ..."}),
+        "...",
+        true,
+    );
+    let rows = transcript_render::render_tool(&panel, &theme, &renderer, 100, false, "tool_output");
+    assert_eq!(screen_dump(&rows.lines, 100), "Bash  printf ...\n└ ...");
+}

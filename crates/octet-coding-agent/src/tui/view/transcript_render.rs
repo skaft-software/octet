@@ -308,6 +308,20 @@ pub(super) fn render_tool(
             }
         }
     }
+    if !panel.finished && is_shell_tool(panel.name.as_str()) {
+        // Pi compatibility source: packages/coding-agent/src/core/tools/
+        // render-utils.ts:142-163 exposes partial execution through Elapsed.
+        // Native cards use a static state, without another timer/animation.
+        let separator = super::semantic_separator(theme);
+        for row in wrap_hanging(
+            &subdued_text(theme, &format!("Running{separator}Esc to interrupt")),
+            "",
+            "",
+            nested_width,
+        ) {
+            output_lines.decoration(row);
+        }
+    }
     let indent = tool_output_indent(theme, width);
     for row in output_lines.copy_rows.iter_mut().flatten() {
         row.left = row.left.saturating_add(indent);
@@ -617,7 +631,7 @@ pub(super) fn render_block_planned_with_rainbow(
             let marker = theme.glyph("shell");
             let prefix = format!("{} ", theme.bold(&theme.fg("model_accent", marker)));
             let status = if shell.running {
-                theme.dim("…")
+                theme.dim("[running]")
             } else if shell.exit_code == 0 {
                 theme.dim("[ok]")
             } else {
