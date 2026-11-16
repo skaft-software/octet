@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Document the reusable provider boundary and explicit caller ownership of storage, login interaction and inference.
+
 ### Changed
 
 - Composer overflow counts sit in centered border labels, leaving more room for draft text.
