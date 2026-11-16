@@ -536,9 +536,10 @@ sanitization and wrapping: Bash, exec, PowerShell and Codemode keep the first tw
 and last two nonblank visual rows in a five-row budget, with the omitted-middle
 count and Ctrl+O on the middle row. Blank-only output rows do not consume that
 preview; expanded Codemode retains them. No test-runner-specific summary is
-inferred, so arbitrary output uses the same rule. Diffs retain ten content rows
-split five head/five tail plus the middle omission hint, preserving changed-line
-styling and capture-loss accounting. Short output is not padded. Local-shell
+inferred, so arbitrary literal output uses the same rule. Structured diffs retain
+ten leading visual rows plus an omission hint: a head/tail split can detach a
+wrapped addition/removal from its sign or hunk. This keeps changed-line styling
+and capture-loss accounting coherent; Ctrl+O reveals the complete retained diff. Short output is not padded. Local-shell
 output remains tail-only. The command is independent of the output budget.
 
 Ctrl+O toggles the global disclosure mode for compaction, retained tool output,

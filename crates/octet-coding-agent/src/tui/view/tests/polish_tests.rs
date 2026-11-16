@@ -302,3 +302,21 @@ fn polish_result_connector_belongs_to_first_visible_output_row() {
         "Bash  printf first\n│     printf second\n└ result"
     );
 }
+
+#[test]
+fn polish_structured_diff_preview_retains_a_coherent_prefix() {
+    let theme = crate::tui::theme::test_theme();
+    let mut panel = tool_panel("write", serde_json::json!({"path":"a.rs"}), "ok", true);
+    panel.diff = Some(format!(
+        "--- /dev/null\n+++ b/a.rs\n@@ -0,0 +1,16 @@\n{}",
+        (1..=16).map(|n| format!("+line {n}\n")).collect::<String>()
+    ));
+    let rows = tool_render::project_diff(&panel, &theme.rich_renderer(), &theme, 60, false, "");
+    let dump = screen_dump(&rows.lines, 60);
+    let dump = dump
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(dump, "@@ -0,0 +1,16 @@\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n7 lines hidden · Ctrl+O");
+}

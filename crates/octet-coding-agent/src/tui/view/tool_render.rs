@@ -366,31 +366,14 @@ pub(super) fn project_diff(
             }
             DiffRemainder::Unknown => "more diff content hidden".to_owned(),
         };
-        // Capture-time summaries are already folded into `hint`; do not retain
-        // a second copy of that metadata in the tail window.
-        let content_rows = projected
-            .copy_rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| row.as_ref().map(|_| index))
-            .collect::<Vec<_>>();
-        projected.retain_rows(&content_rows);
-        let (head, tail_start) =
-            super::output_window::head_tail_window(projected.lines.len(), COMPACT_DIFF_LINES + 1);
-        projected.retain_rows(
-            &(0..head)
-                .chain(tail_start..projected.lines.len())
-                .collect::<Vec<_>>(),
-        );
+        // Structured diffs retain a coherent prefix: splitting wrapped hunks
+        // can separate an addition/removal marker from its continuation rows.
+        projected.retain_rows(&(0..COMPACT_DIFF_LINES).collect::<Vec<_>>());
         let separator = super::semantic_separator(theme);
-        projected.lines.insert(
-            head,
-            fit_line(
-                &subdued_text(theme, &format!("{output_indent}{hint}{separator}Ctrl+O")),
-                width,
-            ),
-        );
-        projected.copy_rows.insert(head, None);
+        projected.decoration(fit_line(
+            &subdued_text(theme, &format!("{output_indent}{hint}{separator}Ctrl+O")),
+            width,
+        ));
     }
     projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
     projected

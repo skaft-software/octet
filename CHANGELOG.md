@@ -53,7 +53,7 @@
 - Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
 - Running shell cards show an explicit interruptible state with a stable text affordance.
 - Completed tool cards share one final duration row and honor the tool_duration theme setting.
-- Tool output previews keep deliberate head and tail windows with exact omitted-middle counts.
+- Shell and Codemode output previews keep deliberate head and tail windows with exact omitted-middle counts.
 - ANSI tool command and output omissions use consistent hidden wording and Ctrl+O disclosure hints.
 - Working and Thinking timers use the shared inline metadata separator.
 - Scrolled transcripts show one concise PageDown instruction alongside the new-output counter.
