@@ -49,7 +49,7 @@ const RELOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_BEGIN: &[u8] = b"\x1b[?2026h";
 const FRAME_END: &[u8] = b"\x1b[?2026l";
 const STALE_MARKER: &str = "OCTET_PTY_STALE_STARTUP";
-const READY_MARKER: &[u8] = b"custom/probe";
+const READY_MARKER: &[u8] = b"probe";
 const PREEXISTING_STARTUP: &[u8] =
     include_bytes!("fixtures/startup-frame-pty/preexisting-startup.txt");
 const INLINE_STARTUP: &str = include_str!("fixtures/startup-frame-pty/inline-startup.txt");
@@ -1235,7 +1235,7 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
         |output| {
             completed_screen_after(output, before).is_some_and(|screen| {
                 !screen.contains("Prompt templates:")
-                    && screen.contains("custom/probe")
+                    && screen.contains("probe")
                     && !screen.contains("reloading")
             })
         },
@@ -1253,9 +1253,8 @@ fn real_octet_reload_is_quiet_until_details_are_requested() {
     let before = octet.pty.output.len();
     octet.pty.write_input(b"\x1b");
     octet.wait_until(RELOAD_ATTEMPT_TIMEOUT, |output| {
-        completed_screen_after(output, before).is_some_and(|screen| {
-            !screen.contains("Prompt templates:") && screen.contains("custom/probe")
-        })
+        completed_screen_after(output, before)
+            .is_some_and(|screen| !screen.contains("Prompt templates:") && screen.contains("probe"))
     });
     for noise in [
         "live reload armed",
@@ -1385,7 +1384,7 @@ fn composer_rule_rows(parser: &vt100::Parser) -> usize {
 fn assert_green_gemma_frame(parser: &vt100::Parser) {
     let text = screen_text(parser, INITIAL_COLUMNS);
     assert_single_welcome(parser, INITIAL_COLUMNS, "first-ready Gemma");
-    assert!(text.contains("Gemma 4 31B"), "{text}");
+    assert!(text.contains("gemma-4-31b"), "{text}");
     assert!(text.contains("~/workspace"), "{text}");
     // The default footer and welcome wordmark are neutral; the composer
     // rules carry the model accent across the full terminal width.
@@ -1475,7 +1474,7 @@ fn real_octet_first_branded_frame_has_resolved_gemma_workspace_and_accent() {
             StartupFixture::ConfiguredGemma { reload: true },
         );
         octet.wait_until(STARTUP_TIMEOUT, |output| {
-            synchronized_frame_end_containing(output, b"Gemma 4 31B").is_some()
+            synchronized_frame_end_containing(output, b"gemma-4-31b").is_some()
         });
         octet.pty.drain_for(Duration::from_millis(150));
         let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
@@ -1523,7 +1522,7 @@ fn assert_model_switch_welcome(diagnostics: bool) {
             &mut octet,
             &mut parser,
             &mut consumed,
-            "Gemma 4 31B",
+            "gemma-4-31b",
             STARTUP_TIMEOUT,
         );
         if diagnostics {
@@ -1548,9 +1547,9 @@ fn assert_model_switch_welcome(diagnostics: bool) {
         let switches_start = octet.pty.output.len();
         let mut settled_screens = Vec::new();
         for (id, name) in [
-            ("qwen-3.8-27b", "Qwen 3.8 27B"),
-            ("gemma-4-31b", "Gemma 4 31B"),
-            ("qwen-3.8-27b", "Qwen 3.8 27B"),
+            ("qwen-3.8-27b", "qwen-3.8-27b"),
+            ("gemma-4-31b", "gemma-4-31b"),
+            ("qwen-3.8-27b", "qwen-3.8-27b"),
         ] {
             octet
                 .pty
@@ -1938,7 +1937,7 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             parser.process(&octet.pty.output[consumed..end]);
             consumed = end;
             let text = parser.screen().contents();
-            if text.contains("custom/probe") {
+            if text.contains("probe") {
                 ready_seen = true;
                 assert_eq!(
                     composer_rule_rows(&parser),
@@ -2027,9 +2026,9 @@ fn real_octet_auto_background_probe_overlaps_model_discovery() {
     assert_unbranded_startup(&parser, INITIAL_COLUMNS);
     api.release.send(()).unwrap();
     octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-        synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+        synchronized_frame_end_containing(bytes, b"probe").is_some()
     });
-    let ready_end = synchronized_frame_end_containing(&octet.pty.output, b"custom/probe").unwrap();
+    let ready_end = synchronized_frame_end_containing(&octet.pty.output, b"probe").unwrap();
     let ready_begin = octet.pty.output[..ready_end]
         .windows(FRAME_BEGIN.len())
         .rposition(|bytes| bytes == FRAME_BEGIN)
@@ -2125,10 +2124,9 @@ fn real_octet_short_pane_startup_is_static_and_keeps_the_draft_cursor() {
                 StartupFixture::Model("probe"),
             );
             octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-                synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+                synchronized_frame_end_containing(bytes, b"probe").is_some()
             });
-            let ready_end =
-                synchronized_frame_end_containing(&octet.pty.output, b"custom/probe").unwrap();
+            let ready_end = synchronized_frame_end_containing(&octet.pty.output, b"probe").unwrap();
             let mut parser = vt100::Parser::new(8, columns, 512);
             parser.process(&octet.pty.output[..ready_end]);
             let cursor_row = parser.screen().cursor_position().0;
@@ -2456,7 +2454,7 @@ fn assert_held_activity_pty(compact: bool, color: bool) {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "custom/probe",
+        "probe",
         STARTUP_TIMEOUT,
     );
     // Settle finite startup animation before measuring steady idle/redraw work.
@@ -3005,7 +3003,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                     StartupFixture::Model("qwen-3.8-27b"),
                 );
                 octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-                    synchronized_frame_end_containing(bytes, b"Qwen 3.8 27B").is_some()
+                    synchronized_frame_end_containing(bytes, b"qwen-3.8-27b").is_some()
                 });
                 octet.pty.drain_for(Duration::from_millis(250));
                 let mut parser = vt100::Parser::new(rows, columns, 512);
@@ -3043,7 +3041,7 @@ fn real_octet_repeated_startup_redraw_composed_screen() {
                             "{label}-setting{step}: redundant thinking notice\n{screen}"
                         );
                         if consumed > redraw_start
-                            && screen.contains(&format!("Qwen 3.8 27B · {level}"))
+                            && screen.contains(&format!("qwen-3.8-27b · {level}"))
                         {
                             break;
                         }
@@ -3433,7 +3431,7 @@ fn real_octet_changelog_initial_and_idle_never_submit_to_provider() {
                 &mut octet,
                 &mut parser,
                 &mut consumed,
-                "custom/probe",
+                "probe",
                 STARTUP_TIMEOUT,
             );
             let before = changelog_session_bytes(&octet);
@@ -3534,7 +3532,7 @@ fn real_octet_mark_click_blinks_then_settles_without_replay() {
         (StartupFixture::Model("probe"), Some(true)),
     );
     octet.wait_until(STARTUP_TIMEOUT, |bytes| {
-        synchronized_frame_end_containing(bytes, b"custom/probe").is_some()
+        synchronized_frame_end_containing(bytes, b"probe").is_some()
     });
     octet.pty.drain_for(Duration::from_millis(150));
     let mut parser = vt100::Parser::new(18, 80, 0);

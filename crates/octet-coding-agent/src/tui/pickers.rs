@@ -996,7 +996,7 @@ pub(crate) async fn session_tree_picker<S>(
 where
     S: futures_util::Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    let rows = crate::session_tree::session_tree_rows(session);
+    let rows = crate::session_tree::session_tree_rows(session, &shell.model_labels());
     if rows.is_empty() {
         shell.notice("No entries in session");
         return Ok(None);
@@ -1312,8 +1312,7 @@ where
 }
 
 /// Build a human-facing label from the same cached metadata boundary used by
-/// the footer. Provider identity is rendered once as a non-selectable group
-/// heading, never repeated in each model row.
+/// the footer. Provider badges are separate from the shared model label.
 fn model_label(model: &octet_ai::ModelSpec) -> String {
     ModelDisplayMetadata::resolve(model).name
 }
@@ -1510,36 +1509,17 @@ fn pad_visible_left(value: &str, width: usize) -> String {
     )
 }
 
-// Custom endpoint labels can be arbitrary configured display names. Include
-// the actual wire ID and endpoint so otherwise indistinguishable choices remain
-// identifiable; keep the friendly name separately and leave routing untouched.
-fn model_picker_identity(model: &octet_ai::ModelSpec) -> (String, Option<String>) {
-    let name = model_label(model);
-    if model.id.0.starts_with("custom/")
-        && !model.api_name.trim().is_empty()
-        && model.api_name != name
-    {
-        (
-            format!("{} [{}]", model.api_name, model.endpoint.0),
-            Some(name),
-        )
-    } else {
-        (name, None)
-    }
-}
-
 pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPresentation {
     let mut rows = catalog
         .models()
         .map(|model| {
-            let (label, name) = model_picker_identity(model);
+            let label = format!("{} [{}]", model_label(model), model.endpoint.0);
             (
                 model_provider_heading(catalog, model),
                 label,
                 model.id.clone(),
                 model_picker_metadata(model),
                 native_model_detail(model),
-                name,
             )
         })
         .collect::<Vec<_>>();
@@ -1576,7 +1556,7 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
         labels: Vec::with_capacity(rows.len()),
         descriptions: Vec::with_capacity(rows.len()),
     };
-    for (provider, label, id, metadata, detail, name) in rows {
+    for (provider, label, id, metadata, detail) in rows {
         presentation.details.push(detail);
         let media = if metadata.media.is_empty() {
             String::new()
@@ -1600,10 +1580,6 @@ pub(crate) fn model_picker_presentation(catalog: &ModelCatalog) -> ModelPickerPr
                 pad_visible_right(&metadata.output_cost, output_width),
                 pad_visible_left(&metadata.context, context_width),
             )
-        };
-        let description = match name {
-            Some(name) => format!("{description}  Model Name: {name}"),
-            None => description,
         };
         presentation.ids.push(id);
         presentation.providers.push(provider);

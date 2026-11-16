@@ -7526,6 +7526,7 @@ pub async fn resolve_launch_interactive(
     shell: &mut InteractiveShell,
     input: &mut EventStream,
 ) -> anyhow::Result<LaunchSelection> {
+    shell.set_model_inventory(&boot.catalog);
     let session = match boot.config.resume.clone() {
         ResumeSelector::New => {
             SessionSelection::CreateNew(boot.sessions.new_path(&crate::modes::timestamp()))

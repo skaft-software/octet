@@ -46,7 +46,7 @@ fn catalogue(picker: &PickerState) -> String {
                 "id": row.id, "path": row.path.as_os_str().as_encoded_bytes(),
                 "title": row.title, "name": row.name, "tags": row.tags,
                 "workspace": row.workspace.as_ref().map(|path| path.as_os_str().as_encoded_bytes()),
-                "messages": row.message_count, "modified": format!("{:?}", row.modified),
+                "messages": row.message_count, "model": row.model, "modified": format!("{:?}", row.modified),
                 "pinned": row.pinned, "archived": row.archived, "trash": row.trashed_at_ms,
                 "purge": row.purge_after_ms, "parent": row.forked_from_session_id,
                 "entry": row.forked_from_entry_id,
@@ -362,6 +362,9 @@ pub(crate) fn node(shell: &ShellState) -> Option<Node> {
         json!({"k":"Messages", "v":target.message_count.to_string()}),
         json!({"k":"Updated", "v":super::super::panel_render::session_age(target.modified, std::time::SystemTime::now())}),
     ];
+    if let Some(model) = &target.model {
+        facts.push(json!({"k":"Model", "v":safe(&shell.model_labels.label(model))}));
+    }
     if let Some(workspace) = &target.workspace {
         facts.push(json!({"k":"Workspace", "v":safe(&crate::presentation::tool_display::human_path(workspace))}));
     }
@@ -504,6 +507,7 @@ mod tests {
             forked_from_session_id: Some("parent".into()),
             forked_from_entry_id: None,
             message_count: 12,
+            model: None,
             modified: SystemTime::UNIX_EPOCH,
             workspace: Some("/fixture/workspace".into()),
         };

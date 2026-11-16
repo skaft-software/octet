@@ -707,19 +707,12 @@ fn push_narrower_variant(variants: &mut Vec<String>, candidate: String) {
     }
 }
 
-fn identity_variants(
-    full_model: &str,
-    model_names: &[String],
-    thinking: &str,
-    separator: &str,
-) -> Vec<String> {
+fn identity_variants(full_model: &str, thinking: &str, separator: &str) -> Vec<String> {
     let mut variants = Vec::new();
     if !thinking.is_empty() && !thinking.eq_ignore_ascii_case("off") {
         push_narrower_variant(&mut variants, format!("{full_model}{separator}{thinking}"));
     }
-    for model in model_names {
-        push_narrower_variant(&mut variants, model.clone());
-    }
+    push_narrower_variant(&mut variants, full_model.to_owned());
     if variants.is_empty() {
         variants.push(full_model.to_owned());
     }
@@ -834,54 +827,28 @@ fn render_status_footer_with_gap(
     } else {
         state.theme.glyph("wordmark").to_owned()
     };
-    let mut model_names = if active {
-        if state.run_model_compact_names.is_empty() {
-            vec![full_model.clone()]
-        } else {
-            state.run_model_compact_names.clone()
-        }
-    } else if state.model_compact_names.is_empty() {
-        vec![full_model.clone()]
-    } else {
-        state.model_compact_names.clone()
-    };
-    if model_names.first() != Some(&full_model) {
-        model_names.insert(0, full_model.clone());
-    }
     let effort = if active {
         state.run_reasoning.as_deref().unwrap_or(&state.reasoning)
     } else {
         &state.reasoning
     }
     .trim();
-    let footer_model = if state.theme.is_compiled_default() {
-        crate::presentation::model::footer_model_name(
-            &full_model,
-            if active {
-                state.run_model.as_deref().unwrap_or(&state.model)
-            } else {
-                &state.model
-            },
-        )
+    // Pi compatibility: footer.ts:220-255 keeps the full ID, dropping only
+    // the optional provider when space is tight. Themes share this policy.
+    let mut variants = identity_variants(
+        &full_model,
+        effort,
+        super::view::semantic_separator(&state.theme),
+    );
+    let provider = if active {
+        state.run_provider.as_deref().unwrap_or(&state.provider)
     } else {
-        &full_model
+        &state.provider
     };
-    // Configured names may contain meaningful family/version words. Only the
-    // compiled footer suppresses the legacy first-word fitting fallback.
-    let footer_names = if state.theme.is_compiled_default() {
-        vec![footer_model.to_owned()]
-    } else {
-        model_names
-    };
-    let mut segments = vec![StatusFooterSegment::new(
-        FooterKind::Identity,
-        identity_variants(
-            footer_model,
-            &footer_names,
-            effort,
-            super::view::semantic_separator(&state.theme),
-        ),
-    )];
+    if state.model_labels.provider_count() > 1 && !provider.is_empty() {
+        variants.insert(0, format!("({provider}) {}", variants[0]));
+    }
+    let mut segments = vec![StatusFooterSegment::new(FooterKind::Identity, variants)];
 
     let base_context = if active {
         state.run_context_estimate
@@ -942,6 +909,11 @@ fn render_status_footer_with_gap(
         hide_footer_kind(&mut segments, FooterKind::Cost);
     }
 
+    // An ID that cannot fit even on its own must not crowd out every other
+    // fact. Keep the complete-label policy and retain context/cost instead.
+    if visible_width(&full_model) > available {
+        hide_footer_kind(&mut segments, FooterKind::Identity);
+    }
     if status_footer_width(&segments, gap) > available {
         compact_footer_kind(&mut segments, FooterKind::Identity);
     }
@@ -1513,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_footer_never_falls_back_to_a_first_word_model_name() {
+    fn footer_never_falls_back_to_a_first_word_model_name() {
         let name = "Claude Sonnet 4.6";
         for custom in [false, true] {
             let mut state = crate::tui::view::ShellState::default();
@@ -1523,7 +1495,6 @@ mod tests {
                 crate::tui::theme::test_theme()
             };
             state.model_display = name.to_owned();
-            state.model_compact_names = crate::presentation::model_display_name_variants(name);
             let wide = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
                 &state,
                 80,
@@ -1535,7 +1506,7 @@ mod tests {
                 16,
                 Instant::now(),
             ));
-            assert_eq!(narrow.contains("Claude"), custom, "{narrow:?}");
+            assert!(!narrow.contains("Claude"), "{narrow:?}");
         }
     }
 

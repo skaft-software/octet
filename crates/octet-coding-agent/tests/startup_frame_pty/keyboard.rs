@@ -75,7 +75,7 @@ fn fullscreen_requests_shift_enter_on_the_active_keyboard_stack() {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "custom/probe",
+        "probe",
         STARTUP_TIMEOUT,
     );
 
@@ -130,7 +130,7 @@ fn modified_enter_survives_live_screen_switches_and_inline() {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "custom/probe",
+        "probe",
         STARTUP_TIMEOUT,
     );
 
@@ -242,7 +242,7 @@ fn signal_shutdown_restores_both_keyboard_stacks() {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "custom/probe",
+        "probe",
         STARTUP_TIMEOUT,
     );
     let (fullscreen, primary, alternate) = keyboard_state(&octet.pty.output);

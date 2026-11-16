@@ -2213,6 +2213,7 @@ fn session_picker_native_empty_message_follows_the_picker_state() {
         forked_from_session_id: None,
         forked_from_entry_id: None,
         message_count: 1,
+        model: None,
         modified: std::time::SystemTime::now(),
         workspace: Some("/tmp/project".into()),
     };
@@ -2254,6 +2255,7 @@ fn session_picker_keeps_preview_actions_loading_and_host_selection() {
         forked_from_session_id: Some("parent".into()),
         forked_from_entry_id: None,
         message_count: 12,
+        model: None,
         modified: std::time::SystemTime::now(),
         workspace: Some("/tmp/project".into()),
     };

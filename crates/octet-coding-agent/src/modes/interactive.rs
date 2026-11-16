@@ -3013,7 +3013,10 @@ where
                 "Durable session facts",
                 format!(
                     "{}\n\n{}",
-                    commands::session_text(&session),
+                    commands::session_text(
+                        &session,
+                        &crate::presentation::ModelLabels::from_catalog(&inspection.catalog)
+                    ),
                     inspection.cache_warming_text(&session)
                 ),
             ),
@@ -5269,8 +5272,8 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
         |reasoning| format!("{} (queued)", crate::app::reasoning_label(reasoning)),
     );
     shell.set_identity(endpoint_label, &app.model.spec.id.0, &reasoning);
-    // Registry/configured metadata overrides the conservative canonical-ID
-    // fallback installed by `set_identity` and is cached until model switch.
+    // The host caches the same inventory labels for chrome and session surfaces.
+    shell.set_model_inventory(&app.catalog);
     shell.set_model_theme(&app.model);
     shell.set_model_cycle(app.model_cycle());
     shell.set_status_detail(commands::status_text_with_metrics(
@@ -10680,7 +10683,7 @@ async fn run_idle_command_inner(
             "Durable session facts",
             format!(
                 "{}\n\n{}",
-                commands::session_text(app.agent.session()),
+                commands::session_text(app.agent.session(), &shell.model_labels()),
                 commands::app_cache_warming_text(&app)
             ),
         ),
@@ -11978,6 +11981,7 @@ async fn run_interactive_without_model(
 
     let result = async {
     loop {
+        shell.set_model_inventory(&boot.catalog);
         state.extensions.refresh_pi_model_catalog_without_selection(&boot.catalog, None);
         state.attach(shell, &session).await;
         state.pump(shell, &mut session, &boot.sessions);
@@ -12031,7 +12035,7 @@ async fn run_interactive_without_model(
                     shell.show_report_facts(
                         "Session",
                         "Durable session facts",
-                        commands::session_text(&session),
+                        commands::session_text(&session, &shell.model_labels()),
                     );
                     shell.render();
                 }

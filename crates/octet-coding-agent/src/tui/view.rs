@@ -1974,9 +1974,9 @@ pub(crate) struct ShellState {
     pub(crate) provider: String,
     /// Canonical model identifier retained for `/status` and diagnostics.
     pub(crate) model: String,
-    /// Stable friendly identity resolved only when model metadata changes.
+    /// Stable ID-first label resolved only when model metadata changes.
     pub(crate) model_display: String,
-    pub(crate) model_compact_names: Vec<String>,
+    pub(crate) model_labels: crate::presentation::ModelLabels,
     /// Canonical identity and lab captured when a run starts. Selection may
     /// change while the run is active, but streaming blocks and telemetry must
     /// continue to belong to the model actually executing that run.
@@ -1984,7 +1984,7 @@ pub(crate) struct ShellState {
     pub(crate) run_model_lab: Option<ModelLab>,
     pub(crate) run_prompt_color: Option<String>,
     pub(crate) run_model_display: Option<String>,
-    pub(crate) run_model_compact_names: Vec<String>,
+    pub(crate) run_provider: Option<String>,
     pub(crate) run_reasoning: Option<String>,
     pub(crate) run_price_display: Option<PriceDisplay>,
     pub(crate) run_context_estimate: Option<(u64, u64)>,
@@ -2368,12 +2368,12 @@ impl ShellState {
             provider: Default::default(),
             model: Default::default(),
             model_display: Default::default(),
-            model_compact_names: Default::default(),
+            model_labels: Default::default(),
             run_model: Default::default(),
             run_model_lab: Default::default(),
             run_prompt_color: Default::default(),
             run_model_display: Default::default(),
-            run_model_compact_names: Default::default(),
+            run_provider: Default::default(),
             run_reasoning: Default::default(),
             run_price_display: Default::default(),
             run_context_estimate: Default::default(),
@@ -4876,7 +4876,7 @@ impl InteractiveShell {
         } else {
             state.model_display.clone()
         });
-        state.run_model_compact_names = state.model_compact_names.clone();
+        state.run_provider = Some(state.provider.clone());
         state.run_reasoning = Some(state.reasoning.clone());
         state.run_price_display = Some(state.price_display);
         state.run_context_estimate = state.context_estimate;
@@ -6540,9 +6540,7 @@ impl InteractiveShell {
             if !state.run.is_active() && state.telemetry_model.as_deref() != Some(model) {
                 state.clear_turn_telemetry();
             }
-            let display = crate::presentation::derive_model_display_name(model);
-            state.model_compact_names = crate::presentation::model_display_name_variants(&display);
-            state.model_display = display;
+            state.model_display = state.model_labels.label(model);
             state.prompt_color = (!model.trim().is_empty())
                 .then(|| crate::tui::theme::prompt_color_for_model_id(model));
 
@@ -9304,6 +9302,15 @@ impl InteractiveShell {
             .push_block(TranscriptBlock::Notice(label.into()));
     }
 
+    pub(crate) fn set_model_inventory(&mut self, catalog: &octet_ai::ModelCatalog) {
+        self.state.borrow_mut().model_labels =
+            crate::presentation::ModelLabels::from_catalog(catalog);
+    }
+
+    pub(crate) fn model_labels(&self) -> crate::presentation::ModelLabels {
+        self.state.borrow().model_labels.clone()
+    }
+
     /// Update stable presentation metadata when the active model changes, then
     /// refresh the model-aware accent when its creator family changes.
     pub fn set_model_theme(&mut self, model: &Model) {
@@ -9313,7 +9320,7 @@ impl InteractiveShell {
         let price_display = PriceDisplay::from_pricing(model.spec.pricing.as_ref());
         let mut state = self.state.borrow_mut();
         state.model_display = metadata.name;
-        state.model_compact_names = metadata.compact_names;
+        state.provider = model.spec.endpoint.0.clone();
         state.price_display = price_display;
         state.prompt_color = Some(prompt_color);
         welcome_card::restart_welcome_animation(&mut state);
@@ -9533,7 +9540,7 @@ impl InteractiveShell {
         state.run_model_lab = None;
         state.run_prompt_color = None;
         state.run_model_display = None;
-        state.run_model_compact_names.clear();
+        state.run_provider = None;
         state.run_reasoning = None;
         state.run_price_display = None;
         state.run_context_estimate = None;

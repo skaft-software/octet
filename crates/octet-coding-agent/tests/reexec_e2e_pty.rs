@@ -411,7 +411,7 @@ impl Pane {
 
     /// Wait for the pane's boot frame and its single durable session file.
     fn await_ready(&mut self, timeout: Duration) -> PathBuf {
-        self.wait_for(b"custom/probe", timeout);
+        self.wait_for(b"probe", timeout);
         let sessions = self.fixture.sessions.clone();
         self.wait_until(timeout, "exactly one session transcript", move |_| {
             !transcript_files(&sessions).is_empty()
@@ -1014,7 +1014,7 @@ fn real_octet_reload_reexecs_a_changed_binary_in_place_and_resumes_the_same_sess
     let courtesy_at = find_bytes(&pane.pty.output, b"To resume this session")
         .expect("observed above")
         + b"To resume this session".len();
-    pane.wait_for_suffix(courtesy_at, b"custom/probe", STEP_TIMEOUT);
+    pane.wait_for_suffix(courtesy_at, b"probe", STEP_TIMEOUT);
     pane.pty.write_input(b"/verbose on\r");
     pane.wait_for(b"verbose transcript enabled", STEP_TIMEOUT);
 
@@ -1085,7 +1085,7 @@ fn forced_unchanged_binary_restart(pi_editor: bool) {
     let courtesy_at = find_bytes(&pane.pty.output, b"To resume this session")
         .expect("observed above")
         + b"To resume this session".len();
-    pane.wait_for_suffix(courtesy_at, b"custom/probe", STEP_TIMEOUT);
+    pane.wait_for_suffix(courtesy_at, b"probe", STEP_TIMEOUT);
     if pi_editor {
         pane.wait_for_suffix(courtesy_at, b"PI-RELOAD-EDITOR", STEP_TIMEOUT);
     }
@@ -1208,7 +1208,7 @@ fn real_octet_reload_of_one_pane_leaves_the_other_pane_and_session_healthy() {
         find_bytes(&pane_a.pty.output, b"To resume this session").expect("observed above")
             + b"To resume this session".len()
     };
-    pane_a.wait_for_suffix(courtesy_at, b"custom/probe", STEP_TIMEOUT);
+    pane_a.wait_for_suffix(courtesy_at, b"probe", STEP_TIMEOUT);
     pane_a.pty.write_input(b"/verbose on\r");
     pane_a.wait_for(b"verbose transcript enabled", STEP_TIMEOUT);
     pane_b.pty.write_input(b"/verbose on\r");

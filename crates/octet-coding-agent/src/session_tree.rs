@@ -19,9 +19,12 @@ pub(crate) struct SessionTreeRow {
 
 /// Render the durable entry forest in append order while making forks and the
 /// selected branch visible. Session replay has already validated parent links.
-pub(crate) fn render_session_tree(session: &Session) -> String {
+pub(crate) fn render_session_tree(
+    session: &Session,
+    labels: &crate::presentation::ModelLabels,
+) -> String {
     let mut output = String::from("Session branch tree (* = active head, + = active branch):\n");
-    let rows = session_tree_rows(session);
+    let rows = session_tree_rows(session, labels);
     if rows.is_empty() {
         output.push_str("  (empty session)");
         return output;
@@ -36,7 +39,10 @@ pub(crate) fn render_session_tree(session: &Session) -> String {
 
 /// Every durable entry, including inactive siblings and non-message markers.
 /// Deep ancestry is bounded visually, with explicit depth/parent identifiers.
-pub(crate) fn session_tree_rows(session: &Session) -> Vec<SessionTreeRow> {
+pub(crate) fn session_tree_rows(
+    session: &Session,
+    labels: &crate::presentation::ModelLabels,
+) -> Vec<SessionTreeRow> {
     let entries = session.entries();
     let mut rows = Vec::with_capacity(entries.len());
 
@@ -106,7 +112,7 @@ pub(crate) fn session_tree_rows(session: &Session) -> Vec<SessionTreeRow> {
         rows.push(SessionTreeRow {
             entry_id: entry.id.clone(),
             label: output,
-            preview: entry_preview(entry),
+            preview: entry_preview(entry, labels),
         });
 
         let mut next_ancestors = frame.ancestor_has_next_sibling;
@@ -191,7 +197,7 @@ fn entry_kind(entry: &Entry) -> &'static str {
     }
 }
 
-fn entry_preview(entry: &Entry) -> String {
+fn entry_preview(entry: &Entry, labels: &crate::presentation::ModelLabels) -> String {
     let text = if let Some(custom) = entry
         .metadata
         .as_ref()
@@ -247,7 +253,10 @@ fn entry_preview(entry: &Entry) -> String {
                 model, reasoning, ..
             } => format!(
                 "{} {}",
-                model.as_deref().unwrap_or(""),
+                model
+                    .as_deref()
+                    .map(|id| labels.label(id))
+                    .unwrap_or_default(),
                 reasoning.as_deref().unwrap_or("")
             ),
             EntryValue::PromptTemplateSelected { name, .. } => name.clone(),
@@ -325,7 +334,7 @@ mod tests {
                 Default::default(),
             )
             .unwrap();
-        let rows = session_tree_rows(&session);
+        let rows = session_tree_rows(&session, &Default::default());
         assert_eq!(rows.len(), session.entries().len());
         let find = |id: &EntryId| rows.iter().find(|row| &row.entry_id == id).unwrap();
         assert!(find(&root).label.contains("└─+"));
@@ -344,7 +353,7 @@ mod tests {
         let session = Session::create(directory.path().join("empty.jsonl")).unwrap();
 
         assert_eq!(
-            render_session_tree(&session),
+            render_session_tree(&session, &Default::default()),
             "Session branch tree (* = active head, + = active branch):\n  (empty session)"
         );
     }
@@ -360,7 +369,7 @@ mod tests {
         let selected = session.append(config("selected")).unwrap();
         let head = session.append(config("head")).unwrap();
 
-        let tree = render_session_tree(&session);
+        let tree = render_session_tree(&session, &Default::default());
         assert_eq!(
             tree,
             format!(
@@ -376,7 +385,7 @@ mod tests {
                 root.0, abandoned.0, abandoned_leaf.0, selected.0, head.0
             )
         );
-        assert_eq!(render_session_tree(&session), tree);
+        assert_eq!(render_session_tree(&session, &Default::default()), tree);
     }
 
     #[test]
@@ -406,7 +415,7 @@ mod tests {
                 .push_str("\n{\"type\":\"head\",\"id\":\"fork\",\"total_cost_microdollars\":0}\n");
             std::fs::write(&path, records).unwrap();
             let session = Session::open_read_only(path).unwrap();
-            let tree = render_session_tree(&session);
+            let tree = render_session_tree(&session, &Default::default());
             let lines = tree
                 .lines()
                 .filter(|line| line.contains("  config"))
@@ -435,7 +444,7 @@ mod tests {
         let old_head = session.append(config("old-head")).unwrap();
         session.checkout(root.clone()).unwrap();
 
-        let tree = render_session_tree(&session);
+        let tree = render_session_tree(&session, &Default::default());
         assert!(tree.contains(&format!("└─* {}  config", root.0)), "{tree}");
         assert!(
             tree.contains(&format!("└─  {}  config", old_head.0)),

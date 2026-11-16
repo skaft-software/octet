@@ -1565,10 +1565,7 @@ fn composer(shell: &ShellState) -> Node {
                                 sanitize_for_terminal(if shell.model_display.is_empty() {
                                     &shell.model
                                 } else {
-                                    crate::presentation::model::footer_model_name(
-                                        &shell.model_display,
-                                        &shell.model,
-                                    )
+                                    &shell.model_display
                                 }),
                                 "accent",
                             )],

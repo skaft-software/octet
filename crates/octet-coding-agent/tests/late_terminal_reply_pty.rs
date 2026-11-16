@@ -257,7 +257,7 @@ fn late_terminal_reply_complete_and_fragmented_bel_st_keep_typing_and_paste() {
             // and lost. It must survive the probe and startup lifecycle waits.
             pty.send(b"typed ");
             pty.drain_for(Duration::from_millis(400));
-            pty.wait_for_screen("custom/probe");
+            pty.wait_for_screen("probe");
             send_reply(&mut pty, ending, fragmented);
             pty.send("\x1b[200~pasted 雪\x1b[201~".as_bytes());
             pty.wait_for_screen("typed pasted 雪");
@@ -285,7 +285,7 @@ fn late_terminal_reply_startup_timeout_mid_fragment_keeps_the_reply_out_of_input
     pty.send(b"1e1e/1e1e/1e1e\x1b");
     pty.drain_for(Duration::from_millis(20));
     pty.send(b"\\");
-    pty.wait_for_screen("custom/probe");
+    pty.wait_for_screen("probe");
     pty.send(b"after-handoff");
     pty.wait_for_screen("after-handoff");
     pty.assert_no_reply_in_frames();
@@ -297,7 +297,7 @@ fn late_terminal_reply_after_six_seconds_keeps_the_editor_clean() {
     let mut pty = PtyOctet::spawn(Some("auto"), true);
     pty.wait_for_query();
     pty.drain_for(Duration::from_secs(6));
-    pty.wait_for_screen("custom/probe");
+    pty.wait_for_screen("probe");
     pty.send(b"very-late ");
     pty.wait_for_screen("very-late");
     send_reply(&mut pty, b"\x1b\\", false);
@@ -312,7 +312,7 @@ fn late_terminal_reply_slow_fragments_keep_paste_without_payload_expiry() {
     let mut pty = PtyOctet::spawn(Some("auto"), true);
     pty.wait_for_query();
     pty.drain_for(Duration::from_millis(400));
-    pty.wait_for_screen("custom/probe");
+    pty.wait_for_screen("probe");
     // Once the complete header identifies the response, no idle or total
     // deadline may turn its printable body (or a split ST) into editor input.
     pty.send(b"\x1b]11;");
@@ -334,7 +334,7 @@ fn late_terminal_reply_immediate_response_and_explicit_appearance_preserve_input
     let mut immediate = PtyOctet::spawn(Some("auto"), true);
     immediate.wait_for_query();
     send_reply(&mut immediate, b"\x07", false);
-    immediate.wait_for_screen("custom/probe");
+    immediate.wait_for_screen("probe");
     immediate.send(b"immediate-kept");
     immediate.wait_for_screen("immediate-kept");
     immediate.assert_no_reply_in_frames();
@@ -342,7 +342,7 @@ fn late_terminal_reply_immediate_response_and_explicit_appearance_preserve_input
 
     for theme in ["dark", "light"] {
         let mut explicit = PtyOctet::spawn(Some(theme), true);
-        explicit.wait_for_screen("custom/probe");
+        explicit.wait_for_screen("probe");
         explicit.drain_for(Duration::from_millis(400));
         assert!(!explicit
             .output

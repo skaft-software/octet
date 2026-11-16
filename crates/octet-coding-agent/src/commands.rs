@@ -1780,7 +1780,7 @@ pub fn move_scope_model(
     }
 }
 
-pub fn session_text(session: &Session) -> String {
+pub fn session_text(session: &Session, labels: &crate::presentation::ModelLabels) -> String {
     let mut messages = 0usize;
     let mut cursor = session.head();
     while let Some(id) = cursor {
@@ -1803,8 +1803,12 @@ pub fn session_text(session: &Session) -> String {
         .head()
         .map(|id| id.0)
         .unwrap_or_else(|| "(empty)".into());
+    let (model, _) = crate::session_store::active_branch_catalog_config(session);
+    let model = model
+        .map(|id| format!("Model: {}\n", labels.label(&id)))
+        .unwrap_or_default();
     format!(
-        "Session: {id}\nFile: {}\nTitle: {}\nHead: {head}\nEntries: {}\nActive-branch messages: {messages}\nCheckpoints: {}\nUsage records: {}\nTokens: {} input · {} cache-read · {} cache-write · {} output\nCost: {}{}",
+        "{model}Session: {id}\nFile: {}\nTitle: {}\nHead: {head}\nEntries: {}\nActive-branch messages: {messages}\nCheckpoints: {}\nUsage records: {}\nTokens: {} input · {} cache-read · {} cache-write · {} output\nCost: {}{}",
         session.path().display(),
         active_branch_title(session),
         session.entries().len(),

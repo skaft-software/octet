@@ -27,6 +27,9 @@ pub(super) fn decorate(
         } else {
             session.workspace.as_ref().map(|path| safe(&path.display().to_string())).unwrap_or_default()
         };
+        let detail = session.model.as_deref().map(|id| safe(&shell.model_labels.label(id)))
+            .map(|model| if detail.is_empty() { model.clone() } else { format!("{model} · {detail}") })
+            .unwrap_or(detail);
         json!({"id":index.to_string(),"label":safe(session.name.as_deref().unwrap_or(&session.title)),
             "detail":detail,"badges":badges,"facts":{"messages":session.message_count,
                 "when":super::panel_render::session_age(session.modified, now)}})
@@ -39,6 +42,9 @@ pub(super) fn decorate(
             json!({"k":"Updated","v":super::panel_render::session_age(session.modified, now)}),
             json!({"k":"File","v":[{"t":safe(&session.path.display().to_string()),"s":"path mono"}]}),
         ];
+        if let Some(model) = &session.model {
+            facts.push(json!({"k":"Model","v":safe(&shell.model_labels.label(model))}));
+        }
         if let Some(workspace) = &session.workspace {
             facts.push(json!({"k":"Workspace","v":[{"t":safe(&crate::presentation::tool_display::human_path(workspace)),"s":"path mono"}]}));
         }

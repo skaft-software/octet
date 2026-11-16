@@ -818,7 +818,7 @@ fn run_activity_case(theme: &str, compact: bool, color: &str, mouse: &str) {
     let mut candidate = Candidate::spawn(&api.url, theme, color, mouse);
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
-    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "probe");
 
     candidate.pty.write_input(b"fixture initial prompt\r");
     api.wait_for_request(&mut candidate, 1);
@@ -1027,7 +1027,7 @@ fn real_queued_steering_interrupt_keeps_entries_recallable_pty_contract() {
     let mut candidate = Candidate::spawn(&api.url, "dark", "never", "app");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
-    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "probe");
     candidate.pty.write_input(b"queue fixture initial\r");
     api.wait_for_request(&mut candidate, 1);
 
@@ -1104,7 +1104,7 @@ fn real_queued_follow_up_option_up_edit_and_settled_dispatch_pty_contract() {
     let mut candidate = Candidate::spawn(&api.url, "dark", "never", "app");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
-    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "probe");
     candidate.pty.write_input(b"steering fixture initial\r");
     api.wait_for_request(&mut candidate, 1);
 
@@ -1230,7 +1230,7 @@ fn real_program_status_success_cancel_dedupe_and_exit_pty_contract() {
         let mut candidate = Candidate::spawn(&api.url, "dark", "never", "auto");
         let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
         let mut consumed = 0;
-        await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+        await_screen(&mut candidate, &mut parser, &mut consumed, "probe");
         candidate.wait_for_output(WAIT_TIMEOUT, |out| {
             program_status_records(out)
                 .last()
@@ -1352,7 +1352,7 @@ fn real_program_status_failure_remains_error_at_exit_pty_contract() {
     let mut candidate = Candidate::spawn(&api.url, "dark", "never", "auto");
     let mut parser = vt100::Parser::new(INITIAL_ROWS, INITIAL_COLUMNS, 512);
     let mut consumed = 0;
-    await_screen(&mut candidate, &mut parser, &mut consumed, "custom/probe");
+    await_screen(&mut candidate, &mut parser, &mut consumed, "probe");
     candidate.pty.write_input(b"inert rejected request\r");
     api.wait_for_request(&mut candidate, 1);
     api.release_response();

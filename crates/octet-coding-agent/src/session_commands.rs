@@ -352,7 +352,7 @@ fn inspect(store: &SessionStore, id: &str) -> anyhow::Result<()> {
         session.total_cost_microdollars()
     ));
     crate::output::stdout_line("");
-    crate::output::stdout_multiline(render_session_tree(&session));
+    crate::output::stdout_multiline(render_session_tree(&session, &Default::default()));
     Ok(())
 }
 
@@ -1117,6 +1117,7 @@ mod tests {
             forked_from_session_id: None,
             forked_from_entry_id: None,
             message_count: 0,
+            model: None,
             modified: now,
             workspace: None,
         };
@@ -1146,6 +1147,7 @@ mod tests {
             forked_from_session_id: None,
             forked_from_entry_id: None,
             message_count: 0,
+            model: None,
             modified: now,
             workspace: None,
         };
@@ -1784,6 +1786,7 @@ mod tests {
             forked_from_session_id: None,
             forked_from_entry_id: None,
             message_count: 0,
+            model: None,
             modified: UNIX_EPOCH,
             workspace: None,
         };

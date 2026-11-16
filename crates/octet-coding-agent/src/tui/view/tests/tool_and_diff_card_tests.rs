@@ -11,7 +11,7 @@ fn renderer_covers_idle_and_every_active_run_phase() {
     let mut idle = InteractiveShell::test_shell();
     idle.set_identity("relay", "gpt-5.6", "high");
     let idle = render_shell(&idle.state.borrow(), 80).join("\n");
-    assert!(idle.contains("GPT-5.6"), "{idle}");
+    assert!(idle.contains("gpt-5.6"), "{idle}");
     assert!(!idle.contains("relay / "));
     // No newline shortcut hint is shown in idle footer
 
@@ -34,7 +34,7 @@ fn renderer_covers_idle_and_every_active_run_phase() {
     ];
     for phase in cases {
         let rendered = rendered_phase(phase);
-        assert!(rendered.contains("GPT-5.6"), "{rendered}");
+        assert!(rendered.contains("gpt-5.6"), "{rendered}");
         assert!(!rendered.contains("Working"), "{rendered}");
     }
 }
@@ -426,7 +426,7 @@ fn responsive_header_drops_metadata_instead_of_truncating_every_field() {
     shell.set_identity("relay", "gpt-5.6", "high");
     let wide = responsive_identity(&shell.state.borrow(), 120);
     assert!(wide.contains("relay / "));
-    assert!(wide.contains("GPT-5.6"));
+    assert!(wide.contains("gpt-5.6"));
     assert!(wide.contains("high"));
 
     shell.set_identity(
@@ -435,8 +435,11 @@ fn responsive_header_drops_metadata_instead_of_truncating_every_field() {
         "high",
     );
     let custom = strip_terminal_sequences(&responsive_identity(&shell.state.borrow(), 120));
-    assert!(custom.contains("custom-openai / Qwen3.6 27B"), "{custom}");
-    assert!(!custom.contains("custom/Intel"), "{custom}");
+    assert!(
+        custom.contains("custom-openai / custom/Intel/Qwen3.6-27B-int4-AutoRound"),
+        "{custom}"
+    );
+    assert!(custom.contains("custom/Intel"), "{custom}");
 
     shell.set_identity(
         "a-very-long-gateway-provider-name",

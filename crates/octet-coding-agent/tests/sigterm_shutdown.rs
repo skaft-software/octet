@@ -315,7 +315,7 @@ impl PtyOctet {
             process.wait_until(READY_DEADLINE, |output| {
                 contains_bytes(output, b"\x1b[?2004h")
                     && contains_bytes(output, b"\x1b[?25l")
-                    && (!wait_for_app || contains_bytes(output, b"custom/probe"))
+                    && (!wait_for_app || contains_bytes(output, b"probe"))
             });
             let raw = terminal_attributes(process.slave_probe.as_raw_fd());
             assert_eq!(raw.c_lflag & (libc::ICANON | libc::ECHO), 0);

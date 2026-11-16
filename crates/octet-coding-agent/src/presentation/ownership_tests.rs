@@ -12,11 +12,10 @@ use octet_ai::{
 use serde_json::json;
 
 use super::{
-    content_hash, derive_model_display_name, format_duration, model_display_name_variants,
-    project_changed_files, provider_status_name, reported_output_hash, resolve_model_display_name,
-    summarize_tool, summarize_tool_with_workspace, trusted_output_hash,
-    validate_changed_file_evidence, RunId, RunOutcome, RunPhase, RunSummary, RunTracker,
-    WorkspaceSnapshot,
+    content_hash, format_duration, project_changed_files, provider_status_name,
+    reported_output_hash, resolve_model_display_name, summarize_tool,
+    summarize_tool_with_workspace, trusted_output_hash, validate_changed_file_evidence, RunId,
+    RunOutcome, RunPhase, RunSummary, RunTracker, WorkspaceSnapshot,
 };
 
 fn instant_after(origin: Instant, milliseconds: u64) -> Instant {
@@ -647,29 +646,8 @@ fn hash_evidence_is_single_lowercase_sha256_token() {
 fn model_tool_and_duration_presentation_are_stable_boundaries() {
     assert_eq!(provider_status_name(" openai "), "OpenAI");
     assert_eq!(
-        derive_model_display_name("openai/gpt-4o-20240806"),
-        "GPT-4o"
-    );
-    assert_eq!(
-        resolve_model_display_name(Some("Configured"), "unknown", "unknown"),
-        "Configured"
-    );
-    assert_eq!(model_display_name_variants("GPT-4o"), vec!["GPT-4o"]);
-    assert_eq!(
-        model_display_name_variants("Claude Sonnet 4.6"),
-        vec!["Claude Sonnet 4.6", "Claude Sonnet", "Claude"]
-    );
-    assert_eq!(
-        super::model::footer_model_name(
-            "Anthropic: Claude Sonnet 4.6",
-            "anthropic/claude-sonnet-4-6"
-        ),
-        "Anthropic: Claude Sonnet 4.6",
-        "a configured provider prefix is not catalogue-owned",
-    );
-    assert_eq!(
-        super::model::footer_model_name("Local tuned Qwen", "local/qwen3.6-27b"),
-        "Local tuned Qwen",
+        resolve_model_display_name(Some("Configured"), "route/unknown", "unknown"),
+        "unknown (Configured)"
     );
     assert_eq!(format_duration(Duration::from_millis(1_250)), "1.25s");
 

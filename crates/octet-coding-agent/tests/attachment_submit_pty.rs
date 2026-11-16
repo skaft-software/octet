@@ -187,7 +187,7 @@ impl PtyOctet {
             root,
             parser: vt100::Parser::new(30, 120, 0),
         };
-        pty.wait_for_screen("custom/probe");
+        pty.wait_for_screen("probe");
         pty
     }
 

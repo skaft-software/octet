@@ -8,6 +8,16 @@ octet --safe-mode --model claude-sonnet-4-6
 ```
 
 `/model [id]` picks a model, and `/status` shows its route and capabilities.
+The footer, model picker, model-bearing splash, session picker/tree and `/session
+info` use the same label: the full provider-facing model ID, followed by a
+configured or inventory display name in parentheses when it adds distinct words.
+Separators, repository paths and quantization suffixes stay intact. The model
+picker adds `[provider]`; the footer adds `(provider)` when multiple providers
+are available and space permits. Compact splashes keep model identity in the
+footer. Sessions whose model is absent from the current inventory retain their
+stored ID as the label. These are presentation labels only: routing, billing and
+IDs saved in sessions and configuration stay unchanged.
+
 octet uses live model discovery where the provider offers it. `--offline` skips
 optional discovery, **not inference traffic**. Which models you can use depends
 on your account and endpoint, and octet's tests don't cover every live provider.

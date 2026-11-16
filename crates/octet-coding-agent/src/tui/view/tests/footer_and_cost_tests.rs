@@ -6,6 +6,141 @@ use super::support::*;
 use super::*;
 
 #[test]
+fn inventory_model_label_is_consistent_across_surfaces() {
+    let source = octet_ai::ModelCatalog::builtin().unwrap();
+    let template = source.models().next().unwrap().clone();
+    for (api_name, display_name, expected) in [
+        ("gpt-6.1-sol", Some("GPT-6.1 Sol"), "gpt-6.1-sol"),
+        (
+            "org/Qwen3.6-27B_int4:latest",
+            None,
+            "org/Qwen3.6-27B_int4:latest",
+        ),
+        (
+            "org/Qwen3.6-27B_int4:latest",
+            Some("My local coder"),
+            "org/Qwen3.6-27B_int4:latest (My local coder)",
+        ),
+    ] {
+        let mut spec = template.clone();
+        spec.id = octet_ai::ModelId(format!("custom/local/{api_name}"));
+        spec.api_name = api_name.into();
+        spec.display_name = display_name.map(str::to_owned);
+        let mut catalog = octet_ai::ModelCatalog::default();
+        catalog
+            .register_endpoint((*source.resolve(&template.id).unwrap().endpoint).clone())
+            .unwrap();
+        catalog.register_model(spec.clone()).unwrap();
+        let model = catalog.resolve(&spec.id).unwrap();
+        let mut shell = InteractiveShell::test_shell_with_theme(
+            crate::tui::theme::test_theme_from_source("[metadata]\nname = 'Model labels'\n"),
+        );
+        shell.set_identity(&spec.endpoint.0, &spec.id.0, "");
+        shell.set_model_inventory(&catalog);
+        shell.set_model_theme(&model);
+        shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+        let picker = crate::tui::pickers::model_picker_presentation(&catalog);
+        assert_eq!(picker.details[0].name, expected, "picker details");
+        assert!(
+            picker.labels[0].starts_with(expected),
+            "picker: {:?}",
+            picker.labels
+        );
+        assert!(
+            plain_footer(&shell, 200, Instant::now()).contains(expected),
+            "footer"
+        );
+        let splash = super::super::welcome_card::render_welcome_card(
+            &shell.state.borrow(),
+            200,
+            12,
+            Instant::now(),
+        )
+        .join("\n");
+        assert!(
+            strip_terminal_sequences(&splash).contains(expected),
+            "splash: {splash}"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::session_store::SessionStore::new(directory.path(), directory.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let mut session = octet_agent::Session::create(store.dir().join("labels.jsonl")).unwrap();
+        session
+            .append(octet_agent::EntryValue::Config {
+                model: Some(spec.id.0.clone()),
+                reasoning: None,
+                reasoning_mode: None,
+            })
+            .unwrap();
+        assert!(
+            crate::commands::session_text(&session, &shell.model_labels()).contains(expected),
+            "session info"
+        );
+        assert_eq!(
+            crate::session_tree::session_tree_rows(&session, &shell.model_labels())[0].preview,
+            expected
+        );
+        session
+            .append(octet_agent::EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text("Label session".into())],
+                },
+            )))
+            .unwrap();
+        let before = std::fs::read(session.path()).unwrap();
+        // Exercise both the cold transcript projection and warm SQLite catalog.
+        for _ in 0..2 {
+            let rows = store.list();
+            assert_eq!(rows[0].model.as_deref(), Some(spec.id.0.as_str()));
+            shell.open_panel(Panel::SessionPicker {
+                picker: Box::new(PickerState::new(rows, None)),
+            });
+            let sessions =
+                strip_terminal_sequences(&render_panel(&shell.state.borrow(), 200).join("\n"));
+            assert!(sessions.contains(expected), "session picker: {sessions}");
+            let native = super::super::tern_picker::node(&shell.state.borrow()).unwrap();
+            assert!(
+                serde_json::to_string(&native).unwrap().contains(expected),
+                "native session picker"
+            );
+            shell.close_panel();
+        }
+        assert_eq!(std::fs::read(session.path()).unwrap(), before);
+        assert_eq!(model.spec.id, spec.id);
+        assert_eq!(model.spec.api_name, api_name);
+    }
+}
+
+#[test]
+fn footer_provider_badge_fits_without_shortening_the_model_label() {
+    let catalog = octet_ai::ModelCatalog::builtin().unwrap();
+    let model = catalog
+        .resolve(&octet_ai::ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_model_inventory(&catalog);
+    shell.set_identity("openai", &model.spec.id.0, "high");
+    shell.set_model_theme(&model);
+    let now = Instant::now();
+    assert!(plain_footer(&shell, 100, now).contains("(openai) gpt-6-astra · high"));
+    let narrow = plain_footer(&shell, 24, now);
+    assert!(narrow.contains("gpt-6-astra · high"), "{narrow:?}");
+    assert!(!narrow.contains("(openai)"), "{narrow:?}");
+    let run = shell.begin_run("openai");
+    shell.set_identity("other", "another-model", "low");
+    assert!(plain_footer(&shell, 100, now).contains("(openai) gpt-6-astra · high"));
+    shell.interrupt_run(run);
+
+    let mut single = octet_ai::ModelCatalog::default();
+    single.register_endpoint((*model.endpoint).clone()).unwrap();
+    single.register_model((*model.spec).clone()).unwrap();
+    shell.set_model_inventory(&single);
+    shell.set_identity("openai", &model.spec.id.0, "high");
+    shell.set_model_theme(&model);
+    assert!(!plain_footer(&shell, 100, now).contains("(openai)"));
+}
+
+#[test]
 fn default_footer_groups_live_metadata_and_right_aligns_workspace() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_workspace(PathBuf::from("/work/octet"));
@@ -13,7 +148,6 @@ fn default_footer_groups_live_metadata_and_right_aligns_workspace() {
     {
         let mut state = shell.state.borrow_mut();
         state.model_display = "GPT-6-Astra".into();
-        state.model_compact_names = vec!["GPT-6-Astra".into(), "GPT-6".into()];
         state.context_estimate = Some((84_320, 272_000));
         state.session_cost_microdollars = Some(295_000_000);
         state.price_display = PriceDisplay::Priced;
@@ -207,7 +341,6 @@ fn footer_omits_noisy_throughput_but_keeps_final_rate_in_status() {
         state.run_model = Some(state.model.clone());
         state.telemetry_model = state.run_model.clone();
         state.run_model_display = Some(state.model_display.clone());
-        state.run_model_compact_names = state.model_compact_names.clone();
         state.run_reasoning = Some(state.reasoning.clone());
         state.run_price_display = Some(PriceDisplay::Unknown);
         state.run_context_estimate = Some((21_000, 256_000));

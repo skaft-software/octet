@@ -938,34 +938,34 @@ fn footer_collapses_semantically_and_keeps_one_adjacent_row() {
     }
     let now = Instant::now();
     let wide = plain_footer(&shell, 100, now);
-    assert!(wide.starts_with("  Qwen3.6 35B A3B · high"), "{wide:?}");
+    assert!(
+        wide.starts_with("  custom/unsloth/Qwen3.6-35B-A3B-MTP-GGUF · high"),
+        "{wide:?}"
+    );
     assert!(wide.contains("2%/246K"), "{wide:?}");
     assert!(wide.contains(" · 2%/246K · $0"), "{wide:?}");
     assert!(wide.ends_with("/work/octet-footer-regression"), "{wide:?}");
     assert_eq!(visible_width(&wide), 98);
     assert!(!wide.contains('↑') && !wide.contains('↓'), "{wide:?}");
 
+    let id = "custom/unsloth/Qwen3.6-35B-A3B-MTP-GGUF";
+    for width in [68, 44, 30] {
+        let footer = plain_footer(&shell, width, now);
+        assert!(visible_width(&footer) <= usize::from(width), "{footer:?}");
+        if width != 44 {
+            assert!(footer.contains("2%"), "{footer:?}");
+        }
+        // Width fitting may omit the complete identity, never invent a shorter name.
+        assert!(
+            !footer.contains("Qwen") || footer.contains(id),
+            "{footer:?}"
+        );
+        assert!(!footer.contains("session"), "{footer:?}");
+    }
     let medium = plain_footer(&shell, 68, now);
-    assert!(medium.contains("Qwen3.6 35B A3B · high"), "{medium:?}");
-    assert!(medium.contains("2%/246K"), "{medium:?}");
+    assert!(medium.contains(id), "{medium:?}");
     assert!(medium.contains(" · 2%/246K · $0"), "{medium:?}");
-    assert!(
-        medium.contains('…') && medium.ends_with("footer-regression"),
-        "{medium:?}"
-    );
-    assert_eq!(visible_width(&medium), 66);
-
-    let compact = plain_footer(&shell, 44, now);
-    assert!(compact.contains("Qwen3.6 35B A3B"), "{compact:?}");
-    assert!(compact.contains("2%"), "{compact:?}");
-    assert!(compact.ends_with(" · 2%/246K · $0"), "{compact:?}");
-    assert!(compact.contains("high"), "{compact:?}");
-    assert!(!compact.contains("footer-regression"), "{compact:?}");
-
-    let narrow = plain_footer(&shell, 30, now);
-    assert!(narrow.contains("Qwen3.6 35B A3B"), "{narrow:?}");
-    assert!(narrow.contains("2%"), "{narrow:?}");
-    assert!(!narrow.contains("session"), "{narrow:?}");
+    assert!(!plain_footer(&shell, 30, now).contains(id));
 
     let surface = plain_composer_surface(&shell, 100, now);
     assert_eq!(surface.len(), 4, "one editor row, two rules, one footer");

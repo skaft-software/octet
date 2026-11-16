@@ -511,13 +511,7 @@ fn thinking_node(
                 Props::new().text(
                     "spans",
                     vec![Span::styled(
-                        sanitize_ordinary_surface_cell(
-                            crate::presentation::model::footer_model_name(
-                                &shell.model_display,
-                                &shell.model,
-                            ),
-                            shell.theme.unicode(),
-                        ),
+                        sanitize_ordinary_surface_cell(&shell.model_display, shell.theme.unicode()),
                         "muted",
                     )],
                 ),

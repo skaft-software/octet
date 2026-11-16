@@ -41,11 +41,11 @@ fn active_model_switch_keeps_run_identity_and_clears_stale_idle_telemetry() {
         },
     );
     let active_footer = plain_footer(&shell, 46, now);
-    assert!(active_footer.contains("GPT-5.6"), "{active_footer:?}");
-    assert!(!active_footer.contains("DeepSeek"), "{active_footer:?}");
+    assert!(active_footer.contains("gpt-5.6"), "{active_footer:?}");
+    assert!(!active_footer.contains("deepseek"), "{active_footer:?}");
     shell.set_size(24, 12);
     let narrow_active = plain_footer(&shell, 24, now);
-    assert!(narrow_active.contains("GPT-5.6"), "{narrow_active:?}");
+    assert!(narrow_active.contains("gpt-5.6"), "{narrow_active:?}");
     assert!(!narrow_active.contains("Working"), "{narrow_active:?}");
     assert!(!narrow_active.contains("tool"), "{narrow_active:?}");
     shell.set_size(46, 12);
@@ -63,7 +63,7 @@ fn active_model_switch_keeps_run_identity_and_clears_stale_idle_telemetry() {
 
     shell.interrupt_run(run_id);
     let idle_footer = plain_footer(&shell, 46, now);
-    assert!(idle_footer.contains("DeepSeek V4 Pro"), "{idle_footer:?}");
+    assert!(idle_footer.contains("deepseek-v4-pro"), "{idle_footer:?}");
     assert!(!idle_footer.contains("55.0 tok/s"), "{idle_footer:?}");
     assert!(!idle_footer.contains("$0.003"), "{idle_footer:?}");
     shell.on_prompt_submitted("prompt for B");
@@ -779,7 +779,7 @@ fn theme_header_footer_status_and_composer_padding_have_narrow_fallbacks() {
     let wide_header = strip_terminal_sequences(&wide_header[0]);
     assert!(wide_header.contains("octet"));
     assert!(
-        wide_header.contains("local / Qwen3.6 27B"),
+        wide_header.contains("local / qwen3.6-27b"),
         "{wide_header:?}"
     );
     assert!(shell_chrome(&shell.state.borrow(), 40, now)

@@ -77,6 +77,8 @@ pub struct SessionMeta {
     pub forked_from_entry_id: Option<String>,
     /// Number of persisted message entries in the active branch.
     pub message_count: usize,
+    /// Stored routing ID, formatted through the current inventory only at presentation.
+    pub model: Option<String>,
     pub modified: SystemTime,
     /// Canonical workspace path recorded in the store's `.workspace` marker,
     /// when known. Enables cross-workspace browsing without reversing the
@@ -730,7 +732,7 @@ enum SummaryRecord {
 }
 
 /// Derive the oldest user title on the active branch, if one exists.
-fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<String>) {
+pub(crate) fn active_branch_catalog_config(session: &Session) -> (Option<String>, Option<String>) {
     let mut model = None;
     let mut reasoning = None;
     let mut cursor = session.head_ref();

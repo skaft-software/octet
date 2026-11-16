@@ -378,7 +378,10 @@ async fn session_and_hotkeys_reports_remain_read_only_during_runs() {
         let text = if command == "/hotkeys" {
             shell.hotkeys_markdown()
         } else {
-            commands::session_text(&inspection.read_only_session().unwrap())
+            commands::session_text(
+                &inspection.read_only_session().unwrap(),
+                &crate::presentation::ModelLabels::from_catalog(&inspection.catalog),
+            )
         };
         assert!(text.contains(expected), "{text}");
         shell.close_overlay();

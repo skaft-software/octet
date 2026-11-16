@@ -548,6 +548,9 @@ fn session_detail(
         };
         details.push(format!("{} {suffix}", meta.message_count));
     }
+    if let Some(model) = &meta.model {
+        details.push(state.model_labels.label(model));
+    }
     if is_unreadable_session(meta) {
         details.push("transcript unavailable".to_owned());
     }

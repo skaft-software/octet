@@ -31,7 +31,7 @@ fn session_detail_reports_file_identity_messages_tokens_cost_and_uncertainty() {
             },
         )))
         .unwrap();
-    let text = session_text(&session);
+    let text = session_text(&session, &Default::default());
     assert!(text.contains("Session: detail-session"), "{text}");
     assert!(
         text.contains(&format!("File: {}", path.display())),
@@ -59,7 +59,7 @@ fn session_detail_reports_file_identity_messages_tokens_cost_and_uncertainty() {
             "assistant_turn",
         )
         .unwrap();
-    let text = session_text(&session);
+    let text = session_text(&session, &Default::default());
     assert!(
         text.contains("known subtotal only; usage or pricing uncertain"),
         "{text}"
@@ -893,7 +893,7 @@ fn unpriced_usage_reports_remain_uncertain_on_a_priced_model_and_reopen() {
             "active catalog pricing cannot price a historical receipt"
         );
         assert!(status_text(&app, None).contains("known subtotal"));
-        assert!(session_text(session).contains("known subtotal"));
+        assert!(session_text(session, &Default::default()).contains("known subtotal"));
         assert!(cost_text(session, &app.model).contains("Known subtotal only"));
         assert!(session.usage_uncertainty_records().is_empty());
     }

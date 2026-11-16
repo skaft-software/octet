@@ -426,6 +426,7 @@ pub(super) fn picker_session(
         forked_from_session_id: None,
         forked_from_entry_id: None,
         message_count,
+        model: None,
         modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_seconds),
         workspace: Some(PathBuf::from("/work")),
     }

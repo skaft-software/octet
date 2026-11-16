@@ -550,7 +550,7 @@ async fn live_subagent_picker_refreshes_and_keeps_the_stable_selection() {
 }
 
 #[test]
-fn model_label_uses_friendly_metadata_without_wire_id_noise() {
+fn model_label_uses_id_when_display_name_only_restates_it() {
     let spec = octet_ai::ModelSpec {
         context_window_options: None,
         preset: Default::default(),
@@ -578,7 +578,7 @@ fn model_label_uses_friendly_metadata_without_wire_id_noise() {
         pricing: None,
         cache: octet_ai::CacheCompatibility::default(),
     };
-    assert_eq!(model_label(&spec), "Llama 3.1 8B");
+    assert_eq!(model_label(&spec), "llama-3.1-8b-instruct");
     assert_eq!(model_picker_metadata(&spec).input_cost, "—");
 
     let mut priced = spec.clone();
@@ -603,7 +603,7 @@ fn model_label_uses_friendly_metadata_without_wire_id_noise() {
 }
 
 #[test]
-fn custom_model_label_removes_provider_repository_and_quantization_noise() {
+fn custom_model_label_keeps_repository_separators_and_quantization() {
     let mut spec = octet_ai::ModelSpec {
         context_window_options: None,
         preset: Default::default(),
@@ -631,7 +631,7 @@ fn custom_model_label_removes_provider_repository_and_quantization_noise() {
         pricing: None,
         cache: octet_ai::CacheCompatibility::default(),
     };
-    assert_eq!(model_label(&spec), "Qwen3.6 27B");
+    assert_eq!(model_label(&spec), "Intel/Qwen3.6-27B-int4-AutoRound");
 
     spec.capabilities.input_modalities = octet_ai::ModalitySet::none()
         .with(octet_ai::Modality::Image)
@@ -661,11 +661,7 @@ fn custom_model_picker_shows_wire_id_endpoint_and_friendly_name_without_changing
         presentation.labels,
         [format!("gpt-5.6-luna [{endpoint_id}]")]
     );
-    assert!(presentation.descriptions[0]
-        .as_deref()
-        .unwrap()
-        .ends_with("  Model Name: GPT-5.6 Luna"));
-    assert_eq!(presentation.details[0].name, "GPT-5.6 Luna");
+    assert_eq!(presentation.details[0].name, "gpt-5.6-luna");
 }
 
 #[tokio::test]
@@ -782,7 +778,7 @@ fn model_picker_groups_and_sorts_models_with_stable_metadata_columns() {
         .position(|id| id.0 == "gpt-6-astra")
         .expect("built-in Astra should use the generic model picker path");
     assert_eq!(presentation.providers[astra_index], "OpenAI");
-    assert_eq!(presentation.labels[astra_index], "GPT-6 Astra");
+    assert_eq!(presentation.labels[astra_index], "gpt-6-astra [openai]");
     let astra_description = descriptions[astra_index];
     assert!(astra_description.contains("$10/M"));
     assert!(astra_description.contains("$50/M"));

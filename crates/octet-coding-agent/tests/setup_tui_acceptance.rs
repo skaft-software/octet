@@ -898,7 +898,7 @@ fn setup_command_adds_api_key_to_configured_session_without_switching_model() {
     let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, true);
     let mut parser = vt100::Parser::new(ROWS, columns, 1024);
     let mut consumed = 0;
-    let initial = octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    let initial = octet.wait_for_text(&mut parser, &mut consumed, columns, "existing-model");
     assert!(!initial.contains("Set up a provider"));
     let config_before = fs::read(octet.config_path()).unwrap();
 
@@ -910,7 +910,7 @@ fn setup_command_adds_api_key_to_configured_session_without_switching_model() {
     octet.wait_for_text(&mut parser, &mut consumed, columns, "Save OpenAI API key?");
     octet.terminal.write_input(b"\r");
     let ready = octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
-        screen.contains("Provider saved") && screen.contains("Existing Model")
+        screen.contains("Provider saved") && screen.contains("existing-model")
     });
     assert!(ready.contains("/model"));
     assert!(!ready.contains(SECRET));
@@ -927,7 +927,7 @@ fn setup_command_adds_api_key_to_configured_session_without_switching_model() {
     assert!(picker.contains("OpenAI"), "new provider absent: {picker}");
     octet.terminal.write_input(b"\x1b");
     octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
-        screen.contains("Existing Model") && !screen.contains("Select model")
+        screen.contains("existing-model") && !screen.contains("Select model")
     });
     let capture = octet.shutdown();
     assert!(capture.status.success());
@@ -944,7 +944,7 @@ fn setup_command_replacement_requires_separate_review() {
     let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, true);
     let mut parser = vt100::Parser::new(ROWS, columns, 1024);
     let mut consumed = 0;
-    octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "existing-model");
     let key_path = octet.home.join(".octet/credentials/api-keys/openai.json");
     fs::create_dir_all(key_path.parent().unwrap()).unwrap();
     fs::set_permissions(
@@ -1031,7 +1031,7 @@ fn setup_command_warns_before_saving_key_overridden_by_environment() {
     );
     let mut parser = vt100::Parser::new(ROWS, columns, 1024);
     let mut consumed = 0;
-    octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "existing-model");
     let key_path = octet.home.join(".octet/credentials/api-keys/openai.json");
     octet.terminal.write_input(b"/setup\r");
     octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
@@ -1099,13 +1099,13 @@ fn setup_command_cancel_keeps_existing_provider_and_default() {
     let mut octet = PtyOctet::spawn(columns, ROWS, "C.UTF-8", true, true);
     let mut parser = vt100::Parser::new(ROWS, columns, 1024);
     let mut consumed = 0;
-    octet.wait_for_text(&mut parser, &mut consumed, columns, "Existing Model");
+    octet.wait_for_text(&mut parser, &mut consumed, columns, "existing-model");
     let config_before = fs::read(octet.config_path()).unwrap();
     octet.terminal.write_input(b"/setup\r");
     octet.wait_for_text(&mut parser, &mut consumed, columns, "Set up a provider");
     octet.terminal.write_input(b"\x1b");
     octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
-        screen.contains("Existing Model") && !screen.contains("Set up a provider")
+        screen.contains("existing-model") && !screen.contains("Set up a provider")
     });
     assert_eq!(fs::read(octet.config_path()).unwrap(), config_before);
     assert!(!octet.home.join(".octet/credentials/api-keys").exists());
@@ -1155,7 +1155,7 @@ fn setup_builtin_api_key_saves_after_review_selects_native_model_and_survives_re
     // unlike a Responses route this cannot trigger startup Responses prewarm.
     octet.terminal.write_input(b"4o\r");
     octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
-        screen.contains("GPT-4o mini")
+        screen.contains("gpt-4o-mini")
             && screen.lines().any(|line| line.trim() == "›")
             && !screen.contains("Select model")
     });
@@ -1185,7 +1185,7 @@ fn setup_builtin_api_key_saves_after_review_selects_native_model_and_survives_re
         &mut restart_consumed,
         columns,
         WAIT,
-        |screen| screen.contains("GPT-4o mini") && screen.lines().any(|line| line.trim() == "›"),
+        |screen| screen.contains("gpt-4o-mini") && screen.lines().any(|line| line.trim() == "›"),
     );
     let capture = restarted.shutdown();
     assert!(capture.status.success());
@@ -1301,16 +1301,15 @@ fn setup_discovery_reaches_normal_prompt_and_records_secret_free_receipt() {
         "a setup secret appeared in the TUI transcript"
     );
 
-    // Confirm the reviewed transaction and wait for both the display label and
-    // the ordinary composer. Canonical identity is checked in the saved config
-    // below; the startup surface intentionally renders the model's display name.
+    // Confirm the reviewed transaction and wait for the shared API-ID label
+    // and ordinary composer. The saved config retains its canonical route ID.
     octet.terminal.write_input(b"\r");
     let ready = octet.wait_for_screen(&mut parser, &mut consumed, columns, WAIT, |screen| {
-        screen.contains("Fixture Model")
+        screen.contains("fixture-model")
             && screen.lines().any(|line| line.trim() == "›")
             && !screen.contains("Review provider setup")
     });
-    assert!(ready.contains("Fixture Model"));
+    assert!(ready.contains("fixture-model"));
     let capture = octet.shutdown();
     assert!(capture.status.success(), "Ctrl-D exit: {}", capture.status);
     assert!(capture.termios_restored);
@@ -1539,9 +1538,9 @@ fn setup_manual_narrow_ascii_no_color_and_configured_startup_remain_bounded() {
         &mut configured_parser,
         &mut configured_consumed,
         COLUMNS,
-        "Existing Model",
+        "existing-model",
     );
-    assert!(configured_screen.contains("Existing Model"));
+    assert!(configured_screen.contains("existing-model"));
     assert!(!configured_screen.contains("Set up a provider"));
     assert!(!configured_screen.contains("No configured model"));
     assert!(configured_screen.is_ascii());

@@ -254,7 +254,7 @@ impl Drop for PtyOctet {
 #[test]
 fn real_octet_slash_enter_invokes_highlighted_command_in_one_submission() {
     let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")));
-    octet.pty.wait_for(b"custom/probe");
+    octet.pty.wait_for(b"probe");
 
     // `/changelog` has one matching popup row. Down keeps that row highlighted;
     // the following single Enter must open its report rather than only filling
@@ -448,7 +448,7 @@ fn read_request(socket: &mut std::net::TcpStream, stop: &AtomicBool) -> Option<S
 fn streaming_octet() -> (StreamApi, PtyOctet) {
     let api = StreamApi::start();
     let mut octet = PtyOctet::spawn_with_provider(Path::new(env!("CARGO_BIN_EXE_octet")), &api.url);
-    octet.pty.wait_for(b"custom/probe");
+    octet.pty.wait_for(b"probe");
     octet.pty.write_input(b"stream a long answer\r");
     api.wait_for_request(&mut octet);
     octet.pty.wait_for(HEAD_MARKER);
@@ -516,7 +516,7 @@ fn real_octet_shortcuts_report_results_and_errors_without_dispatch_notices() {
         &api.url,
         true,
     );
-    octet.pty.wait_for(b"custom/probe");
+    octet.pty.wait_for(b"probe");
     // Stage 1: the extension subprocess is launched asynchronously and its
     // interpreter may be slow to start. Wait for the fixture's own marker so
     // the protocol budget below only covers the handshake.
@@ -555,7 +555,7 @@ fn real_octet_shortcuts_report_results_and_errors_without_dispatch_notices() {
     // Command output is a modal; close it before testing shortcut routing.
     octet.pty.output.clear();
     octet.pty.write_input(PICKER_ESCAPE);
-    octet.pty.wait_for(b"custom/probe");
+    octet.pty.wait_for(b"probe");
     octet.pty.output.clear();
 
     // Terminal encoding of Ctrl+F6, in the same mode as the real TUI.
@@ -800,7 +800,7 @@ fn real_octet_slash_model_opens_the_picker_while_a_response_is_streaming() {
 #[test]
 fn real_octet_picker_escape_and_shutdown_remain_separate_keys() {
     let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")));
-    octet.pty.wait_for(b"custom/probe");
+    octet.pty.wait_for(b"probe");
     octet.pty.write_input(b"/model\r");
     octet.pty.wait_for(b"Select model");
     // Exercise the same-read boundary directly instead of relying on OS timing.
@@ -810,7 +810,7 @@ fn real_octet_picker_escape_and_shutdown_remain_separate_keys() {
 #[test]
 fn real_octet_model_picker_selects_and_persists_without_inference() {
     let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")));
-    octet.pty.wait_for(b"custom/probe");
+    octet.pty.wait_for(b"probe");
     octet.pty.write_input(b"/model\r");
     octet.pty.wait_for(b"Select model");
     // Filter the actual picker, then submit its selected local fixture model.

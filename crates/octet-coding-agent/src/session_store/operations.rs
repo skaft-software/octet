@@ -432,6 +432,7 @@ impl SessionStore {
             forked_from_session_id: metadata.forked_from_session_id,
             forked_from_entry_id: metadata.forked_from_entry_id,
             message_count,
+            model: None,
             modified,
             workspace: self.workspace.clone(),
         }
@@ -461,7 +462,10 @@ impl SessionStore {
             .transpose()?
             .unwrap_or_default();
         let meta = transcript.title.map(|title| {
-            self.meta_from_parts(candidate, id, title, metadata, transcript.message_count)
+            let mut meta =
+                self.meta_from_parts(candidate, id, title, metadata, transcript.message_count);
+            meta.model = transcript.configured_model.clone();
+            meta
         });
         Ok(SessionCatalogInspection {
             catalog: SessionCatalogEntry {
@@ -503,8 +507,11 @@ impl SessionStore {
             .transpose()?
             .unwrap_or_default();
         Ok(SessionCatalogEntry {
-            meta: title
-                .map(|title| self.meta_from_parts(candidate, id, title, metadata, message_count)),
+            meta: title.map(|title| {
+                let mut meta = self.meta_from_parts(candidate, id, title, metadata, message_count);
+                meta.model = configured_model.clone();
+                meta
+            }),
             configured_model,
             configured_reasoning,
         })
@@ -602,13 +609,15 @@ impl SessionStore {
         let Some(title) = active_branch_catalog_title(session) else {
             return Ok(None);
         };
-        Ok(Some(self.meta_from_parts(
+        let mut meta = self.meta_from_parts(
             candidate,
             id.to_owned(),
             title,
             self.load_metadata(id)?,
             active_branch_message_count(session),
-        )))
+        );
+        meta.model = active_branch_catalog_config(session).0;
+        Ok(Some(meta))
     }
 
     /// Refresh the disposable title projection from an already replayed session.
@@ -670,16 +679,19 @@ impl SessionStore {
         id: String,
         summary: CachedTranscriptSummary,
     ) -> Option<SessionMeta> {
-        let (fallback_title, message_count) = match summary {
+        let (fallback_title, message_count, model) = match summary {
             CachedTranscriptSummary::Summary {
                 title,
                 message_count,
+                configured_model,
                 ..
-            } => (title?, message_count),
-            CachedTranscriptSummary::Unreadable => ("(unreadable session)".to_owned(), 0),
+            } => (title?, message_count, configured_model),
+            CachedTranscriptSummary::Unreadable => ("(unreadable session)".to_owned(), 0, None),
         };
         let metadata = self.load_metadata(&id).unwrap_or_default();
-        Some(self.meta_from_parts(candidate, id, fallback_title, metadata, message_count))
+        let mut meta = self.meta_from_parts(candidate, id, fallback_title, metadata, message_count);
+        meta.model = model;
+        Some(meta)
     }
 
     pub(super) fn discover_with_summarizer<F>(

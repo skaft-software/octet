@@ -28,8 +28,7 @@ pub use formatting::{
 #[cfg(test)]
 pub use model::resolve_model_display_name;
 pub use model::{
-    derive_model_display_name, model_display_name_variants, provider_lifecycle_label,
-    provider_status_name, ModelDisplayMetadata,
+    provider_lifecycle_label, provider_status_name, ModelDisplayMetadata, ModelLabels,
 };
 #[cfg(test)]
 pub use run::RunSummary;
