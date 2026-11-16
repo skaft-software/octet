@@ -1874,3 +1874,77 @@ async fn rewritten_cross_protocol_history_normalizes_reasoning_but_rejects_new_h
         serialize_conversation(&req.messages)
     );
 }
+
+#[tokio::test]
+async fn no_projection_bookkeeping_stays_flat_with_growing_context() {
+    struct Observe;
+    #[async_trait::async_trait]
+    impl ProviderContextHook for Observe {
+        async fn project_context(
+            &self,
+            _: &Request,
+            _: &ProviderContextProjectionContext,
+        ) -> Result<Option<ProviderContextProjection>, String> {
+            Ok(None)
+        }
+    }
+    let mut work = Vec::new();
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+    for count in [16, 160, 1600] {
+        let mut canonical = request();
+        canonical.messages = (0..count).map(|_| projected_user("fixture")).collect();
+        canonical.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(vec![
+            octet_ai::ResponsesItem::new(
+                serde_json::json!({"type":"compaction", "encrypted_content":"fixture-checkpoint"}),
+            )
+            .unwrap(),
+        ])));
+        CONTEXT_WORK.with(|value| value.set((0, 0, 0)));
+        let result = project_with_fresh_session(
+            canonical,
+            &[Arc::new(Observe)],
+            &identity(),
+            &model,
+            &AbortFlag::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.messages.len(), count);
+        let measured = CONTEXT_WORK.with(std::cell::Cell::get);
+        eprintln!(
+            "{count} messages: diagnostic bytes={} cloned messages={} opaque-prefix bytes={}",
+            measured.0, measured.1, measured.2
+        );
+        work.push(measured);
+    }
+    assert_eq!(
+        work,
+        [(0, 0, 0); 3],
+        "no-op bookkeeping traverses full history"
+    );
+    // A no-op after an accepted edit borrows that edit, not the original input.
+    // A later rejected candidate must also roll back to that accepted edit.
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(Rewrite {
+            system: None,
+            text: "accepted edit".into(),
+            observations: Arc::default(),
+        }),
+        Arc::new(Observe),
+        Arc::new(InvalidProjection {
+            failure_notice_id: "invalid-candidate",
+        }),
+        Arc::new(Observe),
+    ];
+    let result = project_with_fresh_session(
+        request(),
+        &hooks,
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+    )
+    .await
+    .unwrap();
+    assert!(serialize_conversation(&result.messages).contains("accepted edit"));
+}

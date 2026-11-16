@@ -19,7 +19,12 @@ template](instructions.md#prompt-templates), or set a durable objective with
 ## Request budgeting
 
 Before every model turn, octet estimates the whole next request: instructions,
-history and the exact enabled tool schemas. With the default
+history and the exact enabled tool schemas. Native context observers borrow the
+accepted request; only a returned projection creates an owned candidate. Failed
+candidates are discarded without copying the accepted history for rollback.
+Request-shape diagnostics are computed only on refusal, and unchanged observers
+skip opaque-prefix comparison. Request validation, provider encoding and callbacks
+that consume full context still scale with their input. With the default
 `threshold_fraction = 1.0`, the limit is the context window minus a fixed 16K
 reserve for the turn (or the model's larger advertised reasoning floor). There's
 no extra percentage buffer. `max_active_tokens` sets a smaller working set if

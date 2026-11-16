@@ -14,6 +14,32 @@ const CONTEXT_HOOK_DEADLINE: Duration = Duration::from_secs(5);
 // Beyond this cap, still warn rather than silently hiding a failure.
 const MAX_CONTEXT_FAILURE_NOTICES: usize = 1024;
 
+#[cfg(test)]
+thread_local! {
+    // Diagnostic bytes, cloned messages, serialized opaque-prefix bytes.
+    static CONTEXT_WORK: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+fn clone_context_request(request: &Request) -> Request {
+    #[cfg(test)]
+    CONTEXT_WORK.with(|work| {
+        let (bytes, messages, prefix) = work.get();
+        work.set((bytes, messages + request.messages.len(), prefix));
+    });
+    request.clone()
+}
+
+fn same_messages(left: &[Message], right: &[Message]) -> bool {
+    let left = serde_json::to_vec(left).expect("messages serialize");
+    let right = serde_json::to_vec(right).expect("messages serialize");
+    #[cfg(test)]
+    CONTEXT_WORK.with(|work| {
+        let (bytes, messages, prefix) = work.get();
+        work.set((bytes, messages, prefix + left.len() + right.len()));
+    });
+    left == right
+}
+
 pub(super) struct ProviderContextPreparation<'a> {
     pub(super) hooks: &'a [Arc<dyn ProviderContextHook>],
     pub(super) tool_choice: ToolChoice,
@@ -123,6 +149,11 @@ fn request_descriptor(request: &Request) -> String {
         .join(", ");
     let mut counter = ByteCount::default();
     let request_bytes = serde_json::to_writer(&mut counter, request).map_or(0, |()| counter.0);
+    #[cfg(test)]
+    CONTEXT_WORK.with(|work| {
+        let (bytes, messages, prefix) = work.get();
+        work.set((bytes + request_bytes, messages, prefix));
+    });
     format!(
         "{} messages, {} tools, {} tool schema (largest: {}), request {}",
         request.messages.len(),
@@ -322,26 +353,31 @@ pub(super) async fn project_provider_context(
 ) -> Result<Request, AgentError> {
     // Every refusal names the shape that caused it: an unactionable "hook
     // refused preparation" cost a whole run and could not be diagnosed.
-    let descriptor = request_descriptor(&request);
-    match project_context_hooks(request, hooks, context, model, abort, session, notices).await {
+    match project_context_hooks(&request, hooks, context, model, abort, session, notices).await {
         Err(AgentError::ProviderContextPreparation(reason)) => {
+            let descriptor = request_descriptor(&request);
             Err(refused_owned(format!("{reason}; request {descriptor}")))
         }
-        other => other,
+        Ok(Some(projected)) => Ok(projected),
+        Ok(None) => Ok(request),
+        Err(error) => Err(error),
     }
 }
 
 async fn project_context_hooks(
-    mut request: Request,
+    canonical: &Request,
     hooks: &[Arc<dyn ProviderContextHook>],
     context: &ProviderContextProjectionContext,
     model: &Model,
     abort: &AbortFlag,
     session: &mut Session,
     notices: &mut Vec<String>,
-) -> Result<Request, AgentError> {
-    validate_size(&request)?;
-    let canonical = request.clone();
+) -> Result<Option<Request>, AgentError> {
+    validate_size(canonical)?;
+    // Native validation owns this request. Borrow accepted immutable state for
+    // observers; a real projection alone needs an owned candidate. Rollback is
+    // dropping that candidate, not copying the accepted conversation per hook.
+    let mut projected: Option<Request> = None;
     // Keep only currently registered instances; dropping/reopening the Session
     // releases/resets the ledger. Never persist extension IDs in the transcript.
     session.context_failure_notices.retain(|id| {
@@ -355,6 +391,7 @@ async fn project_context_hooks(
     // guard receives its own bounded deadline.
     let extension_deadline = tokio::time::Instant::now() + budget;
     for hook in hooks {
+        let request = projected.as_ref().unwrap_or(canonical);
         if abort.is_set() {
             return Err(AgentError::Cancelled);
         }
@@ -398,11 +435,11 @@ async fn project_context_hooks(
         let projection = {
             let future = match service
                 .as_mut()
-                .and_then(|service| service.projection_future(&request, context))
+                .and_then(|service| service.projection_future(request, context))
             {
                 Some(future) => future,
                 None => Box::pin(async {
-                    hook.project_context(&request, context)
+                    hook.project_context(request, context)
                         .await
                         .map_err(ProviderContextHookError::Failed)
                 }),
@@ -460,10 +497,14 @@ async fn project_context_hooks(
         // something the provider cannot represent, that projection is the
         // suspect — not the session — so it can be dropped and the run continues
         // on the validated request, exactly like any other handler failure.
-        let accepted_before_hook = request.clone();
+        let accepted_before_hook = request;
+        let changed = projection.is_some();
+        let mut request = std::borrow::Cow::Borrowed(request);
         if let Some(projection) = projection {
-            request.messages = projection.messages;
-            request.system = projection.system;
+            request = std::borrow::Cow::Owned(clone_context_request(accepted_before_hook));
+            let candidate = request.to_mut();
+            candidate.messages = projection.messages;
+            candidate.system = projection.system;
             if let Some(tools) = projection.tools {
                 let mut seen = HashSet::new();
                 for tool in &tools {
@@ -489,26 +530,30 @@ async fn project_context_hooks(
                         )));
                     }
                 }
-                request.tools = tools;
+                candidate.tools = tools;
             }
         }
-        validate_size(&request)?;
+        if changed {
+            validate_size(&request)?;
+        }
         // Pi compatibility: packages/ai/src/api/openai-responses-shared.ts:300-409
         // encodes the context after hooks, including edits and non-text suffixes.
         // Preserve native checkpoints on the common unchanged-prefix path; for
         // edits, associate each opaque output with its own unchanged assistant.
-        if request
-            .responses
-            .as_ref()
-            .is_some_and(|options| options.input.is_some())
+        if changed
+            && request
+                .responses
+                .as_ref()
+                .is_some_and(|options| options.input.is_some())
         {
             let prefix_len = accepted_before_hook.messages.len();
             let suffix = request.messages.get(prefix_len..);
             let unchanged_prefix = suffix.is_some()
                 && accepted_before_hook.system == request.system
-                && serde_json::to_vec(&accepted_before_hook.messages).expect("messages serialize")
-                    == serde_json::to_vec(&request.messages[..prefix_len])
-                        .expect("messages serialize");
+                && same_messages(
+                    &accepted_before_hook.messages,
+                    &request.messages[..prefix_len],
+                );
             let input = if unchanged_prefix {
                 let replay = suffix
                     .unwrap()
@@ -543,10 +588,10 @@ async fn project_context_hooks(
                     replay.as_deref().map(Vec::as_slice).unwrap_or_default(),
                 )?
             };
-            request.responses.as_mut().unwrap().input = Some(input);
+            request.to_mut().responses.as_mut().unwrap().input = Some(input);
             validate_size(&request)?;
         }
-        validate_identities(&canonical, &request, model)?;
+        validate_identities(canonical, &request, model)?;
         // Name the failing validation. The alternative — a bare "invalid
         // canonical provider context" — leaves an operator with a 116-tool
         // request and no way to tell which tool or field is unacceptable.
@@ -569,7 +614,7 @@ async fn project_context_hooks(
                 "tools": request.tools.len(),
                 "schema_bytes": tools.iter().map(|(_, n)| n).sum::<usize>(),
                 "largest": tools.iter().take(5).map(|(n, s)| format!("{n}={s}")).collect::<Vec<_>>(),
-                "validation": validate_projection(model, &canonical, &request)
+                "validation": validate_projection(model, canonical, &request)
                     .err()
                     .map(|e| e.to_string()),
             });
@@ -587,10 +632,9 @@ async fn project_context_hooks(
         // a 116-tool Pi fleet must never be able to end a run. Fall back only to
         // the request that reached this hook, and only when it still validates,
         // so identity, loadout and host-authority checks above stay fatal.
-        if let Err(error) = validate_projection(model, &canonical, &request) {
+        if let Err(error) = validate_projection(model, canonical, &request) {
             let detail: String = error.to_string().chars().take(240).collect();
-            if validate_projection(model, &canonical, &accepted_before_hook).is_ok() {
-                request = accepted_before_hook;
+            if validate_projection(model, canonical, accepted_before_hook).is_ok() {
                 // One precise notice beats the generic hook-failure line plus a
                 // detail line. Deduplicate on the hook's own identity, the same
                 // key the caller prunes to live hooks, so the notice survives
@@ -621,11 +665,14 @@ async fn project_context_hooks(
         if !recoverable && tokio::time::Instant::now() >= deadline {
             return Err(refused("hook deadline exceeded"));
         }
+        if let std::borrow::Cow::Owned(request) = request {
+            projected = Some(request);
+        }
     }
     if abort.is_set() {
         return Err(AgentError::Cancelled);
     }
-    Ok(request)
+    Ok(projected)
 }
 
 impl CompactionContext<'_> {
