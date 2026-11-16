@@ -111,6 +111,7 @@
 - Pi model selection delivers `model_select` with the current and previous models before an applied `pi.setModel()` resolves.
 - Pi session setup retains its extension owner across idle resource refreshes, allowing replacement and later commands to complete.
 - Anthropic cache TTL updates preserve omitted write totals and one-hour subsets independently.
+- Pi extensions can switch back to a previously opened session while captured contexts from its prior incarnation stay retired.
 
 ## [0.10.4] - 2026-11-12
 

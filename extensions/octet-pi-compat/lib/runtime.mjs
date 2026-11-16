@@ -713,7 +713,7 @@ export class Runtime {
   registerAutocomplete(contribution = false) {
     return startCompletionChain(this, contribution);
   }
-  bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead } = {}) {
+  bind(params, store, { foreground = store.method === 'hook/run' && params.hook === 'session_start', requireLeaf, preparationHead, historyPreparation = false } = {}) {
     const context = params.context || {};
     let promptReadScope;
     if (context.system_prompt_scope !== undefined) {
@@ -742,7 +742,8 @@ export class Runtime {
     let state = this.states.get(key);
     // Revisiting a session creates a new incarnation. Captured old contexts
     // still point at their retired state and must never become live again.
-    if (state && !state.alive && !(store.method === 'hook/run' && params.hook === 'session_start')) {
+    const inertRevisit = historyPreparation && store.method === 'session/snapshot/prepare' && state && !state.alive;
+    if (state && !state.alive && !inertRevisit && !(store.method === 'hook/run' && params.hook === 'session_start')) {
       throw rpcError(-32002, 'not_foreground_owner settled owner');
     }
     if (!lifecycle && this.foreground && (owner.extension_instance_id !== this.foreground.owner.extension_instance_id || owner.process_generation !== this.foreground.owner.process_generation)) throw rpcError(-32002, 'not_foreground_owner process binding');
@@ -752,7 +753,10 @@ export class Runtime {
     if (!foreground && this.foreground && state !== this.foreground && ['command/execute', 'shortcut/execute'].includes(store.method)) throw rpcError(-32002, 'not_foreground_owner command belongs to an inactive session');
     if (!state || !state.alive) {
       state = { key, owner: Object.freeze({ ...owner }), alive: true, workspace: context.workspace || this.workspace, host: { ...this.initialHost, ...(context.host || {}) }, statuses: new Map(), branchListeners: new Set(), uiQueues: new Map(), parent: store.id };
-      this.states.set(key, state);
+      // Pi agent-session-runtime.ts:199-223 permits switching back to a file.
+      // Its native history must be prepared before session_start, but preparing
+      // bytes cannot revive old contexts or acquire foreground action authority.
+      if (!inertRevisit) this.states.set(key, state);
     } else {
       state.workspace = context.workspace || state.workspace;
       state.host = { ...state.host, ...(context.host || {}) }; state.parent = store.id;

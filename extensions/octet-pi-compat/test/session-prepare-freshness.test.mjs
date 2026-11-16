@@ -106,16 +106,32 @@ test('a new exact owner seeds only its supplied observations without borrowing f
   assert.equal(createContext(runtime, supplied.store).hasPendingMessages(), false);
 });
 
-test('preparing history cannot resurrect a retired owner or replace its facts', async () => {
-  const { runtime, prepare, calls } = fixture();
+// Pi agent-session-runtime.ts:199-223 can return to a previously opened file.
+// Native snapshot preparation precedes session_start but carries no action grant.
+test('revisiting prepares inert history without resurrecting the captured retired context', async () => {
+  const { runtime, prepare } = fixture();
   const first = prepare(1, { has_pending_messages: true });
   await first.run();
+  runtime.foreground = first.store.state;
   first.store.state.alive = false;
-  const count = calls.length;
-  await assert.rejects(prepare(2, { has_pending_messages: false }).run(), /settled owner/);
-  assert.equal(calls.length, count);
+  const next = prepare(2, { has_pending_messages: false });
+  await next.run();
+  assert.notEqual(next.store.state, first.store.state);
+  assert.equal(runtime.states.get(ownerKey(owner)), first.store.state);
+  assert.equal(runtime.foreground, first.store.state);
   assert.equal(first.store.state.alive, false);
   assert.equal(first.store.state.host.has_pending_messages, true);
+  assert.equal(next.store.state.host.has_pending_messages, false);
+  assert.throws(() => runtime.assertOwner(first.store), /retained context is unavailable/);
+  assert.throws(() => runtime.assertOwner(next.store), /inactive session/);
+  const started = { id: 99, method: 'hook/run', controller: new AbortController() };
+  runtime.foregroundWaiters = new Set();
+  // This minimal history fixture has no UI/timers to dispose. Full Runtime and
+  // real-host replacement suites exercise the actual retirement implementation.
+  runtime.retire = async state => { assert.equal(state, first.store.state); assert.equal(state.alive, false); };
+  runtime.bind({ hook: 'session_start', context: { resource_owner: owner, host: {} } }, started);
+  runtime.assertOwner(started);
+  assert.throws(() => runtime.assertOwner(first.store), /retained context is unavailable/);
 });
 
 test('descriptor owner and generation mismatches refuse before changing host facts', async () => {

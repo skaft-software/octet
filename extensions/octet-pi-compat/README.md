@@ -773,6 +773,11 @@ operation; malformed native history is not accepted.
 `ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
 awaits the actual same-session idle receipt. No hook can wait for its own run to end.
 
+Switching back to a previously opened session prepares its history before
+`session_start` in a separate inert state. Preparation does not revive captured
+contexts, replace retained host facts or grant foreground actions; only the actual
+lifecycle binding activates a new incarnation for the reopened session.
+
 `ctx.newSession({parentSession, setup, withSession})` replaces the native session
 at its idle boundary. A request made while a turn is busy waits for that turn to
 settle; it never takes its session writer. The old session's end precedes writable
