@@ -5,9 +5,9 @@ import { assistantMetadata } from './model-turns.mjs';
 import { assistantObservation } from './run-messages.mjs';
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
 
-// Translating walks each message's ancestry, so a host view is translated once
-// per namespace and limits. Views only grow by append, so the length detects
-// a stale translation. Callers get copies and never share mutable entries.
+// A host view is translated once per namespace and limits. Views only grow by
+// append, so the length detects a stale translation. Callers get copies and
+// never share mutable entries.
 const translations = new WeakMap();
 function cachedTranslation(entries, namespace) {
   if (!Array.isArray(entries)) return translateSessionEntries(entries, namespace);
@@ -24,16 +24,81 @@ function observedEntry(entry) {
   }
   return entry;
 }
-export const sessionEntryCopies = (entries, namespace) => structuredClone(cachedTranslation(entries, namespace)).map(observedEntry);
+// Translations are plain JSON data. Clone mutable containers, but share their
+// immutable strings: structuredClone duplicates large transcript strings on
+// every footer/history read, even though extensions cannot mutate a string.
+function copySessionData(value) {
+  if (Array.isArray(value)) return value.map(copySessionData);
+  if (value === null || typeof value !== 'object') return value;
+  const copy = {};
+  for (const key of Object.keys(value)) {
+    const item = copySessionData(value[key]);
+    if (key === '__proto__') Object.defineProperty(copy, key, { value: item, writable: true, enumerable: true, configurable: true });
+    else copy[key] = item;
+  }
+  return copy;
+}
+export const sessionEntryCopies = (entries, namespace) => copySessionData(cachedTranslation(entries, namespace)).map(observedEntry);
 export function sessionEntryCopy(entries, namespace, id) {
   const entry = cachedTranslation(entries, namespace).find(candidate => candidate.id === id);
-  return entry === undefined ? undefined : observedEntry(structuredClone(entry));
+  return entry === undefined ? undefined : observedEntry(copySessionData(entry));
+}
+
+// Resolve each result against its actual ancestors in one iterative tree walk.
+// The closest call wins, including when another branch reuses its ID. Only
+// result IDs are retained, not a complete copy of every ancestor's call map.
+function indexToolNames(entries, byId) {
+  const children = new Map(), roots = [];
+  for (const entry of entries) {
+    const parent = entry.parent;
+    if (parent === null || parent === undefined || !byId.has(parent)) roots.push(entry);
+    else {
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(entry);
+    }
+  }
+  const names = new Map(), visited = new Set(), active = new Map();
+  const stack = roots.reverse().map(entry => ({ entry }));
+  while (stack.length) {
+    const frame = stack.pop();
+    if (frame.restore) {
+      for (const [id, existed, previous] of frame.restore) {
+        if (existed) active.set(id, previous); else active.delete(id);
+      }
+      continue;
+    }
+    const entry = frame.entry;
+    visited.add(entry.id);
+    const user = entry.value?.User?.content;
+    if (Array.isArray(user)) for (const part of user) {
+      const id = part?.ToolResult?.tool_call_id;
+      if (id !== undefined && active.has(id)) {
+        if (!names.has(entry.id)) names.set(entry.id, new Map());
+        names.get(entry.id).set(id, active.get(id));
+      }
+    }
+    const assistant = entry.value?.Assistant?.content, restore = [], local = new Set();
+    if (Array.isArray(assistant)) for (const part of assistant) {
+      const call = part?.ToolCall;
+      // The old ancestry walk takes the first occurrence within an ancestor.
+      if (call && !local.has(call.id)) {
+        local.add(call.id);
+        restore.push([call.id, active.has(call.id), active.get(call.id)]);
+        active.set(call.id, call.name);
+      }
+    }
+    if (restore.length) stack.push({ restore });
+    const descendants = children.get(entry.id) ?? [];
+    for (let i = descendants.length - 1; i >= 0; i--) stack.push({ entry: descendants[i] });
+  }
+  return { names, visited };
 }
 
 export function translateSessionEntries(entries, namespace) {
   if (!Array.isArray(entries) || entries.length > historyItems()) invalid('session entries snapshot');
   const byId = new Map(entries.map(entry => [entry.id, entry]));
   if (byId.size !== entries.length) invalid('duplicate session entry id');
+  const indexed = indexToolNames(entries, byId);
   return entries.map(entry => {
     if (!entry?.value) return plainJSON(entry, 'Pi session entry', contextBytes());
     const id = bounded(entry.id, 'session entry id', 256), parentId = entry.parent;
@@ -63,15 +128,11 @@ export function translateSessionEntries(entries, namespace) {
     }
     const value = entry.value;
     if (value.type === 'message') {
-      // A result's tool name comes from its real ancestry, not another branch
-      // with a coincidentally equal provider call id.
-      const calls = new Map(), visited = new Set([id]); let cursor = parentId;
-      while (cursor !== null && cursor !== undefined) {
-        if (visited.has(cursor)) invalid('cyclic session ancestry'); visited.add(cursor);
-        const previous = byId.get(cursor); if (!previous) break; // A bounded branch snapshot may begin after a cut.
-        for (const part of previous.value?.Assistant?.content || []) if (part.ToolCall && !calls.has(part.ToolCall.id)) calls.set(part.ToolCall.id, part.ToolCall.name);
-        cursor = previous.parent;
-      }
+      const calls = new Map(indexed.names.get(id));
+      // With unique IDs and one parent per entry, a rootless component is a
+      // cycle or descends from one. Keep the message refusal without walking it
+      // again; unrelated native markers retain their existing observation shape.
+      if (!indexed.visited.has(id)) invalid('cyclic session ancestry');
       const { type, ...canonical } = value;
       // Session-manager entries are read-only observations, not provider replay.
       // As with model-turn observations, a foreign opaque signature must not make

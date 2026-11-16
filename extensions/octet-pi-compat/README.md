@@ -574,8 +574,25 @@ private custom state. Session-manager history is a read-only observation: it sho
 visible reasoning but omits an opaque signature whose model or protocol does not
 match the assistant. This does not authorize replay or change native session data;
 permission hooks still make their own allow/deny decision and malformed history can
-still be refused. Unrepresentable mixed-message entries refuse; other native
-markers retain their identities as `octet_native`, not fabricated Pi entries.
+still be refused. In particular, native tool calls marked `schema_mismatch` or
+`malformed` currently refuse even read-only history and model-turn observations.
+A schema mismatch retains parsed arguments but no Pi field identifies the native
+schema failure; Pi's `argumentsError` denotes arguments that are not a JSON
+object, not a schema mismatch. For malformed calls Octet retains an empty-object
+placeholder but not necessarily the original argument text required for Pi's
+diagnostic. Dropping the marker would make a copied observation look replayable
+as an ordinary call.
+Provider-context projection remains strict; this observation gap is not fixed by
+relaxing it. Unrepresentable mixed-message entries refuse; other native markers
+retain their identities as `octet_native`, not fabricated Pi entries.
+
+History translation indexes tool names in one iterative ancestry walk, retaining
+the nearest actual call across forks and out-of-order snapshots. Message ancestry
+cycles and duplicate entry IDs still refuse. Identical linear history/branch views
+share the internal translation input; getters copy mutable containers while sharing
+only immutable strings. Admitted appends invalidate the cached translation and
+extend each internal array once. This is not support for arbitrary history rewrites,
+and copied observations gain no authority to replay opaque native continuations.
 
 Negotiated API 0.4 `session_append_receipts_v1` requires `session_entries` and
 both `session_snapshot_transport_v1`/`session_owner_routes_v1`. Grant-less appends
@@ -757,10 +774,33 @@ matching persisted `UsageRecord`. The adapter validates entry/model correlation,
 preserves token totals and nonzero cache/reasoning subsets, and converts stored
 microdollar cost categories plus the total picodollar remainder to Pi dollars.
 Unpriced usage remains readable; reading unavailable cost explicitly refuses,
-including copied `ctx.sessionManager` entries/branches. A footer that assumes
-`message.usage.cost.total` always exists needs a priced model, or must handle
-unavailable cost. Unknown subscription pricing is not `$0`; the adapter never
-fabricates a price to satisfy footer arithmetic.
+including copied `ctx.sessionManager` entries/branches. A footer calculating a
+session total must handle unavailable costs in historical entries, even if the
+current model is priced. Unknown subscription pricing is not `$0`; the adapter
+never fabricates a price to satisfy footer arithmetic.
+
+The `pi-agent-extensions@0.5.4` powerline footer catches context and session-cost
+reads together. When a turn has no cost, this can leave both segments showing
+stale values, including `0` context and `$0.000 (sub)`. This is an open Octet
+Pi-compatibility defect: unchanged extensions should not have to catch an
+Octet-only refusal when reading Pi's numeric `usage.cost` object.
+
+Pi 1.5.0's `Usage.cost` categories are catalog estimates; its total is the best
+available billed or estimated cost. `totalFromProvider: false` (or absent) means
+an estimate, not an actual subscription charge. Native assistant observations
+supply recorded counts and nullable cost but not the historical endpoint,
+request-time rates or cost basis. A model ID or the current selected model's
+pricing cannot faithfully fill those historical gaps. No catalog expansion,
+legacy repricing or new disclosure fields are approved for this repair; numeric
+cost compatibility remains blocked at that policy/data boundary. Unknown costs
+continue to refuse rather than become zero or a priced subtotal.
+
+`test/powerline-unpriced.test.mjs` is a self-contained synthetic footer consumer
+that reproduces the shared-catch failure and exercises mixed history, a priced
+branch, missing ledger data, retained updates, known prices and explicit zero.
+It loads no installed third-party code and proves the current refusal, not a
+footer workaround, original-package qualification or a completed compatibility fix.
+
 `end_turn`, `stop_sequence` and `pause_turn` map to `stop`, `max_tokens` to `length`,
 `tool_use` to `toolUse`, and `refusal` to `error` with Pi's generic refusal message.
 Deferred/steered/unknown outcomes without a faithful Pi binding are reported,
@@ -913,6 +953,13 @@ observation: unchanged pi-powerline-footer `cd` completions render in the compos
 suggestions | tab accept") and Tab inserts the selection; the previously failing
 pi-ding, pi-powerline-footer and pi-doom factories now activate with no
 `host refused autocomplete registration`.
+
+**Open composer issues:** A user reports that after path Tab completion the
+Pi-compatible composer changes from purple to blue. An isolated Octet 0.10.4
+PTY probe using the unchanged `pi-agent-extensions@0.5.4` cwd-history editor did
+not reproduce the color change, but `./unique-` plus Tab did not complete a
+matching file. Pi 1.5.0 with the same editor did complete it. The color change's
+cause and its relationship to this completion failure remain unverified.
 
 ## Remote frontend integration
 
@@ -1076,6 +1123,10 @@ established by these editor probes.
 python3 scripts/test-pi-composer-slot.py /absolute/octet \
   --footer /absolute/reviewed/powerline-footer/index.ts \
   --editor /absolute/reviewed/custom-editor.ts --output /absolute/private-evidence
+# Self-contained history/replay regressions and the open unpriced-cost reproduction:
+node --test extensions/octet-pi-compat/test/session-mirror-large.test.mjs \
+  extensions/octet-pi-compat/test/tool-call-observation.test.mjs \
+  extensions/octet-pi-compat/test/powerline-unpriced.test.mjs
 # Optional offline comparison against source-extracted pure Pi 1.0.2 functions:
 PI_REFERENCE_REPO=/absolute/reviewed/pi-checkout \
   node --test extensions/octet-pi-compat/test/context.test.mjs

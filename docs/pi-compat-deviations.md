@@ -44,6 +44,8 @@ verified), **deliberate** (Octet differs on purpose; documented and diagnosed),
 | Builtin `grep`/`find`/`ls` factories | First-class tools | Wrappers refused; no native equivalents | **in flight** |
 | Custom builtin `operations` (e.g. `ssh`) | Supported | Refused | **in flight** |
 | Settings mirror | Full settings schema applies | Only theme, model, thinking projected | **in flight** |
+| Assistant `usage.cost` on unpriced native turns | Numeric catalog-derived categories and a best-available billed/estimated total; `totalFromProvider: false` (or absent) means estimate | Access throws instead of exposing Pi-compatible usage, which can also leave a footer's context display stale | **open — policy/data boundary** — historical endpoint/rates/basis are not disclosed; no catalog expansion, legacy repricing, new fields or zero substitution in this repair. The self-contained `powerline-unpriced.test.mjs` reproduces refusal, not a fix |
+| Tool-call argument failures in read-only history | Pi observations expose parsed arguments and, for malformed input, an `argumentsError` diagnostic | Native `schema_mismatch` and `malformed` markers cause the whole history observation to refuse | **open** — preserve the native failure and replay safety; do not drop the marker or invent lost argument text |
 | `navigateTree`, `ctx.shutdown` | Supported | Incomplete | **open** |
 | `project_trust` events | Emitted | Unsupported | **open** |
 | MCP HTTP, credentials, namespaces | Supported | stdio subset only | **open** |

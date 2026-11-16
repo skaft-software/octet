@@ -20,6 +20,32 @@ test('actual encoded phases: replacement, ordered in-place mutation, exact heade
   assert.deepEqual((await peer.request('hook/run', params('after_provider_response', { status: 429, headers: { 'retry-after': '2' } })).response).result, {});
   await peer.wait(frame => frame.method === 'notification' && frame.params.message === 'actual-arrival:429'); await peer.close();
 });
+test('provider payloads above the old 768 KiB limit reach callbacks intact when they fit the transport frame', async t => {
+  const peer = launch(t, [pipeline]); await peer.init(['pipeline_hooks_v1']); await peer.start();
+  const text = 'x'.repeat(800 * 1024);
+  const reply = await peer.request('hook/run', { hook: 'before_provider_request', context: peer.context(),
+    payload: { operation_id: 'large-attempt', model, payload: { input: [{ content: text }] } } }).response;
+  assert.equal(reply.error, undefined, JSON.stringify(reply.error));
+  assert.equal(reply.result.provider_payload.input[0].content, text);
+  assert.deepEqual(reply.result.provider_payload.sequence, ['first', 'second']);
+  await peer.close();
+});
+
+test('payload or envelope exceeding the negotiated frame fails without retiring the bridge', async t => {
+  const growing = join(root, 'test/fixtures/provider-pipeline-grow.ts');
+  const peer = launch(t, [growing]); await peer.init(['pipeline_hooks_v1']); await peer.start();
+  const params = grow => ({ hook: 'before_provider_request', context: peer.context(),
+    payload: { operation_id: 'bounded-attempt', model, payload: { grow } } });
+  for (const grow of [true, 'envelope']) {
+    const oversized = await peer.request('hook/run', params(grow)).response;
+    assert.equal(oversized.error.code, -32602);
+    assert.match(oversized.error.message, grow === 'envelope' ? /bounds_exceeded output frame/ : /bounds_exceeded provider payload/);
+    assert.deepEqual((await peer.request('hook/run', params(false)).response).result, { provider_payload: { accepted: true } });
+  }
+  assert.ok(!peer.stderr().includes('private_content'));
+  await peer.close();
+});
+
 test('Pi-style handler quirks never refuse the request: numeric-code errors continue, headers and payloads normalize like fetch/JSON', async t => {
   const quirks = join(root, 'test/fixtures/provider-pipeline-pi-quirks.ts');
   const peer = launch(t, [quirks]); await peer.init(['pipeline_hooks_v1']); await peer.start();

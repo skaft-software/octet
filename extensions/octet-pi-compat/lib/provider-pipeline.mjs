@@ -62,7 +62,10 @@ export async function providerPipeline(runtime, params, store) {
   const signal = store.controller.signal, live = () => { signal.throwIfAborted(); runtime.assertSessionOwner(store); };
   return cancellable(runtime.queued(store, async () => {
     live();
-    let payload = hook === 'before_provider_request' ? plainJSON(body.payload, 'provider payload', 786432) : undefined;
+    // A pipeline reply must fit the negotiated physical frame. Do not impose
+    // the smaller legacy context limit on an otherwise representable body.
+    const payloadLimit = runtime.transport.maxFrame;
+    let payload = hook === 'before_provider_request' ? plainJSON(body.payload, 'provider payload', payloadLimit) : undefined;
     const originalHeaders = hook !== 'before_provider_request' ? headers(body.headers) : undefined;
     const mutableHeaders = originalHeaders && structuredClone(originalHeaders);
     if (hook === 'after_provider_response' && (!Number.isInteger(body.status) || body.status < 100 || body.status > 599)) invalid('provider response status');
@@ -102,7 +105,7 @@ export async function providerPipeline(runtime, params, store) {
     budget.finish();
     await cancellable(runtime.flush(store), signal); live();
     if (hook === 'before_provider_request') {
-      return { provider_payload: plainJSON(payload, 'provider payload', 786432) };
+      return { provider_payload: plainJSON(payload, 'provider payload', payloadLimit) };
     }
     if (hook === 'before_provider_headers') {
       const final = headers(normalizeHeaders(mutableHeaders, () => runtime.reportCallbackError(hook, 'provider headers', new TypeError('a header value could not be sent and was dropped'))), true), patch = {};

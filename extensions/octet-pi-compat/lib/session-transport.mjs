@@ -99,7 +99,10 @@ export class SessionTransport {
     let previous = null;
     const branch = h.branch_ids.map(id => { const entry = byId.get(id); if (!entry || entry.parent !== previous) invalid('session history ancestry'); previous = id; return entry; });
     if (previous !== h.head) invalid('session history head');
-    view.host = { session_entries: h.entries, session_branch: branch, session_leaf_id: h.head, session_file: h.file,
+    // Linear sessions have the very same entries in the same order. Reuse the
+    // input array so the mirror translates that large history only once.
+    const branchView = branch.length === h.entries.length && branch.every((entry, index) => entry === h.entries[index]) ? h.entries : branch;
+    view.host = { session_entries: h.entries, session_branch: branchView, session_leaf_id: h.head, session_file: h.file,
       session_header: Object.keys(h.header).length ? h.header : null, session_labels: h.labels };
     return view;
   }
@@ -269,7 +272,10 @@ export class SessionTransport {
         || d.entry_count + added.length > p.view_entries || d.branch_count + added.length > p.view_entries || this.records + records > p.generation_entries) throw unavailable();
     this.bytes += delta; this.records += records;
     const release = view.release; view.release = () => { this.bytes -= delta; this.records -= records; release(); };
-    for (const entry of added) { h.entries.push(entry); h.branch_ids.push(entry.id); view.host.session_branch.push(entry); }
+    for (const entry of added) {
+      h.entries.push(entry); h.branch_ids.push(entry.id);
+      if (view.host.session_branch !== h.entries) view.host.session_branch.push(entry);
+    }
     h.head = receipt.head; view.host.session_leaf_id = receipt.head;
     view.descriptor = { ...d, bytes: d.bytes + delta, entry_count: d.entry_count + added.length, branch_count: d.branch_count + added.length, head: receipt.head, view_revision: receipt.view_revision };
     // Parent and child linked by the native driver share this receipt chain.

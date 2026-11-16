@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch, owner, root } from './helper.mjs';
 import { SessionTransport } from '../lib/session-transport.mjs';
+import { sessionEntryCopies, sessionEntryCopy } from '../lib/session-mirror.mjs';
 import { sessionMethods } from '../lib/session-methods.mjs';
 import { ownerKey } from '../lib/errors.mjs';
 
@@ -96,6 +97,54 @@ function history(entries) {
   return { entries, branch_ids: entries.map(entry => entry.id), head: entries.at(-1)?.id ?? null,
     file: '/scratch/session.jsonl', header: {}, labels: {} };
 }
+
+test('identical history and branch share translation input without duplicating appended entries', () => {
+  for (const shape of ['empty', 'linear', 'forked', 'reordered']) for (const gapCount of [0, 2]) {
+    const entries = shape === 'empty' ? [] : [message('root', null, 'one'), message('left', 'root', 'left')];
+    if (shape === 'forked') entries.push(message('right', 'root', 'right'));
+    if (shape === 'reordered') entries.reverse();
+    const document = history(entries);
+    if (shape === 'forked') document.branch_ids = ['root', 'right'];
+    if (shape === 'reordered') { document.branch_ids = ['root', 'left']; document.head = 'left'; }
+    const transport = new SessionTransport({ namespace: 'actual' }, profile, 1048576);
+    const descriptor = { owner, view_revision: 1, head: document.head, bytes: Buffer.byteLength(JSON.stringify(document)),
+      entry_count: entries.length, branch_count: document.branch_ids.length };
+    const view = { descriptor, document, refs: 1, release: transport.reserve(descriptor) };
+    transport.history(view);
+    if (shape === 'empty' || shape === 'linear') assert.equal(view.host.session_entries, view.host.session_branch);
+    else assert.notEqual(view.host.session_entries, view.host.session_branch);
+    const originalEntries = entries.map(entry => entry.id), originalBranch = [...document.branch_ids];
+    const oldCopies = sessionEntryCopies(view.host.session_entries, 'actual');
+    sessionEntryCopies(view.host.session_branch, 'actual'); // Prime both translation caches.
+    const key = ownerKey(owner), store = { state: { key, host: {} } };
+    transport.current.set(key, { revision: 1, view });
+    for (let revision = 2; revision <= 3; revision++) {
+      const previous_head = document.head, gap = [];
+      let parent = previous_head;
+      for (let i = 0; i < gapCount; i++) {
+        const entry = { id: `config-${revision}-${i}`, parent, value: { type: 'config', key: 'thinking', value: 'off' } };
+        gap.push(entry); parent = entry.id;
+      }
+      const next = message(`next-${revision}`, parent, 'next');
+      transport.append(store, { previous_head, previous_revision: revision - 1, view_revision: revision,
+        entry_id: next.id, entry: next, head: next.id, ...(gap.length ? { gap } : {}) }, null, null);
+      const added = [...gap.map(entry => entry.id), next.id];
+      originalEntries.push(...added); originalBranch.push(...added);
+      assert.deepEqual(view.host.session_entries.map(entry => entry.id), originalEntries);
+      assert.deepEqual(view.host.session_branch.map(entry => entry.id), originalBranch);
+      assert.deepEqual(document.branch_ids, originalBranch);
+      assert.deepEqual(sessionEntryCopies(view.host.session_entries, 'actual').map(entry => entry.id), originalEntries);
+      assert.deepEqual(sessionEntryCopies(view.host.session_branch, 'actual').map(entry => entry.id), originalBranch);
+      assert.equal(sessionEntryCopy(view.host.session_entries, 'actual', next.id).message.content[0].text, 'next');
+      assert.equal(view.descriptor.bytes, Buffer.byteLength(JSON.stringify(document)), 'append accounting stays exact');
+      assert.equal(transport.bytes, view.descriptor.bytes);
+      assert.equal(transport.records, document.entries.length + document.branch_ids.length);
+    }
+    assert.equal(oldCopies.length, entries.length - 2 * (1 + gapCount), 'previous observations remain unchanged');
+    transport.drop(view);
+    assert.deepEqual([transport.bytes, transport.records, transport.views], [0, 0, 0]);
+  }
+});
 
 // Serve one descriptor's chunks and release exactly like a native parent would.
 // A refused document is never released by the adapter: parent settlement owns it.

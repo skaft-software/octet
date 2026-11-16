@@ -364,10 +364,218 @@ fn lightweight_summary_accepts_non_assistant_usage_records() {
         .unwrap();
     drop(session);
 
-    assert_eq!(
-        summarize_session(&path).unwrap().title.as_deref(),
-        Some("usage title")
-    );
+    // These usage kinds are written by other provider operations. They carry
+    // accounting facts, but do not identify assistant entries or change the
+    // active branch. Serialize the native kinds to keep the fixture in sync.
+    for kind in [
+        octet_agent::UsageRecordKind::DelegatedAgent {
+            agent_id: "child".into(),
+            turn_count: 2,
+            tool_call_count: 3,
+        },
+        octet_agent::UsageRecordKind::ToolComposition {
+            parent: "call".into(),
+        },
+        octet_agent::UsageRecordKind::CacheWarm,
+    ] {
+        let record: octet_agent::SessionRecord = serde_json::from_value(serde_json::json!({
+            "type": "usage",
+            "record": { "kind": kind, "usage": octet_ai::Usage::default() }
+        }))
+        .unwrap();
+        append_session_record(&path, &record);
+    }
+    Session::open_read_only(&path).expect("the native reader accepts every usage kind");
+    let summary = summarize_session(&path).unwrap();
+    assert_eq!(summary.title.as_deref(), Some("usage title"));
+    assert_eq!(summary.usage_records.len(), 5);
+}
+
+fn tool_inference_started(attempt: u64) -> octet_agent::SessionRecord {
+    octet_agent::SessionRecord::ToolInferenceStarted {
+        attempt,
+        parent: "tool-call".into(),
+        endpoint: octet_ai::EndpointId("advisor-route".into()),
+        model: ModelId("advisor-model".into()),
+    }
+}
+
+fn tool_inference_usage(attempt: u64) -> octet_agent::SessionRecord {
+    serde_json::from_value(serde_json::json!({
+        "type": "usage",
+        "record": {
+            "kind": octet_agent::UsageRecordKind::ToolInference {
+                attempt,
+                parent: "tool-call".into(),
+            },
+            "endpoint": "advisor-route",
+            "model": "advisor-model",
+            "usage": octet_ai::Usage {
+                input_tokens: 17,
+                output_tokens: 5,
+                total_tokens: 22,
+                ..octet_ai::Usage::default()
+            }
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn lightweight_summary_accepts_tool_inference_lifecycle_without_changing_history() {
+    for terminal in ["pending", "settled", "usage"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tool-inference.jsonl");
+        let mut session = Session::create(&path).unwrap();
+        session
+            .append(EntryValue::Message(Message::User(octet_ai::UserMessage {
+                content: vec![UserPart::Text("inference title".into())],
+            })))
+            .unwrap();
+        drop(session);
+        append_session_record(&path, &tool_inference_started(1));
+        append_session_record(&path, &tool_inference_started(2));
+        // Attempts can settle out of order; settlement never resets numbering.
+        append_session_record(
+            &path,
+            &octet_agent::SessionRecord::ToolInferenceSettled { attempt: 2 },
+        );
+        match terminal {
+            "pending" => {}
+            "settled" => append_session_record(
+                &path,
+                &octet_agent::SessionRecord::ToolInferenceSettled { attempt: 1 },
+            ),
+            "usage" => append_session_record(&path, &tool_inference_usage(1)),
+            _ => unreachable!(),
+        }
+        append_session_record(&path, &tool_inference_started(3));
+        append_session_record(
+            &path,
+            &octet_agent::SessionRecord::ToolInferenceSettled { attempt: 3 },
+        );
+
+        let before = std::fs::read(&path).unwrap();
+        let native = Session::open_read_only(&path).unwrap();
+        assert_eq!(native.has_uncertain_usage(), terminal == "pending");
+        let summary = summarize_session(&path).unwrap();
+        assert_eq!(summary.title.as_deref(), Some("inference title"));
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.usage_records.len(), native.usage_records().len());
+        assert!(summary.usage_uncertainty_records.is_empty());
+        if terminal == "usage" {
+            let usage = &summary.usage_records[0];
+            assert_eq!(usage.endpoint.as_deref(), Some("advisor-route"));
+            assert_eq!(usage.model.as_deref(), Some("advisor-model"));
+            assert_eq!(usage.input_tokens, 17);
+            assert_eq!(usage.output_tokens, 5);
+            assert_eq!(usage.total_tokens, 22);
+        }
+        let catalog = summarize_catalog_session(&path).unwrap();
+        assert_eq!(catalog.title, summary.title);
+        assert_eq!(catalog.message_count, summary.message_count);
+        assert!(catalog.usage_records.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn lightweight_summary_rejects_tool_inference_records_native_replay_refuses() {
+    use std::io::Write as _;
+
+    let start = serde_json::to_value(tool_inference_started(1)).unwrap();
+    let usage = serde_json::to_value(tool_inference_usage(1)).unwrap();
+    let settled = serde_json::json!({ "type": "tool_inference_settled", "attempt": 1 });
+    let mut cases = vec![
+        vec![settled.clone()],
+        vec![usage.clone()],
+        vec![start.clone(), start.clone()],
+        vec![start.clone(), settled.clone(), settled.clone()],
+        vec![start.clone(), usage.clone(), usage.clone()],
+        vec![start.clone(), settled.clone(), usage.clone()],
+    ];
+    for (field, value) in [
+        ("attempt", serde_json::json!(0)),
+        ("attempt", serde_json::json!(2)),
+        ("parent", serde_json::json!("")),
+        ("parent", serde_json::json!("bad\nparent")),
+        ("parent", serde_json::json!("x".repeat(1025))),
+        ("endpoint", serde_json::json!("https://private.invalid")),
+        ("model", serde_json::json!("invalid?model")),
+    ] {
+        let mut invalid = start.clone();
+        invalid[field] = value;
+        cases.push(vec![invalid]);
+    }
+    for field in ["endpoint", "model"] {
+        let mut invalid = usage.clone();
+        invalid["record"][field] = serde_json::json!("different");
+        cases.push(vec![start.clone(), invalid]);
+        let mut missing = usage.clone();
+        missing["record"].as_object_mut().unwrap().remove(field);
+        cases.push(vec![start.clone(), missing]);
+    }
+    for (field, value) in [
+        ("attempt", serde_json::json!(2)),
+        ("parent", serde_json::json!("different")),
+    ] {
+        let mut invalid = usage.clone();
+        invalid["record"]["kind"][field] = value;
+        cases.push(vec![start.clone(), invalid]);
+    }
+
+    for (case, records) in cases.into_iter().enumerate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("invalid-inference.jsonl");
+        drop(Session::create(&path).unwrap());
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for record in records {
+            serde_json::to_writer(&mut file, &record).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            Session::open_read_only(&path).is_err(),
+            "native case {case}"
+        );
+        assert!(summarize_session(&path).is_err(), "summary case {case}");
+        assert!(
+            summarize_catalog_session(&path).is_err(),
+            "catalog case {case}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn lightweight_summary_keeps_pending_inference_with_a_torn_settlement_read_only() {
+    use std::io::Write as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("torn-inference.jsonl");
+    drop(Session::create(&path).unwrap());
+    append_session_record(&path, &tool_inference_started(1));
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"{\"type\":\"tool_inference_settled\",\"attempt\":")
+        .unwrap();
+    drop(file);
+    let before = std::fs::read(&path).unwrap();
+    assert!(Session::open_read_only(&path)
+        .unwrap()
+        .has_uncertain_usage());
+    assert!(summarize_session(&path).unwrap().usage_records.is_empty());
+    assert!(summarize_catalog_session(&path)
+        .unwrap()
+        .usage_records
+        .is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 /// One durably parked deferred run, written through the session's own

@@ -141,7 +141,12 @@ design](design/octet-agent.md#sessions).
   canonical conversation but can't replay opaque output or reasoning updates
   from the previous route. `native-responses` mode still needs complete
   same-route replay, and refuses such a switch until a valid local replay
-  boundary exists.
+  boundary exists. Provider-context hooks may append text-only user messages to
+  opaque replay without dropping provider state; changes to the existing history
+  or system prompt still fail closed when no authoritative projection is available.
+  Pi's `before_provider_request` transformation is separate: its encoded reply
+  must fit the negotiated extension RPC frame, including the envelope. Larger
+  replies are skipped with a warning rather than truncating provider input.
 - Tool definitions have no separate byte quota by default; the complete request,
   including every provider-visible definition, must fit the model context budget.
   Rust embedders may opt into an exact serialized JSON quota with

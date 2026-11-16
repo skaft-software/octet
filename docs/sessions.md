@@ -186,6 +186,11 @@ shows their `.workspace` markers. If the index is unavailable, locked, corrupt,
 oversized or from a newer version, octet scans the JSONL instead and rebuilds a
 corrupt one.
 
+Titles and message counts come from the active conversation branch. Delegated-agent,
+tool-composition, cache-warming and tool-inference accounting records do not change
+them. Discovery validates tool-inference attempt sequencing and settlement against
+the recorded parent, endpoint and model without rewriting transcript bytes.
+
 </details>
 
 ## JSONL schema
@@ -237,7 +242,8 @@ it may get a fallback from its historical `prompt_model`, never the currently
 selected model.
 
 `usage` kinds include assistant turns, rejected Responses turns, compaction,
-terminal gates, `cache_warm` and `delegated_agent`. Cache refresh usage counts
+terminal gates, `cache_warm`, `delegated_agent`, `tool_composition` and
+`tool_inference`. Cache refresh usage counts
 toward exact session totals and ceilings, never assistant-turn statistics or
 model-visible context. Separate payload-free `cache_warm` lifecycle records
 store attempt, route/model, timestamp, state, optional prefix `anchor`, and
@@ -251,6 +257,11 @@ turn and tool-call counts, token totals (counted separately), route and model,
 and exact cost. The child's JSONL stays the detailed transcript. A root mirror
 is written **once before the owning checkpoint**, so session cost, `/cost`,
 export, resume and cost limits all include child spend.
+
+Tool-owned inference records a `tool_inference_started` attempt with its parent
+tool call, endpoint and model. Matching `tool_inference` usage or an explicit
+`tool_inference_settled` record closes that attempt. Pending attempts remain
+uncertain on reopen; these lifecycle records never change the active branch.
 
 An accepted inference attempt that's interrupted before authoritative usage is
 available is recorded as `usage_uncertainty`, **not** as zero tokens or zero

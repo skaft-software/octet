@@ -334,8 +334,7 @@ Every intermediate request is strictly validated and bounded to 64 MiB of
 serialized canonical request. Validation uses dispatch's target-normalized
 history without changing the hook-visible request. A separate strict probe keeps
 newly supplied media intact, including media inserted into historical turns;
-matching original media is identified by content, role and occurrence count.
-Hook errors are redacted and fail closed before
+matching original media is identified by content, role and occurrence count. Hook errors are redacted and fail closed before
 provider I/O; ordered hooks share a five-second deadline capped by the endpoint
 timeout, with cancellation winning same-poll completion.
 
@@ -352,8 +351,9 @@ consumer, not a foreground broadcast event or optimistic success.
 Optional synchronous idle Responses prewarming refuses when async projection
 hooks are registered; real inference and its exact cache refresh retain the
 validated effective request. Opaque Responses replay remains an explicit
-limitation: a changed canonical projection is refused when a hidden `input`
-window would ignore it. The host never silently drops provider replay state to
+limitation: unchanged history may be followed by text-only user messages, but
+other canonical edits are refused when a hidden `input` window would ignore
+them. The host never silently drops provider replay state to
 make a projection appear to work. Responses replay bounds ordinary tool-result
 images in both cold and incremental projections, but retains native computer-call
 screenshots and opaque output because their wire shapes cannot carry the ordinary

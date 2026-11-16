@@ -477,20 +477,61 @@ async fn project_context_hooks(
             }
         }
         validate_size(&request)?;
-        // Never accept a change that opaque replay would ignore, or discard
-        // provider continuation state in order to make a projection work.
+        // The opaque input, not `messages`, is what the Responses codec sends.
+        // An unchanged prefix plus new text-only user messages has an exact
+        // projection: retain every authoritative item, then encode the suffix
+        // with the same replay mapper. Other edits still need provenance that
+        // this boundary does not have and must not be silently ignored.
         if request
             .responses
             .as_ref()
             .is_some_and(|options| options.input.is_some())
         {
-            let unchanged = canonical.system == request.system
-                && serde_json::to_vec(&canonical.messages).expect("messages serialize")
-                    == serde_json::to_vec(&request.messages).expect("messages serialize");
-            if !unchanged {
+            let prefix_len = accepted_before_hook.messages.len();
+            let suffix = request.messages.get(prefix_len..);
+            let unchanged_prefix = suffix.is_some()
+                && accepted_before_hook.system == request.system
+                && serde_json::to_vec(&accepted_before_hook.messages).expect("messages serialize")
+                    == serde_json::to_vec(&request.messages[..prefix_len])
+                        .expect("messages serialize");
+            let appended = suffix.filter(|messages| {
+                messages.iter().all(|message| match message {
+                    Message::User(user) => {
+                        !user.content.is_empty()
+                            && user
+                                .content
+                                .iter()
+                                .all(|part| matches!(part, UserPart::Text(_)))
+                    }
+                    Message::Assistant(_) => false,
+                })
+            });
+            if !unchanged_prefix || appended.is_none() {
                 return Err(refused(
                     "opaque Responses replay requires an authoritative projection seam",
                 ));
+            }
+            let appended = appended.expect("checked above");
+            if !appended.is_empty() {
+                let replay = appended
+                    .iter()
+                    .map(|message| match message {
+                        Message::User(user) => ResponsesReplayItem::User(user.clone()),
+                        Message::Assistant(_) => unreachable!("suffix contains only users"),
+                    })
+                    .collect::<Vec<_>>();
+                let addition =
+                    octet_ai::responses::encode_responses_replay(model, None, &replay)
+                        .map_err(|_| refused("could not encode appended Responses context"))?;
+                let input = request
+                    .responses
+                    .as_mut()
+                    .and_then(|options| options.input.as_mut())
+                    .expect("opaque input was checked above");
+                let mut items = std::mem::take(input).into_items();
+                items.extend(addition.into_items());
+                *input = ResponsesInput::new(items);
+                validate_size(&request)?;
             }
         }
         validate_identities(&canonical, &request, model)?;

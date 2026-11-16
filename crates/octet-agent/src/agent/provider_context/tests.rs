@@ -1103,6 +1103,252 @@ async fn oversized_replacements_fail_before_the_next_hook() {
     assert_eq!(observations.lock().unwrap().len(), 1);
 }
 
+/// Matches a Pi context handler which appends transient routing or memory text.
+struct AppendUser(&'static str);
+#[async_trait::async_trait]
+impl ProviderContextHook for AppendUser {
+    async fn project_context(
+        &self,
+        request: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        let mut messages = request.messages.clone();
+        messages.push(projected_user(self.0));
+        Ok(Some(ProviderContextProjection {
+            system: request.system.clone(),
+            messages,
+            tools: None,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn opaque_replay_keeps_appended_context_after_local_compaction_and_tool_results() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("replay-projection.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+    session
+        .append(EntryValue::Message(projected_user("replaced history")))
+        .unwrap();
+    let first_kept = session
+        .append(EntryValue::Message(projected_user("retained prompt")))
+        .unwrap();
+    let assistant = session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: Protocol::OpenAiResponses,
+            content: vec![AssistantPart::ToolCall(ToolCall {
+                id: octet_ai::ToolCallId("call-1".into()),
+                name: "old-tool".into(),
+                arguments_json: "{}".into(),
+                async_execution: false,
+                argument_error: None,
+            })],
+        })))
+        .unwrap();
+    let opaque = octet_ai::ResponsesOutput::new(
+        [
+            serde_json::json!({"type":"reasoning", "id":"reasoning-1", "encrypted_content":"opaque-state", "future_field":{"keep":true}}),
+            serde_json::json!({"type":"function_call", "call_id":"call-1", "name":"old-tool", "arguments":"{}"}),
+        ]
+        .into_iter()
+        .map(|item| octet_ai::ResponsesItem::new(item).unwrap())
+        .collect(),
+    );
+    session
+        .append_responses_turn(
+            assistant,
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            opaque,
+        )
+        .unwrap();
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(ToolResult {
+                tool_call_id: octet_ai::ToolCallId("call-1".into()),
+                content: vec![ToolResultPart::Text("tool result".into())],
+                is_error: false,
+                added_tool_names: None,
+                tool_name: None,
+            })],
+        })))
+        .unwrap();
+    session
+        .append(EntryValue::Compaction {
+            summary: "local summary".into(),
+            first_kept,
+            snapcompact: None,
+            active_skills: vec![],
+            skill_resources: vec![],
+            details: Default::default(),
+        })
+        .unwrap();
+    let original_head = session.head();
+    let original_context = serde_json::to_value(session.context().unwrap()).unwrap();
+    let mut canonical = request();
+    canonical.messages = session.context().unwrap();
+    canonical.responses =
+        durable_responses_options(&session, &model, "canonical system", None).unwrap();
+    let original_input = canonical
+        .responses
+        .as_ref()
+        .and_then(|options| options.input.as_ref())
+        .expect("same-route session has authoritative replay")
+        .clone();
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![
+        Arc::new(AppendUser("routing anchor")),
+        Arc::new(AppendUser("active memory")),
+    ];
+    let mut notices = Vec::new();
+    let projected = project_provider_context(
+        canonical,
+        &hooks,
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .expect("appended Pi context must coexist with opaque replay");
+    let input = projected.responses.unwrap().input.unwrap();
+    assert_eq!(
+        &input.items()[..original_input.items().len()],
+        original_input.items()
+    );
+    let suffix = &input.items()[original_input.items().len()..];
+    assert_eq!(suffix.len(), 2);
+    assert_eq!(suffix[0].as_json()["role"], "user");
+    assert_eq!(suffix[0].as_json()["content"][0]["text"], "routing anchor");
+    assert_eq!(suffix[1].as_json()["content"][0]["text"], "active memory");
+    assert!(notices.is_empty());
+    assert_eq!(session.head(), original_head);
+    assert_eq!(
+        serde_json::to_value(session.context().unwrap()).unwrap(),
+        original_context
+    );
+    drop(session);
+    assert_eq!(
+        serde_json::to_value(Session::open(path).unwrap().context().unwrap()).unwrap(),
+        original_context
+    );
+}
+
+#[tokio::test]
+async fn opaque_replay_keeps_native_checkpoint_when_context_is_appended() {
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+    let checkpoint = octet_ai::ResponsesItem::new(serde_json::json!({
+        "type": "compaction",
+        "encrypted_content": "opaque-native-checkpoint",
+        "future_field": {"keep": true}
+    }))
+    .unwrap();
+    let mut canonical = request();
+    canonical.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(vec![
+        checkpoint.clone(),
+    ])));
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(AppendUser("native continuation"));
+    let projected = project_with_fresh_session(
+        canonical,
+        &[hook],
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+    )
+    .await
+    .unwrap();
+    let input = projected.responses.unwrap().input.unwrap();
+    assert!(input.contains_compaction());
+    assert_eq!(input.items()[0], checkpoint);
+    assert_eq!(
+        input.items().last().unwrap().as_json()["content"][0]["text"],
+        "native continuation"
+    );
+}
+
+struct UnsupportedOpaqueProjection(&'static str);
+#[async_trait::async_trait]
+impl ProviderContextHook for UnsupportedOpaqueProjection {
+    async fn project_context(
+        &self,
+        request: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        let mut messages = request.messages.clone();
+        let mut system = request.system.clone();
+        match self.0 {
+            "edit" => messages[0] = projected_user("rewritten"),
+            "remove" => messages.clear(),
+            "system" => system = Some("rewritten system".into()),
+            "assistant" => messages.push(Message::Assistant(AssistantMessage {
+                content: vec![AssistantPart::Text("invented".into())],
+                model: octet_ai::ModelId("invented".into()),
+                protocol: Protocol::OpenAiResponses,
+            })),
+            "result" => messages.push(Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: octet_ai::ToolCallId("invented".into()),
+                    content: vec![ToolResultPart::Text("invented".into())],
+                    is_error: false,
+                    added_tool_names: None,
+                    tool_name: None,
+                })],
+            })),
+            "empty" => messages.push(Message::User(UserMessage { content: vec![] })),
+            "media" => messages.push(Message::User(UserMessage {
+                content: vec![UserPart::Media(Media::Image(octet_ai::ImageMedia {
+                    source: ImageSource::Inline(bytes::Bytes::from_static(b"fixture")),
+                    media_type: None,
+                    detail: None,
+                }))],
+            })),
+            _ => unreachable!(),
+        }
+        Ok(Some(ProviderContextProjection {
+            system,
+            messages,
+            tools: None,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn opaque_replay_rejects_edits_deletions_and_forged_suffixes() {
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+    let mut canonical = request();
+    canonical.responses = Some(ResponsesOptions::full_replay(ResponsesInput::default()));
+    for mutation in [
+        "edit",
+        "remove",
+        "system",
+        "assistant",
+        "result",
+        "empty",
+        "media",
+    ] {
+        let hook: Arc<dyn ProviderContextHook> = Arc::new(UnsupportedOpaqueProjection(mutation));
+        assert!(
+            matches!(
+                project_with_fresh_session(
+                    canonical.clone(),
+                    &[hook],
+                    &identity(),
+                    &model,
+                    &AbortFlag::default()
+                )
+                .await,
+                Err(AgentError::ProviderContextPreparation(_))
+            ),
+            "opaque replay must not silently accept {mutation}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn opaque_replay_change_is_refused_instead_of_ignored_or_discarded() {
     let observations = Arc::new(Mutex::new(Vec::new()));

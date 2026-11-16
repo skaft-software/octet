@@ -629,6 +629,23 @@ enum SummaryUsageKind {
     },
     Compaction,
     RejectedResponsesTurn,
+    DelegatedAgent {
+        #[serde(rename = "agent_id")]
+        _agent_id: String,
+        #[serde(rename = "turn_count")]
+        _turn_count: u64,
+        #[serde(rename = "tool_call_count")]
+        _tool_call_count: u64,
+    },
+    ToolComposition {
+        #[serde(rename = "parent")]
+        _parent: String,
+    },
+    CacheWarm,
+    ToolInference {
+        attempt: u64,
+        parent: String,
+    },
     TerminalGate {
         #[serde(rename = "returned")]
         _returned: Option<bool>,
@@ -645,6 +662,23 @@ struct SummaryUsageRecord {
     model: Option<ModelId>,
     #[serde(default)]
     completed_at_unix_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SummaryToolInferenceAttempt {
+    attempt: u64,
+    parent: String,
+    endpoint: EndpointId,
+    model: ModelId,
+}
+
+fn summary_usage_identifier_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.contains("://")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
 }
 
 #[derive(Deserialize)]
@@ -672,6 +706,10 @@ enum SummaryRecord {
     },
     UsageUncertainty {
         record: octet_agent::UsageUncertaintyRecord,
+    },
+    ToolInferenceStarted(SummaryToolInferenceAttempt),
+    ToolInferenceSettled {
+        attempt: u64,
     },
     Usage {
         record: SummaryUsageRecord,
@@ -1223,6 +1261,8 @@ fn summarize_session_with_usage(
     let mut usage_records = Vec::<SessionUsageRecord>::new();
     let mut usage_uncertainty_records = Vec::new();
     let mut deferred_runs = SummaryDeferredRuns::default();
+    let mut next_tool_inference_attempt = 0u64;
+    let mut tool_inference_attempts = BTreeMap::<u64, SummaryToolInferenceAttempt>::new();
     let mut line_bytes = Vec::new();
     let mut observed_bytes = 0usize;
     let mut line_no = 0usize;
@@ -1461,13 +1501,7 @@ fn summarize_session_with_usage(
             SummaryRecord::UsageUncertainty { record } => {
                 // Mirror Session replay validation without retaining conversation bodies.
                 for value in [&record.endpoint.0, &record.model.0, &record.operation] {
-                    if value.is_empty()
-                        || value.len() > 128
-                        || value.contains("://")
-                        || !value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
-                    {
+                    if !summary_usage_identifier_is_valid(value) {
                         return Err(corrupt_summary(
                             line_no,
                             "invalid usage uncertainty identifiers",
@@ -1476,6 +1510,33 @@ fn summarize_session_with_usage(
                 }
                 if retain_usage_records {
                     usage_uncertainty_records.push(record);
+                }
+            }
+            SummaryRecord::ToolInferenceStarted(record) => {
+                if record.attempt == 0
+                    || record.parent.is_empty()
+                    || record.parent.len() > 1024
+                    || record.parent.chars().any(char::is_control)
+                    || !summary_usage_identifier_is_valid(&record.endpoint.0)
+                    || !summary_usage_identifier_is_valid(&record.model.0)
+                {
+                    return Err(corrupt_summary(line_no, "invalid tool inference attempt"));
+                }
+                if next_tool_inference_attempt.checked_add(1) != Some(record.attempt) {
+                    return Err(corrupt_summary(
+                        line_no,
+                        "invalid tool inference attempt sequence",
+                    ));
+                }
+                next_tool_inference_attempt = record.attempt;
+                tool_inference_attempts.insert(record.attempt, record);
+            }
+            SummaryRecord::ToolInferenceSettled { attempt } => {
+                if tool_inference_attempts.remove(&attempt).is_none() {
+                    return Err(corrupt_summary(
+                        line_no,
+                        "settled tool inference attempt is not pending",
+                    ));
                 }
             }
             SummaryRecord::EntryLabel { entry_id, label } => {
@@ -1498,6 +1559,20 @@ fn summarize_session_with_usage(
                     .map_err(|message| corrupt_summary(line_no, message))?;
             }
             SummaryRecord::Usage { record } => {
+                if let SummaryUsageKind::ToolInference { attempt, parent } = &record.kind {
+                    let valid = tool_inference_attempts.get(attempt).is_some_and(|pending| {
+                        &pending.parent == parent
+                            && record.endpoint.as_ref() == Some(&pending.endpoint)
+                            && record.model.as_ref() == Some(&pending.model)
+                    });
+                    if !valid {
+                        return Err(corrupt_summary(
+                            line_no,
+                            "tool inference usage does not match a pending attempt",
+                        ));
+                    }
+                    tool_inference_attempts.remove(attempt);
+                }
                 if let SummaryUsageKind::AssistantTurn { assistant } = &record.kind {
                     let valid_assistant = entries
                         .get(assistant)

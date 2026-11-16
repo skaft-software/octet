@@ -40,9 +40,12 @@
   Newly introduced media remains subject to strict validation.
 - Responses replay bounds ordinary tool-result screenshots, retaining opaque
   output and native computer-call screenshots required by their wire shape.
-- Google-compatible requests ending in an encoded model turn get a wire-only
-  continuation; opt-in request tracing records the final contents role after hooks.
-  This does not establish the cause of any particular provider error.
+- Opt-in request tracing reports the final Google contents role using a bounded
+  vocabulary, including changes made by encoded payload hooks.
+
+- TUI shortcut hints, pickers and `/hotkeys` consistently use `Ctrl+T`-style
+  labels instead of mixing lowercase, title case and caret notation. Key
+  bindings are unchanged, and Shift remains an explicit modifier.
 
 - Fullscreen scrolling and selection reuse unchanged row-to-copy mappings instead
   of re-aligning long answers on every event. Partial mappings extend for later
@@ -51,6 +54,10 @@
   changes between paints; fresh presses still require matching frame geometry.
   Frame pacing counts render/write time toward the interval instead of adding
   another interval after a slow frame.
+
+- Google-compatible continuation requests no longer end with a `model` turn,
+  avoiding HTTP 400 on routes such as `opencode-go-google`. A wire-only user cue
+  preserves the existing history, thought signatures and function responses.
 
 - Tool labels use available terminal width while keeping their selected values readable.
 

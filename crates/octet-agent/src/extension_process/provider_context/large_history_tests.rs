@@ -5,6 +5,121 @@ use crate::extension_process::session_leaf::transport;
 use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};
 use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
 
+#[tokio::test]
+async fn real_pi_append_survives_compacted_opaque_responses_replay() {
+    use crate::session::EntryValue;
+    use octet_ai::{
+        AssistantMessage, AssistantPart, Message, Protocol, ResponsesItem, ResponsesOutput,
+        UserMessage, UserPart,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let process = adapter_with(
+        &temp,
+        r#"
+export default pi => pi.on('context', event => ({ messages: [
+  ...event.messages, { role: 'user', content: 'transient pi context' }
+] }));
+"#,
+    )
+    .await;
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    assert_eq!(model.spec.protocol, Protocol::OpenAiResponses);
+    let mut session = Session::create(temp.path().join("compacted-replay.jsonl")).unwrap();
+    let user = |text: &str| {
+        Message::User(UserMessage {
+            content: vec![UserPart::Text(text.into())],
+        })
+    };
+    session
+        .append(EntryValue::Message(user("replaced")))
+        .unwrap();
+    let first_kept = session
+        .append(EntryValue::Message(user("retained")))
+        .unwrap();
+    let assistant = session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: Protocol::OpenAiResponses,
+            content: vec![AssistantPart::Text("earlier answer".into())],
+        })))
+        .unwrap();
+    let opaque = ResponsesOutput::new([
+        serde_json::json!({"type":"reasoning","id":"reasoning-1","encrypted_content":"opaque-fixture"}),
+        serde_json::json!({"type":"message","id":"message-1","role":"assistant","content":[{"type":"output_text","text":"earlier answer","annotations":[]}]}),
+    ].into_iter().map(|value| ResponsesItem::new(value).unwrap()).collect());
+    session
+        .append_responses_turn(
+            assistant,
+            model.endpoint.id.clone(),
+            model.spec.id.clone(),
+            opaque,
+        )
+        .unwrap();
+    session
+        .append(EntryValue::Compaction {
+            summary: "summary".into(),
+            first_kept,
+            snapcompact: None,
+            active_skills: vec![],
+            skill_resources: vec![],
+            details: Default::default(),
+        })
+        .unwrap();
+
+    let mut host = ExtensionHost::new();
+    process.register(&mut host);
+    let client = octet_ai::AiClient::new();
+    let captures = Arc::new(StdMutex::new(Vec::new()));
+    client.register_host_stream_transport(
+        model.endpoint.id.clone(),
+        Arc::new(Capture(captures.clone())),
+    );
+    let reasoning = octet_ai::select_auxiliary_reasoning(&model).unwrap();
+    let mut agent = Agent::new(AgentConfig {
+        client,
+        model,
+        session,
+        extensions: host,
+        system: "canonical system".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(1),
+        reasoning,
+        reasoning_mode: ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
+        session_id: Some("pi-replay-fixture".into()),
+    })
+    .unwrap();
+    assert_eq!(agent.complete("continue").await.unwrap().text, "answer");
+    let captures = captures.lock().unwrap();
+    assert_eq!(captures.len(), 1);
+    let input = captures[0]
+        .responses
+        .as_ref()
+        .unwrap()
+        .input
+        .as_ref()
+        .unwrap();
+    assert!(input
+        .items()
+        .iter()
+        .any(|item| item.as_json()["encrypted_content"] == "opaque-fixture"));
+    assert_eq!(
+        input.items().last().unwrap().as_json()["content"][0]["text"],
+        "transient pi context"
+    );
+    assert!(!serde_json::to_string(&agent.session().context().unwrap())
+        .unwrap()
+        .contains("transient pi context"));
+    drop(captures);
+    drop(agent);
+    assert!(process.shutdown().await);
+}
+
 async fn adapter(temp: &tempfile::TempDir) -> ExtensionProcess {
     adapter_with(temp, HISTORY_FACTORY).await
 }
