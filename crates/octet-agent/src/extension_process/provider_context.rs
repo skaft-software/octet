@@ -176,6 +176,10 @@ impl ProviderContextHook for ExtensionProcess {
         Some(&self.inner.instance_id)
     }
 
+    fn failure_notice_name(&self) -> Option<&str> {
+        Some(&self.inner.descriptor.manifest.name)
+    }
+
     fn begin_session_wait(
         &self,
         session: &Session,
@@ -648,3 +652,5 @@ mod tests;
 
 #[cfg(test)]
 mod large_history_tests;
+#[cfg(test)]
+mod recovery_tests;

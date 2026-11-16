@@ -371,6 +371,11 @@ pub trait ProviderContextHook: Send + Sync {
         None
     }
 
+    /// Extension name for payload-free failure notices, when available.
+    fn failure_notice_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Activate an optional bounded append service for this exact preparation.
     /// The host calls this synchronously before polling the hook. A process
     /// adapter may publish its grant only after returning a real consumer here;

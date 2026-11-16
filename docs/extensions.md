@@ -460,6 +460,13 @@ reference](extensions/legacy-authoring.md#lifecycle-and-reload) covers
 candidate-first reload, bounded drain, shutdown and supervised restart. Its
 legacy observational methods aren't API `0.3` methods.
 
+Provider-context preparation skips an extension whose append process is stopped
+or draining and warns with the extension's name. The prompt continues without
+that callback's projection. Once the process restarts, new callbacks bind fresh
+append authority to the current generation; completed callbacks and durable
+entries are never replayed. Owner, namespace, persistence and stale-grant
+refusals still protect the session.
+
 ### Provider-retry observations and advice
 
 The Rust `ProviderRetryKind` and the retained API `0.2` and `0.4` provider-retry

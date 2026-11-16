@@ -303,7 +303,11 @@ fn note_context_failure(
         None => true,
     };
     if should_notice {
-        notices.push("Extension context hook failed or timed out; its changes were skipped. Disable the extension if this keeps happening.".to_owned());
+        let name = hook
+            .failure_notice_name()
+            .map(|name| format!(" \"{}\"", bounded_name(name)))
+            .unwrap_or_default();
+        notices.push(format!("Extension{name} context hook failed or timed out; its changes were skipped. Disable the extension if this keeps happening."));
     }
 }
 
@@ -364,7 +368,19 @@ async fn project_context_hooks(
             note_context_failure(hook.as_ref(), session, notices);
             continue;
         }
-        let mut service = hook.begin_session_wait(session, context).map_err(|error| {
+        let activation = hook.begin_session_wait(session, context);
+        // Pi reports throwing handlers and continues (packages/coding-agent/src/
+        // core/extensions/runner.ts:1096-1123). Native process retirement also
+        // means this extension cannot participate. No callback was dispatched:
+        // skip this boundary, never replay an earlier callback or its appends.
+        // The next activation derives authority from the current generation.
+        if recoverable
+            && matches!(&activation, Err(error) if error == "session_append_process_retired")
+        {
+            note_context_failure(hook.as_ref(), session, notices);
+            continue;
+        }
+        let mut service = activation.map_err(|error| {
             // Activation implementations historically return String. Expose
             // only the finite native refusal codes, never arbitrary hook
             // errors, credentials, paths or session content.
