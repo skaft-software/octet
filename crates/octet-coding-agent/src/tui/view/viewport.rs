@@ -717,8 +717,8 @@ mod tests {
     #[test]
     fn overlay_truecolor_does_not_leak_a_background_to_following_rows() {
         let theme = crate::tui::theme::test_theme();
-        let selected = theme.fg("accent", "selected");
-        // The universal octet green includes RGB channel 107. It must remain an
+        let selected = theme.rgb_fg((22, 135, 107), "selected");
+        // A truecolor channel can share the number of an SGR code. It must remain an
         // RGB component rather than becoming a bright-white background SGR.
         assert!(selected.contains(";107m"));
 

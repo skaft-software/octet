@@ -218,13 +218,15 @@ structural resize retains canonical saved-line clear/replay.
 mark in a truecolor fullscreen PTY, observes two full-height eye closures with
 an unchanged baseline, and verifies the
 canonical settled mark, unchanged cursor, no history clear, and no continued
-animation frames. Unit tests cover bounded repeated-click rainbow strength,
+click-animation frames before the next idle pause expires. Unit tests cover bounded repeated-click rainbow strength,
 settlement, stale resize geometry, reduced motion, lower colour capabilities,
 and preservation of explicitly themed hues. These are terminal-byte/VT checks,
 not attended visual acceptance.
 
-The double blink uses a quick eased squeeze and damped reopening, followed by
-a slightly slower second blink. Only the two short bars rise toward the `1`
+Blinks use only the existing open and closed shapes, with an 80 ms closure
+and a 140 ms open gap for doubles. Idle blinks follow randomized 2–5 second
+pauses; one in five is a double. The scheduler wakes at transitions, not
+on animation ticks during pauses. Clicks retain their double blink and rainbow. Only the two short bars rise toward the `1`
 position; their lower cells and the other six bars never move.
 
 Rainbow regressions check left-to-right colour travel, seamless wrapping,

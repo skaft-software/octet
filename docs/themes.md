@@ -1,7 +1,8 @@
 # octet themes
 
 octet's compiled default theme keeps model-family accents, adapts to your
-terminal background and uses semantic status colors. Pick a theme with `/theme`,
+terminal background and uses semantic status colors. UI accents such as the
+scrollbar use neutral grey; model-family and logo colours remain unchanged. Pick a theme with `/theme`,
 `--theme NAME` or `OCTET_THEME`.
 
 ## Choose a theme

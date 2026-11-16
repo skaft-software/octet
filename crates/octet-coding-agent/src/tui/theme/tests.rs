@@ -7,6 +7,35 @@
 use super::*;
 use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
 
+#[test]
+fn default_ui_accent_is_neutral_without_recoloring_models_or_custom_themes() {
+    let caps = TerminalCapabilities::test(true, true, ColorDepth::TrueColor);
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = default_theme_for(background, caps);
+        let (r, g, b) = theme.role_rgb("accent").unwrap();
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        assert_eq!(
+            theme.resolve::<String>("model_accent").unwrap(),
+            balance_foreground(DEFAULT_ACCENT, background)
+        );
+        let custom = load_theme_source_for(
+            "[colors]\naccent = \"#16876d\"",
+            "custom.toml",
+            ThemeSource::File(PathBuf::from("custom.toml")),
+            "Custom",
+            caps,
+            background,
+        )
+        .unwrap();
+        assert_eq!(custom.role_rgb("accent"), Some((0x16, 0x87, 0x6d)));
+    }
+}
+
 fn config(workspace: PathBuf) -> Config {
     Config {
         workspace: workspace.clone(),
@@ -946,7 +975,7 @@ fn shipped_reference_theme_is_schema_valid_and_variant_aware() {
     let light = theme_schema::parse_theme(&source, "reference", TerminalBackground::Light).unwrap();
     assert_eq!(
         dark.tokens.get("accent").map(String::as_str),
-        Some("#16876d")
+        Some("#888888")
     );
     assert_eq!(
         dark.tokens.get("md_code_bg").map(String::as_str),

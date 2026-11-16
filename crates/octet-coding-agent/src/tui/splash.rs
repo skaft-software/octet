@@ -35,7 +35,7 @@ pub(crate) fn render_logo(
         model_accent,
         solid_color,
         (0.0, 0.0),
-        0.0,
+        false,
     )
 }
 
@@ -56,7 +56,7 @@ pub(crate) fn render_reaction(
         model_accent,
         solid_color,
         (strength, phase + rainbow_travel(elapsed, strength)),
-        blink_lift(elapsed),
+        blink_closed(elapsed),
     )
 }
 
@@ -67,27 +67,28 @@ pub(crate) fn rainbow_travel(elapsed: f32, strength: f32) -> f32 {
     1.5 * t + 10.5 * strength * (t - t * t / (2.0 * DURATION))
 }
 
-/// A quick squeeze, a breath, then a softer second blink. The reopening
-/// follows a normalized critically damped spring: fast release, gentle landing.
-/// Analytic time sampling skips missed frames without a simulation or backlog.
-fn blink_lift(elapsed: f32) -> f32 {
-    for (start, close, hold, reopen) in [(0.0, 0.08, 0.06, 0.16), (0.38, 0.10, 0.06, 0.24)] {
-        let t = elapsed - start;
-        if t < 0.0 || t >= close + hold + reopen {
-            continue;
-        }
-        if t < close {
-            let x = t / close;
-            return x * x * (3.0 - 2.0 * x);
-        }
-        if t < close + hold {
-            return 1.0;
-        }
-        let x = (t - close - hold) / reopen;
-        let end = 7.0 * (-6.0_f32).exp();
-        return (((1.0 + 6.0 * x) * (-6.0 * x).exp() - end) / (1.0 - end)).clamp(0.0, 1.0);
-    }
-    0.0
+/// Two brief synchronized closures, separated by a readable open pause.
+/// Two states are enough at this scale: partial blocks look like flicker.
+fn blink_closed(elapsed: f32) -> bool {
+    (0.04..0.12).contains(&elapsed) || (0.26..0.34).contains(&elapsed)
+}
+
+/// Idle blinking changes only geometry, never the settled palette.
+pub(crate) fn render_idle_blink(
+    theme: &OctetTheme,
+    model_accent: Option<(u8, u8, u8)>,
+    solid_color: Option<(u8, u8, u8)>,
+) -> Vec<String> {
+    render_mark(
+        theme,
+        8,
+        2,
+        DURATION,
+        model_accent,
+        solid_color,
+        (0.0, 0.0),
+        true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,7 +100,7 @@ fn render_mark(
     model_accent: Option<(u8, u8, u8)>,
     solid_color: Option<(u8, u8, u8)>,
     rainbow: (f32, f32),
-    blink: f32,
+    blink: bool,
 ) -> Vec<String> {
     let width = width.min(42);
     let rows = symbol_rows.min(21);
@@ -139,7 +140,7 @@ fn render_mark(
             let mut line = " ".repeat(left_pad);
             for (column, bit) in BYTE.iter().enumerate() {
                 let upper_eye = *bit == b'0' && row < top_pad + column_width;
-                if upper_eye && blink == 0.0 {
+                if upper_eye && !blink {
                     line.push_str(&blank);
                     continue;
                 }
@@ -176,15 +177,7 @@ fn render_mark(
                         rainbow.0 * (1.0 - elapsed / DURATION).clamp(0.0, 1.0),
                     );
                 }
-                // Fill the space above each short bar; never shrink its base.
-                let eye = if theme.unicode() {
-                    [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][(blink * 8.0).round() as usize]
-                } else if blink >= 0.5 {
-                    "#"
-                } else {
-                    " "
-                };
-                line.push_str(&theme.rgb_fg(color, if upper_eye { eye } else { &filled }));
+                line.push_str(&theme.rgb_fg(color, &filled));
             }
             line.push_str(&" ".repeat(right_pad));
             line
@@ -610,7 +603,7 @@ mod reaction_tests {
                 .map(|s| sexy_tui_rs::strip_terminal_sequences(&s))
                 .collect::<Vec<_>>()
         };
-        for elapsed in [0.10, 0.50] {
+        for elapsed in [0.08, 0.30] {
             let blink = plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None));
             assert_eq!(blink, ["████████", "████████"]);
         }
@@ -620,12 +613,22 @@ mod reaction_tests {
                 [" ██ ████", "████████"]
             );
         }
-        let closing = plain(render_reaction(&theme, 0.04, 0.0, 0.0, None, None));
-        assert_eq!(closing, ["▄██▄████", "████████"]);
         for ms in 0..=1000 {
-            let lift = blink_lift(ms as f32 / 1000.0);
-            assert!((0.0..=1.0).contains(&lift));
+            let rows = plain(render_reaction(
+                &theme,
+                ms as f32 / 1000.0,
+                0.0,
+                0.0,
+                None,
+                None,
+            ));
+            assert!(rows[0] == " ██ ████" || rows[0] == "████████");
+            assert_eq!(rows[1], "████████");
         }
+        assert_eq!(
+            plain(render_idle_blink(&theme, None, None)),
+            ["████████", "████████"]
+        );
         let normal = render_logo(&theme, 8, 2, DURATION, None, None);
         assert_eq!(
             render_reaction(&theme, DURATION, 1.0, 0.0, None, None),

@@ -287,7 +287,7 @@ pub(super) const UNIVERSAL_TARGET_LUMINANCE: f64 = 0.179;
 pub(super) const BALANCED_FOREGROUNDS: &[(&str, &str)] = &[
     ("muted", "#777777"),
     ("dim", "#777777"),
-    ("accent", DEFAULT_ACCENT),
+    ("accent", "#888888"),
     ("error", "#c74747"),
     ("warning", "#9a6700"),
     ("border_focused", DEFAULT_ACCENT),

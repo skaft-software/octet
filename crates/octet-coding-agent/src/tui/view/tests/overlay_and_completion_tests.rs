@@ -292,6 +292,7 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     {
         let mut state = shell.state.borrow_mut();
         crate::tui::theme::apply_model_lab(&mut state.theme, ModelLab::Anthropic);
+        state.theme.override_token("accent", "#123456");
         state.model_lab = Some(ModelLab::Anthropic);
     }
     let model_accent = {

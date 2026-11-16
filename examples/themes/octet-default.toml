@@ -43,7 +43,7 @@ border_focused = "#16876d"
 # Semantic status. These are the compiled default's source colours; the
 # compiled theme balances them per background, while this reference keeps the
 # source values so the file is deterministic across profiles.
-accent = "#16876d"
+accent = "#888888"
 success = "default"
 info = "default"
 error = "#c74747"

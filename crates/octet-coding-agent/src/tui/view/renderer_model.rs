@@ -589,6 +589,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         startup_pending,
         startup_card_started_at,
         welcome_reaction,
+        welcome_blink_closed,
     );
     if target.editor.text() != source.editor.text() {
         target.editor.set_text(source.editor.text());

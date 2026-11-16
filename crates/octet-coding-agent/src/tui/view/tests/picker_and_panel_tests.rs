@@ -271,6 +271,12 @@ fn session_picker_render_shows_scope_markers_and_fork_metadata() {
 fn model_and_resume_pickers_use_the_active_model_accent() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("anthropic", "claude-sonnet-4", "high");
+    // Keep the UI sentinel distinct from neutral descriptions in these rows.
+    shell
+        .state
+        .borrow_mut()
+        .theme
+        .override_token("accent", "#123456");
     let (model_accent, ui_accent) = {
         let state = shell.state.borrow();
         let sequence = |role| {

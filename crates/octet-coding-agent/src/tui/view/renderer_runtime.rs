@@ -341,11 +341,51 @@ impl AnimationClock {
     }
 }
 
+/// One deadline per visible transition, with no ticks during the open pause.
+struct IdleBlink {
+    deadline: Instant,
+    closed: bool,
+    remaining: u8,
+}
+
+impl IdleBlink {
+    fn new(now: Instant) -> Self {
+        use std::hash::BuildHasher;
+        let sample = std::collections::hash_map::RandomState::new().hash_one(0_u8);
+        Self::with_sample(now, sample)
+    }
+
+    fn with_sample(now: Instant, sample: u64) -> Self {
+        Self {
+            deadline: now + Duration::from_millis(2000 + sample % 3001),
+            closed: false,
+            remaining: if sample.is_multiple_of(5) { 2 } else { 1 },
+        }
+    }
+
+    fn advance(&mut self, now: Instant) {
+        if now < self.deadline {
+            return;
+        }
+        if !self.closed {
+            self.closed = true;
+            self.remaining -= 1;
+            self.deadline = now + Duration::from_millis(80);
+        } else if self.remaining > 0 {
+            self.closed = false;
+            self.deadline = now + Duration::from_millis(140);
+        } else {
+            *self = Self::new(now);
+        }
+    }
+}
+
 struct AnimationSchedule {
     status: AnimationClock,
     event_dot: AnimationClock,
     timer: AnimationClock,
     welcome: AnimationClock,
+    blink: Option<IdleBlink>,
 }
 
 impl AnimationSchedule {
@@ -355,6 +395,7 @@ impl AnimationSchedule {
             event_dot: AnimationClock::new(EVENT_DOT_TOGGLE_INTERVAL),
             timer: AnimationClock::new(STATUS_TIMER_INTERVAL),
             welcome: AnimationClock::new(Duration::from_millis(40)),
+            blink: None,
         }
     }
 
@@ -380,12 +421,27 @@ impl AnimationSchedule {
         self.timer.set_active(status_timer_active(state), now);
         self.welcome
             .set_active(state.welcome_reaction.is_some(), now);
+        let idle = state.welcome_reaction.is_none()
+            && super::builtin_welcome_card::mark_rect(state).is_some()
+            && state
+                .pointer_render_geometry()
+                .is_some_and(|g| g.welcome_mark.is_some());
+        if idle {
+            self.blink.get_or_insert_with(|| IdleBlink::new(now));
+        } else {
+            self.blink = None;
+        }
     }
 
     fn remaining(&self, now: Instant) -> Duration {
         [&self.status, &self.event_dot, &self.timer, &self.welcome]
             .into_iter()
             .filter_map(|clock| clock.remaining(now))
+            .chain(
+                self.blink
+                    .as_ref()
+                    .map(|blink| blink.deadline.saturating_duration_since(now)),
+            )
             .fold(RESIZE_POLL_INTERVAL, Duration::min)
     }
 
@@ -393,6 +449,14 @@ impl AnimationSchedule {
         // Semantic state may have changed during coalescing or lock acquisition.
         // Never advance an old status, or use a pre-coalescing due flag.
         self.observe(state, now);
+        if let Some(blink) = &mut self.blink {
+            blink.advance(now);
+        }
+        let closed = self.blink.as_ref().is_some_and(|blink| blink.closed);
+        if state.welcome_blink_closed != closed {
+            state.welcome_blink_closed = closed;
+            state.invalidate_transcript();
+        }
         if self.welcome.take_ticks(now) > 0 {
             super::builtin_welcome_card::advance_reaction(state, now);
         }
@@ -1061,6 +1125,74 @@ mod scheduler_tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn idle_blinks_have_long_quiet_pauses_and_only_two_or_four_transitions() {
+        let now = Instant::now();
+        for sample in 0..=6002 {
+            let mut blink = IdleBlink::with_sample(now, sample);
+            let pause = blink.deadline.duration_since(now);
+            assert!((Duration::from_secs(2)..=Duration::from_secs(5)).contains(&pause));
+            let first = blink.deadline;
+            blink.advance(first - Duration::from_millis(1));
+            assert!(!blink.closed);
+            assert_eq!(blink.deadline, first);
+            let count = if sample.is_multiple_of(5) { 2 } else { 1 };
+            for n in 0..count {
+                blink.advance(blink.deadline);
+                assert!(blink.closed);
+                let reopen = blink.deadline;
+                blink.advance(reopen - Duration::from_millis(1));
+                assert!(blink.closed);
+                blink.advance(reopen);
+                assert!(!blink.closed);
+                if n + 1 < count {
+                    assert_eq!(blink.deadline - reopen, Duration::from_millis(140));
+                } else {
+                    assert!(blink.deadline - reopen >= Duration::from_secs(2));
+                }
+            }
+        }
+        let mut late = IdleBlink::with_sample(now, 0);
+        late.advance(now + Duration::from_secs(60));
+        assert!(late.closed);
+        assert_eq!(
+            late.deadline,
+            now + Duration::from_secs(60) + Duration::from_millis(80)
+        );
+    }
+
+    #[test]
+    fn idle_blink_invalidates_only_at_transitions_and_stops_when_hidden() {
+        use super::super::{
+            renderer_geometry::{GeometryFence, RenderedGeometry},
+            InteractiveShell,
+        };
+        let shell = InteractiveShell::test_shell();
+        let mut state = shell.state.borrow_mut();
+        let now = Instant::now();
+        state.size = (80, 24);
+        state.startup_card_started_at = Some(now);
+        state.application_viewport_requested = true;
+        state.rendered_transcript(80);
+        let geometry = RenderedGeometry::capture(&state, GeometryFence::capture(&state));
+        assert!(geometry.welcome_mark.is_some());
+        state.render_geometry = Some(std::sync::Arc::new(geometry));
+        let mut schedule = AnimationSchedule::new();
+        schedule.observe(&state, now);
+        let deadline = schedule.blink.as_ref().unwrap().deadline;
+        let revision = state.transcript_semantic_revision;
+        schedule.advance(&mut state, deadline - Duration::from_millis(1));
+        assert_eq!(state.transcript_semantic_revision, revision);
+        assert!(!state.welcome_blink_closed);
+        schedule.advance(&mut state, deadline);
+        assert!(state.welcome_blink_closed);
+        assert_eq!(state.transcript_semantic_revision, revision + 1);
+        state.size.0 = 40; // stale painted geometry cancels the blink
+        schedule.advance(&mut state, deadline + Duration::from_millis(1));
+        assert!(!state.welcome_blink_closed);
+        assert!(schedule.blink.is_none());
+    }
 
     #[test]
     fn active_state_without_a_concrete_wake_never_requests_a_frame() {

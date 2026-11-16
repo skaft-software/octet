@@ -2913,13 +2913,21 @@ fn assert_single_welcome(parser: &vt100::Parser, columns: u16, label: &str) {
     } else {
         (version_row, 2)
     };
+    // A frame may land in the brief idle closure. Both eyes must agree;
+    // everything outside those two upper cells stays exactly canonical.
+    let closed = parser
+        .screen()
+        .cell(top as u16, left as u16)
+        .unwrap()
+        .contents()
+        == "█";
     let (rows, _) = parser.screen().size();
     for row in 0..usize::from(rows) {
         for col in 0..usize::from(columns) {
             let in_grid =
                 row >= top && row < top + 2 * scale && col >= left && col < left + 8 * scale;
-            let expected =
-                in_grid && (row >= top + scale || b"01101111"[(col - left) / scale] == b'1');
+            let expected = in_grid
+                && (closed || row >= top + scale || b"01101111"[(col - left) / scale] == b'1');
             let actual = parser
                 .screen()
                 .cell(row as u16, col as u16)
@@ -3561,11 +3569,30 @@ fn real_octet_mark_click_blinks_then_settles_without_replay() {
     }
     assert_eq!(blinks, 2, "one click must raise the eyes twice");
     assert_single_welcome(&parser, 80, "settled click");
+    assert_eq!(parser.screen().cell(1, 2).unwrap().contents().trim(), "");
     assert_eq!(parser.screen().cursor_position(), cursor);
     assert_eq!(count_bytes(&octet.pty.output[start..], b"\x1b[3J"), 0);
     let settled = octet.pty.output.len();
     octet.pty.drain_for(Duration::from_millis(250));
     assert_eq!(count_bytes(&octet.pty.output[settled..], FRAME_BEGIN), 0);
+    // Observe one entire idle cycle after the click has settled. Even a double
+    // blink needs at most four frames; no colour pulse or layout replay.
+    let idle_start = octet.pty.output.len();
+    octet.pty.drain_for(Duration::from_millis(5200));
+    let mut transitions = 0;
+    let mut was_closed = false;
+    for frame in frame_ranges(&octet.pty.output[idle_start..]) {
+        parser.process(&octet.pty.output[idle_start + frame.start..idle_start + frame.end]);
+        assert_single_welcome(&parser, 80, "idle blink");
+        let closed = parser.screen().cell(1, 2).unwrap().contents() == "█";
+        if closed != was_closed {
+            transitions += 1;
+        }
+        was_closed = closed;
+        assert_eq!(parser.screen().cursor_position(), cursor);
+    }
+    assert!(transitions >= 2, "idle eyes must close and reopen");
+    assert_eq!(count_bytes(&octet.pty.output[idle_start..], b"\x1b[3J"), 0);
     let capture = octet.shutdown();
     assert!(capture.status.success());
     assert!(capture.termios_restored);
