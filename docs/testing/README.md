@@ -35,7 +35,11 @@ offline run. It does not install toolchains. Tests use temporary HOME and TMPDIR
 outside the checkout, while retaining Cargo and rustup caches. Set `TMPDIR` before
 running the gate to choose its scratch parent (for example, a disk-backed path
 instead of a small `/tmp` tmpfs). Temporary workspaces sit beneath the isolated
-HOME so workspace discovery stops before any surrounding dotfiles repository.
+HOME so native workspace discovery stops before any surrounding dotfiles repository.
+Pi fixtures intentionally inspect ancestors through the filesystem root, matching
+`packages/coding-agent/src/core/trust-manager.ts:193–215` in Pi's source. Choose a
+scratch parent outside a home containing `.agents/skills` or `.git` (for example,
+`/var/tmp`): a private HOME alone does not hide those ancestor resources.
 
 For iteration only:
 
