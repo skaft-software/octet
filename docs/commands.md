@@ -299,3 +299,5 @@ search discarded capture bytes or your terminal's native scrollback. The resume
 picker's Ctrl+F separately searches bounded session text. Ctrl+Shift+B cycles
 the hidden, auto and always transcript scrollbar modes for this shell, which
 isn't a saved preference or an alternate-screen switch.
+
+The model picker also matches model and provider names when `-`, `_`, `.`, `/`, or `:` separators are omitted from a filter term.
