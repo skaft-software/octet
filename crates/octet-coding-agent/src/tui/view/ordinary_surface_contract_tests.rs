@@ -311,9 +311,9 @@ fn ordinary_surface_contract_fixture_matrix_preserves_grid_and_capabilities() {
             fixture.name
         );
         let expected_footer = match (fixture.width, fixture.unicode) {
-            (46, true) => "↑↓ navigate · ↵ select · Esc close",
+            (46, true) => "Up/Down navigate · Enter select · Esc close",
             (40, false) => "Up/Down navigate - Enter select",
-            (_, true) => "commands · ↑↓ navigate · ↵ select · Esc close",
+            (_, true) => "commands · Up/Down navigate · Enter select · Esc close",
             (_, false) => "commands - Up/Down navigate - Enter select - Esc close",
         };
         assert_eq!(

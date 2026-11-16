@@ -171,8 +171,10 @@ The common action-footer grammar is:
 ```
 
 Key names use `Ctrl+X`, `Enter`, `Tab`, and `Esc` casing, with explicit Shift
-modifiers; compact navigation can retain its arrow glyphs. For example, command
-discovery uses `commands · ↑↓ navigate · ↵ select · Esc close`; ASCII falls back
+modifiers. Navigation uses `Up/Down`, `PageUp/PageDown`, and `Esc/Left` in
+all terminal profiles. Hint keys use the shared `keybindings::display_key_id`
+formatter, including Option on macOS. For example, command discovery uses
+`commands · Up/Down navigate · Enter select · Esc close`; ASCII falls back
 to `commands - Up/Down navigate - Enter select - Esc close`. At compact widths,
 scope drops first. The remaining key/verb pairs are complete priority-ordered
 segments: the rightmost close/cancel pair drops, then select, before navigation;
@@ -187,7 +189,7 @@ The information architecture is invariant across terminal profiles:
 
 | Capability | Contract |
 | --- | --- |
-| Unicode | Use the compiled default's single-cell semantic glyphs and concise arrows. |
+| Unicode | Use the compiled default's single-cell semantic glyphs and spelled-out key labels. |
 | ASCII | Use the existing ASCII marker, separator, ellipsis, and key-name fallbacks; no Unicode glyph is required for comprehension. |
 | Truecolor/256/16 colour | Preserve the same words, focus marker, grid, count, and action grammar. Accent identifies active shell focus, never provider authority. |
 | No colour | Emit no ANSI styling. Explicit status words, marker shape, indentation, and action text still distinguish every state. |

@@ -1097,11 +1097,7 @@ fn render_panel_output_with_limit(
                 }
             }
             if show_footer {
-                let navigation = if state.theme.unicode() {
-                    "↑↓"
-                } else {
-                    "Up/Down"
-                };
+                let navigation = "Up/Down";
                 let mut hints: Vec<(&str, &str)> = vec![(navigation, "navigate")];
                 // Only the grouped subagent panel has collapsible groups and a
                 // declared-state view filter, so those are advertised only
@@ -1177,16 +1173,8 @@ fn render_panel_output_with_limit(
             } else {
                 format!("{}-{}/{}", start + 1, end, visual.len())
             };
-            let navigation = if state.theme.unicode() {
-                "↑↓"
-            } else {
-                "Up/Down"
-            };
-            let back = if state.theme.unicode() {
-                "Esc/←"
-            } else {
-                "Esc/Left"
-            };
+            let navigation = "Up/Down";
+            let back = "Esc/Left";
             lines.push(panel_action_footer(
                 state,
                 width,

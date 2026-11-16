@@ -39,6 +39,7 @@
 - Responses replay bounds ordinary tool-result screenshots while keeping native computer-call screenshots.
 - Opt-in request tracing reports the final Google contents role, including changes made by payload hooks.
 - TUI shortcut hints, pickers and `/hotkeys` consistently use `Ctrl+T`-style labels.
+- Completion, picker and report footers spell out navigation keys with the shared shortcut formatter.
 - Fullscreen scrolling and selection reuse unchanged row mappings instead of re-aligning long answers on every event.
 - Google-compatible continuation requests no longer end with a `model` turn, avoiding HTTP 400 on OpenCode Go.
 - Tool labels use available terminal width while keeping their selected values readable.

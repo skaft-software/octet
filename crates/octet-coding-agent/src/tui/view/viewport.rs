@@ -248,21 +248,9 @@ fn render_report_overlay(
         }
     }
     if geometry.footer {
-        let navigation = if state.theme.unicode() {
-            "↑↓"
-        } else {
-            "Up/Down"
-        };
-        let page = if state.theme.unicode() {
-            "Pg↑↓"
-        } else {
-            "PageUp/PageDown"
-        };
-        let close = if state.theme.unicode() {
-            "Esc/←"
-        } else {
-            "Esc/Left"
-        };
+        let navigation = "Up/Down";
+        let page = "PageUp/PageDown";
+        let close = "Esc/Left";
         lines.push(super::panel_render::panel_action_footer(
             state,
             width,

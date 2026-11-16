@@ -121,9 +121,14 @@ pub(super) fn input_slash_suggestions(state: &ShellState) -> Vec<InputSlashSugge
 }
 
 fn suggestion_key_hint(state: &ShellState, key: &str, label: &str) -> String {
+    let key = key
+        .split('/')
+        .map(|key| crate::tui::keymap::keybindings::display_key_id(key, cfg!(target_os = "macos")))
+        .collect::<Vec<_>>()
+        .join("/");
     format!(
         "{} {}",
-        state.theme.bold(&state.theme.fg("model_accent", key)),
+        state.theme.bold(&state.theme.fg("model_accent", &key)),
         state.theme.fg("muted", label)
     )
 }
@@ -186,11 +191,7 @@ fn slash_suggestion_footer(
     } else {
         "commands".to_owned()
     };
-    let (navigation_key, select_key) = if state.theme.unicode() {
-        ("↑↓", "↵")
-    } else {
-        ("Up/Down", "Enter")
-    };
+    let (navigation_key, select_key) = ("Up/Down", "Enter");
     let separator = suggestion_separator(state);
     let mut segments = [
         // Scope is visually first but is the least useful segment at compact
@@ -395,18 +396,7 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     let mut segments = [
         FooterSegment::optional(state.theme.fg("muted", heading_label), 0),
         FooterSegment::primary(suggestion_key_hint(state, "Tab", "complete")),
-        FooterSegment::optional(
-            suggestion_key_hint(
-                state,
-                if state.theme.unicode() {
-                    "↑↓"
-                } else {
-                    "Up/Down"
-                },
-                "navigate",
-            ),
-            1,
-        ),
+        FooterSegment::optional(suggestion_key_hint(state, "Up/Down", "navigate"), 1),
     ];
     lines.push(fit_prioritized_footer(
         "  ",

@@ -329,7 +329,7 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     let plain_footer = strip_terminal_sequences(footer);
     assert!(
         plain_footer.contains("commands 1–5/")
-            && plain_footer.contains("↑↓ navigate · ↵ select · Esc close"),
+            && plain_footer.contains("Up/Down navigate · Enter select · Esc close"),
         "{plain_footer:?}"
     );
     assert!(footer.contains(&model_accent), "{footer:?}");
@@ -358,7 +358,7 @@ fn inline_autocomplete_uses_compact_footers_and_the_model_accent() {
     let footer = paths.last().expect("mention suggestion footer");
     assert_eq!(
         strip_terminal_sequences(footer).trim(),
-        "project files · Tab complete · ↑↓ navigate"
+        "project files · Tab complete · Up/Down navigate"
     );
     assert!(footer.contains(&model_accent), "{footer:?}");
     assert!(!footer.contains(&ui_accent), "{footer:?}");

@@ -286,9 +286,20 @@ fn picker_filter_line(state: &ShellState, picker: &PickerState, width: u16) -> S
 }
 
 fn panel_action_hint(state: &ShellState, key: &str, verb: &str) -> String {
+    // Filter syntax shares this footer but is not a terminal key id.
+    let key = match key {
+        "re:<pattern>" | "\"phrase\"" => key.to_owned(),
+        _ => key
+            .split('/')
+            .map(|key| {
+                crate::tui::keymap::keybindings::display_key_id(key, cfg!(target_os = "macos"))
+            })
+            .collect::<Vec<_>>()
+            .join("/"),
+    };
     format!(
         "{} {}",
-        state.theme.bold(&state.theme.fg("model_accent", key)),
+        state.theme.bold(&state.theme.fg("model_accent", &key)),
         state.theme.fg("muted", verb)
     )
 }
@@ -912,11 +923,7 @@ pub(super) fn render_message_picker(
     // constrained height the action footer yields rather than hiding status.
     let can_show_footer = max_rows >= lines.len().saturating_add(2 + border_rows);
     if can_show_footer {
-        let navigation = if state.theme.unicode() {
-            "↑↓"
-        } else {
-            "Up/Down"
-        };
+        let navigation = "Up/Down";
         lines.push(panel_action_footer(
             state,
             width,
