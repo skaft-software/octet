@@ -171,3 +171,52 @@ fn bounds_schema_validation_work_and_error_text() {
     assert!(message.len() <= MAX_SCHEMA_ERROR_BYTES);
     assert!(message.contains("nesting") || message.contains("work limit"));
 }
+
+fn plain_tool(name: String, parameters: serde_json::Value) -> crate::types::ToolDef {
+    crate::types::ToolDef {
+        async_execution: false,
+        name,
+        description: "ordinary tool".into(),
+        parameters,
+        constrained_sampling: None,
+    }
+}
+
+#[test]
+fn many_ordinary_tool_schemas_validate_with_independent_budgets() {
+    // 160 tools of ~60 schema nodes each exceed one shared 4,096-node budget
+    // but each is far below the per-schema limit.
+    let tools: Vec<crate::types::ToolDef> = (0..160)
+        .map(|index| {
+            let properties: serde_json::Map<String, serde_json::Value> = (0..20)
+                .map(|field| {
+                    (
+                        format!("field_{field}"),
+                        serde_json::json!({"type": "string", "description": "value"}),
+                    )
+                })
+                .collect();
+            plain_tool(
+                format!("tool_{index}"),
+                serde_json::json!({"type": "object", "properties": properties}),
+            )
+        })
+        .collect();
+    super::validate_tool_definitions(&tools).expect("independent per-tool budgets");
+}
+
+#[test]
+fn one_oversized_tool_schema_still_exceeds_its_budget() {
+    let properties: serde_json::Map<String, serde_json::Value> = (0..5_000)
+        .map(|field| (format!("f{field}"), serde_json::json!({"type": "string"})))
+        .collect();
+    let tools = vec![plain_tool(
+        "huge".into(),
+        serde_json::json!({"type": "object", "properties": properties}),
+    )];
+    let error = super::validate_tool_definitions(&tools).unwrap_err();
+    assert!(
+        error.to_string().contains("validation work limit exceeded"),
+        "{error}"
+    );
+}

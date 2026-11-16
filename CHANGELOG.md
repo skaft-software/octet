@@ -44,6 +44,7 @@
 
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.
 - Fullscreen wheel, selection and picker navigation preempt the stream frame timer just like composer edits.
 - Gemini file preparation validates requests before uploading recorded audio.
 - OpenRouter audio discovery retains explicit and catalog capability sources through fresh inventories, cached replay and model admission.

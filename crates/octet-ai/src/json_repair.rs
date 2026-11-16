@@ -321,8 +321,11 @@ pub(crate) fn validate_tool_definitions(
         ));
     }
     let mut names = HashSet::new();
-    let mut budget = ValidationBudget::default();
     for tool in tools {
+        // Each schema gets its own work budget. A shared budget rejected large
+        // but individually ordinary tool sets (for example 135 Pi tools with
+        // 214 KiB of schema). Total work stays bounded by MAX_SCHEMA_TOOLS.
+        let mut budget = ValidationBudget::default();
         if tool.name.is_empty() || tool.name.len() > MAX_SCHEMA_PROPERTY_NAME_BYTES {
             return Err(bounded_error(
                 "tool argument schema validation failed",
