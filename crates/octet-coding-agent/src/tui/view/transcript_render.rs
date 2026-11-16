@@ -63,8 +63,13 @@ fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<St
     let mut first_content_row = true;
     rows.into_iter()
         .map(|row| {
-            if row.is_empty() {
-                return row;
+            // Styled whitespace is still a blank row. Keep its geometry, but
+            // attach the result connector to actual output, not empty chrome.
+            if sexy_tui_rs::strip_terminal_sequences(&row)
+                .trim()
+                .is_empty()
+            {
+                return String::new();
             }
             let prefix = if first_content_row && indent > 0 {
                 first_content_row = false;
@@ -105,7 +110,11 @@ fn append_nested_tool_output(
     theme: &OctetTheme,
     width: u16,
 ) {
-    if !rows.iter().any(|row| !row.is_empty()) {
+    if !rows
+        .iter()
+        .any(|row| !sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
+    {
+        header.extend(rows);
         return;
     }
 

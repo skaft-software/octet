@@ -274,3 +274,31 @@ fn polish_running_shell_cards_never_end_with_bare_ellipsis() {
     let rows = transcript_render::render_tool(&panel, &theme, &renderer, 100, false, "tool_output");
     assert_eq!(screen_dump(&rows.lines, 100), "Bash  printf ...\n└ ...");
 }
+
+#[test]
+fn polish_result_connector_belongs_to_first_visible_output_row() {
+    let theme = crate::tui::theme::test_theme();
+    let renderer = theme.rich_renderer();
+    let panel = tool_panel(
+        "codemode",
+        serde_json::json!({"code":"return 1"}),
+        "   \nresult",
+        true,
+    );
+    let rows = transcript_render::render_tool(&panel, &theme, &renderer, 100, true, "tool_output");
+    assert_eq!(
+        screen_dump(&rows.lines, 100),
+        "Codemode  return 1\n\n└ result"
+    );
+    let panel = tool_panel(
+        "bash",
+        serde_json::json!({"command":"printf first\nprintf second"}),
+        "result",
+        true,
+    );
+    let rows = transcript_render::render_tool(&panel, &theme, &renderer, 100, true, "tool_output");
+    assert_eq!(
+        screen_dump(&rows.lines, 100),
+        "Bash  printf first\n│     printf second\n└ result"
+    );
+}

@@ -49,6 +49,7 @@
 
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
 - Running shell cards show an explicit interruptible state with a stable text affordance.
 - Completed tool cards share one final duration row and honor the tool_duration theme setting.
 - Tool output previews keep deliberate head and tail windows with exact omitted-middle counts.

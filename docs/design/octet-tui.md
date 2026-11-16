@@ -516,7 +516,11 @@ six-cell minimum for short names), avoiding a wide dead column while keeping
 each wrapped header's value column fixed. Computer-use labels continue to omit
 their shared `computer_use_` prefix to preserve the action name. A muted vertical `│` joins
 each wrapped header row to the single `└` that begins its nested output, making
-the output's ownership visible without adding another indentation level.
+the output's ownership visible without adding another indentation level. The
+`└` attaches to the first visibly nonblank result row, never a whitespace-only
+or ANSI-style-only spacer under the command preview. Blank result rows retain
+their height without a connector; later result rows keep the same text column.
+The default stays at column 2 for the connector and column 4 for result text.
 
 Bash and PowerShell headers wrap at whitespace where possible and hard-wrap
 oversized words by terminal cell width without splitting graphemes. Collapsed
