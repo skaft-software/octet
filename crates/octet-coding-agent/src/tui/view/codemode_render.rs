@@ -176,7 +176,7 @@ pub(super) fn project_output(
 pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {
     let (mut text, hidden) = output_preview(panel, expanded);
     if hidden {
-        text.push_str("\n(output hidden · Ctrl+O)");
+        text.push_str("\n(output preview; Ctrl+O for full output)");
     }
     text
 }
@@ -248,7 +248,7 @@ mod tests {
         for output in ["one\ntwo\nthree\nfour\nfive\nsix".into(), "雪".repeat(2000)] {
             let p = panel("return 1", &output, true, false);
             let preview = output_text(&p, false);
-            assert!(preview.contains("output hidden · Ctrl+O"));
+            assert!(preview.contains("Ctrl+O for full output"));
             assert!(preview.chars().count() < 700);
             assert_eq!(output_text(&p, true), output);
             assert_eq!(p.output, output);
@@ -312,7 +312,7 @@ mod tests {
         let preview = output_text(&p, false);
         assert!(!preview.starts_with("Script failed"));
         assert!(preview.contains("Wall time 0.0 seconds"));
-        assert!(preview.contains("output hidden · Ctrl+O"));
+        assert!(preview.contains("Ctrl+O for full output"));
         assert!(preview.chars().count() < 700);
         assert_eq!(
             output_text(&p, true),

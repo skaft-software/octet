@@ -552,7 +552,7 @@ highlighting instead of flattening it into an extension-argument summary. ANSI
 terse mode shows three wrapped source rows and an explicit hidden-row hint;
 Ctrl+O reveals the complete source. Literal ANSI output uses the shared five-visual-row head/tail window and full
 disclosure through the same toggle. The semantic Tern preview retains its five
-source-line / 600-character cap. Output is not interpreted as Markdown or an edit diff. Semantic copy
+source-line / 600-character cap and its existing full-output hint. Output is not interpreted as Markdown or an edit diff. Semantic copy
 includes the complete sanitized script, not argument envelopes, output or preview
 hints. Disclosure-sensitive Codemode blocks remain atomic at history commits.
 Native Tern uses its own semantic code/queued-input chrome; see [Tern](../tern.md).
