@@ -526,6 +526,9 @@ renderer materialization, layout and terminal writes; do not present its reducti
 as an equivalent end-to-end resume speedup. Full native replay still has
 history-sized layout and output cost.
 
+Frontend blocking discovery keeps its no-redirect HTTP policy; asynchronous
+Codex inventory discovery owns that policy in `octet-ai`, not a frontend client.
+
 ## Agent-turn request copy audit
 
 Ordinary provider turns no longer construct an unused native-steering

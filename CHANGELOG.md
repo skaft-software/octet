@@ -60,6 +60,7 @@
 - Provider HTTP failures show redacted structured error messages, codes and types, including pretty-printed Responses error bodies.
 - Plain-mode outcomes use compact durations with explicit completion, failure and interruption labels.
 - Pi turn observers isolate coded callback faults, preserve durable appends and continue later handlers.
+- Authenticated frontend model discovery keeps API keys within the requested HTTP origin.
 - Ctrl+D exits restore terminal attributes under tmux, including after extension reload and resize.
 - Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
 

@@ -251,7 +251,7 @@ fn embedded_builtin_endpoints_use_provider_response_header_timeout() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 
-async fn discovery_clients_do_not_follow_authenticated_redirects() {
+async fn blocking_discovery_client_does_not_follow_authenticated_redirects() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -280,14 +280,7 @@ async fn discovery_clients_do_not_follow_authenticated_redirects() {
     .unwrap();
     assert_eq!(blocking_status, reqwest::StatusCode::FOUND);
 
-    let async_status = discovery_client(Duration::from_secs(2))
-        .unwrap()
-        .get(format!("{}/models", origin.uri()))
-        .header("x-api-key", "async-secret")
-        .send()
-        .await
-        .unwrap()
-        .status();
-    assert_eq!(async_status, reqwest::StatusCode::FOUND);
+    // Async Codex discovery now belongs to octet_ai::providers::codex::discover_inventory_with;
+    // there is no frontend async discovery client to exercise here.
     assert!(destination.received_requests().await.unwrap().is_empty());
 }
