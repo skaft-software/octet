@@ -3,7 +3,7 @@
 use super::renderer_model::{RenderModel, RenderOwner};
 use std::cell::{Cell, RefCell, RefMut};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -88,6 +88,7 @@ pub(super) struct SharedState(
     Arc<Mutex<super::tern_input::Mailbox>>,
     Arc<AtomicBool>,
     Arc<Mutex<super::program_status::Publisher>>,
+    Arc<AtomicU64>,
 );
 
 impl SharedState {
@@ -110,7 +111,17 @@ impl SharedState {
             Arc::new(Mutex::new(super::tern_input::Mailbox::default())),
             Arc::new(AtomicBool::new(initial_fullscreen_mode())),
             Arc::new(Mutex::new(super::program_status::Publisher::default())),
+            Arc::new(AtomicU64::new(0)),
         )
+    }
+
+    pub(super) fn publish_input(&self) {
+        self.6
+            .store(crate::tui::latency::published(), Ordering::Release);
+    }
+
+    fn input_sequence(&self) -> u64 {
+        self.6.load(Ordering::Acquire)
     }
 
     /// Lock-free test for a completed workspace walk. Idle wakes with nothing
@@ -927,9 +938,11 @@ pub(super) fn render_loop_with_terminal(
         let resize_epoch = state.borrow().resize_epoch;
         // The interval this frame owns starts before the terminal write, so a
         // slow paint is paid out of the budget rather than added after it.
+        let input_sequence = state.input_sequence();
         pacer.begin();
         tui.request_render_force(resize_epoch != painted_resize_epoch);
         state.frame_written_at(tui.rendered_viewport_top());
+        crate::tui::latency::painted(input_sequence);
         painted_resize_epoch = resize_epoch;
         resize_schedule.painted();
     }

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Opt-in fullscreen input traces report event-to-publication and completed-frame timing without recording input text.
+
 - Expose shared provider declarations and account-scoped Codex catalogs with explicit local reads, discovery and exact route binding.
 
 - Share Codex authentication and private storage through octet-ai with in-memory credentials and caller-owned login presentation.

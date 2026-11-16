@@ -179,6 +179,37 @@ live-grid repair bound or saved-snapshot product guarantee is claimed. Keep
 physical-terminal reflow, selection, paint smoothness, and long-duration
 qualification separate from library and PTY evidence.
 
+### Fullscreen interaction timing
+
+`OCTET_STARTUP_TRACE=latency` extends the opt-in startup trace with payload-free
+`octet-latency` records on stderr. Redirect stderr to a local file, not the TUI.
+Each record identifies only an event kind and sequence, microseconds from native
+input delivery (after protocol/extension interception) to the first subsequent
+render publication (`updated_us`), and to a completed terminal write
+(`painted_us`). Publication is a state-update fence, not the exact mutation time;
+ignored events may be included with the next publication. Input received during
+a write cannot be credited to that earlier frame. No text, coordinates, or
+command names are recorded. The pending ring holds at most 1,024 events; overflow
+increments `dropped`. Tracing itself adds synchronous stderr I/O; use a regular
+file and compare identically instrumented builds. Normal sessions retain only an
+atomic input/publication clock, not timing samples.
+
+The offline Unix PTY driver uses a disposable home, a 100-model manual catalog,
+1,000 synthetic user/assistant turns, and 4 ms wheel, selection, slash-filter and
+arrow bursts. It verifies trace counts, the final composer marker, clean exit,
+and terminal-mode restoration, retaining raw samples and per-kind p50/p95:
+
+```sh
+cargo build -p octet-coding-agent --bin octet
+python3 scripts/bench-interaction-latency.py target/debug/octet > interaction.json
+python3 -m unittest discover -s scripts/tests -p 'test_bench_interaction_latency.py'
+```
+
+Use the same debug build profile, host and workload for both runs. These clocks
+exclude OS input queueing and physical emulator display. The driver drains real
+terminal output but does not qualify physical touchpad smoothness or live-provider
+load. Selection/reader-position correctness remains covered by the TUI tests.
+
 ### Fullscreen navigation and selection audit
 
 For unchanged fullscreen application-owned history, navigation retains the

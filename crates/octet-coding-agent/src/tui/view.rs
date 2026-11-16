@@ -4832,6 +4832,7 @@ impl InteractiveShell {
     /// Queue a retained-frame render without doing layout on the async loop.
     /// The bounded renderer queue coalesces bursts of model/tool events.
     pub fn render(&mut self) {
+        self.state.publish_input();
         if let Some(render_tx) = self
             .render_tx
             .lock()

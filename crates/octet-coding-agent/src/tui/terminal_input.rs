@@ -820,7 +820,10 @@ impl<E: Into<Packet>, S: Stream<Item = io::Result<E>> + Unpin> Stream for Termin
             // behind it stays ordered: a queued reply is delivered before the
             // next raw event is admitted.
             match this.intercept.poll(cx) {
-                Some(Poll::Ready(event)) => return Poll::Ready(Some(Ok(event))),
+                Some(Poll::Ready(event)) => {
+                    crate::tui::latency::received(&event);
+                    return Poll::Ready(Some(Ok(event)));
+                }
                 Some(Poll::Pending) => return Poll::Pending,
                 None => {}
             }

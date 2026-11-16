@@ -7,6 +7,7 @@ pub(crate) mod context;
 pub(crate) mod extension_components;
 pub(crate) mod fuzzy;
 pub mod keymap;
+pub(crate) mod latency;
 pub(crate) mod layout;
 pub mod pickers;
 pub(crate) mod reload_summary;
