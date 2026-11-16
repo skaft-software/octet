@@ -210,6 +210,12 @@ exclude OS input queueing and physical emulator display. The driver drains real
 terminal output but does not qualify physical touchpad smoothness or live-provider
 load. Selection/reader-position correctness remains covered by the TUI tests.
 
+The renderer compares the published native input sequence as well as composer
+revision and readiness when deciding whether to preempt the stream frame slot.
+Non-editing navigation therefore bypasses that timer too. The sequence credited
+to a completed frame is captured before rendering; events during a write still
+preempt the following slot. Semantic-only updates retain the 16 ms pacing budget.
+
 ### Fullscreen navigation and selection audit
 
 For unchanged fullscreen application-owned history, navigation retains the

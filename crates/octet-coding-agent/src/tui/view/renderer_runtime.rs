@@ -124,6 +124,16 @@ impl SharedState {
         self.6.load(Ordering::Acquire)
     }
 
+    fn input_changed_since(&self, editor: u64, startup: bool, sequence: u64) -> bool {
+        let shell = self.borrow();
+        // Native terminal scheduling belongs here, not in the Pi adapter.
+        // Pi compatibility: packages/tui/src/tui.ts:1154-1161 preempts its
+        // render timer after focused input, including non-editing navigation.
+        self.input_sequence() != sequence
+            || shell.editor.revision() != editor
+            || shell.startup_pending != startup
+    }
+
     /// Lock-free test for a completed workspace walk. Idle wakes with nothing
     /// new never take the state lock to find out.
     pub(super) fn file_index_ready(&self) -> bool {
@@ -799,6 +809,7 @@ pub(super) fn render_loop_with_terminal(
     // still differs on the next wake, even when that write was not current.
     let mut last_editor_revision = state.borrow().editor.revision();
     let mut last_startup_pending = state.borrow().startup_pending;
+    let mut last_input_sequence = state.input_sequence();
     let mut animations = AnimationSchedule::new();
     let mut resize_schedule = ResizeSchedule::new(painted_resize_epoch);
     // A suspend is decided by the coalescer but finalized here, where the
@@ -856,14 +867,12 @@ pub(super) fn render_loop_with_terminal(
             false
         };
         let now = Instant::now();
-        let (resize_epoch, input_changed) = {
-            let shell = state.borrow();
-            (
-                shell.resize_epoch,
-                shell.editor.revision() != last_editor_revision
-                    || shell.startup_pending != last_startup_pending,
-            )
-        };
+        let resize_epoch = state.borrow().resize_epoch;
+        let input_changed = state.input_changed_since(
+            last_editor_revision,
+            last_startup_pending,
+            last_input_sequence,
+        );
         resize_schedule.observe(resize_epoch, now);
         if !input_changed
             && resize_schedule
@@ -892,9 +901,11 @@ pub(super) fn render_loop_with_terminal(
             &tui,
             &mut suspended,
             || {
-                let shell = state.borrow();
-                shell.editor.revision() != last_editor_revision
-                    || shell.startup_pending != last_startup_pending
+                state.input_changed_since(
+                    last_editor_revision,
+                    last_startup_pending,
+                    last_input_sequence,
+                )
             },
             animations.remaining(Instant::now()),
         ) {
@@ -910,9 +921,12 @@ pub(super) fn render_loop_with_terminal(
         let now = Instant::now();
         let shell = state.borrow();
         resize_schedule.observe(shell.resize_epoch, now);
-        let input_changed = shell.editor.revision() != last_editor_revision
-            || shell.startup_pending != last_startup_pending;
         drop(shell);
+        let input_changed = state.input_changed_since(
+            last_editor_revision,
+            last_startup_pending,
+            last_input_sequence,
+        );
         if !input_changed
             && resize_schedule
                 .remaining(now)
@@ -943,6 +957,7 @@ pub(super) fn render_loop_with_terminal(
         tui.request_render_force(resize_epoch != painted_resize_epoch);
         state.frame_written_at(tui.rendered_viewport_top());
         crate::tui::latency::painted(input_sequence);
+        last_input_sequence = input_sequence;
         painted_resize_epoch = resize_epoch;
         resize_schedule.painted();
     }
@@ -1071,6 +1086,26 @@ mod title_tests;
 
 #[cfg(test)]
 mod scheduler_tests {
+    #[test]
+    fn navigation_publication_preempts_stream_frame_slot_without_editor_mutation() {
+        let shell = super::InteractiveShell::test_shell();
+        let editor = shell.state.borrow().editor.revision();
+        let startup = shell.state.borrow().startup_pending;
+        let sequence = shell.state.input_sequence();
+        assert!(!shell.state.input_changed_since(editor, startup, sequence));
+        // Wheel, selection and picker motion publish input without editing text.
+        shell.state.6.store(sequence + 1, super::Ordering::Release);
+        let changed = shell.state.input_changed_since(editor, startup, sequence);
+        let start = super::Instant::now();
+        assert_eq!(
+            super::frame_coalesce_delay(Some(start), start, changed),
+            super::Duration::ZERO,
+        );
+        assert!(!shell
+            .state
+            .input_changed_since(editor, startup, sequence + 1));
+    }
+
     use std::time::{Duration, Instant};
 
     use super::*;

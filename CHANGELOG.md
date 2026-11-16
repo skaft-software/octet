@@ -31,8 +31,10 @@
 - Update quinn-udp to fix a receive loop that can spin after a truncated datagram. ([#735](https://github.com/skaft-software/octet/pull/735) by [@gafiatulin](https://github.com/gafiatulin))
 
 - Extension activation and trust flags preserve following subcommands. ([#734](https://github.com/skaft-software/octet/pull/734) by [@gafiatulin](https://github.com/gafiatulin))
+
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Fullscreen wheel, selection and picker navigation preempt the stream frame timer just like composer edits.
 - Native context observers borrow accepted requests and compute request-shape diagnostics only when preparation is refused.
 - Pi child text and reasoning observations share immutable strings and update byte budgets from new deltas.
 - Pi streamed tool arguments accept native-sized chunks while retaining bounded, isolated observations.
