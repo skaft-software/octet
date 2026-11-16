@@ -61,6 +61,7 @@
 - Plain-mode outcomes use compact durations with explicit completion, failure and interruption labels.
 - Pi turn observers isolate coded callback faults, preserve durable appends and continue later handlers.
 - Ctrl+D exits restore terminal attributes under tmux, including after extension reload and resize.
+- Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
 
 ## [0.10.4] - 2026-11-12
 

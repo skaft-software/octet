@@ -428,7 +428,36 @@ pub fn encode_responses_projection(
             }
         })
         .collect::<Vec<_>>();
-    encode_responses_replay(model, system, &projected)
+    let mut input = encode_responses_replay(model, system, &projected)?.into_items();
+    // Pi compatibility: openai-responses-shared.ts:334-339 replays the signed
+    // reasoning item itself, not a summary rebuilt from readable thinking. A
+    // text edit can retain that signature without retaining the whole output.
+    fn reasoning_key(item: &ResponsesItem) -> Option<(Option<&str>, Option<&str>)> {
+        let json = item.as_json();
+        if json.get("type").and_then(serde_json::Value::as_str) != Some("reasoning") {
+            return None;
+        }
+        let id = json.get("id").and_then(serde_json::Value::as_str);
+        let encrypted = json
+            .get("encrypted_content")
+            .and_then(serde_json::Value::as_str);
+        (id.is_some() || encrypted.is_some()).then_some((id, encrypted))
+    }
+    let signed = outputs
+        .iter()
+        .filter_map(|item| match item {
+            ResponsesReplayItem::Output(output) => Some(output.items()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|item| reasoning_key(item).map(|key| (key, item)))
+        .collect::<std::collections::HashMap<_, _>>();
+    for item in &mut input {
+        if let Some(original) = reasoning_key(item).and_then(|key| signed.get(&key)) {
+            *item = (*original).clone();
+        }
+    }
+    Ok(ResponsesInput::new(input))
 }
 
 /// Encodes ordinary canonical messages using the same input mapper as opaque

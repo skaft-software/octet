@@ -169,3 +169,52 @@ fn projection_keeps_opaque_reasoning_with_its_own_unchanged_assistant() {
     let input = encode_responses_projection(&model, None, &[], &original, &replay).unwrap();
     assert!(input.items().is_empty());
 }
+
+#[test]
+fn projection_replays_own_signed_reasoning_verbatim_when_assistant_text_is_edited() {
+    use crate::{
+        AssistantPart, ModelCatalog, ModelId, ReasoningPart, ReasoningState, ReasoningStateKind,
+    };
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let assistant = |text: &str| {
+        Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: model.spec.protocol,
+            content: vec![
+                AssistantPart::Reasoning(ReasoningPart {
+                    text: None,
+                    state: Some(ReasoningState {
+                        model: model.spec.id.clone(),
+                        protocol: model.spec.protocol,
+                        kind: ReasoningStateKind::OpenAiReasoning {
+                            item_id: Some("rs_own".into()),
+                            encrypted_content: Some("encrypted-own".into()),
+                        },
+                    }),
+                }),
+                AssistantPart::Text(text.into()),
+            ],
+        })
+    };
+    let reasoning = ResponsesItem::new(serde_json::json!({
+        "type":"reasoning", "id":"rs_own", "encrypted_content":"encrypted-own",
+        "summary":[], "future":{"must":"remain verbatim"},
+    }))
+    .unwrap();
+    let replay = vec![ResponsesReplayItem::Output(ResponsesOutput::new(vec![
+        reasoning.clone(),
+    ]))];
+    let input = encode_responses_projection(
+        &model,
+        None,
+        &[assistant("edited")],
+        &[assistant("original")],
+        &replay,
+    )
+    .unwrap();
+    assert_eq!(input.items()[0], reasoning);
+    assert_eq!(input.items()[1].as_json()["content"][0]["text"], "edited");
+}

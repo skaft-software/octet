@@ -113,7 +113,9 @@ Pi-compatible context hooks can edit messages, change instructions or append
 media while continuing an opaque Responses session. The wire request encodes
 the projected context. Unchanged assistant messages retain their own opaque
 output verbatim; edited or removed assistants cannot inherit another message's
-reasoning. Hook projections never rewrite the saved session.
+reasoning. An assistant text edit that retains its signed reasoning also retains
+the complete signed reasoning item verbatim. Hook projections never rewrite the
+saved session.
 
 `delete` moves the files to `.trash/`. `repair` makes an owner-private backup,
 then removes only an interrupted final append. A corrupted completed record is
