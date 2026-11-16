@@ -512,6 +512,31 @@ impl HeldApi {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<bool>,
     ) {
+        Self::start_with_prefix(body, repeat, 0).await
+    }
+
+    /// Deliver actual text deltas, then hold completion until released. Tests
+    /// can react to the Agent's output event rather than sleep before input.
+    pub(super) async fn streaming(
+        body: String,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<bool>,
+    ) {
+        let prefix = body.find("event: message_delta").unwrap();
+        Self::start_with_prefix(body, true, prefix).await
+    }
+
+    async fn start_with_prefix(
+        body: String,
+        repeat: bool,
+        prefix: usize,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<bool>,
+    ) {
         use std::sync::atomic::Ordering;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -580,15 +605,16 @@ impl HeldApi {
                     socket.write_all(body.as_bytes()).await.unwrap();
                     continue;
                 }
+                socket.write_all(&body.as_bytes()[..prefix]).await.unwrap();
                 let _ = started_tx.take().unwrap().send(());
                 let release = release_rx.take().unwrap();
                 let body = body.clone();
                 held_responses.spawn(async move {
                     if let Ok(complete) = release.await {
                         let response = if complete {
-                            body.as_bytes()
+                            &body.as_bytes()[prefix..]
                         } else {
-                            &body.as_bytes()[..1]
+                            &body.as_bytes()[prefix..prefix + 1]
                         };
                         let _ = socket.write_all(response).await;
                     }

@@ -252,6 +252,7 @@ test('long Pi-reference history survives repeated routed snapshots and cancellat
     input: JSON.stringify({ directory, cases: [{ name: 'adapter-seed', operations, checkpoints: [1199] }], diagnostics: true }),
     encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024,
   });
+  t.diagnostic(JSON.stringify({ oracle: { code: oracle.status, signal: oracle.signal, error: oracle.error?.code, stderr_tail: oracle.stderr } }));
   assert.equal(oracle.status, 0, oracle.stderr);
   assert.equal(oracle.signal, null);
   const state = JSON.parse(oracle.stdout).results[0].steps[0].state;
@@ -262,6 +263,13 @@ test('long Pi-reference history survives repeated routed snapshots and cancellat
     console.error(JSON.stringify({stage:'hook_snapshot', pid:process.pid, rss:process.memoryUsage().rss, heap_used:process.memoryUsage().heapUsed}));
     return { messages:`);
   const peer = launch(t, [fixture(directory, longFactory)]);
+  const closed = once(peer.child, 'close');
+  // Report the observed child status even when hydration or a later assertion
+  // fails. launch() owns teardown; do not infer a cause from a closed stdout.
+  t.after(async () => {
+    const [code, signal] = await closed;
+    t.diagnostic(JSON.stringify({ host: { pid: process.pid, rss: process.memoryUsage().rss }, child: { pid: peer.child.pid, code, signal }, stderr_tail: peer.stderr() }));
+  });
   await peer.init(features, offer);
   await peer.start();
   for (let revision = 1; revision <= 6; revision++) {
@@ -282,10 +290,8 @@ test('long Pi-reference history survives repeated routed snapshots and cancellat
     t.diagnostic(JSON.stringify({ stage: 'snapshot_applied', revision, entries: entries.length, head: parts.preparation.head, child_pid: peer.child.pid }));
     entries.push(message(`later-${revision}`, entries.at(-1).id, 'later turn'));
   }
-  const closed = once(peer.child, 'close');
   await peer.close();
   const [code, signal] = await closed;
-  t.diagnostic(JSON.stringify({ host: { pid: process.pid, rss: process.memoryUsage().rss }, child: { pid: peer.child.pid, code, signal }, oracle: { code: oracle.status, signal: oracle.signal, stderr_tail: oracle.stderr }, stderr_tail: peer.stderr() }));
   assert.deepEqual([code, signal], [0, null]);
   const observations = peer.stderr().trim().split('\n').map(line => JSON.parse(line));
   assert.equal(observations.length, 5);
@@ -406,4 +412,26 @@ test('receipt append checks only new IDs, independent of pinned history length',
     assert.deepEqual([transport.bytes, transport.records, transport.views], [0, 0, 0]);
   }
   assert.ok(work.every(reads => reads === 0), `append rescans history: ${work}`);
+});
+
+test('foreign-owner history never hydrates or poisons a later live-owner invocation', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'session-foreign-owner-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const peer = launch(t, [fixture(directory, countingFactory)]);
+  await peer.init(features, offer);
+  await peer.start();
+  const entries = [message('live-root', null, 'live history')];
+  const foreign = descriptors(entries, 1);
+  foreign.snapshot.descriptor.owner = { ...owner, session_id: 'foreign-session' };
+  const reply = await peer.request('hook/run', contextParams(peer, foreign, 1)).response;
+  assert.equal(reply.error?.code, -32602, JSON.stringify(reply));
+  assert.equal(peer.seen.some(frame => frame.method === 'session/snapshot/read'), false,
+    'reject owner mismatch before reading a single history byte');
+  const fresh = descriptors(entries, 2);
+  const buffers = new Map([[fresh.snapshot.descriptor.transfer_id, fresh.snapshot.bytes], [fresh.invocation.descriptor.transfer_id, fresh.invocation.bytes]]);
+  const served = serveAll(peer, buffers, [...buffers.keys()]);
+  const later = await peer.request('hook/run', contextParams(peer, fresh, 2)).response;
+  await served;
+  assert.deepEqual(later.result?.provider_context?.messages, [{ User: { content: [{ Text: 'count:1' }] } }]);
+  await peer.close();
 });

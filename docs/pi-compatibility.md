@@ -458,6 +458,24 @@ stderr tails, RSS/heap observations and snapshot transitions, including recovery
 after cancellation. These checks are separate from version admission and the
 API inventory; full-inventory acceptance on the owner's real setup is **NOT RUN**.
 
+Reduced real-App qualification (`cargo test -p octet-coding-agent --lib
+native_pi_qualification --profile ci-test --locked`) also exercises ordered tool
+argument/result hooks, coded input faults, malformed context rollback, copied
+history mutation, final wire payload hooks, and a later successful provider turn.
+A held loopback SSE response sends real text before a barrier injects Escape or
+Ctrl+D. Cancellation completes without releasing the response; a later turn still
+works. A never-settling Pi shutdown handler cannot trap native exit, and the
+adapter and its spawned child stop. The routed transport corpus separately rejects
+foreign-owner snapshots before reading their bytes and accepts the next live-owner
+invocation. These are offline reduced-fixture checks, not attended terminal or
+full-inventory acceptance.
+
+Intentional boundaries stay visible: callback-initiated root `ctx.abort()` reports
+`unsupported_feature` (no negotiated root-run abort contract); native Escape and
+Ctrl+D retain authority. Native shutdown bounds Pi's awaited shutdown callback to
+preserve terminal/process cleanup. These checks do not turn API admission or
+interface inventory into behavioral qualification of every installed package.
+
 The automated adapter suite uses a synthetic host. A run with all four original
 entrypoints explicitly supplied passed **22 tests, zero skips**, including Doom
 WASM animation/resume, drawing mouse export, owner-retained powerline snapshots,

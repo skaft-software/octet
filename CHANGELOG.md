@@ -11,6 +11,7 @@
 - Document the reusable provider boundary and explicit caller ownership of storage, login interaction and inference.
 - Pi compatibility checks record long-session snapshot transitions, process exits and memory observations with isolated offline fixtures.
 - Pi session checks cover repeated tools, compaction, process restart and resume with durable private state and later turns.
+- Pi compatibility checks cover hook faults, history isolation, ownership, streaming cancellation and descendant cleanup.
 
 ### Changed
 

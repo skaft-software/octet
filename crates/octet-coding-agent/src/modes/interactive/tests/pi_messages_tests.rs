@@ -802,3 +802,105 @@ export default pi => {
         .all(|request| !request.to_string().contains("ENDURANCE_PRIVATE")));
     assert!(directory.path().join("fixture.txt").is_file());
 }
+
+// Pi runner.ts:1525-1574 isolates throwing input handlers; :1190-1246 chains
+// tool-result replacements; :1305-1335 isolates context handlers; :1368-1398
+// chains wire payload hooks (packages/coding-agent/src/core/extensions/).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_qualification_faults_poisoned_history_tool_order_and_wire_hooks() {
+    let (directory, mut app, _server, requests) = app_with_provider(r#"
+export default pi => {
+  const trace = value => appendFileSync(TRACE + '.qualification', JSON.stringify(value) + '\n');
+  pi.on('input', () => { throw Object.assign(new Error('callback-local'), {code:-32602}); });
+  pi.on('input', () => ({action:'transform', text:42}));
+  pi.on('input', event => ({action:'transform', text:event.text + ':HEALTHY_INPUT'}));
+  pi.on('context', (event, ctx) => {
+    const entries = ctx.sessionManager.getEntries();
+    const user = entries.find(entry => entry.type === 'message' && entry.message.role === 'user');
+    if (user) user.message.content[0].text = 'POISONED_OBSERVATION';
+    trace({stage:'history', poisoned:JSON.stringify(ctx.sessionManager.getEntries()).includes('POISONED_OBSERVATION')});
+    event.messages[0].content = [{type:'text',text:'POISONED_CONTEXT'}];
+    return {messages:'malformed'};
+  });
+  pi.on('context', event => { trace({stage:'context', poisoned:JSON.stringify(event.messages).includes('POISONED')}); });
+  pi.on('tool_call', event => { trace({stage:'call-first'}); event.input.path = 'qualified.txt'; });
+  pi.on('tool_call', event => { trace({stage:'call-second', path:event.input.path}); });
+  pi.on('tool_result', event => { trace({stage:'result-first', content:event.content}); return {content:[{type:'text',text:'QUALIFIED_RESULT'}]}; });
+  pi.on('tool_result', event => { trace({stage:'result-second', content:event.content}); });
+  pi.on('before_provider_request', event => ({...event.payload, max_tokens:77}));
+  pi.on('before_provider_request', event => { trace({stage:'wire', max:event.payload.max_tokens}); });
+};
+"#, true).await;
+    let mut shell = InteractiveShell::test_shell();
+    std::fs::write(
+        directory.path().join("qualified.txt"),
+        "QUALIFICATION_TOOL_SOURCE",
+    )
+    .unwrap();
+    for text in ["QUALIFICATION_FIRST", "QUALIFICATION_LATER"] {
+        let input = app
+            .executable_extensions
+            .process_input(text.into(), None, "interactive", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(input.text, format!("{text}:HEALTHY_INPUT"));
+        drive(&mut app, &mut shell, UserInput::from(input.text)).await;
+    }
+    app.executable_extensions.shutdown().await;
+    let rows: Vec<Value> =
+        std::fs::read_to_string(directory.path().join("trace.jsonl.qualification"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    let stages: Vec<_> = rows
+        .iter()
+        .filter_map(|row| row["stage"].as_str())
+        .collect();
+    assert_eq!(
+        stages.iter().filter(|stage| **stage == "context").count(),
+        3
+    );
+    assert!(rows
+        .iter()
+        .filter(|row| row["stage"] == "context")
+        .all(|row| row["poisoned"] == false));
+    let observations: Vec<_> = rows
+        .iter()
+        .filter(|row| row["stage"] == "history")
+        .collect();
+    assert_eq!(observations.len(), 3);
+    assert!(observations.iter().all(|row| row["poisoned"] == false));
+    let call = stages
+        .iter()
+        .position(|stage| *stage == "call-first")
+        .unwrap();
+    assert_eq!(
+        &stages[call..call + 4],
+        &["call-first", "call-second", "result-first", "result-second"]
+    );
+    assert_eq!(rows[call + 1]["path"], "qualified.txt");
+    assert!(rows[call + 2]["content"]
+        .to_string()
+        .contains("QUALIFICATION_TOOL_SOURCE"));
+    assert_eq!(
+        rows[call + 3]["content"],
+        json!([{"type":"text", "text":"QUALIFIED_RESULT"}])
+    );
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 3);
+    assert!(captured.iter().all(|request| request["max_tokens"] == 77));
+    assert!(captured
+        .iter()
+        .all(|request| !request.to_string().contains("POISONED")));
+    assert!(captured[1].to_string().contains("QUALIFIED_RESULT"));
+    assert!(captured
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("QUALIFICATION_LATER:HEALTHY_INPUT"));
+    let durable = std::fs::read_to_string(app.agent.session().path()).unwrap();
+    assert!(!durable.contains("POISONED"));
+    assert!(durable.contains("QUALIFIED_RESULT"));
+}

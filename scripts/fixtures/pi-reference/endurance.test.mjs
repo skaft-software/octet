@@ -28,7 +28,8 @@ test('long oracle reports completed snapshots, memory and actual child exit', { 
   const checkpoints = [1199, 1200, 1201, 1203, 1204, 1207, 1208, 1209];
   const child = spawn(process.execPath, [new URL('./session-driver.mjs', import.meta.url).pathname, '1.5.0'], { stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
-  let stdout = '', stderr = '', overflow = false;
+  let stdout = '', stderr = '', overflow = false, inputError;
+  child.stdin.on('error', error => { inputError = error.code; });
   child.stdout.setEncoding('utf8').on('data', data => {
     if (stdout.length + data.length >= 32 * 1024 * 1024) { overflow = true; child.kill('SIGKILL'); }
     else stdout += data;
@@ -36,7 +37,7 @@ test('long oracle reports completed snapshots, memory and actual child exit', { 
   child.stderr.setEncoding('utf8').on('data', data => { stderr = (stderr + data).slice(-65536); });
   child.stdin.end(JSON.stringify({ directory, cases: [{ name: 'long', operations: ops, checkpoints }], diagnostics: true }));
   const status = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal })); });
-  t.diagnostic(JSON.stringify({ host: { pid: process.pid, rss: process.memoryUsage().rss }, child: { pid: child.pid, ...status }, stderr_tail: stderr }));
+  t.diagnostic(JSON.stringify({ host: { pid: process.pid, rss: process.memoryUsage().rss }, child: { pid: child.pid, ...status, input_error: inputError }, stderr_tail: stderr }));
   assert.equal(overflow, false, 'oracle output exceeds the reduced fixture bound');
   assert.deepEqual(status, { code: 0, signal: null }, stderr);
   const events = stderr.trim().split('\n').map(line => JSON.parse(line));

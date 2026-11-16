@@ -477,3 +477,172 @@ export default pi => pi.on('session_start', async (_, ctx) => {
     assert_eq!(receipt["level"], "off");
     app.executable_extensions.shutdown().await;
 }
+
+#[derive(Clone)]
+struct StreamingInput {
+    sender: tokio::sync::mpsc::UnboundedSender<std::io::Result<Event>>,
+    fired: Arc<std::sync::atomic::AtomicBool>,
+    quit: bool,
+}
+
+impl octet_agent::EventObserver for StreamingInput {
+    fn on_event(&self, event: &AgentEvent) {
+        if matches!(event, AgentEvent::OutputDelta { .. })
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let (code, modifiers) = if self.quit {
+                (KeyCode::Char('d'), KeyModifiers::CONTROL)
+            } else {
+                (KeyCode::Esc, KeyModifiers::NONE)
+            };
+            self.sender
+                .send(Ok(Event::Key(crossterm::event::KeyEvent::new(
+                    code, modifiers,
+                ))))
+                .unwrap();
+        }
+    }
+}
+
+// Pi runner.ts:265-274 awaits session_shutdown. Native terminal/process ownership
+// deliberately bounds that wait so a never-settling callback cannot trap exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pi_qualification_stream_cancel_quit_shutdown_and_descendant_cleanup() {
+    use super::pi_contract_support::command;
+    use super::support::{scripted_model, text_turn, HeldApi};
+    for quit in [false, true] {
+        let (server, _started, release) = HeldApi::streaming(text_turn()).await;
+        let (directory, mut app) = pi_app(
+            r#"
+import { appendFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+const trace = value => appendFileSync(TRACE, JSON.stringify(value) + '\n');
+export default pi => {
+  pi.on('session_start', async () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    trace({stage:'started', pid:process.pid, child:child.pid});
+  });
+  pi.registerCommand('abort-probe', {handler: (_, ctx) => {
+    try { ctx.abort(); trace({stage:'abort-accepted'}); }
+    catch (error) { trace({stage:'abort-refused', code:error.code}); }
+  }});
+  pi.on('session_shutdown', async () => { trace({stage:'shutdown'}); await new Promise(() => {}); });
+};
+"#,
+        );
+        let model = scripted_model(&server.uri);
+        app.catalog
+            .register_endpoint((*model.endpoint).clone())
+            .unwrap();
+        app.catalog.register_model((*model.spec).clone()).unwrap();
+        app = rebuild_app(app, Some(model), None, None, None).unwrap();
+        app.executable_extensions
+            .activate_session_lifecycle_driver();
+        let mut shell = InteractiveShell::test_shell();
+        command(&mut app, &mut shell, "abort-probe").await.unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.agent.observe(StreamingInput {
+            sender,
+            fired: fired.clone(),
+            quit,
+        });
+        let mut input = futures_util::stream::poll_fn(move |cx| receiver.poll_recv(cx));
+        let inspection = ActiveRunInspection::capture(&app);
+        let mut run = app
+            .agent
+            .prompt("cancel actual streamed output")
+            .await
+            .unwrap();
+        let control = run.control();
+        let id = shell.begin_run("stream probe");
+        shell.set_awaiting_provider(id);
+        let mut quitting = false;
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            drive_active_run(
+                &mut run,
+                &control,
+                &mut shell,
+                &mut input,
+                &mut tokio::time::interval(Duration::from_millis(16)),
+                &mut VecDeque::new(),
+                &mut quitting,
+                None,
+                None,
+                &mut app.executable_extensions,
+                &mut false,
+                &inspection,
+                &mut None,
+            ),
+        )
+        .await
+        .expect("stream cancellation must settle without provider completion")
+        .unwrap();
+        drop(run);
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            outcome,
+            HostRunOutcome::Aborted,
+            "{}",
+            shell.debug_snapshot()
+        );
+        assert_eq!(quitting, quit);
+        drop(release); // Never finish the interrupted response, even after cancellation.
+        let path = app.agent.session().path().to_owned();
+        let prefix = std::fs::read(&path).unwrap();
+        if !quit {
+            let mut later = app
+                .agent
+                .prompt("later turn after cancellation")
+                .await
+                .unwrap();
+            let mut finished = 0;
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(10), later.next())
+                .await
+                .unwrap()
+            {
+                if let AgentEvent::RunFinished { reason, .. } = event {
+                    assert!(matches!(reason, octet_agent::FinishReason::Completed));
+                    finished += 1;
+                }
+            }
+            drop(later);
+            assert_eq!(finished, 1, "later turn must actually complete");
+            assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            app.executable_extensions.shutdown(),
+        )
+        .await
+        .expect("never-settling Pi shutdown must not trap terminal ownership");
+        assert!(app.executable_extensions.running_generations().is_empty());
+        let rows: Vec<serde_json::Value> =
+            std::fs::read_to_string(directory.path().join("trace.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        assert!(rows
+            .iter()
+            .any(|row| row["stage"] == "abort-refused" && row["code"] == -32601));
+        assert!(!rows.iter().any(|row| row["stage"] == "abort-accepted"));
+        assert!(rows.iter().any(|row| row["stage"] == "shutdown"));
+        let start = rows.iter().find(|row| row["stage"] == "started").unwrap();
+        for key in ["pid", "child"] {
+            let pid = start[key].as_u64().unwrap();
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let status = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                status.trim().is_empty() || status.trim_start().starts_with('Z'),
+                "owned {key} {pid} still running: {status}"
+            );
+        }
+        Session::open_read_only(&path).expect("interrupted session remains resumable");
+    }
+}
