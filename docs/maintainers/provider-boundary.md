@@ -75,3 +75,7 @@ checks, cache-first readiness, context override fallback/notes and default
 selection remain frontend policy. An account/plan replacement invalidates an
 existing resolver rather than spending a replacement account's credential.
 No tool-definition, schema-validation or extension-host API changes are made.
+
+Browser success-page markup, branding and font assets also remain caller-owned
+through `LoginInteraction::browser_page`; the AI crate has no frontend asset
+dependency. The existing frontend callback page retains its presentation.

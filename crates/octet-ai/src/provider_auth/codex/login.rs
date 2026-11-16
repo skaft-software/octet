@@ -62,6 +62,10 @@ pub enum DeviceLoginPhase {
 pub trait LoginInteraction: Send + Sync {
     fn notify(&self, progress: LoginProgress);
     fn open_browser(&self, url: &str) -> bool;
+    /// Optional caller-owned callback-page presentation. Inputs are static public labels.
+    fn browser_page(&self, _title: &str, heading: &str, message: &str) -> String {
+        format!("{heading}\n{message}")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +79,11 @@ tokio::task_local! {
 }
 fn publish_progress(progress: LoginProgress) {
     let _ = INTERACTION.try_with(|interaction| interaction.notify(progress));
+}
+pub(super) fn browser_page(title: &str, heading: &str, message: &str) -> String {
+    INTERACTION
+        .try_with(|interaction| interaction.browser_page(title, heading, message))
+        .unwrap_or_else(|_| format!("{heading}\n{message}"))
 }
 pub(super) fn browser_exchange_started() {
     publish_progress(LoginProgress::Exchanging);

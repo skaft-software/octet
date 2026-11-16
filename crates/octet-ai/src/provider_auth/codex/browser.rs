@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use sha2::{Digest as _, Sha256};
@@ -20,18 +20,6 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
-/// The monochrome mark; the page's CSS paints it in the text colour.
-const MARK: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/assets/octet/marks/mark-black.svg"
-));
-/// Local Grotesk Regular (Local 0.53), inlined so
-/// the pages load nothing from the network. See `THIRD_PARTY_NOTICES.md`.
-const FONT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/assets/fonts/LocalGrotesk-Regular.woff2"
-));
-
 /// The loopback address for one registered callback port.
 pub(super) fn callback_address(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
@@ -344,23 +332,8 @@ async fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Re
     stream.shutdown().await
 }
 
-/// A flat page in the brand's ink colours, following the system theme: one
-/// hairline frame, no fills, radii or shadows.
 fn page(title: &str, heading: &str, message: &str) -> String {
-    let font = STANDARD.encode(FONT);
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>
-@font-face{{font-family:"Local Grotesk";src:url(data:font/woff2;base64,{font}) format("woff2");font-weight:400;font-style:normal;font-display:block}}
-:root{{color-scheme:light dark;--bg:#fafaf7;--fg:#121416;--muted:#6b6e69;--line:#dfe0da}}
-@media(prefers-color-scheme:dark){{:root{{--bg:#101214;--fg:#f2f3ee;--muted:#9a9d97;--line:#2a2d30}}}}
-html{{background:var(--bg);color:var(--fg);font:400 15px/1.6 "Local Grotesk",ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}}
-body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}}
-main{{width:min(100%,400px);box-sizing:border-box;border:1px solid var(--line);padding:32px}}
-svg{{display:block;width:40px;height:20px}}svg rect{{fill:currentColor}}
-h1{{font-size:20px;font-weight:400;line-height:1.3;letter-spacing:-.01em;margin:40px 0 8px}}
-p{{margin:0;color:var(--muted)}}
-</style></head><body><main>{MARK}<h1>{heading}</h1><p>{message}</p></main></body></html>"#
-    )
+    login::browser_page(title, heading, message)
 }
 
 #[cfg(test)]
