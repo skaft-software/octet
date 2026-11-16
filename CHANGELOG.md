@@ -48,6 +48,7 @@
 
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Tool output previews keep deliberate head and tail windows with exact omitted-middle counts.
 - Tool command and output omissions use consistent hidden wording and Ctrl+O disclosure hints.
 - Working and Thinking timers use the shared inline metadata separator.
 - Scrolled transcripts show one concise PageDown instruction alongside the new-output counter.

@@ -121,3 +121,27 @@ fn polish_tool_omissions_share_hidden_word_and_shortcut() {
         "… 4 output rows hidden · Ctrl+O"
     );
 }
+
+#[test]
+fn polish_output_window_keeps_two_head_and_two_nonblank_tail_rows() {
+    let theme = crate::tui::theme::test_theme();
+    let output = "line 1\n\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n\nline 8\n\n";
+    for name in ["bash", "exec", "powershell", "codemode"] {
+        let panel = tool_panel(
+            name,
+            serde_json::json!({"command":"run tests", "code":"return 1"}),
+            output,
+            true,
+        );
+        let rows = if name == "codemode" {
+            codemode_render::project_output(&panel, &theme, 100, false).lines
+        } else {
+            render_compact_bash_output(&panel, &theme, 100, false, "")
+        };
+        assert_eq!(
+            screen_dump(&rows, 100),
+            "line 1\nline 2\n… 4 output rows hidden · Ctrl+O\nline 7\nline 8",
+            "{name}"
+        );
+    }
+}

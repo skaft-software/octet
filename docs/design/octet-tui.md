@@ -518,10 +518,15 @@ output omissions use `hidden` and advertise `Ctrl+O`; compact widths use
 that discarded bytes can be recovered. Generic tool headers retain their
 selected argument with newlines intact and use the same twelve-row preview, rather
 than truncating at a fixed character count. Semantic copy preserves the full
-sanitized input, never the raw argument envelope. Collapsed output keeps
-both its head and tail within the visual-row budget, with an exact omitted-middle
-count distinct from irrecoverable capture-byte loss. Local-shell output remains
-tail-only. The command is independent of the output budget.
+sanitized input, never the raw argument envelope. Collapsed native tool output uses a deterministic head/marker/tail window after
+sanitization and wrapping: Bash, exec, PowerShell and Codemode keep the first two
+and last two nonblank visual rows in a five-row budget, with the omitted-middle
+count and Ctrl+O on the middle row. Blank-only output rows do not consume that
+preview; expanded Codemode retains them. No test-runner-specific summary is
+inferred, so arbitrary output uses the same rule. Diffs retain ten content rows
+split five head/five tail plus the middle omission hint, preserving changed-line
+styling and capture-loss accounting. Short output is not padded. Local-shell
+output remains tail-only. The command is independent of the output budget.
 
 Ctrl+O toggles the global disclosure mode for compaction, retained tool output,
 Bash/local-shell output, and edit/write diffs. Retained reasoning keeps its own
@@ -532,9 +537,9 @@ already discarded.
 Codemode renders its documented JavaScript `code` field with literal syntax
 highlighting instead of flattening it into an extension-argument summary. ANSI
 terse mode shows three wrapped source rows and an explicit hidden-row hint;
-Ctrl+O reveals the complete source. Literal output has a bounded default preview
-(five source lines / 600 Unicode characters) and full disclosure through the same
-toggle. Output is not interpreted as Markdown or an edit diff. Semantic copy
+Ctrl+O reveals the complete source. Literal ANSI output uses the shared five-visual-row head/tail window and full
+disclosure through the same toggle. The semantic Tern preview retains its five
+source-line / 600-character cap. Output is not interpreted as Markdown or an edit diff. Semantic copy
 includes the complete sanitized script, not argument envelopes, output or preview
 hints. Disclosure-sensitive Codemode blocks remain atomic at history commits.
 Native Tern uses its own semantic code/queued-input chrome; see [Tern](../tern.md).

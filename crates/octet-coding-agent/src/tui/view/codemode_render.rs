@@ -136,22 +136,39 @@ pub(super) fn project_output(
     width: u16,
     expanded: bool,
 ) -> ToolRows {
-    let (text, hidden) = output_preview(panel, expanded);
+    // Native cards use the same wrapped-row window as shell cards. The bounded
+    // source preview below remains the semantic Tern projection, not ANSI layout.
+    let (text, _) = output_preview(panel, true);
     let rows = text
         .lines()
+        .filter(|line| expanded || !line.trim().is_empty())
         .flat_map(|line| wrap_hanging(&theme.fg("tool_output", line), "", "", width))
         .collect();
     let mut output = ToolRows::literal(rows, text, 0);
     output.retain_rows(&(0..output.lines.len()).collect::<Vec<_>>());
-    if hidden {
-        for row in wrap_hanging(
-            &theme.fg("tool_output", "(output hidden · Ctrl+O)"),
-            "",
-            "",
-            width,
-        ) {
-            output.decoration(row);
-        }
+    if !expanded && output.lines.len() > super::COMPACT_EXEC_OUTPUT_ROWS {
+        let (head, tail_start) = super::output_window::head_tail_window(
+            output.lines.len(),
+            super::COMPACT_EXEC_OUTPUT_ROWS,
+        );
+        let hidden = tail_start - head;
+        let retained = (0..head)
+            .chain(tail_start..output.lines.len())
+            .collect::<Vec<_>>();
+        output.retain_rows(&retained);
+        output.lines.insert(
+            head,
+            subdued_text(
+                theme,
+                &super::tool_render::tool_omission_hint(
+                    theme,
+                    hidden,
+                    "output",
+                    usize::from(width),
+                ),
+            ),
+        );
+        output.copy_rows.insert(head, None);
     }
     output
 }
@@ -239,6 +256,9 @@ mod tests {
         let p = panel("return 1", "one\n\n    two", true, false);
         assert_eq!(output_text(&p, false), "one\n\n    two");
         assert!(render_output(&p, &test_theme(), 80, false)
+            .iter()
+            .all(|row| !row.is_empty()));
+        assert!(render_output(&p, &test_theme(), 80, true)
             .iter()
             .any(|row| row.is_empty()));
     }
