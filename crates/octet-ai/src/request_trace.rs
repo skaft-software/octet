@@ -220,6 +220,28 @@ pub(crate) fn request_shape(body: &Value) -> Map<String, Value> {
             None => "missing",
         };
         shape.insert("contents_final_role".into(), json!(role));
+        let (mut text, mut thought, mut function_call, mut other) =
+            (0usize, 0usize, 0usize, 0usize);
+        for part in contents
+            .iter()
+            .filter_map(|content| content.get("parts").and_then(Value::as_array))
+            .flatten()
+        {
+            if !part.get("thoughtSignature").is_some_and(Value::is_string) {
+                continue;
+            }
+            if part.get("functionCall").is_some() {
+                function_call += 1;
+            } else if part.get("text").is_some() && part.get("thought") == Some(&Value::Bool(true))
+            {
+                thought += 1;
+            } else if part.get("text").is_some() {
+                text += 1;
+            } else {
+                other += 1;
+            }
+        }
+        shape.insert("google_signed_parts".into(), json!({"text": text, "thought": thought, "function_call": function_call, "other": other}));
     }
     shape.insert(
         "previous_response_id".into(),

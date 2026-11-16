@@ -154,3 +154,21 @@ fn contents_final_role_is_bounded_and_reports_wire_tail() {
         );
     }
 }
+
+#[test]
+fn google_signature_shape_counts_only_part_kinds() {
+    let body = json!({"contents": [{"role": "model", "parts": [
+        {"text": "PRIVATE", "thoughtSignature": "SECRET"},
+        {"text": "PRIVATE", "thought": true, "thoughtSignature": "SECRET"},
+        {"functionCall": {"name": "PRIVATE"}, "thoughtSignature": "SECRET"},
+        {"unknown": "PRIVATE", "thoughtSignature": "SECRET"},
+        {"text": "unsigned"}
+    ]}]});
+    let shape = Value::Object(request_shape(&body));
+    assert_eq!(
+        shape["google_signed_parts"],
+        json!({"text": 1, "thought": 1, "function_call": 1, "other": 1})
+    );
+    assert!(!shape.to_string().contains("SECRET"));
+    assert!(!shape.to_string().contains("PRIVATE"));
+}

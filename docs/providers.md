@@ -1079,6 +1079,8 @@ usage; a rejection adds the status and the provider's request id. Shape includes
   body size;
 - the length of every top-level array, and whether `previous_response_id` is set
   (never its value);
+- for Google-compatible requests, counts of signed text, thought, function-call
+  and other parts in the final wire body, without signature values;
 - for Responses requests, the count of each input item type, the trailing item
   type, image counts by kind (inline, URL, file id) with inline wire bytes, how
   many reasoning items carry `encrypted_content` (never its content), and how
