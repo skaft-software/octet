@@ -50,6 +50,7 @@
 
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
 - Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
 - Empty and ellipsis-only running shell cards show an explicit interruptible state while live progress keeps its available rows.
 - Completed tool cards share one final duration row with a documented tool_duration theme setting.

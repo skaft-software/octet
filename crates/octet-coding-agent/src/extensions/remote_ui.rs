@@ -386,6 +386,9 @@ impl RemoteUi {
                                 state.working.frames = frames;
                                 state.working.interval_ms = interval_ms;
                             }
+                            Chrome::WorkingComponent { line } => {
+                                state.working.component_line = line
+                            }
                             Chrome::HiddenThinking { label } => state.hidden_thinking_label = label,
                             Chrome::Editor { .. }
                             | Chrome::Get

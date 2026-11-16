@@ -384,6 +384,22 @@ deliberate differences from Pi's unbounded, blocking chain.
   their visible labels as plain text. Other terminal escapes remain rejected. Oversized Pi render
   snapshots are clipped to the existing row, per-line and aggregate wire bounds at UTF-8/SGR
   boundaries, with an ellipsis. Rust paints cached lines and never calls JS synchronously.
+- The working row runs the same Pi TUI `Loader` class exported to factories, so
+  prototype rendering patches affect the live indicator. Message, visibility,
+  explicit indicator options and palette changes update that component; hiding
+  or stopping work disposes its timer, and showing/restarting creates a fresh
+  Loader with retained settings. `setWorkingIndicator()` restores Pi defaults
+  through the Loader, including any extension override of its rendering.
+  Effective safe-SGR presentation (not copied animation frames) crosses the
+  existing owner-fenced chrome channel: one in-flight request, one replaceable
+  latest row, a 2-second delivery deadline and a 16-KiB row bound. Only the
+  working component publishes here; dialog Loaders remain independent. Native
+  frame updates touch live status blocks, not settled transcript history. Retirement
+  and reload stop its timer and fence pending callbacks. Rust paints the cached
+  row once, retains elapsed-time/layout ownership and suppresses animated
+  component presentation under reduced motion or disabled terminal animation,
+  using the plain working message instead. Without an active component, the
+  native spinner remains available. No paint path calls the host synchronously.
 - `setStatus` retains footer-provider metadata and, without a custom Pi footer,
   projects one width-clipped status row below the native footer through an
   owner-fenced `below_editor` slot. Keys sort deterministically; setting an
@@ -1107,7 +1123,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The isolated rebased-candidate adapter run, with two test files in parallel, is
-**1650 tests: 1617 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1653 tests: 1620 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
@@ -1149,6 +1165,30 @@ run, and the host now answers the model-auth query that probe needs, so re-run
 the probe on your binary to confirm. Original `/draw`
 acceptance remains historical; these are observed working-tree binaries, not a
 frozen release candidate.
+
+Working-Loader qualification uses an explicitly supplied, unchanged
+`pi-agent-extensions@0.5.4/extensions/whimsical/index.ts`. Fetch its reviewed
+published tarball into a temporary directory with `npm pack pi-agent-extensions@0.5.4`;
+keep it outside this repository. The offline real-process probe accepts its path
+and an installed Pi CLI; it never downloads packages or calls live providers:
+
+```sh
+python3 -B scripts/test-pi-working-loader.py --binary /absolute/octet \
+  --pi-cli /absolute/pi/dist/bundle/cli.js \
+  --whimsical /absolute/package/extensions/whimsical/index.ts \
+  --output /absolute/new-private-evidence-directory
+```
+
+It exercises all five original presets, multi-character output, the original
+preset tuner during gated loopback inference, retained message/theme/indicator
+controls, visibility, cancellation, restart, reload and terminal restoration.
+Separate real-process legs check colorless-terminal animation suppression and
+Tern's reduced-motion handshake plus live policy toggles through a bounded TSP
+observer. Reload/exit checks verify retired adapter PIDs disappear. Adapter
+regressions check timer disposal, backpressure and rejection of retired callbacks.
+The test companion drives retained contexts without changing Whimsical; it opens
+the original tuner before starting work because native busy slash commands queue.
+Captures are terminal-output evidence, not physical-display measurements.
 
 Before the composer-slot change, the unchanged original rainbow editor passed
 both paced input (with a grace

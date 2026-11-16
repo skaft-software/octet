@@ -702,6 +702,17 @@ pub(super) fn render_block_planned_with_rainbow(
                 && reasoning
                     .extension_working
                     .as_ref()
+                    .is_some_and(|working| working.component_line.is_some()) =>
+        {
+            None
+        }
+        TranscriptBlock::Reasoning(reasoning)
+            if collapsed_reasoning
+                && !reasoning.finished
+                && theme.capabilities().animation
+                && reasoning
+                    .extension_working
+                    .as_ref()
                     .is_some_and(|working| working.frames.is_some()) =>
         {
             super::remote_ui::working_frame(reasoning)

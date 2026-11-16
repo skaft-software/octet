@@ -1199,7 +1199,8 @@ pub(super) fn collapsed_reasoning_lines_sized(
             .map_or_else(Vec::new, |label| vec![theme.fg("muted", label)]);
     }
     if let Some(working) = reasoning.extension_working.as_ref().filter(|working| {
-        working.message.is_some()
+        working.component_line.is_some()
+            || working.message.is_some()
             || working.visible.is_some()
             || working.frames.is_some()
             || working.interval_ms.is_some()
@@ -1213,6 +1214,13 @@ pub(super) fn collapsed_reasoning_lines_sized(
         };
         if working.visible == Some(false) {
             return hidden().into_iter().collect();
+        }
+        if theme.capabilities().animation {
+            if let Some(line) = &working.component_line {
+                let mut lines = vec![line.clone()];
+                lines.extend(hidden());
+                return lines;
+            }
         }
         let label = working
             .message

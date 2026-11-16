@@ -168,6 +168,7 @@ impl ExecutableExtensions {
                     visible,
                     frames,
                     interval_ms,
+                    ..Default::default()
                 });
             }
             ExtensionUiContribution::HiddenThinking { label } => {

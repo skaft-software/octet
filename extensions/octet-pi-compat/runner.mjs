@@ -11,6 +11,7 @@ const { Runtime } = await import('./lib/runtime.mjs');
 const { sendDesktopNotification } = await import('./lib/desktop-notifications.mjs');
 const { fallbackData } = await import('./lib/installed-pi.mjs');
 const { configureBridgeTheme, bindInstalledPiTheme, onBridgeThemeChange } = await import('./lib/theme.mjs');
+const { invalidateWorkingLoader } = await import('./lib/working-loader.mjs');
 const { tracePhase } = await import('./lib/startup-trace.mjs');
 tracePhase('adapter.entry');
 
@@ -38,7 +39,7 @@ try {
     if (runtime.stopping) return;
     // The facade is stable: invalidate owned renderer components explicitly,
     // including cached lastComponent tool slots, rather than comparing identity.
-    for (const state of runtime.states.values()) if (state.alive) runtime.transcript.retire(state);
+    for (const state of runtime.states.values()) if (state.alive) { runtime.transcript.retire(state); invalidateWorkingLoader(state); }
     const store = runtime.scope.getStore();
     if (store?.state?.alive && store.state === runtime.foreground && !store.controller.signal.aborted) runtime.transcript.invalidate(store);
     for (const surface of runtime.ui.surfaces.values()) if (surface.store.state.alive) runtime.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });

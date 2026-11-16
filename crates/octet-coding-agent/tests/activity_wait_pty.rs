@@ -297,6 +297,13 @@ impl Candidate {
             std::path::PathBuf::from(env!("CARGO_BIN_EXE_octet"))
         };
 
+        // A saved preference keeps the primary-screen fixture mutable: the
+        // program-status journey switches screens through /settings.
+        let config_path = home.join(".octet/config.toml");
+        let mut config = fs::read_to_string(&config_path).unwrap_or_default();
+        config.insert_str(0, "tui_mode = \"inline\"\n");
+        fs::write(config_path, config).expect("inline screen preference");
+
         let pty = Pty::open(INITIAL_COLUMNS, INITIAL_ROWS);
         let tty_fd = pty.slave.as_ref().expect("open PTY slave").as_raw_fd();
         let stdin = duplicate_stdio(tty_fd);
@@ -308,10 +315,6 @@ impl Candidate {
                 "--offline",
                 "--no-context-files",
                 "--no-tools",
-                // This suite qualifies primary-screen clear/replay, not the
-                // default alternate-screen viewport policy.
-                "--tui-mode",
-                "inline",
                 "--color",
                 color,
                 "--theme",

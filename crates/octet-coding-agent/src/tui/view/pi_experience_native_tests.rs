@@ -187,3 +187,70 @@ fn native_pi_spinner_changes_glyph_not_label_style_and_honors_reduced_motion() {
         assert!(working_row(&shell.state.borrow(), false).is_none());
     }
 }
+
+#[test]
+fn native_working_component_paints_one_effective_row_without_reanimation() {
+    for theme in themes() {
+        let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme);
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Reasoning(Box::new(
+                super::super::AssistantBlock::finalized_reasoning("settled history".into()),
+            )));
+        shell.begin_run("test");
+        let mut working = super::super::ShellExtensionWorking {
+            component_line: Some("\u{1b}[31m>>>\u{1b}[0m patched message".into()),
+            message: Some("patched message".into()),
+            // Configuration must not override the effective component output.
+            frames: Some(vec!["unused".into(), "also unused".into()]),
+            interval_ms: Some(1),
+            ..Default::default()
+        };
+        shell.set_extension_ui(super::super::ShellExtensionUi {
+            working: Some(working.clone()),
+            ..Default::default()
+        });
+        {
+            let mut state = shell.state.borrow_mut();
+            let before = working_row(&state, false).unwrap();
+            let children = before.c.as_ref().unwrap();
+            assert_eq!(children[0].k, Kind::Ansi);
+            assert!(!children.iter().any(|child| child.id == "work.label"));
+            let serialized = serde_json::to_string(&before).unwrap();
+            assert_eq!(serialized.matches("patched message").count(), 1);
+            assert!(serialized.contains(">>>"));
+            assert!(!serialized.contains("unused"));
+            assert!(!state.has_active_thinking_spinner());
+            assert!(!state.has_active_status_shimmer());
+            let TranscriptBlock::Reasoning(settled) = &state.transcript[0] else {
+                panic!("settled reasoning fixture");
+            };
+            assert!(
+                settled.extension_working.is_none(),
+                "animation leaves settled history untouched"
+            );
+            state.advance_thinking_spinner(3);
+            state.advance_status_shimmer_by(3);
+            let after = working_row(&state, false).unwrap();
+            assert_eq!(before.c.as_ref().unwrap()[0], after.c.as_ref().unwrap()[0]);
+            let reduced = serde_json::to_string(&working_row(&state, true).unwrap()).unwrap();
+            assert!(!reduced.contains(">>>"));
+            assert_eq!(reduced.matches("patched message").count(), 1);
+        }
+        working.component_line = Some("\u{1b}[32m∙∙●∙∙\u{1b}[0m changed".into());
+        shell.set_extension_ui(super::super::ShellExtensionUi {
+            working: Some(working),
+            ..Default::default()
+        });
+        let next =
+            serde_json::to_string(&working_row(&shell.state.borrow(), false).unwrap()).unwrap();
+        assert!(next.contains("∙∙●∙∙"));
+        assert!(!next.contains(">>>"));
+        shell.set_extension_ui(Default::default());
+        let fallback =
+            serde_json::to_string(&working_row(&shell.state.borrow(), false).unwrap()).unwrap();
+        assert!(!fallback.contains("changed"));
+        assert!(fallback.contains("work.label"));
+    }
+}

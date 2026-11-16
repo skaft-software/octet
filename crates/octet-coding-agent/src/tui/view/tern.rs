@@ -1401,7 +1401,13 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
         .as_ref()
         .filter(|_| !reduce_motion && shell.theme.capabilities().animation)
     {
-        if let Some(frames) = &working.frames {
+        if let Some(line) = &working.component_line {
+            // The Pi component owns animation and message styling. Paint its
+            // effective row once; keep native elapsed time/layout ownership.
+            let children = node.c.as_mut().expect("working row");
+            children[0] = octet_tern::scene::ansi_block("work.spin", line);
+            children.retain(|child| child.id != "work.label");
+        } else if let Some(frames) = &working.frames {
             let interval = working.interval_ms.filter(|value| *value > 0).unwrap_or(80);
             let frame = if frames.is_empty() {
                 ""

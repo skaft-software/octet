@@ -232,10 +232,17 @@ impl super::InteractiveShell {
 }
 
 impl ShellState {
-    pub(super) fn sync_extension_reasoning(&mut self) {
+    pub(super) fn sync_extension_reasoning(&mut self, labels_changed: bool) {
+        // Animated component snapshots must not walk settled session history.
+        // Only an explicit hidden-label change restyles completed reasoning.
+        let indices: Vec<_> = if labels_changed {
+            (0..self.transcript.len()).collect()
+        } else {
+            self.active_event_blocks.clone()
+        };
         let mut changed = Vec::new();
-        for (index, block) in self.transcript.iter_mut().enumerate() {
-            if let super::TranscriptBlock::Reasoning(reasoning) = block {
+        for index in indices {
+            if let super::TranscriptBlock::Reasoning(reasoning) = &mut self.transcript[index] {
                 if reasoning.extension_working != self.extension_ui.working
                     || reasoning.hidden_thinking_label != self.extension_ui.hidden_thinking_label
                 {

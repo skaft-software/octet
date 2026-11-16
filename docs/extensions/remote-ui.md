@@ -153,6 +153,25 @@ native admission, not OS delivery. Only the host renderer encodes OSC 777; the
 terminal must support that desktop-notification protocol. Headless/plain output
 does not advertise this frontend service. No escape bytes are accepted in frames.
 
+### `ui/chrome` — working component presentation
+
+A working component can publish its effective single-row presentation through
+`chrome: {"kind":"working_component","line":"\u001b[31m>>>\u001b[0m Working"}`.
+The `line` is printable UTF-8 plus checked safe SGR, at most 16 KiB. `null`
+withdraws the component and restores native presentation. Existing `remote_ui`
+negotiation, foreground owner/process-generation admission and chrome receipts
+apply; this does not open a surface or acquire terminal ownership.
+
+The Pi adapter owns a real instance of the exported TUI Loader. It asynchronously
+captures its rendered presentation after extension modifications, with one
+in-flight chrome request, one latest snapshot and a 2-second deadline. Old
+component callbacks are generation-fenced locally and process retirement is
+fenced natively. No unrelated dialog Loader contributes to this row.
+Rust paints the cached component output without a second animation or duplicate
+spinner/message, and retains final clipping, elapsed time and accessibility policy.
+Reduced motion and disabled terminal animation use the native static marker and
+plain working message instead of animated component presentation.
+
 ### `ui/chrome` — native component editor service
 
 The adapter's synchronous `Editor` facade uses `chrome.kind:"editor"` on an

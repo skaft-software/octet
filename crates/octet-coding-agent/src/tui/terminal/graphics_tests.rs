@@ -74,6 +74,7 @@ pub(crate) fn terminal(
             image_store,
             write_log: None,
             in_synchronized_frame_depth: 0,
+            initial_frame: false,
         }),
         frames,
     )

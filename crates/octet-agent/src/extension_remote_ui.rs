@@ -173,6 +173,11 @@ pub enum ExtensionRemoteUiChrome {
         /// Milliseconds between frames; absent restores native timing.
         interval_ms: Option<u64>,
     },
+    /// Effective presentation of an extension-owned working component.
+    WorkingComponent {
+        /// Cached safe-SGR row; absent restores native presentation.
+        line: Option<String>,
+    },
     /// Override or restore the collapsed thinking label.
     HiddenThinking {
         /// Override label; absent restores the native label.
@@ -284,6 +289,16 @@ impl ExtensionRemoteUiChrome {
             Self::WorkingMessage { message } | Self::HiddenThinking { label: message } => {
                 if let Some(text) = message {
                     validate_text("chrome text", text, 4096, true)?;
+                }
+                Ok(())
+            }
+            Self::WorkingComponent { line } => {
+                if let Some(line) = line {
+                    if line.len() > MAX_EXTENSION_REMOTE_UI_LINE_BYTES {
+                        return Err(bounds("working component exceeds line bound"));
+                    }
+                    validate_remote_ui_line(line)
+                        .map_err(|detail| (ExtensionRequestFailure::InvalidRequest, detail))?;
                 }
                 Ok(())
             }
@@ -1816,6 +1831,32 @@ mod tests {
         assert_eq!(
             frame.validate().unwrap_err().0,
             ExtensionRequestFailure::BoundsExceeded
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn working_component_snapshot_validates_effective_sgr_and_bounds() {
+    for line in [
+        None,
+        Some("".into()),
+        Some("\u{1b}[31m>>>\u{1b}[0m Working".into()),
+        Some("x".repeat(MAX_EXTENSION_REMOTE_UI_LINE_BYTES)),
+    ] {
+        ExtensionRemoteUiChrome::WorkingComponent { line }
+            .validate()
+            .unwrap();
+    }
+    for line in [
+        "\u{1b}]2;title\u{7}".into(),
+        "two\nrows".into(),
+        "x".repeat(MAX_EXTENSION_REMOTE_UI_LINE_BYTES + 1),
+    ] {
+        assert!(
+            ExtensionRemoteUiChrome::WorkingComponent { line: Some(line) }
+                .validate()
+                .is_err()
         );
     }
 }

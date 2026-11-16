@@ -187,7 +187,7 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     settle(octet, parser, consumed);
     assert!(!parser.screen().contents().contains("rows back"));
     octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
-    await_screen(octet, parser, consumed, "12 rows back", STARTUP_TIMEOUT);
+    await_screen(octet, parser, consumed, "4 rows back", STARTUP_TIMEOUT);
     // The VT parser exposes partial synchronized frames; hit-test only after
     // the completed frame/geometry receipt, as the terminal presents it.
     settle(octet, parser, consumed);
@@ -500,7 +500,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "288 rows back",
+        "96 rows back",
         STARTUP_TIMEOUT,
     );
     assert!(parser.screen().contents().contains("draft-kept"));
@@ -510,7 +510,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         &mut octet,
         &mut parser,
         &mut consumed,
-        "276 rows back",
+        "92 rows back",
         STARTUP_TIMEOUT,
     );
     assert_ne!(row_text(&parser, 0, 100), top);
@@ -598,11 +598,11 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
         }
         // Resume, PageUp and PageDown must leave pointer coordinates aligned.
         octet.pty.write_input(b"\x1b[5~\x1b[6~");
-        octet.pty.write_input(&sgr(64, 20, 3, false).repeat(4));
+        octet.pty.write_input(&sgr(64, 20, 3, false).repeat(12));
         settle(&mut octet, &mut parser, &mut consumed);
         // Pick a row only from the repaint at the final scroll position. The
         // half-page PageUp above also paints a "N rows back" frame, and
-        // PageDown returns to the tail, so the four wheel steps of three rows
+        // PageDown returns to the tail, so the twelve wheel steps of one row
         // leave exactly 12 rows back. Any earlier frame still on screen would
         // aim the drag at a row the wheel has since moved.
         let deadline = Instant::now() + Duration::from_secs(5);

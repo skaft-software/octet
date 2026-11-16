@@ -1602,6 +1602,8 @@ pub struct ShellExtensionUiLine {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellExtensionWorking {
+    /// Effective Pi component row, already animated in the adapter.
+    pub component_line: Option<String>,
     pub message: Option<String>,
     pub visible: Option<bool>,
     pub frames: Option<Vec<String>>,
@@ -3668,7 +3670,12 @@ impl ShellState {
     /// on the label makes `Working` and `Thinking` one continuous sweep, while
     /// retry, compaction, and provider lifecycle labels stay timer-only.
     fn status_shimmer_active(&self, reasoning: &AssistantBlock) -> bool {
-        self.theme.activity_shimmer_enabled() && reasoning.is_shimmering_activity()
+        self.theme.activity_shimmer_enabled()
+            && reasoning.is_shimmering_activity()
+            && reasoning
+                .extension_working
+                .as_ref()
+                .is_none_or(|working| working.component_line.is_none())
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
@@ -3765,6 +3772,7 @@ impl ShellState {
                         self.transcript.get(*index),
                         Some(TranscriptBlock::Reasoning(reasoning))
                             if !reasoning.finished && !reasoning.reasoning_expanded
+                                && reasoning.extension_working.as_ref().is_none_or(|working| working.component_line.is_none())
                     )
                 })
     }
@@ -3787,6 +3795,7 @@ impl ShellState {
                     self.transcript.get(*index),
                     Some(TranscriptBlock::Reasoning(reasoning))
                         if !reasoning.finished && !reasoning.reasoning_expanded
+                                && reasoning.extension_working.as_ref().is_none_or(|working| working.component_line.is_none())
                 )
             })
             .collect::<Vec<_>>();
@@ -6755,8 +6764,9 @@ impl InteractiveShell {
         if state.extension_ui == ui {
             return false;
         }
+        let labels_changed = state.extension_ui.hidden_thinking_label != ui.hidden_thinking_label;
         state.extension_ui = ui;
-        state.sync_extension_reasoning();
+        state.sync_extension_reasoning(labels_changed);
         true
     }
 
@@ -6781,11 +6791,13 @@ impl InteractiveShell {
             || (projection.mount(Placement::Header).is_some()
                 && state.extension_ui.remote.components != projection.components);
         let chrome = projection.chrome.as_ref();
+        let labels_changed = state.extension_ui.hidden_thinking_label
+            != chrome.and_then(|chrome| chrome.hidden_thinking_label.clone());
         state.extension_ui.working = chrome.map(|chrome| chrome.working.clone());
         state.extension_ui.hidden_thinking_label =
             chrome.and_then(|chrome| chrome.hidden_thinking_label.clone());
         state.extension_ui.remote = projection;
-        state.sync_extension_reasoning();
+        state.sync_extension_reasoning(labels_changed);
         let fullscreen = state.extension_ui.remote.mount(Placement::Fullscreen);
         let has_fullscreen = fullscreen.is_some();
         let capture = fullscreen.is_some_and(|mount| mount.mouse_capture);

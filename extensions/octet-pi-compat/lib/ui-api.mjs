@@ -13,6 +13,7 @@ import { CancellableLoader } from '../node_modules/@earendil-works/pi-tui/dist/c
 import { getKeybindings } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
 import { keyHint } from './keybinding-hints.mjs';
 import { rendering } from './ui-delivery.mjs';
+import { workingLoader, invalidateWorkingLoader } from './working-loader.mjs';
 
 // Public Pi authoring helpers, adapted from Pi 1.0.2's interactive components.
 // Copyright (c) 2025 Mario Zechner; MIT, see ../LICENSE.pi.
@@ -204,6 +205,7 @@ export function chromeAPI(runtime, store) {
       if (!result.success) return { success: false, ...(result.error === undefined ? {} : { error: result.error }) };
       nativeTheme(result.theme);
       store.state.host.theme = structuredClone(result.theme);
+      invalidateWorkingLoader(store.state);
       for (const surface of runtime.ui.surfaces.values()) if (surface.store.state === store.state) {
         runtime.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
       }
@@ -212,18 +214,21 @@ export function chromeAPI(runtime, store) {
     setTitle(title) { bounded(title, 'terminal title', 1024); queue({ kind: 'title', title }); },
     setWorkingMessage(message) {
       // Pi's loader message may carry SGR (working-message-test.ts); the host label is printable text.
-      if (message !== undefined) message = plainChromeText(message, 'working message');
-      queue({ kind: 'working_message', message: message ?? null });
+      if (message !== undefined) safeLines([message]);
+      queue({ kind: 'working_message', message: message === undefined ? null : plainChromeText(message, 'working message') });
+      workingLoader(runtime, store.state).message(message);
     },
     setWorkingVisible(visible) {
       if (typeof visible !== 'boolean') invalid('working visibility');
       queue({ kind: 'working_visible', visible });
+      workingLoader(runtime, store.state).visibility(visible);
     },
     setWorkingIndicator(options) {
       if (options !== undefined) fields(options, ['frames', 'intervalMs'], 'working indicator');
       if (options?.frames !== undefined) safeLines(options.frames);
       if (options?.intervalMs !== undefined && (!Number.isSafeInteger(options.intervalMs) || options.intervalMs < 0)) invalid('working interval');
       queue({ kind: 'working_indicator', frames: options?.frames ?? null, interval_ms: options?.intervalMs ?? null });
+      workingLoader(runtime, store.state).indicator(options);
     },
     setHiddenThinkingLabel(label) {
       if (label !== undefined) label = plainChromeText(label, 'hidden thinking label');

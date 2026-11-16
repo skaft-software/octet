@@ -30,6 +30,7 @@ import { beforeAgentStart } from './before-agent-start.mjs';
 import { installChildRuntime, retireChildSessions, CHILD_FEATURES, CHILD_METHODS } from './children.mjs';
 import { appendReply, entryPayload, leafGrant, replacementStore } from './session-leaf.mjs';
 import { RemoteUI } from './remote-ui.mjs';
+import { workingLoader, retireWorkingLoader, invalidateWorkingLoader } from './working-loader.mjs';
 import { TranscriptRenderers } from './transcript-renderers.mjs';
 import { Timers, deadline } from './timers.mjs';
 import { activateInstalledPi, classifyLoadFailure, fallbackData, installedPiAliases, piRuntimeMode, scanPiImportGaps } from './installed-pi.mjs';
@@ -816,6 +817,7 @@ export class Runtime {
     });
   }
   async retire(state) {
+    retireWorkingLoader(state);
     cancelProviderStream(this, undefined, state);
     this.transcript.retire(state);
     this.sessionTransport?.retire(state);
@@ -854,6 +856,7 @@ export class Runtime {
     if (Object.hasOwn(next, 'theme')) nativeTheme(next.theme);
     const previous = state.host.git_branch; state.host = { ...state.host, ...next };
     retainPiProjectTrust(state);
+    if (Object.hasOwn(next, 'theme')) invalidateWorkingLoader(state);
     if (previous !== state.host.git_branch) for (const listener of state.branchListeners) listener();
     for (const surface of this.ui.surfaces.values()) if (surface.store.state === state) this.scope.run(surface.store, () => { surface.tui.invalidate(); surface.requestRender(); });
   }
@@ -1147,7 +1150,10 @@ export class Runtime {
     const activity = { 'turn/started': ['runActive', true], 'turn/settled': ['runActive', false], 'compaction/started': ['compacting', true], 'compaction/settled': ['compacting', false] }[message.method];
     if (activity) {
       const tracked = p?.resource_owner ? this.states.get(ownerKey(p.resource_owner)) : this.foreground;
-      if (tracked?.alive) tracked[activity[0]] = activity[1];
+      if (tracked?.alive) {
+        tracked[activity[0]] = activity[1];
+        if (activity[0] === 'runActive') workingLoader(this, tracked).sync();
+      }
     }
     // Advisory notifications cannot deliver a veto or a post-commit append
     // consumer. Actual Pi compaction callbacks now arrive as awaited hook/run.
@@ -1315,7 +1321,7 @@ export class Runtime {
     retireCompactions(this, undefined, cancelled());
     retireChildSessions(this); this.uninstallChildren?.();
     for (const store of this.active.values()) store.controller.abort(cancelled());
-    for (const state of this.states.values()) this.transcript.retire(state);
+    for (const state of this.states.values()) { retireWorkingLoader(state); this.transcript.retire(state); }
     this.timers.all(); await this.ui.shutdown();
     for (const state of this.states.values()) state.alive = false;
     try { await deadline(this.transport.send({ jsonrpc: '2.0', id, result: {} }), 750); await deadline(this.transport.idle(), 750); }
@@ -1326,6 +1332,7 @@ export class Runtime {
   }
   lost(error, eof) {
     cancelProviderStream(this);
+    for (const state of this.states.values()) retireWorkingLoader(state);
     this.stopping = true; retireCompactions(this, undefined, error); this.timers.all(); retireChildSessions(this); this.uninstallChildren?.();
     for (const store of this.active.values()) store.controller.abort(cancelled());
     this.ui.shutdown().finally(() => { if (!eof) console.error(`[pi-compat transport] ${error.message}`); process.exit(eof ? 0 : 1); });
