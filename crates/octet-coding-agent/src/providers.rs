@@ -7,11 +7,11 @@
 
 mod auth;
 mod catalog;
-mod compatibility;
-mod contract;
+pub(crate) use octet_ai::providers::compatibility;
+pub(crate) use octet_ai::providers::contract;
 mod copilot;
-mod models;
-mod pricing;
+pub(crate) use octet_ai::providers::models;
+pub(crate) use octet_ai::providers::pricing;
 mod vertex;
 
 pub use contract::{
@@ -59,3 +59,7 @@ pub(crate) use contract::{
 pub(crate) use contract::{OPENAI, OPENCODE, OPENCODE_GO, OPENROUTER};
 pub(crate) use pricing::pricing_for;
 pub(crate) use vertex::resolve_vertex_configuration;
+
+#[cfg(test)]
+#[path = "providers/contract/tests.rs"]
+mod declaration_tests;

@@ -482,7 +482,7 @@ crates/octet-ai/models/SOURCES.md
 crates/octet-ai/src/protocol/openai_responses.rs
 crates/octet-ai/src/responses_ws.rs
 crates/octet-coding-agent/README.md
-crates/octet-coding-agent/src/providers/declarations.json
+crates/octet-ai/src/providers/declarations.json
 crates/sexy-tui-rs/LICENSE
 crates/sexy-tui-rs/README.md
 crates/sexy-tui-rs/VENDORED.md

@@ -1,14 +1,16 @@
+#![allow(missing_docs)]
+
 //! Checked-in static model definitions selected by provider declarations.
 
 use std::collections::BTreeMap;
 
-use octet_ai::{OpenAiChatReasoningMode, Protocol, ReasoningEffort};
+use crate::{OpenAiChatReasoningMode, Protocol, ReasoningEffort};
 
 use super::contract::StaticModelSet;
 
 /// Request encoding for a static model's OpenAI Chat reasoning capability.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum StaticOpenAiChatReasoningProfile {
+pub enum StaticOpenAiChatReasoningProfile {
     /// Standard OpenAI-compatible `reasoning_effort` encoding.
     #[default]
     Standard,
@@ -17,7 +19,7 @@ pub(crate) enum StaticOpenAiChatReasoningProfile {
 }
 
 impl StaticOpenAiChatReasoningProfile {
-    pub(crate) fn openai_chat_mode(self) -> OpenAiChatReasoningMode {
+    pub fn openai_chat_mode(self) -> OpenAiChatReasoningMode {
         match self {
             Self::Standard => OpenAiChatReasoningMode::Standard,
             Self::DeepSeekThinking => OpenAiChatReasoningMode::DeepSeekThinking,
@@ -28,7 +30,7 @@ impl StaticOpenAiChatReasoningProfile {
 /// Explicit reasoning primitives for the existing static inventory. Based on
 /// Pi 853a80d API encoders; no generated catalog or new availability is imported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StaticReasoningMode {
+pub enum StaticReasoningMode {
     Effort,
     Budget,
     Adaptive {
@@ -59,7 +61,7 @@ pub struct StaticModelPreset {
     pub vision: bool,
     pub audio: bool,
     pub reasoning: bool,
-    pub(crate) reasoning_mode: StaticReasoningMode,
+    pub reasoning_mode: StaticReasoningMode,
     /// Lowest portable reasoning effort that the provider accepts.
     pub min_reasoning_effort: ReasoningEffort,
     pub max_reasoning_effort: ReasoningEffort,
@@ -1626,23 +1628,23 @@ pub const CLOUDFLARE_AI_GATEWAY_MODELS: &[StaticModelPreset] = &[
 /// `processZaiModels` (`thinkingFormat: "zai"`) and the Alibaba Token Plan
 /// variant (`thinkingFormat: "qwen"`, `supportsReasoningEffort: true`).
 /// Behavioral reference: `packages/ai/test/baseten-models.test.ts`.
-pub(crate) fn discovery_wire_preset(provider_id: &str) -> Option<octet_ai::ModelPreset> {
+pub fn discovery_wire_preset(provider_id: &str) -> Option<crate::ModelPreset> {
     let preset = match provider_id {
-        "baseten" => octet_ai::ModelPreset {
-            thinking_format: Some(octet_ai::ThinkingFormat::Baseten),
+        "baseten" => crate::ModelPreset {
+            thinking_format: Some(crate::ThinkingFormat::Baseten),
             chat_template_args: Some(baseten_chat_template_args()),
             supports_reasoning_effort: Some(true),
             ..Default::default()
         },
         "qwen-token-plan" | "qwen-token-plan-cn" | "qwen-token-plan-individual" => {
-            octet_ai::ModelPreset {
-                thinking_format: Some(octet_ai::ThinkingFormat::Qwen),
+            crate::ModelPreset {
+                thinking_format: Some(crate::ThinkingFormat::Qwen),
                 supports_reasoning_effort: Some(true),
                 ..Default::default()
             }
         }
-        "zai-coding-cn" => octet_ai::ModelPreset {
-            thinking_format: Some(octet_ai::ThinkingFormat::Zai),
+        "zai-coding-cn" => crate::ModelPreset {
+            thinking_format: Some(crate::ThinkingFormat::Zai),
             supports_reasoning_effort: Some(true),
             ..Default::default()
         },
@@ -1653,12 +1655,12 @@ pub(crate) fn discovery_wire_preset(provider_id: &str) -> Option<octet_ai::Model
 
 /// `chat_template_args` for the Baseten thinking contract: the top-level
 /// `enable_thinking` toggle value is always resolved, on or off.
-pub(super) fn baseten_chat_template_args() -> BTreeMap<String, octet_ai::ChatTemplateValue> {
+pub fn baseten_chat_template_args() -> BTreeMap<String, crate::ChatTemplateValue> {
     let mut args = BTreeMap::new();
     args.insert(
         "enable_thinking".to_owned(),
-        octet_ai::ChatTemplateValue::Variable(octet_ai::ChatTemplateVariable {
-            variable: octet_ai::ThinkingVariable::Enabled,
+        crate::ChatTemplateValue::Variable(crate::ChatTemplateVariable {
+            variable: crate::ThinkingVariable::Enabled,
             omit_when_off: false,
         }),
     );
@@ -1667,7 +1669,7 @@ pub(super) fn baseten_chat_template_args() -> BTreeMap<String, octet_ai::ChatTem
 
 /// Return static models for a declaration-selected set without branching on a
 /// provider identifier.
-pub(crate) fn static_models(set: StaticModelSet) -> &'static [StaticModelPreset] {
+pub fn static_models(set: StaticModelSet) -> &'static [StaticModelPreset] {
     match set {
         StaticModelSet::None => &[],
         StaticModelSet::KimiCoding => KIMI_CODING_MODELS,

@@ -1,6 +1,8 @@
+#![allow(missing_docs)]
+
 //! Provider pricing policies selected by declarations.
 
-use octet_ai::{Pricing, PricingTier, TokenRate};
+use crate::{Pricing, PricingTier, TokenRate};
 
 use super::contract::{PricingProfile, ProviderDeclaration};
 
@@ -22,7 +24,7 @@ type FlatRates = (u64, u64, u64, u64);
 fn pricing_with_long_context_tier(base: FlatRates, tier: Option<FlatRates>) -> Pricing {
     let mut pricing = flat_pricing(base.0, base.1, base.2, base.3);
     pricing.tiers = tier
-        .map(|rates| octet_ai::PricingTier {
+        .map(|rates| crate::PricingTier {
             // Pi's source catalogs express this as "above 272000".
             min_input_tokens: 272_001,
             input: Some(TokenRate(rates.0)),
@@ -364,10 +366,10 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
 /// pricing without another hand-maintained model match arm. Subscription
 /// inventory is account-scoped and never inherits public API quotes: only the
 /// reviewed subscription allowlist can establish a price.
-pub(crate) fn pricing_for(provider: &ProviderDeclaration, model_id: &str) -> Option<Pricing> {
+pub fn pricing_for(provider: &ProviderDeclaration, model_id: &str) -> Option<Pricing> {
     let reviewed = legacy_model_pricing(provider.pricing, model_id);
     if provider.pricing == PricingProfile::Subscription {
         return reviewed;
     }
-    reviewed.or_else(|| octet_ai::model_metadata::model_pricing(provider.id, model_id))
+    reviewed.or_else(|| crate::model_metadata::model_pricing(provider.id, model_id))
 }

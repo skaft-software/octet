@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 //! Provider-neutral declarations and setup-facing catalog contracts.
 //!
 //! Declarations describe public provider behavior only: codec families, model
@@ -7,7 +9,7 @@
 
 use std::fmt;
 
-use octet_ai::{
+use crate::{
     ConfigError, EndpointTransport, ModelCatalog, OpenAiChatRuntimeProfile, Protocol,
     RequestBodyEncoding, RequestRuntime, ResponsesRuntimeProfile,
 };
@@ -47,7 +49,7 @@ pub enum ProviderAuthentication {
 }
 
 impl ProviderAuthentication {
-    pub(crate) fn environment_variables(self) -> Option<&'static [&'static str]> {
+    pub fn environment_variables(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Environment { variables } => Some(variables),
             Self::Aws { .. }
@@ -141,7 +143,7 @@ pub enum DiscoveryCapabilityProfile {
 
 impl DiscoveryCapabilityProfile {
     /// Whether a sparse API model should receive the GPT image fallback.
-    pub(crate) fn gpt_vision_fallback(self, model_id: &str) -> bool {
+    pub fn gpt_vision_fallback(self, model_id: &str) -> bool {
         let model_id = model_id.rsplit('/').next().unwrap_or(model_id);
         matches!(self, Self::GptVisionFallback)
             && (model_id.starts_with("gpt-4o")
@@ -151,7 +153,7 @@ impl DiscoveryCapabilityProfile {
     }
 
     /// Whether sparse models are assumed to accept image input.
-    pub(crate) fn assumes_image_input(self) -> bool {
+    pub fn assumes_image_input(self) -> bool {
         matches!(self, Self::AssumeImageInput)
     }
 }
@@ -354,7 +356,7 @@ pub enum ProviderRuntimeConfiguration {
 /// Data-only built-in provider declaration.
 ///
 /// It contains no credential material. The private auth lifecycle translates a
-/// declaration and a credential source into an `octet_ai::Auth` only immediately
+/// declaration and a credential source into an `crate::Auth` only immediately
 /// before endpoint and discovery work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderDeclaration {
@@ -425,13 +427,13 @@ impl ProviderDeclaration {
     ///
     /// Host-owned discovery uses this when each returned model carries its
     /// protocol explicitly instead of relying on a model-name heuristic.
-    pub(crate) fn route_for_protocol(&self, protocol: Protocol) -> Option<&ProviderRoute> {
+    pub fn route_for_protocol(&self, protocol: Protocol) -> Option<&ProviderRoute> {
         self.routes.iter().find(|route| route.protocol == protocol)
     }
 
     /// Route whose declared fallback authentication is used for model
     /// inventory discovery.
-    pub(crate) fn inventory_route(&self) -> Option<&ProviderRoute> {
+    pub fn inventory_route(&self) -> Option<&ProviderRoute> {
         self.route_rules.iter().find_map(|rule| match *rule {
             ModelRouteRule::Default { route } => self.routes.get(route),
             _ => None,
@@ -479,11 +481,12 @@ impl ProviderDeclaration {
     /// Resolve the private runtime base URL. Placeholder values are validated as
     /// opaque URL-path identifiers and are never retained in public definitions
     /// or error messages.
-    pub(crate) fn resolved_base_url(&self) -> Result<url::Url, ConfigError> {
-        self.resolve_base_url_with(octet_ai::auth::read_bounded_env)
+    pub fn resolved_base_url(&self) -> Result<url::Url, ConfigError> {
+        self.resolve_base_url_with(crate::auth::read_bounded_env)
     }
 
-    fn resolve_base_url_with(
+    /// Resolve the non-secret endpoint template against an injected environment view.
+    pub fn resolve_base_url_with(
         &self,
         mut read_environment: impl FnMut(&str) -> Result<Option<String>, ConfigError>,
     ) -> Result<url::Url, ConfigError> {
@@ -521,10 +524,7 @@ impl ProviderDeclaration {
     }
 
     /// Resolve the private runtime URL for one declared provider route.
-    pub(crate) fn resolved_route_base_url(
-        &self,
-        route: &ProviderRoute,
-    ) -> Result<url::Url, ConfigError> {
+    pub fn resolved_route_base_url(&self, route: &ProviderRoute) -> Result<url::Url, ConfigError> {
         self.resolved_base_url()?
             .join(route.base_path)
             .map_err(|_| ConfigError::InvalidBaseUrl("provider route URL is invalid".to_owned()))
@@ -587,7 +587,7 @@ impl ProviderDeclaration {
                 }
             }
             if (route.runtime.responses_profile != ResponsesRuntimeProfile::Default
-                || route.runtime.responses_features != octet_ai::ResponsesFeatures::default())
+                || route.runtime.responses_features != crate::ResponsesFeatures::default())
                 && route.protocol != Protocol::OpenAiResponses
             {
                 return Err(ProviderDefinitionError::new(
@@ -1144,7 +1144,7 @@ fn valid_route_base_path(path: &str) -> bool {
 
 /// Check that a declaration header is a bounded public request header rather
 /// than an authentication or credential carrier.
-pub(crate) fn valid_public_header(name: &str, value: &str) -> bool {
+pub fn valid_public_header(name: &str, value: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(is_http_token_byte)
         && value.len() <= 1024
@@ -1174,7 +1174,7 @@ fn is_http_token_byte(byte: u8) -> bool {
         )
 }
 
-pub(crate) fn credential_like_header(name: &str) -> bool {
+pub fn credential_like_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     let compact: String = lower
         .bytes()
@@ -1215,6 +1215,3 @@ fn bounded_setup_text(value: &str) -> String {
 }
 
 include!(concat!(env!("OUT_DIR"), "/provider_declarations.rs"));
-
-#[cfg(test)]
-mod tests;

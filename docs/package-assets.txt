@@ -67,7 +67,7 @@ text crates/octet-ai/models/SOURCES.md
 text crates/octet-ai/src/protocol/openai_responses.rs
 text crates/octet-ai/src/responses_ws.rs
 text crates/octet-coding-agent/README.md
-text crates/octet-coding-agent/src/providers/declarations.json
+text crates/octet-ai/src/providers/declarations.json
 text crates/sexy-tui-rs/LICENSE
 text crates/sexy-tui-rs/README.md
 text crates/sexy-tui-rs/VENDORED.md

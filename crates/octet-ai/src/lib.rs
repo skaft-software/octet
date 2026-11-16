@@ -351,3 +351,6 @@ pub enum CompatibilityMode {
 pub mod provider_auth;
 /// Descriptor-bound private storage primitives.
 pub mod secure_fs;
+
+/// Provider declarations and account-scoped catalog binding.
+pub mod providers;

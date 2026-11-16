@@ -1,5 +1,9 @@
 #![allow(missing_docs)]
 
+#[cfg(test)]
+use crate::codex_context::CODEX_MAX_OUTPUT_TOKENS;
+#[cfg(test)]
+use octet_ai::AgentDelegation;
 use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,10 +20,10 @@ use octet_agent::{
     EffectBroker, EntryValue, ExtensionHost, GoalDriver, Session, SkillRegistry, TelemetryObserver,
 };
 use octet_ai::{
-    AgentDelegation, AiClient, Auth, CacheCompatibility, Capabilities, Endpoint, EndpointId,
-    EndpointTransport, ModalitySet, Model, ModelCatalog, ModelId, ModelLimits, ModelSpec,
-    OpenAiChatReasoningMode, Pricing, PricingTier, Protocol, ReasoningCapability, ReasoningConfig,
-    ReasoningControl, ReasoningMode, RequestRuntime, TokenRate, ToolDef,
+    AiClient, Auth, CacheCompatibility, Capabilities, Endpoint, EndpointId, EndpointTransport,
+    ModalitySet, Model, ModelCatalog, ModelId, ModelLimits, ModelSpec, OpenAiChatReasoningMode,
+    Pricing, PricingTier, Protocol, ReasoningCapability, ReasoningConfig, ReasoningControl,
+    ReasoningMode, RequestRuntime, TokenRate, ToolDef,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -30,7 +34,6 @@ use crate::app::{
 };
 use crate::codex_context::{
     resolve_codex_context_window, CodexContextOverride, CODEX_CONTEXT_OVERRIDE_ENV,
-    CODEX_MAX_OUTPUT_TOKENS,
 };
 use crate::config::{CompactionMode, Config, Mode, ResumeSelector};
 use crate::extensions::{
@@ -1328,275 +1331,16 @@ fn model_id_implies_vision(id: &str) -> bool {
 /// Shared bounded metadata ingress for hosted discovery, custom bootstrap and
 /// guided setup. A malformed assertion fails, absent and unknown stay distinct,
 /// and explicit false wins before any route-scoped fallback is consulted.
-#[derive(Clone, Debug)]
-struct DiscoveredReasoning {
-    source: octet_ai::types::ReasoningMetadataSource,
-    supported: Option<bool>,
-    control: Option<ReasoningControl>,
-    options: Option<octet_ai::types::ReasoningOptions>,
-    profile: Option<OpenAiChatReasoningMode>,
-    /// The endpoint published the enabled effort levels it accepts without
-    /// saying anything about disabling thinking (DeepSeek's `effort` object).
-    /// A declaration that owns an Off wire control keeps that choice.
-    enabled_effort_levels: bool,
-}
+use octet_ai::providers::inventory_metadata::DiscoveredReasoning;
 
-fn decode_reasoning_metadata(entry: &serde_json::Value) -> anyhow::Result<DiscoveredReasoning> {
-    use octet_ai::types::{ReasoningMetadataSource as Source, ReasoningOptions};
-    let mut fields = Vec::new();
-    for metadata in [
-        Some(entry),
-        entry.get("top_provider"),
-        entry.get("provider"),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for name in ["reasoning", "supports_reasoning", "reasoning_effort"] {
-            if let Some(value) = metadata.get(name) {
-                fields.push(value);
-            }
-            if let Some(value) = metadata.get("capabilities").and_then(|c| c.get(name)) {
-                fields.push(value);
-            }
-        }
-    }
-    let mut result = DiscoveredReasoning {
-        source: Source::Absent,
-        supported: None,
-        control: None,
-        options: None,
-        profile: None,
-        enabled_effort_levels: false,
-    };
-    if fields
-        .iter()
-        .any(|v| metadata_capability_flag(v) == Some(false))
-    {
-        result.source = Source::Explicit;
-        result.supported = Some(false);
-        return Ok(result);
-    }
-    for field in fields {
-        result.source = Source::Unknown;
-        if field.is_null() {
-            continue;
-        }
-        anyhow::ensure!(
-            field.is_boolean() || field.is_object(),
-            "malformed reasoning metadata"
-        );
-        if let Some(supported) = field.get("supported") {
-            anyhow::ensure!(
-                supported.is_boolean(),
-                "malformed reasoning supported assertion"
-            );
-        }
-        if let Some(supported) = metadata_capability_flag(field) {
-            result.supported = Some(supported);
-            result.source = Source::Explicit;
-        }
-        if let Some(control) = field.get("control") {
-            let control = match control.as_str() {
-                Some("effort" | "levels") => ReasoningControl::Effort,
-                Some("toggle" | "binary") => ReasoningControl::Toggle,
-                Some("always_on") => ReasoningControl::AlwaysOn,
-                Some("token_budget") => ReasoningControl::TokenBudget,
-                Some(_) => {
-                    result.source = Source::Unknown;
-                    result.supported = None;
-                    return Ok(result);
-                }
-                None => anyhow::bail!("malformed reasoning control"),
-            };
-            result.control = Some(control);
-        }
-        if let Some(values) = field.get("values") {
-            result.options = Some(decode_reasoning_options(values, field.get("default"))?);
-        } else if let Some(default) = field.get("default") {
-            // Some inventories publish the accepted levels as `effort` alongside
-            // a structured default ({"type": "effort", "value": ...}). Without a
-            // declared level list there is nothing exact to select, so keep
-            // failing closed instead of inventing a range.
-            let values = field
-                .get("effort")
-                .ok_or_else(|| anyhow::anyhow!("reasoning default requires exact values"))?;
-            result.options = Some(decode_reasoning_options(values, Some(default))?);
-        }
-        if let Some(profile) = field.get("profile") {
-            result.profile =
-                Some(serde_json::from_value(profile.clone()).context("invalid reasoning profile")?);
-        }
-    }
-    if let Some(values) = entry
-        .get("supported_reasoning_levels")
-        .or_else(|| entry.get("supported_reasoning_efforts"))
-    {
-        result.options = Some(decode_reasoning_options(
-            values,
-            entry
-                .get("default_reasoning_level")
-                .or_else(|| entry.get("default_reasoning_effort")),
-        )?);
-        result.source = Source::Explicit;
-        result.supported = Some(true);
-        result.control = Some(ReasoningControl::Effort);
-    }
-    if let Some(options) = entry.get("reasoning_options") {
-        let options = options
-            .as_array()
-            .filter(|o| o.len() <= 3)
-            .ok_or_else(|| anyhow::anyhow!("malformed reasoning options"))?;
-        for option in options {
-            match option.get("type").and_then(serde_json::Value::as_str) {
-                Some("effort") => {
-                    anyhow::ensure!(
-                        result.options.is_none(),
-                        "conflicting reasoning option sources"
-                    );
-                    result.options = Some(decode_reasoning_options(
-                        option
-                            .get("values")
-                            .ok_or_else(|| anyhow::anyhow!("missing effort values"))?,
-                        option.get("default"),
-                    )?);
-                    result.control = Some(ReasoningControl::Effort);
-                }
-                Some("toggle" | "budget_tokens") => {
-                    if result.options.is_none() {
-                        result.source = Source::Unknown;
-                    }
-                }
-                _ => anyhow::bail!("malformed reasoning options"),
-            }
-        }
-    }
-    // DeepSeek publishes its effort contract as `effort`: the endpoint declares
-    // which enabled levels it accepts and which one it uses unless asked. The
-    // levels describe enabled effort only; an Off control stays declaration-owned
-    // (`thinking.type`), exactly as the pinned contract already states.
-    if result.options.is_none() && result.source != Source::Unknown {
-        if let Some(effort) = entry.get("effort") {
-            if let Some(levels) = effort.get("supported_levels") {
-                result.options = Some(decode_reasoning_options(
-                    levels,
-                    effort.get("default_level"),
-                )?);
-                result.control = Some(ReasoningControl::Effort);
-                result.supported = Some(true);
-                result.source = Source::Explicit;
-                result.enabled_effort_levels = true;
-            }
-        }
-    }
-    if result.options.is_none() {
-        if let Some(parameters) = entry
-            .get("supported_parameters")
-            .and_then(serde_json::Value::as_array)
-        {
-            if parameters.iter().any(|p| {
-                matches!(
-                    p.as_str(),
-                    Some("reasoning_effort" | "reasoning.effort" | "reasoning")
-                )
-            }) {
-                result.supported = Some(true);
-                result.source = Source::Explicit;
-                if parameters
-                    .iter()
-                    .any(|p| matches!(p.as_str(), Some("reasoning_effort" | "reasoning.effort")))
-                {
-                    result.control = Some(ReasoningControl::Effort);
-                }
-            }
-        }
-    }
-    if let Some(options) = &result.options {
-        let choices = options.choices();
-        let has_effort = choices
-            .iter()
-            .any(|v| matches!(v, ReasoningConfig::Effort(_)));
-        let inferred = if result.control == Some(ReasoningControl::AlwaysOn) {
-            anyhow::ensure!(
-                choices.iter().all(|choice| *choice == ReasoningConfig::On),
-                "always-on reasoning requires only On choices"
-            );
-            ReasoningControl::AlwaysOn
-        } else if has_effort {
-            ReasoningControl::Effort
-        } else {
-            ReasoningControl::Toggle
-        };
-        anyhow::ensure!(
-            result.control.is_none_or(|c| c == inferred),
-            "reasoning control disagrees with exact values"
-        );
-        result.control = Some(inferred);
-        result.supported = Some(choices.iter().any(|v| *v != ReasoningConfig::Off));
-        result.source = Source::Explicit;
-    }
-    // Binary controls are semantic, not an effort range.
-    if result.control == Some(ReasoningControl::Toggle) && result.options.is_none() {
-        result.options = Some(ReasoningOptions {
-            values: vec!["false".into(), "true".into()],
-            default: None,
-        });
-    }
-    Ok(result)
-}
+pub(crate) use octet_ai::providers::inventory_metadata::decode_reasoning_metadata;
 
-fn decode_reasoning_options(
-    values: &serde_json::Value,
-    default: Option<&serde_json::Value>,
-) -> anyhow::Result<octet_ai::types::ReasoningOptions> {
-    let values = values
-        .as_array()
-        .filter(|a| !a.is_empty() && a.len() <= 9)
-        .ok_or_else(|| anyhow::anyhow!("invalid reasoning values"))?;
-    let values = values
-        .iter()
-        .map(|v| {
-            v.as_str().or_else(|| {
-                v.get("effort")
-                    .or_else(|| v.get("value"))
-                    .and_then(serde_json::Value::as_str)
-            })
-        })
-        .map(|v| {
-            v.map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("invalid reasoning value"))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let default = default
-        .filter(|d| !d.is_null())
-        .map(|d| {
-            // A structured default names its effort in `value`; a plain string
-            // default is the same claim in the shorter form.
-            d.as_str()
-                .or_else(|| d.get("value").and_then(serde_json::Value::as_str))
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("invalid reasoning default"))
-        })
-        .transpose()?;
-    let options = octet_ai::types::ReasoningOptions { values, default };
-    anyhow::ensure!(
-        options.is_valid(),
-        "unknown, duplicate or inconsistent reasoning values/default"
-    );
-    Ok(options)
-}
+pub(crate) use octet_ai::providers::inventory_metadata::decode_reasoning_options;
 
 /// Only genuine inventory labels cross the display-name boundary. A synthetic
 /// id fallback would obscure builtin spelling and cannot later be distinguished
 /// from a user's intentional raw-looking label.
-pub(crate) fn discovered_display_name(entry: &serde_json::Value, id: &str) -> Option<String> {
-    ["display_name", "name"]
-        .into_iter()
-        .filter_map(|key| entry.get(key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .find(|name| !name.is_empty() && *name != id)
-        .map(str::to_owned)
-}
+pub(crate) use octet_ai::providers::inventory_metadata::discovered_display_name;
 
 pub(crate) fn apply_discovered_reasoning(
     entry: &serde_json::Value,
@@ -1620,30 +1364,7 @@ pub(crate) fn apply_discovered_reasoning(
 
 /// Presence, not successful decoding, controls enrichment. Unknown/null and
 /// malformed endpoint assertions must never be replaced by catalog optimism.
-fn has_metadata_assertion(entry: &serde_json::Value, names: &[&str]) -> bool {
-    [
-        Some(entry),
-        entry.get("provider"),
-        entry.get("top_provider"),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|metadata| {
-        let asserted = |object: &serde_json::Value, name: &str| {
-            if let Some((container, field)) = name.split_once('/') {
-                object
-                    .get(container)
-                    .is_some_and(|value| !value.is_object() || value.get(field).is_some())
-            } else {
-                object.get(name).is_some()
-            }
-        };
-        names.iter().any(|name| asserted(metadata, name))
-            || metadata.get("capabilities").is_some_and(|caps| {
-                !caps.is_object() || names.iter().any(|name| asserted(caps, name))
-            })
-    })
-}
+pub(crate) use octet_ai::providers::inventory_metadata::has_metadata_assertion;
 
 const MODALITY_FIELDS: &[&str] = &[
     "architecture/input_modalities",
@@ -2172,39 +1893,7 @@ fn deepseek_discovered_limits(model: &DiscoveredApiModel) -> (u64, u64) {
     (context_window, max_output_tokens)
 }
 
-fn metadata_capability_flag(value: &serde_json::Value) -> Option<bool> {
-    value
-        .as_bool()
-        .or_else(|| value.get("supported").and_then(serde_json::Value::as_bool))
-}
-
-fn asserted_capability(entry: &serde_json::Value, names: &[&str]) -> Option<bool> {
-    let mut supported = None;
-    for metadata in [
-        Some(entry),
-        entry.get("top_provider"),
-        entry.get("provider"),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for object in [Some(metadata), metadata.get("capabilities")]
-            .into_iter()
-            .flatten()
-        {
-            for name in names {
-                if let Some(value) = object.get(*name) {
-                    match metadata_capability_flag(value) {
-                        Some(true) => supported = Some(true),
-                        // Unknown/malformed explicit flags are not positive support.
-                        Some(false) | None => return Some(false),
-                    }
-                }
-            }
-        }
-    }
-    supported
-}
+pub(crate) use octet_ai::providers::inventory_metadata::asserted_capability;
 
 fn discovered_structured_output(entry: &serde_json::Value) -> Option<bool> {
     asserted_capability(entry, &["structured_output", "supports_structured_output"]).or_else(|| {
@@ -2291,72 +1980,11 @@ fn custom_model_metadata_supports_tools(entry: &serde_json::Value) -> bool {
 /// `modalities`). Keeping this normalization in one place prevents a model
 /// from being incorrectly treated as text-only just because its inventory
 /// shape differs.
-fn input_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
-    modalities_from_entry(entry, "input")
-}
+pub(crate) use octet_ai::providers::inventory_metadata::input_modalities_from_entry;
 
-fn output_modalities_from_entry(entry: &serde_json::Value) -> ModalitySet {
-    modalities_from_entry(entry, "output")
-}
+pub(crate) use octet_ai::providers::inventory_metadata::output_modalities_from_entry;
 
-fn modalities_from_entry(entry: &serde_json::Value, direction: &str) -> ModalitySet {
-    let field = format!("{direction}_modalities");
-    let values = [
-        Some(entry),
-        entry.get("top_provider"),
-        entry.get("provider"),
-    ]
-    .into_iter()
-    .flatten()
-    .flat_map(|metadata| [Some(metadata), metadata.get("capabilities")])
-    .flatten()
-    .find_map(|metadata| {
-        metadata
-            .get("architecture")
-            .and_then(|architecture| {
-                if architecture.is_object() {
-                    architecture.get(&field)
-                } else {
-                    Some(architecture)
-                }
-            })
-            .or_else(|| metadata.get(&field))
-            .or_else(|| {
-                metadata.get("modalities").and_then(|modalities| {
-                    if modalities.is_object() {
-                        modalities.get(direction)
-                    } else if direction == "input" {
-                        Some(modalities)
-                    } else {
-                        None
-                    }
-                })
-            })
-    })
-    .and_then(serde_json::Value::as_array)
-    .filter(|values| values.iter().all(serde_json::Value::is_string));
-    let mut result = ModalitySet::none();
-    for value in values.into_iter().flatten() {
-        match value.as_str().unwrap().to_ascii_lowercase().as_str() {
-            "image" | "vision" => result = result.with(octet_ai::Modality::Image),
-            "audio" => result = result.with(octet_ai::Modality::Audio),
-            // models.dev says `pdf`; OpenRouter's architecture says `file`.
-            "pdf" | "file" if direction == "input" => {
-                result = result.with(octet_ai::Modality::Pdf);
-            }
-            _ => {}
-        }
-    }
-    result
-}
-
-fn conversation_output_modalities(protocol: Protocol, advertised: ModalitySet) -> ModalitySet {
-    if protocol == Protocol::OpenAiChat && advertised.contains(octet_ai::Modality::Audio) {
-        ModalitySet::none().with(octet_ai::Modality::Audio)
-    } else {
-        ModalitySet::none()
-    }
-}
+pub(crate) use octet_ai::providers::inventory_metadata::conversation_output_modalities;
 
 /// Parse the two inventory envelopes used by supported providers: OpenAI-style
 /// `{ "data": [...] }` and Codex-style `{ "models": [...] }`. Some local
@@ -6367,14 +5995,17 @@ pub(crate) fn extract_ctx_from_model_entry(entry: &serde_json::Value) -> Option<
 
 // Cache source defaults and maxima separately from effective budgets. Version 12
 // invalidates limits normalized by the retired 272K/plan-selection policy.
-const CODEX_MODEL_CACHE_VERSION: u8 = 12;
-const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+#[cfg(test)]
+use octet_ai::providers::codex::CODEX_MODEL_CACHE_REFRESH_INTERVAL;
+#[cfg(test)]
+use octet_ai::providers::codex::CODEX_MODEL_CACHE_VERSION;
 // This is the Codex `/models` schema compatibility version octet implements,
 // not octet's package version. Sending an older version causes the backend to
 // filter out models that require a contemporary Codex client: it withheld
 // GPT-6.1 Sol from 0.156.1 although the bundled catalog lists a 0.153.0
 // minimum, while Codex 0.159.2 listed it for the same account.
-const CODEX_MODELS_CLIENT_VERSION: &str = "0.159.2";
+#[cfg(test)]
+use octet_ai::providers::codex::CODEX_MODELS_CLIENT_VERSION;
 
 pub(crate) fn effective_compaction_threshold_fraction(config: &Config, model: &Model) -> f64 {
     effective_policy_threshold_fraction(&config.compaction, model)
@@ -6395,278 +6026,29 @@ pub(crate) fn effective_policy_threshold_fraction(
     policy.threshold_fraction.min(absolute_fraction)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct DiscoveredCodexModel {
-    id: String,
-    #[serde(default)]
-    display_name: Option<String>,
-    input_modalities: ModalitySet,
-    output_modalities: ModalitySet,
-    reasoning_options: octet_ai::types::ReasoningOptions,
-    context_window: u64,
-    /// Backend default retained separately from the user-selected budget.
-    #[serde(default)]
-    default_context_window: u64,
-    max_context_window: u64,
-    max_output_tokens: u64,
-    min_effort: octet_ai::ReasoningEffort,
-    max_effort: octet_ai::ReasoningEffort,
-    /// Positive account-inventory authority, never inferred from a model name.
-    #[serde(default)]
-    reasoning_effort_updates: bool,
-    responses_lite: bool,
-    // `Option<T>` normally treats a missing key as `None`; the custom decoder
-    // keeps explicit null valid while making incomplete dynamic metadata fail.
-    #[serde(deserialize_with = "deserialize_required_agent_delegation")]
-    agent_delegation: Option<AgentDelegation>,
-}
+use octet_ai::providers::codex::DiscoveredCodexModel;
 
-fn deserialize_required_agent_delegation<'de, D>(
-    deserializer: D,
-) -> Result<Option<AgentDelegation>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    <Option<AgentDelegation> as serde::Deserialize>::deserialize(deserializer)
-}
+#[cfg(test)]
+use octet_ai::providers::codex::CodexModelCache;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct CodexModelCache {
-    version: u8,
-    account_id: String,
-    plan: Option<String>,
-    models: Vec<DiscoveredCodexModel>,
-}
+use octet_ai::providers::codex::CodexDiscovery;
 
-#[derive(Clone)]
-struct CodexDiscovery {
-    claims: crate::auth::codex::SubscriptionClaims,
-    models: Vec<DiscoveredCodexModel>,
-}
+use octet_ai::providers::codex::positive_u64;
 
-fn positive_u64(entry: &serde_json::Value, names: &[&str]) -> Option<u64> {
-    names.iter().find_map(|name| {
-        entry
-            .get(*name)
-            .and_then(serde_json::Value::as_u64)
-            .filter(|value| *value > 0)
-    })
-}
-
-fn codex_fallback_reasoning_options(model_id: &str) -> octet_ai::types::ReasoningOptions {
-    // Sparse Codex metadata cannot establish Off or Ultra for generic fallback
-    // models. Bundled 6.1 Sol/Terra advertise Ultra, but it is only usable when the
-    // account inventory also positively advertises V2; offline fallback strips it.
-    let floor = codex_min_effort(model_id);
-    let ceiling = codex_max_effort(model_id);
-    let candidates: &[&str] = if matches!(model_id, "gpt-6.1-sol" | "gpt-6.1-terra") {
-        &["low", "medium", "high", "xhigh", "max", "ultra"]
-    } else if model_id == "gpt-5.6-luna" {
-        &["none", "low", "medium", "high", "xhigh", "max"]
-    } else {
-        &["minimal", "low", "medium", "high", "xhigh", "max"]
-    };
-    let values = candidates
-        .iter()
-        .copied()
-        .filter(|value| match ReasoningConfig::from_provider_value(value) {
-            Some(ReasoningConfig::Off) => true,
-            Some(ReasoningConfig::Effort(effort)) => {
-                effort >= floor
-                    && (effort <= ceiling
-                        || (matches!(model_id, "gpt-6.1-sol" | "gpt-6.1-terra")
-                            && effort == octet_ai::ReasoningEffort::Ultra))
-            }
-            _ => false,
-        })
-        .map(str::to_owned)
-        .collect();
-    // Defaults follow the bundled Codex catalog.
-    let default = match model_id {
-        "gpt-6.1-sol" | "gpt-6.1-terra" => Some("low"),
-        "gpt-6-sol" | "gpt-6-luna" => Some("medium"),
-        _ => None,
-    };
-    octet_ai::types::ReasoningOptions {
-        values,
-        default: default.map(str::to_owned),
-    }
-}
-
-fn strip_codex_ultra(options: &mut octet_ai::types::ReasoningOptions) {
-    options.values.retain(|v| {
-        ReasoningConfig::from_provider_value(v)
-            != Some(ReasoningConfig::Effort(octet_ai::ReasoningEffort::Ultra))
-    });
-    if options
-        .default
-        .as_ref()
-        .is_some_and(|d| !options.values.contains(d))
-    {
-        options.default = options.values.first().cloned();
-    }
-}
-
-fn codex_reasoning_range(
-    options: &octet_ai::types::ReasoningOptions,
-    id: &str,
-) -> (octet_ai::ReasoningEffort, octet_ai::ReasoningEffort) {
-    let efforts = options
-        .choices()
-        .into_iter()
-        .filter_map(|c| match c {
-            ReasoningConfig::Effort(e) => Some(e),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    (
-        efforts
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(codex_min_effort(id)),
-        efforts
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(codex_max_effort(id)),
-    )
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_fallback_reasoning_options;
 
 /// The decoded models alone; tests that do not inspect skipped entries use it.
 #[cfg(test)]
-fn codex_models_from_response(
-    body: &serde_json::Value,
-) -> anyhow::Result<Vec<DiscoveredCodexModel>> {
-    codex_inventory_from_response(body).map(|inventory| inventory.models)
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_models_from_response;
 
 /// A decoded Codex inventory plus the entries it had to leave out.
-struct CodexInventory {
-    models: Vec<DiscoveredCodexModel>,
-    /// `id: reason` for each entry whose reasoning metadata was unusable.
-    skipped: Vec<String>,
-}
 
 /// Decode an inventory, failing closed per model: an entry with malformed or
 /// unusable reasoning metadata is left out, never registered with guessed
 /// choices, and never costs the account its other models.
-fn codex_inventory_from_response(body: &serde_json::Value) -> anyhow::Result<CodexInventory> {
-    // The subscription backend uses `models`, while OpenAI-compatible proxies
-    // commonly expose the same inventory under `data`. Accepting both keeps
-    // OAuth discovery working through enterprise gateways as well.
-    let entries = body
-        .get("models")
-        .or_else(|| body.get("data"))
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("Codex models response has no models array"))?;
-    let mut models = Vec::with_capacity(entries.len());
-    let mut skipped = Vec::new();
-    for entry in entries {
-        let Some(id) = entry
-            .as_str()
-            .or_else(|| {
-                entry
-                    .get("slug")
-                    .or_else(|| entry.get("id"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            continue;
-        };
-        let fallback = codex_model_context_limits(id);
-        let advertised_context = positive_u64(
-            entry,
-            &["context_window", "context_length", "max_context_tokens"],
-        );
-        let advertised_max = positive_u64(entry, &["max_context_window"]);
-        let (default_context_window, max_context_window) =
-            match (advertised_context, advertised_max) {
-                (Some(context), Some(maximum)) => (context.min(maximum), maximum),
-                (Some(context), None) => (context, context),
-                (None, Some(maximum)) => (maximum, maximum),
-                (None, None) => fallback,
-            };
-        let resolution = resolve_codex_context_window(
-            id,
-            default_context_window,
-            max_context_window,
-            positive_u64(entry, &["max_output_tokens", "max_completion_tokens"]),
-            CodexContextOverride::NONE,
-        )
-        .expect("resolving a Codex context window without a user override cannot fail");
-        let context_window = resolution.context_window;
-        // Astra's advertised input envelope never changes its 128K output
-        // contract, while lower live metadata remains authoritative.
-        let max_output_tokens = resolution.max_output_tokens;
-        let agent_delegation = entry
-            .get("multi_agent_version")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|version| version.eq_ignore_ascii_case("v2"))
-            .then_some(AgentDelegation::V2);
-        let metadata = match decode_reasoning_metadata(entry) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                skipped.push(format!("{id}: {error}"));
-                continue;
-            }
-        };
-        if metadata.source == octet_ai::types::ReasoningMetadataSource::Unknown {
-            skipped.push(format!("{id}: unknown reasoning metadata"));
-            continue;
-        }
-        let mut reasoning_options = if metadata.supported == Some(false) {
-            octet_ai::types::ReasoningOptions {
-                values: vec!["none".into()],
-                default: Some("none".into()),
-            }
-        } else {
-            metadata
-                .options
-                .unwrap_or_else(|| codex_fallback_reasoning_options(id))
-        };
-        if agent_delegation != Some(AgentDelegation::V2) {
-            strip_codex_ultra(&mut reasoning_options);
-        }
-        if !reasoning_options.is_valid() {
-            skipped.push(format!("{id}: no usable reasoning choices"));
-            continue;
-        }
-        let (min_effort, max_effort) = codex_reasoning_range(&reasoning_options, id);
-        let responses_lite = entry
-            .get("use_responses_lite")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        models.push(DiscoveredCodexModel {
-            id: id.to_owned(),
-            display_name: discovered_display_name(entry, id)
-                .or_else(|| (id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned())),
-            input_modalities: codex_input_modalities(entry, id),
-            output_modalities: output_modalities_from_entry(entry),
-            reasoning_options,
-            context_window,
-            default_context_window,
-            max_context_window,
-            max_output_tokens,
-            min_effort,
-            max_effort,
-            reasoning_effort_updates: entry
-                .get("supports_reasoning_effort_updates")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            responses_lite,
-            agent_delegation,
-        });
-    }
-    models.sort_by(|left, right| left.id.cmp(&right.id));
-    models.dedup_by(|left, right| left.id == right.id);
-    if models.is_empty() {
-        anyhow::bail!("Codex models response contained no usable models");
-    }
-    Ok(CodexInventory { models, skipped })
-}
+use octet_ai::providers::codex::codex_inventory_from_response;
 
 /// Report inventory entries left out for unusable reasoning metadata.
 fn report_skipped_codex_models(skipped: &[String]) {
@@ -6687,135 +6069,31 @@ fn report_skipped_codex_models(skipped: &[String]) {
 }
 
 /// Reviewed offline fallback windows; authenticated inventory takes precedence.
-fn codex_model_context_limits(model_id: &str) -> (u64, u64) {
-    crate::codex_context::fallback_context_windows(model_id)
-}
 
-fn codex_model_limits(model_id: &str) -> (ModelLimits, u64) {
-    let (context_window, maximum) = codex_model_context_limits(model_id);
-    (
-        ModelLimits {
-            context_window,
-            max_output_tokens: CODEX_MAX_OUTPUT_TOKENS.min(context_window),
-        },
-        maximum,
-    )
-}
-
-fn codex_min_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if known_gpt_6_model(model_id) || model_id == "gpt-5.6-luna" {
-        octet_ai::ReasoningEffort::Low
-    } else {
-        octet_ai::ReasoningEffort::Minimal
-    }
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_min_effort;
 
 // New Codex families accept the top `max` effort tier. Live discovery narrows
 // this range when the backend publishes explicit supported reasoning levels.
-fn codex_max_effort(model_id: &str) -> octet_ai::ReasoningEffort {
-    if known_gpt_6_model(model_id) || model_id.starts_with("gpt-5.6-") {
-        octet_ai::ReasoningEffort::Max
-    } else {
-        octet_ai::ReasoningEffort::High
-    }
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_max_effort;
 
 /// Current Codex vision-capable families. The Codex backend's inventory does
 /// not reliably include modality metadata, so keep this capability aligned
 /// with the provider's published model contract instead of defaulting every
 /// OAuth model to text-only.
-fn codex_supports_image_input(model_id: &str) -> bool {
-    model_id == "codex-mini-latest"
-        || known_gpt_6_model(model_id)
-        || model_id.starts_with("gpt-5.4")
-        || model_id.starts_with("gpt-5.5")
-        || model_id.starts_with("gpt-5.6")
-        || model_id.starts_with("gpt-5.3-codex")
-        || model_id.starts_with("gpt-5.2-codex")
-        || model_id.starts_with("gpt-5.1-codex")
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_supports_image_input;
 
-fn codex_input_modalities(entry: &serde_json::Value, id: &str) -> ModalitySet {
-    let mut modalities = input_modalities_from_entry(entry);
-    if !has_metadata_assertion(entry, MODALITY_FIELDS) && codex_supports_image_input(id) {
-        modalities = modalities.with(octet_ai::Modality::Image);
-    }
-    for (field, modality) in [
-        ("vision", octet_ai::Modality::Image),
-        ("audio", octet_ai::Modality::Audio),
-    ] {
-        match asserted_capability(entry, &[field]) {
-            Some(true) => modalities = modalities.with(modality),
-            Some(false) => modalities = modalities.without(modality),
-            None => {}
-        }
-    }
-    modalities
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_input_modalities;
 
-fn codex_plan_cache_key(claims: &crate::auth::codex::SubscriptionClaims) -> Option<&str> {
-    claims.plan.as_ref().map(|plan| plan.raw_value())
-}
+#[cfg(test)]
+use octet_ai::providers::codex::codex_plan_cache_key;
 
-fn save_codex_model_cache(
-    store: &crate::auth::codex::CredentialStore,
-    discovery: &CodexDiscovery,
-) -> anyhow::Result<()> {
-    let cache = CodexModelCache {
-        version: CODEX_MODEL_CACHE_VERSION,
-        account_id: discovery.claims.account_id.clone(),
-        plan: codex_plan_cache_key(&discovery.claims).map(str::to_owned),
-        models: discovery.models.clone(),
-    };
-    store.save_model_cache(&serde_json::to_vec_pretty(&cache)?)
-}
+use octet_ai::providers::codex::save_codex_model_cache;
 
-fn load_codex_model_cache(
-    store: &crate::auth::codex::CredentialStore,
-    claims: &crate::auth::codex::SubscriptionClaims,
-) -> anyhow::Result<Option<Vec<DiscoveredCodexModel>>> {
-    let Some(bytes) = store.load_fresh_model_cache(CODEX_MODEL_CACHE_REFRESH_INTERVAL)? else {
-        return Ok(None);
-    };
-    let mut cache: CodexModelCache =
-        serde_json::from_slice(&bytes).context("invalid Codex model cache")?;
-    if cache.version != CODEX_MODEL_CACHE_VERSION
-        || cache.account_id != claims.account_id
-        || cache.plan.as_deref() != codex_plan_cache_key(claims)
-        || cache.models.is_empty()
-    {
-        return Ok(None);
-    }
-    for model in &mut cache.models {
-        if known_gpt_6_model(&model.id) {
-            // Current-schema caches can still contain a previously accepted
-            // over-cap GPT-6 entry; normalize it to the fixed contract.
-            model.max_output_tokens = model.max_output_tokens.min(CODEX_MAX_OUTPUT_TOKENS);
-        }
-    }
-    let mut ids = std::collections::BTreeSet::new();
-    for model in &cache.models {
-        if model.id.trim() != model.id
-            || model.id.is_empty()
-            || !ids.insert(model.id.as_str())
-            || model.context_window == 0
-            || model.default_context_window == 0
-            || model.default_context_window > model.max_context_window
-            || model.max_context_window < model.context_window
-            || model.max_output_tokens == 0
-            || model.max_output_tokens > model.context_window
-            || !model.reasoning_options.is_valid()
-            || codex_reasoning_range(&model.reasoning_options, &model.id)
-                != (model.min_effort, model.max_effort)
-            || model.min_effort > model.max_effort
-            || (model.max_effort == octet_ai::ReasoningEffort::Ultra
-                && model.agent_delegation != Some(AgentDelegation::V2))
-        {
-            anyhow::bail!("invalid Codex model cache: incomplete or inconsistent model metadata");
-        }
-    }
-    Ok(Some(cache.models))
-}
+use octet_ai::providers::codex::load_codex_model_cache;
 
 /// Which source produced the Codex inventory for one registration.
 ///
@@ -6938,57 +6216,11 @@ fn discover_codex_models_within_envelope(
     )
 }
 
-fn conservative_offline_codex_models(
-    mut models: Vec<DiscoveredCodexModel>,
-) -> Vec<DiscoveredCodexModel> {
-    for model in &mut models {
-        model.reasoning_effort_updates = false;
-        model.responses_lite = false;
-        model.agent_delegation = None;
-        strip_codex_ultra(&mut model.reasoning_options);
-        (model.min_effort, model.max_effort) =
-            codex_reasoning_range(&model.reasoning_options, &model.id);
-    }
-    models.retain(|m| m.reasoning_options.is_valid());
-    models
-}
+use octet_ai::providers::codex::conservative_offline_codex_models;
 
-fn fallback_codex_models() -> Vec<DiscoveredCodexModel> {
-    crate::auth::codex::MODELS
-        .iter()
-        .map(|model_id| {
-            let (default_context_window, _) = codex_model_context_limits(model_id);
-            let (limits, max_context_window) = codex_model_limits(model_id);
-            let mut reasoning_options = codex_fallback_reasoning_options(model_id);
-            // The checked-in model contract alone cannot establish account
-            // authority for V2/Ultra when the live inventory is unreachable.
-            strip_codex_ultra(&mut reasoning_options);
-            DiscoveredCodexModel {
-                id: (*model_id).to_owned(),
-                display_name: (*model_id == "gpt-6.1-sol").then(|| "GPT-6.1-Sol".to_owned()),
-                input_modalities: codex_input_modalities(&serde_json::Value::Null, model_id),
-                output_modalities: ModalitySet::none(),
-                reasoning_options,
-                context_window: limits.context_window,
-                default_context_window,
-                max_context_window,
-                max_output_tokens: limits.max_output_tokens,
-                min_effort: codex_min_effort(model_id),
-                max_effort: codex_max_effort(model_id),
-                reasoning_effort_updates: false,
-                responses_lite: false,
-                agent_delegation: None,
-            }
-        })
-        .collect()
-}
+use octet_ai::providers::codex::fallback_codex_models;
 
-fn codex_models_url() -> anyhow::Result<url::Url> {
-    let mut url = url::Url::parse(crate::providers::CODEX.base_url)?.join("models")?;
-    url.query_pairs_mut()
-        .append_pair("client_version", CODEX_MODELS_CLIENT_VERSION);
-    Ok(url)
-}
+use octet_ai::providers::codex::codex_models_url;
 
 /// Wall-clock envelope for the SELECTED route's Codex inventory work.
 ///
@@ -7133,13 +6365,7 @@ fn discover_codex_models_with(
     })
 }
 
-fn codex_user_agent() -> String {
-    format!(
-        "octet/{} ({})",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS
-    )
-}
+use octet_ai::providers::codex::codex_user_agent;
 
 /// Read the explicit opt-in Codex context-window override.
 ///
@@ -7222,36 +6448,7 @@ fn codex_context_record_note(
 /// Select the coding product's inference contract independently of inventory
 /// transport preferences. Like Pi, use ordinary Responses with parallel calls;
 /// explicitly selected Lite remains supported by `octet-ai` for SDK callers.
-fn codex_inference_capabilities(model: &DiscoveredCodexModel) -> Capabilities {
-    Capabilities {
-        // Preserve known advertised inputs, but Responses has no audio codec.
-        input_modalities: model.input_modalities.without(octet_ai::Modality::Audio),
-        output_modalities: conversation_output_modalities(
-            Protocol::OpenAiResponses,
-            model.output_modalities,
-        ),
-        tools: true,
-        parallel_tool_calls: true,
-        reasoning: Some(ReasoningCapability {
-            options: Some(model.reasoning_options.clone()),
-            control: ReasoningControl::Effort,
-            exposes_text: true,
-            preserves_state: true,
-            effort_budgets: None,
-            openai_chat_mode: OpenAiChatReasoningMode::Standard,
-            min_effort: model.min_effort,
-            max_effort: model.max_effort,
-        }),
-        responses_lite: false,
-        agent_delegation: model.agent_delegation,
-        structured_output: false,
-        deferred_tool_loading: false,
-        responses_features: octet_ai::ResponsesFeatures {
-            reasoning_effort_updates: model.reasoning_effort_updates,
-            ..Default::default()
-        },
-    }
-}
+use octet_ai::providers::codex::codex_inference_capabilities;
 
 /// Register the OpenAI Codex (Sign in with ChatGPT) endpoint and discover the
 /// account's current model inventory, but only for a validated subscription

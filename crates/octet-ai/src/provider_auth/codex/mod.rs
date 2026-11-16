@@ -95,6 +95,22 @@ pub fn usable_subscription_claims(
     )?))
 }
 
+/// Explicit local-only claims read, without legacy import or refresh.
+pub fn local_subscription_claims(
+    store: &CredentialStore,
+) -> anyhow::Result<Option<SubscriptionClaims>> {
+    let Some(credential) = store.load_local()? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        !credential.tokens.refresh_token.trim().is_empty(),
+        "Codex credential has no refresh token; sign in again"
+    );
+    Ok(Some(oauth::subscription_claims(
+        &credential.tokens.access_token,
+    )?))
+}
+
 /// Seconds since the Unix epoch.
 pub(crate) fn now_unix() -> u64 {
     std::time::SystemTime::now()

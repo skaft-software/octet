@@ -21,8 +21,16 @@ struct PricingRecord {
     reasoning: Option<u64>,
 }
 
+mod provider_build;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=provider_build.rs");
+    provider_build::generate_provider_declarations(
+        &PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()),
+        &PathBuf::from(env::var_os("OUT_DIR").unwrap()),
+    )
+    .expect("valid checked-in provider declarations");
     println!("cargo:rerun-if-changed={SNAPSHOT_PATH}");
     println!("cargo:rerun-if-changed={PRICING_SNAPSHOT_PATH}");
 

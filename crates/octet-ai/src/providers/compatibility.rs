@@ -1,6 +1,8 @@
+#![allow(missing_docs)]
+
 //! Prompt-cache compatibility selected by provider declarations.
 
-use octet_ai::{
+use crate::{
     CacheCompatibility, CacheControlFormat, EndpointId, EndpointTransport, ModelCatalog,
     PromptCacheLifetimes, Protocol, SessionAffinityFormat,
 };
@@ -10,7 +12,7 @@ use super::contract::{CompatibilityProfile, ProviderDeclaration, ProviderRoute, 
 /// Return the tested prompt-cache compatibility for a declaration-selected
 /// provider route. The OpenCode header helper also checks the declared route
 /// identity because this one routing header spans three different codecs.
-pub(crate) fn cache_compatibility(
+pub fn cache_compatibility(
     profile: CompatibilityProfile,
     model_id: &str,
     protocol: Protocol,
@@ -104,7 +106,7 @@ pub(crate) fn cache_compatibility(
 /// Add lifetime hints only for the canonical direct Anthropic declaration and
 /// its actual registered destination. A copied protocol/name or a configured
 /// gateway override does not establish the upstream cache lifetime.
-pub(crate) fn cache_compatibility_for_route(
+pub fn cache_compatibility_for_route(
     catalog: &ModelCatalog,
     declaration: &ProviderDeclaration,
     model_id: &str,
@@ -141,12 +143,12 @@ mod tests {
             for route in declaration.routes {
                 let mut catalog = ModelCatalog::default();
                 catalog
-                    .register_endpoint(octet_ai::Endpoint {
+                    .register_endpoint(crate::Endpoint {
                         id: EndpointId(route.endpoint_id.into()),
                         // Even the real Anthropic URL cannot qualify a gateway's
                         // declaration merely because it speaks the same protocol.
                         base_url: url::Url::parse(ANTHROPIC.base_url).unwrap(),
-                        auth: octet_ai::Auth::none(),
+                        auth: crate::Auth::none(),
                         default_headers: http::HeaderMap::new(),
                         transport: route.transport,
                         runtime: route.runtime,
@@ -184,10 +186,10 @@ mod tests {
         ] {
             let mut catalog = ModelCatalog::default();
             catalog
-                .register_endpoint(octet_ai::Endpoint {
+                .register_endpoint(crate::Endpoint {
                     id: EndpointId(route.endpoint_id.into()),
                     base_url: url::Url::parse(base_url).unwrap(),
-                    auth: octet_ai::Auth::none(),
+                    auth: crate::Auth::none(),
                     default_headers: http::HeaderMap::new(),
                     transport: route.transport,
                     runtime: route.runtime,
@@ -203,10 +205,10 @@ mod tests {
         }
         let mut catalog = ModelCatalog::default();
         catalog
-            .register_endpoint(octet_ai::Endpoint {
+            .register_endpoint(crate::Endpoint {
                 id: EndpointId(route.endpoint_id.into()),
                 base_url: url::Url::parse(ANTHROPIC.base_url).unwrap(),
-                auth: octet_ai::Auth::none(),
+                auth: crate::Auth::none(),
                 default_headers: http::HeaderMap::new(),
                 transport: EndpointTransport::WebSocketPreferred,
                 runtime: route.runtime,

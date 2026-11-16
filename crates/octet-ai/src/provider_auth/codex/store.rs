@@ -359,6 +359,10 @@ impl CredentialStore {
         refresh_lock.finish_with(result)
     }
 
+    pub(crate) fn load_local(&self) -> Result<Option<CredentialFile>> {
+        self.load_octet_credential()
+    }
+
     fn load_octet_credential(&self) -> Result<Option<CredentialFile>> {
         if let Some(memory) = &self.memory {
             return Ok(memory.credential.read().unwrap().clone());

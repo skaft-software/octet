@@ -13,21 +13,22 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use octet_ai::{
     AiClient, Auth, AwsCredentials, AwsSigV4Signer, CacheRetention, Capabilities,
-    CompatibilityMode, Message, ModalitySet, Model, ModelCatalog, ModelId, ModelLimits,
-    OutputFormat, OutputModalities, ReasoningConfig, ReasoningMode, Request, ToolChoice,
-    UserMessage, UserPart,
+    CompatibilityMode, ConfigError, EndpointTransport, Message, ModalitySet, Model, ModelCatalog,
+    ModelId, ModelLimits, OpenAiChatRuntimeProfile, OutputFormat, OutputModalities, Protocol,
+    ReasoningConfig, ReasoningMode, Request, RequestBodyEncoding, RequestRuntime,
+    ResponsesRuntimeProfile, ToolChoice, UserMessage, UserPart,
 };
 use serde::Deserialize;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::*;
 use crate::providers::auth::EnvironmentCredential;
 use crate::providers::catalog::{
     register_discovered_model, register_dynamic_endpoints_at_base_url,
     register_environment_endpoints_at_base_url, register_private_endpoints_at_base_url,
     register_static_models,
 };
+use crate::providers::contract::*;
 
 const PINNED_PI_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",

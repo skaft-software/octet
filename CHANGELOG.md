@@ -4,6 +4,8 @@
 
 ### Added
 
+- Expose shared provider declarations and account-scoped Codex catalogs with explicit local reads, discovery and exact route binding.
+
 - Share Codex authentication and private storage through octet-ai with in-memory credentials and caller-owned login presentation.
 
 - Document the reusable provider boundary and explicit caller ownership of storage, login interaction and inference.

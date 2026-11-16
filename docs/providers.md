@@ -114,7 +114,7 @@ normal precedence. Attribution applies to new requests, not past usage.
 Other built-in presets: DeepSeek, Groq, Cerebras, xAI, Together AI, Fireworks
 AI, NVIDIA, Hugging Face, Moonshot AI, Xiaomi, MiniMax and OpenCode Zen. A
 preset name doesn't promise every API of that provider. The [provider
-declarations](../crates/octet-coding-agent/src/providers/declarations.json) list
+declarations](../crates/octet-ai/src/providers/declarations.json) list
 what each route covers.
 
 Bedrock takes AWS credentials in this order: an `AWS_ACCESS_KEY_ID` /
@@ -867,7 +867,7 @@ Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
   operation and doesn't replay accepted input through HTTP. Codex also uses
   endpoint-configured zstd request compression, and if compression fails, octet
   sends the valid uncompressed body. These come from the provider
-  [declarations](../crates/octet-coding-agent/src/providers/declarations.json),
+  [declarations](../crates/octet-ai/src/providers/declarations.json),
   not from the Responses codec itself.
 - Explicit Responses Lite selection in `octet-ai` applies to ordinary and native
   compact requests; the coding product's Codex route does not select it. Lite

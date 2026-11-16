@@ -43,3 +43,22 @@ A resolver owns a started refresh task through rotation persistence even if its
 request waiter is dropped. Keep the Tokio runtime alive until such bounded work
 finishes; process termination/runtime shutdown and ambiguous remote exchanges
 remain uncertain. Cancellation is not revocation or permission to replay.
+
+## Catalog extraction (item 31)
+
+The declaration manifest/generator, static presets, compatibility and pricing
+now live under `octet_ai::providers`. The frontend reuses those owners and the
+pure `inventory_metadata` and Codex decoders. Existing catalogs and filtering
+remain intact. `providers::codex::CodexCatalog::fallback` and `from_inventory`
+construct immutable credential-free snapshots without any I/O. Supplied
+inventory must come from the caller's trusted account/endpoint; parsing alone
+does not authenticate it. `load_local` explicitly reads private storage and
+never imports or refreshes. `discover` explicitly authorizes only Codex inventory
+and necessary refresh, with bounded bodies/deadlines and no redirects.
+
+Snapshots distinguish supplied inventory, online discovery, fresh account/plan
+cache, and conservative suggestions. `bind_into` binds the declared Responses
+endpoint and a resolver pinned to the account/plan; replacement requires a new
+catalog. It never chooses direct OpenAI. Capabilities, defaults, unknown pricing
+and authoritative omissions retain their existing semantics. Context arithmetic
+is shared; environment publication and session notes remain frontend-owned.

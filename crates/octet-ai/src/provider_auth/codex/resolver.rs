@@ -14,6 +14,7 @@ use super::{now_unix, oauth, REFRESH_SKEW_SECS, TOKEN_URL};
 #[derive(Clone)]
 pub struct CodexResolver {
     store: CredentialStore,
+    expected_account: Option<super::SubscriptionClaims>,
     http: reqwest::Client,
     /// Token endpoint for refresh (overridable in tests/proxies).
     token_url: String,
@@ -30,10 +31,19 @@ impl CodexResolver {
     pub fn new(store: CredentialStore) -> Self {
         Self {
             store,
+            expected_account: None,
             http: super::http_client(),
             token_url: TOKEN_URL.to_owned(),
             refresh_lock: std::sync::Arc::new(Mutex::new(())),
             refresh_lock_wait: super::store::REFRESH_LOCK_WAIT,
+        }
+    }
+
+    /// Pin request authentication to the account/plan that supplied the catalog.
+    pub fn for_account(store: CredentialStore, claims: &super::SubscriptionClaims) -> Self {
+        Self {
+            expected_account: Some(claims.clone()),
+            ..Self::new(store)
         }
     }
 
@@ -60,6 +70,7 @@ impl CodexResolver {
             .store
             .load()?
             .ok_or_else(|| anyhow!("not signed in to OpenAI Codex; run `octet --login codex`"))?;
+        self.check_account(&cred)?;
         if now_unix() + REFRESH_SKEW_SECS < cred.expires_at {
             return Ok(cred);
         }
@@ -86,6 +97,7 @@ impl CodexResolver {
             .store
             .load_while_refresh_locked(&process_guard)?
             .ok_or_else(|| anyhow!("credential removed during refresh"))?;
+        self.check_account(&cred)?;
         if now_unix() + REFRESH_SKEW_SECS < cred.expires_at {
             process_guard.finish()?;
             return Ok(cred);
@@ -108,8 +120,19 @@ impl CodexResolver {
         };
         self.store
             .save_while_refresh_locked(&refreshed, &process_guard)?;
+        self.check_account(&refreshed)?;
         process_guard.finish()?;
         Ok(refreshed)
+    }
+
+    fn check_account(&self, credential: &CredentialFile) -> Result<()> {
+        if let Some(expected) = &self.expected_account {
+            anyhow::ensure!(
+                oauth::subscription_claims(&credential.tokens.access_token)? == *expected,
+                "Codex account changed; reload the catalog"
+            );
+        }
+        Ok(())
     }
 
     /// Resolve the complete header set and subscription identity needed by
@@ -212,6 +235,21 @@ mod tests {
             })
             .unwrap();
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn pinned_catalog_resolver_rejects_account_replacement_without_refresh() {
+        let (_dir, store) = store_with(now_unix() + 3600);
+        let claims = super::super::local_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let resolver = CodexResolver::for_account(store.clone(), &claims);
+        let mut replacement = store.load().unwrap().unwrap();
+        replacement.tokens.access_token = jwt_with_account("other-account");
+        replacement.expires_at = 0;
+        store.save(&replacement).unwrap();
+        assert!(matches!(resolver.resolve().await, Err(AuthError::Resolve)));
+        assert_eq!(store.load().unwrap().unwrap().tokens.refresh_token, "r");
     }
 
     #[tokio::test]
