@@ -44,7 +44,8 @@ outlive its caller, and pending records are not claimed delivered.
 
 The JSONL `tool_finished` record has `elapsed_us`, the monotonic tool duration
 truncated to microseconds, alongside the existing truncated `elapsed_ms` field.
-It is the same measurement retained for tool-result replay. The duration's
+Live `ToolFinished` events use that same microsecond value retained for tool-result
+replay, so presentation rounding cannot change after resuming. The duration's
 boundaries depend on the execution path and are not an isolated measurement of
 tool execution or of individual hooks. Other telemetry fields retain their
 specified units.

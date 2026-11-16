@@ -168,9 +168,11 @@ Live activity elapsed timers use whole seconds: `28s`, `1m49s`, or `1h01m01s`.
 Other TUI durations share one display-only formatter: up to three significant digits,
 with `ns`, `µs`, `ms`, `s`, `min`, or `h` selected automatically. Rounding is
 nearest, ties upward, and promotes across unit boundaries; fractional trailing
-zeroes are omitted and zero displays as `0ns`. Stored measurements retain their
-original precision. Live timers use the existing render schedule, not a faster
-refresh loop.
+zeroes are omitted and zero displays as `0ns`. Completed tool durations are
+truncated once to the session's microsecond precision before live events and
+persistence, so live and replayed rows round identically. Other stored measurements
+retain their original precision. Live timers use the existing render schedule,
+not a faster refresh loop.
 
 ## Interaction tone
 

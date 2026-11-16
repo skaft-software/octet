@@ -3300,15 +3300,16 @@ impl Agent {
                     if let Some(evidence) = terminal_gate_evidence.as_mut() {
                         evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
                     }
+                    let mut metadata = EntryMetadata {
+                        tool_output: details,
+                        tool_started_unix_ms: started_unix_ms,
+                        tool_finished_unix_ms: finished_unix_ms,
+                        ..EntryMetadata::default()
+                    };
+                    let duration = metadata.set_tool_duration(duration);
                     if let Err(e) = session.append_with_metadata(
                         EntryValue::Message(Message::User(message)),
-                        Some(EntryMetadata {
-                            tool_output: details,
-                            tool_duration_us: Some(duration.as_micros().min(u64::MAX as u128) as u64),
-                            tool_started_unix_ms: started_unix_ms,
-                            tool_finished_unix_ms: finished_unix_ms,
-                            ..EntryMetadata::default()
-                        }),
+                        Some(metadata),
                     ) {
                         break 'run FinishReason::Failed(e.into());
                     }

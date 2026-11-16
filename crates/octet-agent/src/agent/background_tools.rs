@@ -181,16 +181,15 @@ impl BackgroundTools {
             Vec::new(),
         );
         let message = with_tool_name(message, &call.name);
-        session.append_with_metadata(
-            EntryValue::Message(Message::User(message)),
-            Some(EntryMetadata {
-                tool_output: details,
-                tool_duration_us: Some(execution.duration.as_micros().min(u64::MAX as u128) as u64),
-                tool_started_unix_ms: execution.started_unix_ms,
-                tool_finished_unix_ms: execution.finished_unix_ms,
-                ..EntryMetadata::default()
-            }),
-        )?;
+        let mut metadata = EntryMetadata {
+            tool_output: details,
+            tool_started_unix_ms: execution.started_unix_ms,
+            tool_finished_unix_ms: execution.finished_unix_ms,
+            ..EntryMetadata::default()
+        };
+        execution.duration = metadata.set_tool_duration(execution.duration);
+        session
+            .append_with_metadata(EntryValue::Message(Message::User(message)), Some(metadata))?;
         // Only remove after the paired result is durable. A failed append ends
         // the run and leaves restart recovery the original unresolved identity.
         let mut execution = self
@@ -280,14 +279,16 @@ mod tests {
         let mut session = Session::open_read_only(&path).unwrap();
         let (tx, rx) = mpsc::channel(1);
         let task = tokio::spawn(async move {
-            completed_parallel_read_execution(
+            let mut completed = completed_parallel_read_execution(
                 Ok(ToolOutput::new("retained-completed-output")),
                 None,
                 rx,
                 ToolProgressSink::live(tx),
                 std::time::Instant::now(),
                 false,
-            )
+            );
+            completed.execution.duration = std::time::Duration::from_nanos(812_999);
+            completed
         });
         let mut jobs = BackgroundTools {
             jobs: VecDeque::from([BackgroundJob {
@@ -333,16 +334,33 @@ mod tests {
         // no second task or effect execution.
         drop(session);
         let mut session = Session::open(&path).unwrap();
-        jobs.settle_one(
-            &mut session,
-            &model,
-            &sandbox,
-            &context,
-            &mut usage,
-            &mut None,
-        )
-        .await
-        .unwrap();
+        let events = jobs
+            .settle_one(
+                &mut session,
+                &model,
+                &sandbox,
+                &context,
+                &mut usage,
+                &mut None,
+            )
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolFinished { duration, .. }
+                if *duration == std::time::Duration::from_micros(812)
+        )));
+        assert_eq!(
+            session
+                .entries()
+                .last()
+                .unwrap()
+                .metadata
+                .as_ref()
+                .unwrap()
+                .tool_duration_us,
+            Some(812)
+        );
         assert!(jobs.is_empty());
         assert_eq!(pending_tool_state(&session).unwrap().1.len(), 1);
     }

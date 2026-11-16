@@ -742,6 +742,14 @@ pub enum SessionRunOutcomeStatus {
 }
 
 impl EntryMetadata {
+    /// Record a monotonic tool duration at session precision and return the
+    /// same value for live events, so display rounding agrees with replay.
+    pub fn set_tool_duration(&mut self, duration: std::time::Duration) -> std::time::Duration {
+        let micros = duration.as_micros().min(u64::MAX as u128) as u64;
+        self.tool_duration_us = Some(micros);
+        std::time::Duration::from_micros(micros)
+    }
+
     fn sanitized(mut self) -> Option<Self> {
         self.native_steering = self.native_steering.filter(|(operation, id)| {
             !operation.is_empty()

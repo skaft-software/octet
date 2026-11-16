@@ -3596,6 +3596,24 @@ async fn reasoning_and_text_deltas_use_distinct_channels() {
     ));
 }
 
+fn assert_tool_durations_match_replay(events: &[AgentEvent], session: &Session) {
+    let recorded: Vec<_> = session
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.metadata.as_ref()?.tool_duration_us)
+        .map(Duration::from_micros)
+        .collect();
+    let live: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolFinished { duration, .. } => Some(*duration),
+            _ => None,
+        })
+        .collect();
+    assert!(!live.is_empty());
+    assert_eq!(live, recorded, "live tool timing must equal replay timing");
+}
+
 #[tokio::test]
 async fn one_tool_call_executes_and_persists() {
     let mut h = harness(
@@ -3639,6 +3657,7 @@ async fn one_tool_call_executes_and_persists() {
     // Persistence: user, assistant(tool call), tool result, final assistant.
     let session = h.agent.session();
     assert_eq!(session.entries().len(), 4);
+    assert_tool_durations_match_replay(&events, session);
     match &events[events.len() - 1] {
         AgentEvent::RunFinished { head, .. } => assert_eq!(session.head(), Some(head.clone())),
         _ => unreachable!(),
@@ -3702,6 +3721,7 @@ async fn multiple_parallel_safe_tool_calls_start_together_and_coalesce_in_order(
 
     // Each result is its own session entry (user, assistant, 2 results, assistant).
     assert_eq!(h.agent.session().entries().len(), 5);
+    assert_tool_durations_match_replay(&events, h.agent.session());
 
     // On the wire the two persisted results coalesce into ONE user message.
     let requests = wire_requests(h.server.as_ref().unwrap()).await;

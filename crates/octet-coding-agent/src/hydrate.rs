@@ -1167,7 +1167,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("timing.jsonl");
         let mut session = Session::create(&path).unwrap();
-        let live = Duration::from_nanos(812_999);
+        let mut metadata = EntryMetadata::default();
+        let live = metadata.set_tool_duration(Duration::from_nanos(812_999));
+        assert_eq!(live, Duration::from_micros(812));
         session
             .append_with_metadata(
                 EntryValue::Message(Message::User(UserMessage {
@@ -1179,10 +1181,7 @@ mod tests {
                         tool_name: None,
                     })],
                 })),
-                Some(EntryMetadata {
-                    tool_duration_us: Some(live.as_micros() as u64),
-                    ..EntryMetadata::default()
-                }),
+                Some(metadata),
             )
             .unwrap();
         drop(session);
