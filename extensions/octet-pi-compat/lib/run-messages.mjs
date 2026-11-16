@@ -2,31 +2,10 @@
 // This bounded mirror never writes the session or feeds provider context.
 import { bounded, facade, strict, unsupported } from './errors.mjs';
 import { messageEntry } from './model-turns.mjs';
+import { copyObservation as copy } from './observation-copy.mjs';
 
 const MAX_MESSAGES = 8192, MAX_BYTES = 4 * 1024 * 1024;
 export const runMessageMethods = new Set(['turn/started', 'turn/settled', 'message/started', 'message/updated', 'message/settled']);
-// Copy containers, not immutable transcript strings. Pi's
-// packages/agent/src/agent-loop.ts:434-450
-// shallow-copies messages and shares their nested partial; keep that alias within
-// an event, while retaining octet's stronger isolation across callbacks/events.
-function copy(value, seen = new Map()) {
-  if (value === null || typeof value !== 'object') return value;
-  if (seen.has(value)) return seen.get(value);
-  const result = Array.isArray(value) ? [] : {};
-  seen.set(value, result);
-  for (const key of Object.keys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    // Stream argument getters close over an immutable prefix. Materialize only
-    // if a consumer actually reads it, never for an unrelated text/delta read.
-    if (descriptor.get) {
-      let ready = false, item;
-      Object.defineProperty(result, key, { enumerable: true, configurable: true,
-        get() { if (!ready) { item = copy(descriptor.get()); ready = true; } return item; },
-        set(value) { item = value; ready = true; } });
-    } else Object.defineProperty(result, key, { value: copy(value[key], seen), enumerable: true, configurable: true, writable: true });
-  }
-  return result;
-}
 // Raw argument prefixes stay ropes until a full-arguments consumer requests one.
 // Retain completed-prefix candidates so invalid later input preserves the last
 // parseable value, just as the previous eager JSON.parse-on-every-delta did.
@@ -234,7 +213,10 @@ export async function handleRunMessage(runtime, method, payload, store) {
       if (!call) return;
       const { contentIndex } = call;
       if (phase === 'delta') {
-        bounded(delta, 'tool argument delta', 8192, { controls: true });
+        // Native tool-call chunks use the negotiated frame bound, not the text
+        // coalescer's 8KiB bound (process_hooks.rs:551-574). The aggregate mirror
+        // quota still bounds retained raw prefixes, including incomplete JSON.
+        bounded(delta, 'tool argument delta', MAX_BYTES, { controls: true });
         growPartial(run, size(delta) - 2);
         call.text += delta;
         // Only object/array/string/number/literal endings can parse. Avoid

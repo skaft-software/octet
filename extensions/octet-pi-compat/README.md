@@ -471,7 +471,14 @@ need not parse the whole argument prefix. Retained events remain isolated from
 later deltas and callback mutations. Full-message consumers still pay for the
 content they read. `test/stream-work.test.mjs` counts serializer/parser input at
 10, 100 and 1000 deltas; these counts are not RSS or wire-traffic measurements.
-The native delta wire is unchanged.
+The native delta wire is unchanged, including native-sized tool-argument chunks
+that are larger than the text coalescer's 8 KiB batch. Child text/thinking
+observations use the same container-copy mechanism and incremental byte budgets;
+`test/child-stream-work.test.mjs` gates both channels. The native
+`subscribed_native_stream_observation_work_is_delta_sized` fixture counts
+serialization through the real Rust writer and subscribed adapter child at
+10/100/1000 deltas. This is an offline publisher-boundary measurement, not
+provider throughput or full installed-setup qualification.
 
 A stream starts with Pi 1.0.2's provisional zero usage and `pending` stop reason.
 When no committed observation is available (including projection failures),
@@ -1086,8 +1093,8 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
     extensions/octet-pi-compat/test/builtin-overrides.test.mjs
 ```
 
-The isolated working-candidate adapter run is **1619 tests: 1586 passed, 0
-failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+The isolated rebased-candidate adapter run, with two test files in parallel, is
+**1639 tests: 1606 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the

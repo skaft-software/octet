@@ -249,3 +249,99 @@ async fn wait_until_idle_covers_a_session_start_still_in_flight() {
         .expect("the session start settled successfully");
     assert!(process.shutdown().await);
 }
+
+/// Native writer/subscribed child measurement, without a provider or App UI.
+#[tokio::test]
+async fn subscribed_native_stream_observation_work_is_delta_sized() {
+    use super::tests::trusted_descriptor;
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp.path().join("stream-work.mjs");
+    std::fs::write(&factory, r#"import { appendFileSync } from 'node:fs';
+export default pi => {
+  const stringify = JSON.stringify;
+  let serialized = 0, updates = 0;
+  JSON.stringify = function(value, ...rest) {
+    const text = stringify(value, ...rest);
+    if (value?.role === 'assistant' || value?.message?.role === 'assistant') serialized += Buffer.byteLength(text);
+    return text;
+  };
+  pi.on('session_start', () => {});
+  pi.on('agent_start', () => { serialized = 0; updates = 0; });
+  pi.on('message_update', event => { if (event.assistantMessageEvent.type === 'text_delta') updates++; });
+  pi.on('agent_end', () => appendFileSync(`${process.cwd()}/work.jsonl`, stringify({ serialized, updates }) + '\n'));
+};"#).unwrap();
+    let manifest_path = capture(temp.path(), &[factory]).await;
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    let process = ExtensionProcess::start(
+        trusted_descriptor(manifest_path.parent().unwrap(), manifest),
+        config,
+    )
+    .await
+    .unwrap();
+    let session = crate::Session::create(temp.path().join("session.jsonl")).unwrap();
+    let key = session.resource_owner_key();
+    process
+        .set_host_state_with_session(process.current_context().host, &session)
+        .unwrap();
+    process
+        .start_session_hook_binding(key.clone())
+        .await
+        .unwrap();
+    let owner = process
+        .current_context_for_resource_owner(key)
+        .resource_owner
+        .unwrap();
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let mut work = Vec::new();
+    for (trial, count) in [10, 100, 1000].into_iter().enumerate() {
+        assert!(connection
+            .queue_notification("turn/started", serde_json::json!({"resource_owner":owner})));
+        assert!(connection.queue_notification(
+            "message/started",
+            serde_json::json!({"resource_owner":owner})
+        ));
+        for _ in 0..count {
+            assert!(connection.queue_notification(
+                "message/updated",
+                serde_json::json!({"resource_owner":owner,"delta":"x".repeat(64)})
+            ));
+            // Exercise every delta without overrunning the bounded writer. This
+            // pacing is not a throughput measurement; only work is counted.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(connection
+            .queue_notification("turn/settled", serde_json::json!({"resource_owner":owner})));
+        let records = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let text =
+                    std::fs::read_to_string(temp.path().join("work.jsonl")).unwrap_or_default();
+                let rows = text.lines().collect::<Vec<_>>();
+                if rows.len() > trial {
+                    break rows
+                        .into_iter()
+                        .map(|row| serde_json::from_str::<serde_json::Value>(row).unwrap())
+                        .collect::<Vec<_>>();
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let measured = &records[trial];
+        assert_eq!(measured["updates"], count);
+        let bytes = measured["serialized"].as_u64().unwrap();
+        eprintln!(
+            "native subscribed child: {count} text deltas serialized {bytes} observation bytes"
+        );
+        work.push((count, bytes));
+    }
+    assert!(process.shutdown().await);
+    for (count, bytes) in work {
+        assert!(
+            bytes < 2048 + count as u64 * 256,
+            "{count} deltas serialized {bytes} bytes"
+        );
+    }
+}

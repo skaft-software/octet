@@ -31,6 +31,8 @@
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Native context observers borrow accepted requests and compute request-shape diagnostics only when preparation is refused.
+- Pi child text and reasoning observations share immutable strings and update byte budgets from new deltas.
+- Pi streamed tool arguments accept native-sized chunks while retaining bounded, isolated observations.
 - Audio read errors identify the provider and model when the selected route cannot accept the clip.
 - Packaged documentation keeps internal investigation notes private.
 - Provider request traces count signed Google parts by kind without exposing signatures.

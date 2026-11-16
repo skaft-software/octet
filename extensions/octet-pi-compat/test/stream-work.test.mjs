@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleRunMessage } from '../lib/run-messages.mjs';
+import { toolLifecyclePayload } from '../lib/tool-events.mjs';
 
 // Count actual serializer/parser input, not elapsed time, RSS or wire traffic.
 // The exact same fixtures run before and after the optimization.
@@ -36,6 +37,39 @@ for (const kind of ['text', 'arguments']) test(`${kind} stream serialization fol
     } finally { JSON.stringify = stringify; JSON.parse = parse; }
   }
   for (const { count, bytes } of work) assert.ok(bytes < 2048 + count * 256, `full partial revisited at ${count}: ${bytes}`);
+});
+
+test('tool progress observation work stays independent of earlier progress', t => {
+  for (const count of [10, 100, 1000]) {
+    let oldReads = 0;
+    const store = { state: {} };
+    toolLifecyclePayload({ tool_call_id: 'call', tool_name: 'tool', args: {} }, store);
+    for (let i = 0; i < count; i++) {
+      const partialResult = { content: [{ type: 'text', text: 'x'.repeat(64) }] };
+      const event = toolLifecyclePayload({ tool_call_id: 'call', tool_name: 'tool', partialResult }, store, 'tool/updated');
+      assert.equal(event.partialResult, partialResult);
+      // Any subsequent revisit of an earlier observation would be counted.
+      Object.defineProperty(partialResult, 'content', { get() { oldReads++; return []; } });
+    }
+    t.diagnostic(`${count} progress events: old observation reads=${oldReads}`);
+    assert.equal(oldReads, 0);
+  }
+});
+
+test('native-sized argument chunks and later malformed input preserve argument observations', async () => {
+  const events = [], runtime = { require() {}, metadata: () => ({ hooks: [] }), runEvent: async (type, value) => {
+    if (type === 'message_update') events.push(value);
+  } }, store = { state: { host: {} } };
+  await handleRunMessage(runtime, 'turn/started', {}, store);
+  const tool = async fields => handleRunMessage(runtime, 'message/updated', { tool_call: { index: 0, ...fields } }, store);
+  await tool({ phase: 'start', id: 'call', name: 'tool' });
+  await tool({ phase: 'delta', delta: JSON.stringify({ text: 'x'.repeat(20000) }) });
+  await tool({ phase: 'delta', delta: 'malformed trailing input' });
+  assert.equal(events.at(-1).message.content[0].arguments.text.length, 20000);
+  events.at(-1).message.content[0].arguments.text = 'changed';
+  assert.equal(events.at(-2).message.content[0].arguments.text.length, 20000);
+  store.state.run.bytes = 4 * 1024 * 1024;
+  await assert.rejects(tool({ phase: 'delta', delta: 'more' }), /bounded mirror exceeded/);
 });
 
 test('retained observations isolate nested mutation and preserve message/partial alias', async () => {

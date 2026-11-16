@@ -1,6 +1,7 @@
 // Bounded Pi observations built only from actual native child-run events.
 // This view is not a transcript writer and never feeds a provider or accounting.
 import { bounded, invalid, plainJSON, unsupported } from './errors.mjs';
+import { copyObservation } from './observation-copy.mjs';
 const MAX_HISTORY = 4 * 1024 * 1024;
 const API = { open_ai_responses: 'openai-responses', open_ai_chat: 'openai-completions', anthropic_messages: 'anthropic-messages', google_generative_ai: 'google-generative-ai' };
 const STOP = { EndTurn: 'stop', StopSequence: 'stop', ToolUse: 'toolUse', MaxTokens: 'length' };
@@ -39,7 +40,7 @@ export class ChildEventProjection {
     this.partial = undefined; this.turn = undefined; this.runStart = 0; this.runFinished = false;
     this.model = undefined; this.provider = undefined;
   }
-  _emit(event) { this.emit(structuredClone(event)); }
+  _emit(event) { this.emit(copyObservation(event)); }
   _append(message) {
     const bytes = Buffer.byteLength(JSON.stringify(message));
     if (this.bytes + bytes > MAX_HISTORY || this.messages.length >= 8192) unsupported('child message history', 'bounded mirror exceeded; no truncated transcript is returned');
@@ -67,6 +68,7 @@ export class ChildEventProjection {
       case 'turn_started':
         if (this.turn || this.partial) invalid('child turn started before prior message/turn settled');
         this.partial = { role: 'assistant', content: [], timestamp: event.timestamp, ...(this.model ? { model: this.model } : {}), ...(this.provider ? { provider: this.provider } : {}) };
+        this.partialBytes = Buffer.byteLength(JSON.stringify(this.partial));
         this._emit({ type: 'turn_start' });
         this._emit({ type: 'message_start', message: this.partial }); break;
       case 'output_delta': {
@@ -74,9 +76,14 @@ export class ChildEventProjection {
         bounded(event.text, 'child delta', 262144, { controls: true });
         const type = event.channel === 'text' ? 'text' : 'thinking', key = type === 'text' ? 'text' : 'thinking';
         let part = this.partial.content.at(-1);
-        if (part?.type !== type) { part = { type, [key]: '' }; this.partial.content.push(part); }
+        if (part?.type !== type) {
+          part = { type, [key]: '' };
+          this.partialBytes += Buffer.byteLength(JSON.stringify(part)) + (this.partial.content.length ? 1 : 0);
+          this.partial.content.push(part);
+        }
+        this.partialBytes += Buffer.byteLength(JSON.stringify(event.text)) - 2;
+        if (this.partialBytes > 262144) unsupported('child partial message', 'bounded stream projection exceeded');
         part[key] += event.text;
-        if (Buffer.byteLength(JSON.stringify(this.partial)) > 262144) unsupported('child partial message', 'bounded stream projection exceeded');
         this._emit({ type: 'message_update', message: this.partial, assistantMessageEvent: { type: `${type}_delta`, contentIndex: this.partial.content.length - 1, delta: event.text, partial: this.partial } }); break;
       }
       case 'turn_finished': {
