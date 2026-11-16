@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-//! `octet-ai` — provider-independent inference for octet's agent loop.
+//! `octet-ai` — provider-independent inference for Rust applications.
 //!
 //! This crate turns a provider-independent [`Request`] plus a selected [`Model`]
 //! into either a streamed sequence of [`StreamEvent`]s or a single assembled

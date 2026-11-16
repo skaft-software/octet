@@ -84,7 +84,7 @@ impl ParityOptions {
         // One publication path for every frontend: the TUI effort menu calls
         // `CodexContextOverride::publish` with the same values.
         if let Some(override_) = self.codex_context_override() {
-            crate::codex_context::publish(override_);
+            override_.publish();
         }
     }
 

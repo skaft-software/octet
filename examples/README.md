@@ -54,3 +54,8 @@ declarations aren't an OS sandbox, so use a trusted, separately isolated
 environment. See [discovery and
 trust](../docs/extensions.md#layout-and-discovery) and the [legacy Python
 runtime](../sdk/python/legacy-runtime.md).
+
+## Provider-only embedding
+
+[Provider-only consumer](provider-only/README.md) is an offline loopback fixture
+whose only Octet dependency is `octet-ai`; it does not start an agent runtime.

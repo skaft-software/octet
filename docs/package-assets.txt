@@ -626,3 +626,10 @@ text docs/design/pi-single-import.md
 text examples/themes/pi-profile.toml
 
 # private docs/design/codex-parity-context-tools-and-delegation.md
+
+text docs/provider-embedding.md
+text examples/provider-only/Cargo.toml
+text examples/provider-only/Cargo.lock
+text examples/provider-only/README.md
+text examples/provider-only/src/main.rs
+text examples/provider-only/check-dependencies.sh

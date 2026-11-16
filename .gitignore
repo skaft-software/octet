@@ -68,3 +68,6 @@ crates/ygg-coding-agent/
 
 # The no-Node codemode extension crate builds in place and in its own cache
 /extensions/octet-codemode/target/
+
+# Independent provider-only fixture builds locally when no target override is set.
+/examples/provider-only/target/

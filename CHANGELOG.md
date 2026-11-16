@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add a provider-only loopback consumer and embedding notes for shared Codex storage, catalogs and one-request inference.
+
 - Opt-in fullscreen input traces report event-to-publication and completed-frame timing without recording input text.
 
 - Expose shared provider declarations and account-scoped Codex catalogs with explicit local reads, discovery and exact route binding.

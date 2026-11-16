@@ -284,8 +284,10 @@ explicit maintainer script `scripts/refresh-models-dev-pricing.py` refreshes bot
 snapshots together and excludes provider-known dead aliases before writing them.
 Pricing is provider-scoped, represented as integer microdollars per million
 tokens, and is used as a fallback for discovered built-in routes; explicit
-`CatalogConfig` pricing remains authoritative. Runtime discovery is a
-coding-product concern and can be disabled with `--offline`/`OCTET_OFFLINE=true`.
+`CatalogConfig` pricing remains authoritative. Codex discovery is an explicit
+shared provider operation; the frontend owns readiness and its
+`--offline`/`OCTET_OFFLINE=true` discovery policy. Other runtime inventory
+orchestration remains frontend-owned. See [provider-only embedding](../provider-embedding.md).
 
 The crate never fetches models.dev itself. `live_metadata_from_models_dev`
 applies the refresh script's extraction to a catalog the host fetched and checks

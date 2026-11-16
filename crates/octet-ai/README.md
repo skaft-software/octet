@@ -1,6 +1,6 @@
 # octet-ai
 
-Provider-independent inference for octet's agent loop.
+Provider-independent inference, authentication and model routing for Rust applications.
 
 `octet-ai` provides one canonical conversation model and one event stream across:
 
@@ -178,3 +178,10 @@ no key, an explicit `GOOGLE_APPLICATION_CREDENTIALS` selects ADC, and `None`
 means the caller decides whether an ADC probe is available. These helpers read
 only the supplied environment view: they perform no I/O, never mutate process
 state, and never probe the metadata server.
+
+## Provider-only embedding
+
+Shared Codex login, private/in-memory storage, account-scoped catalogs and exact
+route binding are available without the frontend or agent runtime. See the
+[embedding API and migration notes](../../docs/provider-embedding.md) and the
+[offline independent consumer](../../examples/provider-only/README.md).

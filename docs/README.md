@@ -61,6 +61,7 @@ builds from version-pinned publication channels and their qualification.
 - [Extension API 0.4 and retained wire reference](extensions/API-0.4-REFERENCE.md)
 - [Remote component UI (API 0.4)](extensions/remote-ui.md)
 - [Native embedding — host protocol 1](sdk.md)
+- [Provider-only embedding (unreleased)](provider-embedding.md)
 - [Examples and their compatibility status](../examples/README.md)
 - Architecture: [model clients](design/octet-ai.md), [agent
   runtime](design/octet-agent.md), [application](design/octet-coding-agent.md),

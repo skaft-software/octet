@@ -65,13 +65,6 @@ impl CodexResolver {
 
     /// Load a non-expired credential, refreshing if necessary.
     async fn load_valid(&self) -> Result<CredentialFile> {
-        let worker = self.clone();
-        tokio::spawn(async move { worker.load_valid_owned().await })
-            .await
-            .context("credential worker failed")?
-    }
-
-    async fn load_valid_owned(&self) -> Result<CredentialFile> {
         let cred = self
             .store
             .load()?
@@ -92,7 +85,7 @@ impl CodexResolver {
         // indefinitely blocked lock worker behind. A timed-out acquisition takes
         // nothing and rotates nothing, so the credential file is left exactly as
         // the other owner had it.
-        let _task_guard = self.refresh_lock.lock().await;
+        let task_guard = self.refresh_lock.clone().lock_owned().await;
         let lock_store = self.store.clone();
         let refresh_lock_wait = self.refresh_lock_wait;
         let process_guard =
@@ -109,26 +102,39 @@ impl CodexResolver {
             return Ok(cred);
         }
 
-        let tokens =
-            oauth::refresh_with_url(&self.http, &self.token_url, &cred.tokens.refresh_token)
-                .await?;
-        // Re-validate every rotated token. Keeping the old account id when the
-        // new token lacks subscription claims would silently reintroduce the
-        // localhost/free-routing 404 failure.
-        let account_id = oauth::validate_subscription_token(&tokens.access)?;
-        let refreshed = CredentialFile {
-            tokens: Tokens {
-                access_token: tokens.access,
-                refresh_token: tokens.refresh,
-                account_id,
-            },
-            expires_at: tokens.expires_at,
-        };
-        self.store
-            .save_while_refresh_locked(&refreshed, &process_guard)?;
-        self.check_account(&refreshed)?;
-        process_guard.finish()?;
-        Ok(refreshed)
+        // Cancellation before this point must not start an exchange later. Once
+        // rotation starts, retain both locks and persistence ownership even if
+        // the inference waiter disappears (Pi auth/resolve.ts:105–155).
+        let worker = self.clone();
+        tokio::spawn(async move {
+            let _task_guard = task_guard;
+            let tokens = oauth::refresh_with_url(
+                &worker.http,
+                &worker.token_url,
+                &cred.tokens.refresh_token,
+            )
+            .await?;
+            // Re-validate every rotated token. Keeping the old account id when
+            // the new token lacks subscription claims would silently reintroduce
+            // the localhost/free-routing 404 failure.
+            let account_id = oauth::validate_subscription_token(&tokens.access)?;
+            let refreshed = CredentialFile {
+                tokens: Tokens {
+                    access_token: tokens.access,
+                    refresh_token: tokens.refresh,
+                    account_id,
+                },
+                expires_at: tokens.expires_at,
+            };
+            worker
+                .store
+                .save_while_refresh_locked(&refreshed, &process_guard)?;
+            worker.check_account(&refreshed)?;
+            process_guard.finish()?;
+            anyhow::Ok(refreshed)
+        })
+        .await
+        .context("credential worker failed")?
     }
 
     fn check_account(&self, credential: &CredentialFile) -> Result<()> {
@@ -280,6 +286,36 @@ mod tests {
         store.delete_async().await.unwrap();
         assert!(!store.is_signed_in().unwrap());
         assert!(resolver.resolve().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_refresh_does_not_start_an_exchange() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": jwt_with_account("acct_9"), "refresh_token": "rotated", "expires_in": 3600
+        }))).mount(&server).await;
+        let (_dir, store) = store_with(0);
+        let mut resolver = CodexResolver::new(store);
+        resolver.token_url = format!("{}/token", server.uri());
+        let held = resolver.refresh_lock.lock().await;
+        let mut waiting = Box::pin(resolver.resolve());
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        tokio::task::yield_now().await;
+        drop(waiting);
+        drop(held);
+        let _settled = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resolver.refresh_lock.lock(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            0,
+            "cancellation before refresh starts must not authorize a later exchange"
+        );
     }
 
     #[tokio::test]
