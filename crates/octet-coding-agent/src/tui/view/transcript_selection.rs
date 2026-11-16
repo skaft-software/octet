@@ -266,16 +266,10 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
     let cache = state.transcript_cache.borrow();
     // Intersect the selection with the painted window before visiting blocks.
     // An offscreen anchor can otherwise make every drag scan settled history.
-    let first = cache
-        .block_starts
-        .partition_point(|row| *row <= start_row)
-        .saturating_sub(1)
-        .max(start.block);
-    let after = cache
-        .block_starts
-        .partition_point(|row| *row < start_row + lines.len())
-        .min(end.block.saturating_add(1));
-    for index in first..after {
+    for index in cache
+        .blocks_in_rows(start_row, start_row + lines.len())
+        .filter(|index| *index >= start.block && *index <= end.block)
+    {
         #[cfg(test)]
         super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
         let Some((block_start, block_rows, geometry)) = state.block_span(index) else {

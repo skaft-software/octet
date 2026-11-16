@@ -61,6 +61,9 @@ pub(super) struct TranscriptCache {
     welcome_rows: usize,
     pub(super) block_starts: Vec<usize>,
     pub(super) block_lengths: Vec<usize>,
+    /// Sorted block slots with at least one painted row. Hidden runs must not
+    /// turn viewport-sized receipt/selection work into a history-wide scan.
+    nonempty_blocks: Vec<usize>,
     pub(super) block_geometries: Vec<SurfaceGeometry>,
     pub(super) block_revisions: Vec<u64>,
     /// Blocks changed since the last layout pass. Keeping this explicit avoids
@@ -73,6 +76,40 @@ pub(super) struct TranscriptCache {
 }
 
 impl TranscriptCache {
+    pub(super) fn blocks_in_rows(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let first = self
+            .block_starts
+            .partition_point(|row| *row <= start)
+            .saturating_sub(1);
+        let slot = self.nonempty_blocks.partition_point(|index| *index < first);
+        self.nonempty_blocks[slot..]
+            .iter()
+            .copied()
+            .take_while(move |index| self.block_starts[*index] < end)
+    }
+
+    fn record_block_length(&mut self, index: usize, length: usize) {
+        // Cold layout and ordinary appends construct this index in O(n), not
+        // O(n log n); historical disclosure already shifts flat row metadata.
+        if self.nonempty_blocks.last().is_none_or(|last| *last < index) {
+            if length > 0 {
+                self.nonempty_blocks.push(index);
+            }
+            return;
+        }
+        match (self.nonempty_blocks.binary_search(&index), length > 0) {
+            (Err(slot), true) => self.nonempty_blocks.insert(slot, index),
+            (Ok(slot), false) => {
+                self.nonempty_blocks.remove(slot);
+            }
+            _ => {}
+        }
+    }
+
     /// Drop one tail block without invalidating the complete historic layout.
     /// A rendered transient status contributes cached rows to truncate; an
     /// event burst may remove the same status before its first frame, in which
@@ -101,6 +138,8 @@ impl TranscriptCache {
             self.lines.truncate(start);
             self.block_starts.truncate(index);
             self.block_lengths.truncate(index);
+            let keep = self.nonempty_blocks.partition_point(|block| *block < index);
+            self.nonempty_blocks.truncate(keep);
             self.block_geometries.truncate(index);
             self.block_revisions.truncate(index);
         }
@@ -122,6 +161,7 @@ impl Default for TranscriptCache {
             welcome_rows: 0,
             block_starts: Vec::new(),
             block_lengths: Vec::new(),
+            nonempty_blocks: Vec::new(),
             block_geometries: Vec::new(),
             block_revisions: Vec::new(),
             dirty_blocks: Vec::new(),
@@ -240,6 +280,7 @@ impl ShellState {
                 cache.lines.clear();
                 cache.block_starts.clear();
                 cache.block_lengths.clear();
+                cache.nonempty_blocks.clear();
                 cache.block_geometries.clear();
                 cache.block_revisions.clear();
                 cache.dirty_blocks.clear();
@@ -277,6 +318,7 @@ impl ShellState {
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
+                    cache.record_block_length(index, length);
                     cache.block_geometries.push(rendered.geometry);
                     cache.block_revisions.push(self.block_revisions[index]);
                 }
@@ -319,6 +361,7 @@ impl ShellState {
                     cache.lines.extend(rendered.lines);
                     cache.block_starts.push(start);
                     cache.block_lengths.push(length);
+                    cache.record_block_length(index, length);
                     cache.block_geometries.push(rendered.geometry);
                     cache.block_revisions.push(self.block_revisions[index]);
                 }
@@ -369,6 +412,7 @@ impl ShellState {
                             .lines
                             .splice(replacement_start..start + old_length, update.replacement);
                         cache.block_lengths[index] = new_length;
+                        cache.record_block_length(index, new_length);
                         cache.block_geometries[index] = update.geometry;
                         cache.block_revisions[index] = self.block_revisions[index];
 
@@ -408,6 +452,7 @@ impl ShellState {
                         .lines
                         .splice(start..start + old_length, rendered.lines);
                     cache.block_lengths[index] = new_length;
+                    cache.record_block_length(index, new_length);
                     cache.block_geometries[index] = rendered.geometry;
                     cache.block_revisions[index] = self.block_revisions[index];
 
@@ -744,6 +789,72 @@ mod tests {
     }
 
     #[test]
+    fn nonempty_block_index_tracks_disclosure_reflow_and_removal() {
+        use super::super::AssistantBlock;
+        let mut shell = InteractiveShell::test_shell();
+        {
+            let mut state = shell.state.borrow_mut();
+            state.push_block(TranscriptBlock::Notice("before".into()));
+            state.push_block(TranscriptBlock::Reasoning(Box::new(
+                AssistantBlock::finalized_reasoning("hidden reasoning".into())
+                    .with_reasoning_expanded(false),
+            )));
+            state.push_block(TranscriptBlock::Notice("after".into()));
+        }
+        for (expanded, width) in [
+            (false, 80),
+            (true, 80),
+            (false, 80),
+            (true, 40),
+            (false, 40),
+        ] {
+            shell.set_thinking_expanded(expanded);
+            let state = shell.state.borrow();
+            state.rendered_transcript(width);
+            let cache = state.transcript_cache.borrow();
+            let expected = cache
+                .block_lengths
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rows)| (*rows > 0).then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(cache.nonempty_blocks, expected);
+            assert_eq!(cache.nonempty_blocks.contains(&1), expanded);
+            for row in 0..cache.lines.len() {
+                let expected = expected
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        cache.block_starts[*index] <= row
+                            && row < cache.block_starts[*index] + cache.block_lengths[*index]
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    cache.blocks_in_rows(row, row + 1).collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+        // Tail truncation, append into the old slot, and structural removal.
+        for index in [2, 2, 0, 1, 0] {
+            let mut state = shell.state.borrow_mut();
+            state.remove_transient_activity_block(index);
+            if index == 2 && state.transcript.len() == 2 {
+                state.push_block(TranscriptBlock::Notice("replacement".into()));
+            }
+            state.rendered_transcript(40);
+            let cache = state.transcript_cache.borrow();
+            let expected = cache
+                .block_lengths
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rows)| (*rows > 0).then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(cache.nonempty_blocks, expected);
+        }
+    }
+
+    #[test]
     fn welcome_prefix_replacement_reanchors_following_blocks() {
         let mut cache = TranscriptCache {
             width: Some(80),
@@ -755,6 +866,7 @@ mod tests {
             welcome_rows: 10,
             block_starts: vec![2],
             block_lengths: vec![1],
+            nonempty_blocks: vec![0],
             block_geometries: vec![SurfaceGeometry::default()],
             block_revisions: vec![0],
             dirty_blocks: Vec::new(),

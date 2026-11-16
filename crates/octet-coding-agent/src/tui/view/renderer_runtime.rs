@@ -1,7 +1,7 @@
 //! Retained renderer scheduling, shared state, and frame bookkeeping.
 
 use super::renderer_model::{RenderModel, RenderOwner};
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -1651,11 +1651,67 @@ pub(super) struct ShellFrameState {
     pub(super) pending_tool_start: Option<usize>,
 }
 
+/// Bounded opt-in work observations. Emit once when this renderer retires,
+/// never while capturing geometry (which would feed diagnostics into frames).
+struct GeometryWorkTrace {
+    enabled: bool,
+    frames: Cell<usize>,
+    max_slots: Cell<usize>,
+    max_us: Cell<usize>,
+}
+impl GeometryWorkTrace {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os(crate::app::bootstrap::STARTUP_TRACE_ENV)
+                .is_some_and(|value| !value.is_empty() && value != "0"),
+            frames: Cell::new(0),
+            max_slots: Cell::new(0),
+            max_us: Cell::new(0),
+        }
+    }
+    fn observe(&self, slots: usize, elapsed: Duration) {
+        self.frames.set(self.frames.get().saturating_add(1));
+        self.max_slots.set(self.max_slots.get().max(slots));
+        self.max_us
+            .set(self.max_us.get().max(elapsed.as_micros() as usize));
+    }
+}
+#[cfg(test)]
+#[test]
+fn geometry_trace_retains_only_frame_count_and_high_water_marks() {
+    let trace = GeometryWorkTrace {
+        enabled: false,
+        frames: Cell::new(0),
+        max_slots: Cell::new(0),
+        max_us: Cell::new(0),
+    };
+    trace.observe(9, Duration::from_micros(50));
+    trace.observe(11, Duration::from_micros(20));
+    assert_eq!(trace.frames.get(), 2);
+    assert_eq!(trace.max_slots.get(), 11);
+    assert_eq!(trace.max_us.get(), 50);
+}
+
+impl Drop for GeometryWorkTrace {
+    fn drop(&mut self) {
+        if self.enabled && self.frames.get() > 0 {
+            for (name, value) in [
+                ("tui.geometry.frames", self.frames.get()),
+                ("tui.geometry.max_blocks", self.max_slots.get()),
+                ("tui.geometry.max_us", self.max_us.get()),
+            ] {
+                crate::app::bootstrap::startup_count(name, value);
+            }
+        }
+    }
+}
+
 /// The retained root component. It reads the shell state at render time, while
 /// `InteractiveShell` mutates that same state in response to events.
 pub(super) struct ShellComponent {
     state: SharedState,
     frame: RefCell<ShellFrameState>,
+    geometry_trace: GeometryWorkTrace,
     owner: Option<RefCell<RenderOwner>>,
     /// Mouse capture starts in bounded semantic mode. Keyboard PageUp can
     /// request the same renderer later without changing terminal mouse policy.
@@ -1667,6 +1723,7 @@ impl ShellComponent {
         Self {
             state,
             frame: RefCell::new(ShellFrameState::default()),
+            geometry_trace: GeometryWorkTrace::new(),
             owner: None,
             mouse_application_viewport: application_viewport,
         }
@@ -1705,6 +1762,7 @@ impl ShellComponent {
             RenderStateGuard::Private {
                 owner,
                 shared: &self.state,
+                trace: &self.geometry_trace,
             }
         } else {
             RenderStateGuard::Inline(state)
@@ -1717,6 +1775,7 @@ enum RenderStateGuard<'a> {
     Private {
         owner: RefMut<'a, RenderOwner>,
         shared: &'a SharedState,
+        trace: &'a GeometryWorkTrace,
     },
 }
 impl Deref for RenderStateGuard<'_> {
@@ -1730,14 +1789,23 @@ impl Deref for RenderStateGuard<'_> {
 }
 impl Drop for RenderStateGuard<'_> {
     fn drop(&mut self) {
-        let Self::Private { owner, shared } = self else {
+        let Self::Private {
+            owner,
+            shared,
+            trace,
+        } = self
+        else {
             return;
         };
         let owner = &mut **owner;
+        let started = trace.enabled.then(Instant::now);
         let mut geometry = super::renderer_geometry::RenderedGeometry::capture(
             &owner.state,
             owner.geometry_fence.expect("accepted model"),
         );
+        if let Some(started) = started {
+            trace.observe(geometry.blocks_visited, started.elapsed());
+        }
         let mut state = shared.0.lock().expect("shell state mutex poisoned");
         // Every mutable semantic borrow advances this fence, including input,
         // resize, disclosure, hydration and transcript changes. Never let an

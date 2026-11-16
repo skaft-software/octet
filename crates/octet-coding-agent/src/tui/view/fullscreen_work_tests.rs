@@ -6,6 +6,7 @@ use sexy_tui_rs::Component;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Work {
     pub(super) messages_visited: usize,
+    pub(super) geometry_blocks_visited: usize,
     pub(super) rows_laid_out: usize,
     pub(super) rows_mapped: usize,
     pub(super) cells_rendered: usize,
@@ -46,7 +47,7 @@ fn fixture(messages: usize) -> (InteractiveShell, ShellComponent) {
 }
 fn paint(shell: &InteractiveShell, component: &ShellComponent) {
     let update = component.render_update(80).unwrap();
-    assert!(update.replacement.len() <= 24);
+    assert!(update.replacement.len() <= usize::from(shell.state.borrow().size.1));
     assert!(!update.rebuild_scrollback);
     shell.state.frame_written_at(None);
 }
@@ -146,4 +147,66 @@ fn fullscreen_unpainted_scroll_burst_preserves_every_navigation_step() {
     assert_eq!(shell.state.borrow().scroll_from_bottom.get(), 192);
     assert_eq!(work.rows_laid_out, 0);
     assert!(work.messages_visited <= 128, "{work:?}");
+}
+
+#[test]
+fn fullscreen_edits_and_frames_skip_zero_height_history() {
+    let mut samples = Vec::new();
+    for hidden in [100, 1_000, 10_000] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        {
+            let mut state = shell.state.borrow_mut();
+            state.application_viewport_requested = true;
+            state.render_threaded = true;
+            for index in 0..30 {
+                state.push_block(TranscriptBlock::Notice(format!("visible-{index:02}")));
+            }
+            for _ in 0..hidden {
+                state.push_block(TranscriptBlock::Reasoning(Box::new(
+                    AssistantBlock::finalized_reasoning("settled reasoning".into())
+                        .with_reasoning_expanded(false),
+                )));
+            }
+            state.push_block(TranscriptBlock::Notice("latest answer".into()));
+        }
+        let component = ShellComponent::isolated(shell.state.clone(), true);
+        paint(&shell, &component);
+        let edit = measured(|| {
+            shell.apply_edit(EditAction::Char('x'));
+            paint(&shell, &component);
+        });
+        assert_eq!(shell.state.borrow().editor.text(), "x");
+        let scroll = measured(|| {
+            shell.scroll_lines(-3);
+            paint(&shell, &component);
+        });
+        let resize = measured(|| {
+            shell.set_size(80, 25);
+            let frame = component.render_update(80).unwrap();
+            assert!(frame.replacement.len() <= 25);
+            shell.state.frame_written_at(None);
+        });
+        shell.select_all_transcript();
+        let selection = measured(|| {
+            paint(&shell, &component);
+        });
+        let expected = (0..30)
+            .map(|index| format!("visible-{index:02}"))
+            .chain(std::iter::once("latest answer".into()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(shell.selected_plain_text().unwrap(), expected);
+        eprintln!("hidden={hidden}: edit={edit:?} scroll={scroll:?} resize={resize:?} selection={selection:?}");
+        samples.push([edit, scroll, resize, selection]);
+    }
+    for sample in &samples {
+        for work in sample {
+            assert_eq!(work.rows_laid_out, 0, "{work:?}");
+            assert!(work.geometry_blocks_visited <= 25, "{work:?}");
+            assert!(work.messages_visited <= 128, "{work:?}");
+        }
+    }
+    assert_eq!(samples[0], samples[1]);
+    assert_eq!(samples[1], samples[2]);
 }

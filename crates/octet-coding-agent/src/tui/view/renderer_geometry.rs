@@ -248,6 +248,7 @@ pub(super) struct RenderedGeometry {
     pub(super) viewport_rows: usize,
     pub(super) viewport_available: usize,
     pub(super) blocks: Vec<VisibleBlockGeometry>,
+    pub(super) blocks_visited: usize,
     /// Only live nodes; their headings are fenced against the painted viewport.
     pub(super) animation_block_starts: Vec<(u64, usize)>,
 }
@@ -267,13 +268,13 @@ impl RenderedGeometry {
         // Private anchor rebasing is not new semantic navigation intent.
         // Update the fence's delta only when that feedback is accepted.
         let cache = state.transcript_cache.borrow();
-        let first_block = cache
-            .block_starts
-            .partition_point(|row| *row <= start)
-            .saturating_sub(1);
-        let blocks = (first_block..cache.block_starts.len())
-            .take_while(|index| cache.block_starts[*index] < end)
+        let mut blocks_visited = 0;
+        let blocks = cache
+            .blocks_in_rows(start, end)
             .filter_map(|index| {
+                blocks_visited += 1;
+                #[cfg(test)]
+                super::fullscreen_work_tests::record(|work| work.geometry_blocks_visited += 1);
                 let id = *state.transcript_commit_ids.get(index)?;
                 Some(VisibleBlockGeometry {
                     index,
@@ -324,6 +325,7 @@ impl RenderedGeometry {
             viewport_rows,
             viewport_available: chrome.transcript_rows,
             blocks,
+            blocks_visited,
             animation_block_starts: state
                 .active_event_blocks
                 .iter()

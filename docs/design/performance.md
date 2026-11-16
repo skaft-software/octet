@@ -234,7 +234,8 @@ path. Anchor conversion and selection decoration create fresh alignment memos;
 prefixes. Alignment searches can cost O(rows × copy bytes) on decorated rows.
 Tool copy projection re-renders disclosed output and traverses its prefix.
 Completed receipts retain O(v) rows, but constructing them can still cost O(B)
-or worse; zero-height block runs can also make k depend on n. Image cropping
+or worse. The nonempty-block index now skips zero-height runs for geometry and
+selection painting; k counts only blocks with painted rows. Image cropping
 has a fixed 512-row lookbehind, not a whole-history scan. Terminal diff/output
 remain viewport-sized, without unconditional full-screen replay on navigation.
 
@@ -257,6 +258,41 @@ current canonical native replay and authoritative history. Estimated size is
 800–1,200 changed lines including Unicode/decorated/tool/empty-row, reflow,
 branch/prepend, stale-receipt and blocked-renderer tests. That redesign is not
 part of this targeted fix.
+
+### Hidden-block frame work
+
+`TranscriptCache` maintains sorted nonempty block slots alongside row geometry.
+Receipt capture and selection painting binary-search that index, visiting only
+blocks with rows in the viewport. With n cached slots, v viewport rows, and k
+intersecting nonempty blocks, metadata work changes from O(n) across hidden runs
+to O(log n + k), with k <= v + 1. Initial layout and appends build the index in
+O(n); the extra retained space is O(nonempty blocks). Historical zero/nonzero
+transitions can shift O(n) index slots, just as historical height changes already
+shift following row offsets. Width/theme/disclosure changes still reflow affected
+content, and large individual blocks retain their block-local mapping costs.
+
+The deterministic `fullscreen_edits_and_frames_skip_zero_height_history` fixture
+uses 100/1,000/10,000 completed collapsed reasoning blocks between visible text
+at 80×24. It exercises an edit through `apply_edit`, scroll, height-only resize
+and selection through the isolated production publication/materialization path.
+Before the fix, edit receipts visit 109/1,009/10,009 blocks; afterwards they visit
+9/9/9. Resize and selection receipts fall from 111/1,011/10,011 to 11/11/11.
+Selection painting plus projections falls from 112/1,012/10,012 visits to 12 at
+every size. All work counters (layout, mapped rows, cells and counted copy bytes)
+are identical across sizes after warmup; no rows are laid out again. Exact copied
+visible text is also checked. These are work measurements, not input-to-PTY or
+physical-terminal latency distributions.
+
+The existing `OCTET_STARTUP_TRACE=1` opt-in also records bounded per-renderer
+geometry observations: `tui.geometry.frames`, `tui.geometry.max_blocks` and
+`tui.geometry.max_us`. Values use the existing `count=` trace field; `max_us` is
+elapsed microseconds for completed-frame geometry capture (including chrome and
+copy mappings), before acquiring the semantic feedback lock, not total frame or
+terminal paint time. Only three counters are retained. The summary emits once
+when the renderer retires, including suspension, rather than enqueueing a
+self-triggering diagnostic on each paint. No text or source data is recorded;
+with tracing disabled no geometry clock is sampled. The fixture's work counters
+remain available under `--nocapture` without enabling tracing.
 
 ## Visual stability is separate from throughput
 
