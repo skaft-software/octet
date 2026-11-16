@@ -193,6 +193,7 @@ pub(super) fn prepare_host_request(
 ) -> Result<(Request, Vec<crate::error::Diagnostic>), AiError> {
     let mut request = req;
     request.messages = crate::transform::transform_request_messages_owned(request.messages, model);
+    let request = crate::video::prepare_request_owned(model, request)?;
     let request = crate::validate::normalize_request_reasoning(&request, &model.spec.capabilities)
         .into_owned();
     let diagnostics = crate::validate::validate_request(

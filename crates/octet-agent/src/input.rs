@@ -99,6 +99,7 @@ impl UserInput {
                 InputPart::Text(text) => pieces.push(text.clone()),
                 InputPart::Media(Media::Image(_)) => pieces.push("[image]".into()),
                 InputPart::Media(Media::Audio(_)) => pieces.push("[audio]".into()),
+                InputPart::Media(Media::Video(_)) => pieces.push("[video]".into()),
                 InputPart::Media(Media::Document(_)) => pieces.push("[PDF]".into()),
             }
         }

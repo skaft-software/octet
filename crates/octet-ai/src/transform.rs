@@ -94,7 +94,14 @@ pub(crate) fn transform_request_messages(messages: &[Message], target: &Model) -
                     content: user
                         .content
                         .iter()
-                        .map(normalize_pending_user_part)
+                        .map(|part| match part {
+                            UserPart::Media(Media::Video(_))
+                                if !target.spec.supports_video_input() =>
+                            {
+                                UserPart::Text(video_placeholder(target))
+                            }
+                            _ => normalize_pending_user_part(part),
+                        })
                         .collect(),
                 })
             }
@@ -129,7 +136,16 @@ pub(crate) fn transform_request_messages_owned(
                     content: user
                         .content
                         .into_iter()
-                        .map(normalize_pending_user_part_owned)
+                        .map(|part| match part {
+                            // A read can retain original video on a text-only route.
+                            // Continue this same tool turn without erasing its source.
+                            UserPart::Media(Media::Video(_))
+                                if !target.spec.supports_video_input() =>
+                            {
+                                UserPart::Text(video_placeholder(target))
+                            }
+                            _ => normalize_pending_user_part_owned(part),
+                        })
                         .collect(),
                 })
             }
@@ -280,6 +296,13 @@ fn transform_user_part(part: &UserPart, target: &Model) -> UserPart {
                     UserPart::Text(audio_fallback_text(audio, AUDIO_PLACEHOLDER, target))
                 }
             }
+            Media::Video(_) => {
+                if target.spec.supports_video_input() {
+                    UserPart::Media(media.clone())
+                } else {
+                    UserPart::Text(video_placeholder(target))
+                }
+            }
             Media::Document(document) => {
                 if document_is_replayable(target) {
                     UserPart::Media(media.clone())
@@ -333,6 +356,13 @@ fn transform_user_part_owned(part: UserPart, target: &Model) -> UserPart {
                 UserPart::Text(fallback)
             }
         }
+        UserPart::Media(Media::Video(video)) => {
+            if target.spec.supports_video_input() {
+                UserPart::Media(Media::Video(video))
+            } else {
+                UserPart::Text(video_placeholder(target))
+            }
+        }
         UserPart::Media(Media::Document(document)) => {
             if document_is_replayable(target) {
                 UserPart::Media(Media::Document(document))
@@ -383,6 +413,13 @@ fn transform_tool_result_part(part: &ToolResultPart, target: &Model) -> ToolResu
             Media::Audio(audio) => {
                 ToolResultPart::Text(audio_fallback_text(audio, TOOL_AUDIO_PLACEHOLDER, target))
             }
+            Media::Video(_) => {
+                if target.spec.supports_video_input() {
+                    ToolResultPart::Media(media.clone())
+                } else {
+                    ToolResultPart::Text(video_placeholder(target))
+                }
+            }
             Media::Document(_) => ToolResultPart::Text(TOOL_DOCUMENT_PLACEHOLDER.to_string()),
         },
     }
@@ -416,6 +453,13 @@ fn transform_tool_result_part_owned(part: ToolResultPart, target: &Model) -> Too
         ToolResultPart::Media(Media::Audio(audio)) => {
             let fallback = audio_fallback_text(&audio, TOOL_AUDIO_PLACEHOLDER, target);
             ToolResultPart::Text(fallback)
+        }
+        ToolResultPart::Media(Media::Video(video)) => {
+            if target.spec.supports_video_input() {
+                ToolResultPart::Media(Media::Video(video))
+            } else {
+                ToolResultPart::Text(video_placeholder(target))
+            }
         }
         ToolResultPart::Media(Media::Document(_)) => {
             ToolResultPart::Text(TOOL_DOCUMENT_PLACEHOLDER.to_string())
@@ -476,6 +520,9 @@ fn transform_assistant_part(
         AssistantPart::Media(Media::Image(_)) => {
             Some(AssistantPart::Text(ASSISTANT_IMAGE_PLACEHOLDER.to_string()))
         }
+        AssistantPart::Media(Media::Video(_)) => {
+            Some(AssistantPart::Text("(video is input only)".into()))
+        }
         AssistantPart::Media(Media::Document(_)) => Some(AssistantPart::Text(
             ASSISTANT_DOCUMENT_PLACEHOLDER.to_string(),
         )),
@@ -520,6 +567,9 @@ fn transform_assistant_part_owned(
         }
         AssistantPart::Media(Media::Image(_)) => {
             Some(AssistantPart::Text(ASSISTANT_IMAGE_PLACEHOLDER.to_string()))
+        }
+        AssistantPart::Media(Media::Video(_)) => {
+            Some(AssistantPart::Text("(video is input only)".into()))
         }
         AssistantPart::Media(Media::Document(_)) => Some(AssistantPart::Text(
             ASSISTANT_DOCUMENT_PLACEHOLDER.to_string(),
@@ -638,3 +688,7 @@ fn push_synthetic_results(
 
 #[cfg(test)]
 mod tests;
+
+fn video_placeholder(target: &Model) -> String {
+    format!("(video omitted: provider {} model {} does not support native video or images; original retained)", target.endpoint.id.0, target.spec.api_name)
+}

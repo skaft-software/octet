@@ -28,6 +28,13 @@ fn facade_preserves_extension_classification() {
 }
 
 #[test]
+fn video_paths_are_attachable_media() {
+    for name in ["clip.mp4", "clip.MOV", "clip.webm", "clip.avi"] {
+        assert!(media_kind_for_path(Path::new(name)).is_some(), "{name}");
+    }
+}
+
+#[test]
 fn paste_classification_checks_paths_before_size() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("photo.png");
@@ -380,4 +387,25 @@ fn pdf_mentions_follow_the_model_and_refuse_impostors_and_oversized_files() {
         Err(AttachError::TooLarge { limit_bytes }) if limit_bytes == MAX_PDF_BYTES
     ));
     assert_eq!(ledger.entries.len(), 2, "refusals leave no partial chips");
+}
+
+#[test]
+fn video_attachment_composes_durable_media_and_visible_frame_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clip.mp4");
+    let original = include_bytes!("../../../../octet-ai/src/video/tiny.mp4");
+    fs::write(&path, original).unwrap();
+    let mut ledger = AttachmentLedger::default();
+    let chip = ledger.attach_media(&path, all_modalities(), &[]).unwrap();
+    assert!(chip.contains("video sent as 4 frames"));
+    let composed = compose(chip, &mut ledger);
+    assert!(composed.transcript_text.contains("video sent as 4 frames"));
+    fs::remove_file(&path).unwrap();
+    let InputPart::Media(octet_ai::Media::Video(video)) = &composed.parts[1] else {
+        panic!("video expected")
+    };
+    assert_eq!(video.data.as_ref(), original);
+    assert!(
+        matches!(&composed.parts[0], InputPart::Text(text) if text.contains("[attached video:"))
+    );
 }

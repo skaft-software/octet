@@ -836,3 +836,23 @@ async fn pdf_reads_explain_how_to_reach_the_document_instead_of_decoding_it() {
         notes.text
     );
 }
+
+#[tokio::test]
+async fn local_video_read_preserves_original_bytes_after_source_removal() {
+    let f = fixture();
+    let bytes = include_bytes!("../../../../octet-ai/src/video/tiny.mp4");
+    let path = f.workspace.join("clip.mp4");
+    std::fs::write(&path, bytes).unwrap();
+    let output = ReadTool
+        .execute(json!({"path":"clip.mp4"}), &f.ctx())
+        .await
+        .unwrap();
+    assert_eq!(output.media_kinds(), &[crate::ToolOutputMediaKind::Video]);
+    std::fs::remove_file(path).unwrap();
+    let Media::Video(video) = &output.media()[0] else {
+        panic!("video expected")
+    };
+    assert_eq!(video.data.as_ref(), bytes);
+    assert!(output.text.contains("read=video"));
+    assert!(!output.text.contains("AAAA"));
+}

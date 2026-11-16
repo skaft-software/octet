@@ -64,6 +64,7 @@ pub mod stream;
 mod transform;
 pub mod types;
 mod validate;
+pub mod video;
 
 pub(crate) mod protocol;
 
@@ -166,6 +167,7 @@ pub use types::{
     RequestRuntime, Response, ResponsesFeatures, ResponsesRuntimeProfile, ServiceTier,
     SessionAffinityFormat, StopReason, ToolArgumentValidation, ToolCall, ToolCallArgumentError,
     ToolCallId, ToolChoice, ToolDef, ToolResult, ToolResultPart, Usage, UserMessage, UserPart,
+    VideoMedia,
 };
 
 /// Selects reasoning for a host-generated auxiliary request.

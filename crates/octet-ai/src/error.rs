@@ -290,6 +290,9 @@ pub enum StreamProtocolError {
 /// Description of unsupported capabilities.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnsupportedError {
+    /// Video requires native support or image input for frame sampling.
+    #[error("Video input requires native video or image input support")]
+    Video,
     /// A media refusal annotated by the selected host-owned route.
     #[error(
         "provider {provider} model {model}: {capability}; select a compatible model or format"

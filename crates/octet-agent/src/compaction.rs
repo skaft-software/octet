@@ -395,6 +395,7 @@ pub fn prepare_handoff(
 fn media_summary(media: &Media) -> String {
     match media {
         Media::Image(_) => "[image]".to_owned(),
+        Media::Video(_) => "[video]".to_owned(),
         Media::Document(document) => format!("[PDF: {}]", document.file_name()),
         Media::Audio(audio) => audio
             .transcript

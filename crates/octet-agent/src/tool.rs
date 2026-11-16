@@ -1090,6 +1090,8 @@ pub enum ToolOutputMediaKind {
     Audio,
     /// A PDF document.
     Document,
+    /// Recorded video (native or sampled images).
+    Video,
 }
 
 impl ToolOutputMediaKind {
@@ -1098,6 +1100,7 @@ impl ToolOutputMediaKind {
             Media::Image(_) => Self::Image,
             Media::Audio(_) => Self::Audio,
             Media::Document(_) => Self::Document,
+            Media::Video(_) => Self::Video,
         }
     }
 }

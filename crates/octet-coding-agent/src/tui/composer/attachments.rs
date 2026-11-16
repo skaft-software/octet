@@ -28,6 +28,7 @@ pub const MAX_PDF_BYTES: u64 = 10 * 1024 * 1024;
 pub enum MediaKind {
     Image(mime::Mime),
     Audio(AudioFormat),
+    Video(mime::Mime),
 }
 
 /// Document kinds: sent as document bytes where the model accepts them, and
@@ -58,15 +59,13 @@ pub fn media_kind_for_path(path: &Path) -> Option<MediaKind> {
         "flac" => Some(MediaKind::Audio(AudioFormat::Flac)),
         "opus" | "ogg" => Some(MediaKind::Audio(AudioFormat::Opus)),
         "aac" | "m4a" => Some(MediaKind::Audio(AudioFormat::Aac)),
-        _ => None,
+        other => octet_ai::video::video_mime(other).map(MediaKind::Video),
     }
 }
 
 fn unsupported_media_type_for_path(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
-        "mp4" | "m4v" | "mov" | "avi" | "mkv" | "webm" | "wmv" | "flv" | "mpeg" | "mpg" | "3gp"
-        | "ogv" => Some("video"),
         "bmp" | "tif" | "tiff" | "ico" | "heic" | "heif" | "avif" | "svg" => Some("image"),
         _ => None,
     }
@@ -146,8 +145,20 @@ fn prepare_media(
     let (label, modality, modality_name, limit) = match &kind {
         MediaKind::Image(_) => ("Image", Modality::Image, "image", MAX_IMAGE_BYTES),
         MediaKind::Audio(_) => ("Audio", Modality::Audio, "audio", MAX_AUDIO_BYTES),
+        MediaKind::Video(_) => (
+            if modalities.contains(Modality::Video) {
+                "Video"
+            } else {
+                "Video: video sent as 4 frames"
+            },
+            Modality::Image,
+            "video (requires image input)",
+            octet_ai::video::MAX_VIDEO_BYTES as u64,
+        ),
     };
-    if !modalities.contains(modality) {
+    if !modalities.contains(modality)
+        && !(matches!(kind, MediaKind::Video(_)) && modalities.contains(Modality::Video))
+    {
         return Err(AttachError::UnsupportedModality {
             modality: modality_name,
         });
@@ -162,6 +173,7 @@ fn prepare_media(
     let media = match kind {
         MediaKind::Image(mime) => Media::image_bytes(bytes::Bytes::from(data), mime),
         MediaKind::Audio(format) => Media::audio_bytes(bytes::Bytes::from(data), format),
+        MediaKind::Video(mime) => Media::video_bytes(bytes::Bytes::from(data), mime),
     };
     Ok(PreparedMedia {
         label,

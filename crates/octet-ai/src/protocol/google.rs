@@ -108,6 +108,7 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
     for message in &req.messages {
         match message {
             Message::User(user) => {
+                let user = crate::video::prepare_user_message(model, user)?;
                 let mut parts = Vec::new();
                 // functionResponse carries text only. Tool-result media (from
                 // history recorded on a route with native tool-result media,
@@ -135,6 +136,12 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                     parts.push(part);
                                 }
                             }
+                        }
+                        UserPart::Media(Media::Video(video)) => {
+                            parts.push(serde_json::json!({"inlineData": {
+                                "mimeType": video.media_type.as_ref(),
+                                "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &video.data),
+                            }}));
                         }
                         UserPart::Media(Media::Document(document)) => {
                             if model

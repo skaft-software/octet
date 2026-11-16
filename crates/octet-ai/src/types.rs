@@ -451,6 +451,7 @@ impl ModalitySet {
             Modality::Image => 1 << 0,
             Modality::Audio => 1 << 1,
             Modality::Pdf => 1 << 2,
+            Modality::Video => 1 << 3,
         };
         Self {
             bits: self.bits | bit,
@@ -463,6 +464,7 @@ impl ModalitySet {
             Modality::Image => 1 << 0,
             Modality::Audio => 1 << 1,
             Modality::Pdf => 1 << 2,
+            Modality::Video => 1 << 3,
         };
         Self {
             bits: self.bits & !bit,
@@ -475,12 +477,13 @@ impl ModalitySet {
             Modality::Image => 1 << 0,
             Modality::Audio => 1 << 1,
             Modality::Pdf => 1 << 2,
+            Modality::Video => 1 << 3,
         };
         (self.bits & bit) != 0
     }
 
     pub(crate) fn is_valid(self) -> bool {
-        self.bits & !0b111 == 0
+        self.bits & !0b1111 == 0
     }
 }
 
@@ -494,6 +497,8 @@ pub enum Modality {
     Audio,
     /// PDF document input, sent as the document's bytes.
     Pdf,
+    /// Native video input (image-capable routes also accept sampled video).
+    Video,
 }
 
 /// Host-side collaboration protocol advertised for a model.
@@ -870,9 +875,33 @@ pub enum Media {
     Audio(AudioMedia),
     /// Document content (PDF input).
     Document(DocumentMedia),
+    /// Original recorded video, retained durably and projected per route.
+    Video(VideoMedia),
+}
+
+/// Recorded video bytes. Frame preparation is shared by clones, not serialized.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VideoMedia {
+    /// Original container bytes, independent of the source path.
+    #[serde(with = "base64_bytes")]
+    pub data: bytes::Bytes,
+    /// Container MIME type.
+    #[serde(with = "mime_string")]
+    pub media_type: mime::Mime,
+    #[serde(skip)]
+    pub(crate) frames: crate::video::FrameCache,
 }
 
 impl Media {
+    /// Retain original video bytes; decoding is deferred until a route needs frames.
+    pub fn video_bytes(data: bytes::Bytes, media_type: mime::Mime) -> Self {
+        Self::Video(VideoMedia {
+            data,
+            media_type,
+            frames: Default::default(),
+        })
+    }
+
     /// Creates PDF document media from inline bytes.
     ///
     /// `name` is the file name providers show the model; the protocols that
@@ -1193,7 +1222,27 @@ impl ModelSpec {
         if !self.protocol.supports_document_input() {
             modalities = modalities.without(Modality::Pdf);
         }
+        if self.supports_native_video() {
+            modalities = modalities.with(Modality::Video);
+        } else {
+            modalities = modalities.without(Modality::Video);
+        }
         modalities
+    }
+
+    /// Native generateContent video; other image routes use deterministic frames.
+    pub fn supports_native_video(&self) -> bool {
+        self.protocol == Protocol::GoogleGenerativeAi
+            && (self.capabilities.input_modalities.contains(Modality::Video)
+                || (self.api_name.starts_with("gemini-")
+                    && self.capabilities.input_modalities.contains(Modality::Image)))
+    }
+
+    /// Whether this route accepts native video or sampled image frames.
+    pub fn supports_video_input(&self) -> bool {
+        self.supports_native_video()
+            || (self.protocol != Protocol::MistralConversations
+                && self.capabilities.input_modalities.contains(Modality::Image))
     }
 
     /// Returns the output modalities usable through both the model and selected
@@ -1560,6 +1609,12 @@ mod optional_mime {
 
 mod mime_string {
     use serde::{Deserialize, Deserializer};
+    pub fn serialize<S: serde::Serializer>(
+        mime: &mime::Mime,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(mime.as_ref())
+    }
     use std::str::FromStr;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<mime::Mime, D::Error>

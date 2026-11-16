@@ -259,15 +259,16 @@ impl SteeringControl {
         let delta = request
             .responses
             .as_ref()
-            .and_then(|options| options.input.clone())
-            .unwrap_or_else(|| {
-                crate::responses::encode_canonical_responses_input(
-                    &self.model,
-                    request.system.as_deref(),
-                    &request.messages,
-                    request.compatibility,
-                )
-            });
+            .and_then(|options| options.input.clone());
+        let delta = match delta {
+            Some(input) => input,
+            None => crate::responses::encode_canonical_responses_input(
+                &self.model,
+                request.system.as_deref(),
+                &request.messages,
+                request.compatibility,
+            )?,
+        };
         request
             .messages
             .insert(0, crate::Message::Assistant(completed));

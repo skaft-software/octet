@@ -156,6 +156,7 @@ pub(crate) fn build_request(
     for message in &request.messages {
         match message {
             Message::User(user) => {
+                let user = crate::video::prepare_user_message(model, user)?;
                 let mut content = Vec::new();
                 for part in &user.content {
                     match part {
@@ -185,6 +186,9 @@ pub(crate) fn build_request(
                             }));
                         }
                         UserPart::Media(Media::Audio(_)) => {}
+                        UserPart::Media(Media::Video(_)) => {
+                            unreachable!("video projected before encoding")
+                        }
                         UserPart::Media(Media::Document(document)) => {
                             if !model
                                 .spec

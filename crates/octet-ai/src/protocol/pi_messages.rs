@@ -242,6 +242,7 @@ fn tool_result_name(messages: &[Message], id: &str) -> Option<String> {
 }
 
 fn encode_context(
+    model: &Model,
     req: &Request,
     provider: &str,
     lossy: bool,
@@ -252,12 +253,16 @@ fn encode_context(
     for message in &req.messages {
         match message {
             Message::User(user) => {
+                let user = crate::video::prepare_user_message(model, user)?;
                 let mut content: Vec<Value> = Vec::new();
                 for part in &user.content {
                     match part {
                         UserPart::Text(text) => content.push(json!({"type": "text", "text": text})),
                         UserPart::Media(Media::Image(image)) => {
                             content.push(image_content(image)?);
+                        }
+                        UserPart::Media(Media::Video(_)) => {
+                            unreachable!("video projected before encoding")
                         }
                         UserPart::Media(Media::Document(_)) => {
                             if lossy {
@@ -293,7 +298,9 @@ fn encode_context(
                                     ToolResultPart::Media(Media::Image(image)) => {
                                         blocks.push(image_content(image)?);
                                     }
-                                    ToolResultPart::Media(Media::Audio(_) | Media::Document(_)) => {
+                                    ToolResultPart::Media(
+                                        Media::Audio(_) | Media::Document(_) | Media::Video(_),
+                                    ) => {
                                         if lossy {
                                             diagnostics.push(Diagnostic {
                                                 code: "dropped_tool_result_media".to_owned(),
@@ -473,7 +480,8 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
             None
         }
     };
-    let (messages, mut context_diagnostics) = encode_context(req, &model.endpoint.id.0, lossy)?;
+    let (messages, mut context_diagnostics) =
+        encode_context(model, req, &model.endpoint.id.0, lossy)?;
     diagnostics.append(&mut context_diagnostics);
     let mut context = Map::new();
     if let Some(system) = req.system.as_deref().filter(|system| !system.is_empty()) {

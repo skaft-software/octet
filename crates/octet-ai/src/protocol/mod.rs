@@ -369,7 +369,8 @@ pub(crate) fn route_validation(
 ) -> Result<Vec<crate::Diagnostic>, AiError> {
     match result {
         Err(AiError::Unsupported(
-            capability @ (crate::UnsupportedError::Audio
+            capability @ (crate::UnsupportedError::Video
+            | crate::UnsupportedError::Audio
             | crate::UnsupportedError::AudioOutput
             | crate::UnsupportedError::ToolResultMedia
             | crate::UnsupportedError::ProviderMediaRef),

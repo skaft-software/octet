@@ -528,14 +528,15 @@ pub(crate) fn build_request(
         .flatten();
     // Opaque replay is authoritative: do not encode canonical history only to
     // discard it when a raw input is present.
-    let mut input = raw_input.cloned().unwrap_or_else(|| {
-        crate::responses::encode_canonical_responses_input(
+    let mut input = match raw_input {
+        Some(input) => input.clone(),
+        None => crate::responses::encode_canonical_responses_input(
             model,
             req.system.as_deref(),
             &req.messages,
             req.compatibility,
-        )
-    });
+        )?,
+    };
     crate::responses::validate_responses_input(model, &input, &req.reasoning, false)?;
     if input.contains_configuration_updates()
         && responses_options

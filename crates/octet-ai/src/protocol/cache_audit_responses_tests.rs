@@ -129,6 +129,7 @@ fn cache_audit_responses_service_tiers_preserve_authoritative_replay_and_cache_c
             &req.messages,
             req.compatibility,
         )
+        .unwrap()
         .into_items();
         input.push(
             ResponsesItem::new(json!({

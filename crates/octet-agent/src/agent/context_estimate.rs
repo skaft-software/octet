@@ -90,6 +90,7 @@ pub(super) fn inline_media_payload_bytes(media: &Media) -> u64 {
             AudioPayload::ProviderRef(_) => 0,
         },
         Media::Document(document) => document.data.len() as u64,
+        Media::Video(video) => video.data.len() as u64,
     };
     // Inline media's serde representation is one padded base64 string. The
     // surrounding quotes and variant metadata remain in the structural byte
@@ -100,6 +101,7 @@ pub(super) fn inline_media_payload_bytes(media: &Media) -> u64 {
 pub(super) fn media_tokens(media: &Media) -> u64 {
     match media {
         Media::Image(_) => ESTIMATED_IMAGE_TOKENS,
+        Media::Video(_) => ESTIMATED_IMAGE_TOKENS * octet_ai::video::VIDEO_FRAMES as u64,
         Media::Audio(_) => ESTIMATED_AUDIO_TOKENS,
         Media::Document(document) => document
             .estimated_pages()
@@ -191,6 +193,7 @@ fn inline_media_payload_key(media: &Media) -> Option<InlinePayloadKey> {
             AudioPayload::ProviderRef(_) => return None,
         },
         Media::Document(document) => &document.data,
+        Media::Video(video) => &video.data,
     };
     let mut hasher = sha2::Sha256::new();
     {
@@ -208,6 +211,19 @@ fn canonical_inline_media(messages: &[Message]) -> HashMap<InlinePayloadKey, Vec
     let mut observe = |media: &Media| {
         if let Some(key) = inline_media_payload_key(media) {
             canonical.entry(key).or_default().push(media_tokens(media));
+        }
+        if let Media::Video(video) = media {
+            if let Some(frames) = video.cached_frames() {
+                for frame in frames.iter() {
+                    let image = Media::Image(frame.image.clone());
+                    if let Some(key) = inline_media_payload_key(&image) {
+                        canonical
+                            .entry(key)
+                            .or_default()
+                            .push(ESTIMATED_IMAGE_TOKENS);
+                    }
+                }
+            }
         }
     };
     for message in messages {

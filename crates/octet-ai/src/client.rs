@@ -1117,13 +1117,14 @@ impl AiClient {
                         && options.service_tier.is_none()
                         && options.computer_use.is_none()
                         && options.input.as_ref().is_none_or(|input| {
-                            input
-                                == &crate::responses::encode_canonical_responses_input(
-                                    model,
-                                    request.system.as_deref(),
-                                    &request.messages,
-                                    request.compatibility,
-                                )
+                            crate::responses::encode_canonical_responses_input(
+                                model,
+                                request.system.as_deref(),
+                                &request.messages,
+                                request.compatibility,
+                            )
+                            .as_ref()
+                            .is_ok_and(|canonical| input == canonical)
                         })
                 })
             {

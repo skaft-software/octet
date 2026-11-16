@@ -28,7 +28,7 @@ PASS or FAIL; failures do not stop later steps. The final summary exits nonzero
 if any step failed. This does not replace other CI lanes or release qualification.
 
 Use CI's Rust 1.89.0 with rustfmt and clippy, Rust 1.90.0 for packaging, Node
-22.19.0, Python 3 and ripgrep. The gate reads named commands and npm dependency
+22.19.0, Python 3, ripgrep, FFmpeg and FFprobe. The gate reads named commands and npm dependency
 setup from `.github/workflows/ci.yml`; keep it and its contract test in sync when
 CI changes. Full mode runs CI's npm installs. Cache dependencies first for an
 offline run. It does not install toolchains. Tests use temporary HOME and TMPDIR

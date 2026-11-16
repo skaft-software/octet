@@ -7,7 +7,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    AssistantMessage, CacheRetention, CompatibilityMode, Message, Model, OutputFormat,
+    AiError, AssistantMessage, CacheRetention, CompatibilityMode, Message, Model, OutputFormat,
     ReasoningConfig, ReasoningMode, ToolDef, Usage, UserMessage,
 };
 
@@ -489,7 +489,7 @@ pub(crate) fn encode_canonical_responses_input(
     system: Option<&str>,
     messages: &[Message],
     compatibility: CompatibilityMode,
-) -> ResponsesInput {
+) -> Result<ResponsesInput, AiError> {
     crate::protocol::openai_responses::encode_canonical_input(
         model,
         system,

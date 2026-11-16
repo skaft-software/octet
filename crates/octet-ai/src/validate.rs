@@ -556,6 +556,15 @@ pub(crate) fn validate_request(
                                 }
                             }
                         }
+                        UserPart::Media(Media::Video(video)) => {
+                            crate::video::validate_video(video)?;
+                            if !caps.input_modalities.contains(crate::Modality::Image)
+                                && !(protocol == Protocol::GoogleGenerativeAi
+                                    && caps.input_modalities.contains(crate::Modality::Video))
+                            {
+                                return Err(UnsupportedError::Video.into());
+                            }
+                        }
                         UserPart::Media(Media::Document(_)) => {
                             let supported = protocol.supports_document_input()
                                 && caps.input_modalities.contains(crate::types::Modality::Pdf);
@@ -617,7 +626,9 @@ pub(crate) fn validate_request(
                                     },
                                     // Documents travel in user content only; no tool-result
                                     // document mapping is implemented yet.
-                                    ToolResultPart::Media(Media::Document(_)) => false,
+                                    ToolResultPart::Media(Media::Document(_) | Media::Video(_)) => {
+                                        false
+                                    }
                                     ToolResultPart::Media(Media::Audio(audio)) => {
                                         protocol == Protocol::GoogleGenerativeAi
                                             && caps

@@ -384,6 +384,9 @@ fn media_payload(index: usize, media: &Media) -> serde_json::Value {
                 "payload_omitted": true,
             })
         }
+        Media::Video(video) => {
+            serde_json::json!({"index": index, "kind": "video", "bytes": video.data.len(), "payload_omitted": true})
+        }
         Media::Document(document) => serde_json::json!({
             "index": index,
             "kind": "document",

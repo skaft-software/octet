@@ -124,6 +124,7 @@ pub(super) fn media_content(media: &Media) -> Value {
             ImageSource::ProviderRef(_) => json!({"type": "text", "text": "[image]"}),
         },
         Media::Audio(_) => json!({"type": "text", "text": "[audio]"}),
+        Media::Video(_) => json!({"type": "text", "text": "[video]"}),
         Media::Document(document) => {
             json!({"type": "text", "text": format!("[PDF: {}]", document.file_name())})
         }

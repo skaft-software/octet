@@ -534,6 +534,7 @@ pub(crate) fn build_request(
     for msg in &req.messages {
         match msg {
             Message::User(ref user) => {
+                let user = crate::video::prepare_user_message(model, user)?;
                 let mut blocks = Vec::new();
                 for part in &user.content {
                     match part {
@@ -574,6 +575,9 @@ pub(crate) fn build_request(
                             });
                         }
                         UserPart::Media(Media::Audio(_)) => {}
+                        UserPart::Media(Media::Video(_)) => {
+                            unreachable!("video projected before encoding")
+                        }
                         UserPart::Media(Media::Document(ref document)) => {
                             if !model
                                 .spec
@@ -629,8 +633,9 @@ pub(crate) fn build_request(
                                                 .push(AnthropicToolResultBlock::Image { source });
                                         }
                                     }
-                                    ToolResultPart::Media(Media::Audio(_) | Media::Document(_)) => {
-                                    }
+                                    ToolResultPart::Media(
+                                        Media::Audio(_) | Media::Document(_) | Media::Video(_),
+                                    ) => {}
                                 }
                             }
                             blocks.push(AnthropicContentBlock::ToolResult {

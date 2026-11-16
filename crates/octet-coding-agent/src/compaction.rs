@@ -40,6 +40,7 @@ pub fn estimate_text_tokens(text: &str) -> u64 {
 pub fn estimate_media_tokens(media: &Media) -> u64 {
     match media {
         Media::Image(_) => IMAGE_TOKENS,
+        Media::Video(_) => IMAGE_TOKENS * octet_ai::video::VIDEO_FRAMES as u64,
         Media::Audio(_) => AUDIO_TOKENS,
         Media::Document(document) => document
             .estimated_pages()

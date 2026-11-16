@@ -310,6 +310,7 @@ fn drop_media(
     let (error, code) = match media {
         Media::Image(_) => (UnsupportedError::Image, "dropped_image"),
         Media::Audio(_) => (UnsupportedError::Audio, "dropped_audio"),
+        Media::Video(_) => (UnsupportedError::Video, "dropped_video"),
         Media::Document(_) => (UnsupportedError::Document, "dropped_document"),
     };
     drop_unsupported(req, diagnostics, error, code)

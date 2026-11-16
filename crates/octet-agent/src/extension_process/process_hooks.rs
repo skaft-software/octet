@@ -765,6 +765,10 @@ impl ExtensionProcess {
                         });
                         return None;
                     }
+                    ToolOutputContentPart::Media(Media::Video(_)) => {
+                        // Pi ImageContent has no native video: packages/ai/src/types.ts:438-442.
+                        content.push(serde_json::json!({"type":"text", "text":"[video retained by native host]"}));
+                    }
                     ToolOutputContentPart::Media(Media::Document(_)) => {
                         let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
                             message: "Pi tool_result does not support document content".into(),

@@ -206,7 +206,8 @@ pub(super) fn map_user_input(
     pending_tool_calls: &mut std::collections::BTreeSet<String>,
     synthetic_tool_results: &std::collections::HashSet<String>,
     computer_call_ids: &std::collections::BTreeSet<String>,
-) -> Vec<ResponsesInputItem> {
+) -> Result<Vec<ResponsesInputItem>, AiError> {
+    let user = crate::video::prepare_user_message(model, user)?;
     let mut input = Vec::new();
     let mut content = Vec::new();
     for part in &user.content {
@@ -266,6 +267,7 @@ pub(super) fn map_user_input(
                 });
             }
             UserPart::Media(Media::Audio(_)) => {}
+            UserPart::Media(Media::Video(_)) => unreachable!("video projected before encoding"),
             UserPart::Media(Media::Document(document)) => {
                 if !model
                     .spec
@@ -329,7 +331,9 @@ pub(super) fn map_user_input(
                                 }
                             }
                         },
-                        ToolResultPart::Media(Media::Audio(_) | Media::Document(_)) => {}
+                        ToolResultPart::Media(
+                            Media::Audio(_) | Media::Document(_) | Media::Video(_),
+                        ) => {}
                     }
                 }
                 // Preserve canonical order: emit buffered user content before
@@ -359,7 +363,7 @@ pub(super) fn map_user_input(
         }
     }
     flush_user_content(&mut input, &mut content);
-    input
+    Ok(input)
 }
 
 pub(super) fn map_assistant_input(
@@ -441,7 +445,7 @@ pub(crate) fn encode_canonical_input(
     system: Option<&str>,
     messages: &[Message],
     compatibility: crate::CompatibilityMode,
-) -> crate::responses::ResponsesInput {
+) -> Result<crate::responses::ResponsesInput, AiError> {
     let mut input = map_system_input(model, system);
     let mut pending_tool_calls = std::collections::BTreeSet::new();
     let mut synthetic_tool_results = std::collections::HashSet::new();
@@ -455,7 +459,7 @@ pub(crate) fn encode_canonical_input(
                 &mut pending_tool_calls,
                 &synthetic_tool_results,
                 &computer_call_ids,
-            )),
+            )?),
             Message::Assistant(assistant) => {
                 if compatibility == crate::CompatibilityMode::Lossy {
                     push_synthetic_tool_results(
@@ -480,7 +484,9 @@ pub(crate) fn encode_canonical_input(
             &mut synthetic_tool_results,
         );
     }
-    crate::responses::ResponsesInput::new(input.into_iter().map(opaque_input_item).collect())
+    Ok(crate::responses::ResponsesInput::new(
+        input.into_iter().map(opaque_input_item).collect(),
+    ))
 }
 
 pub(crate) fn encode_replay_input(
@@ -517,7 +523,7 @@ pub(crate) fn encode_replay_input(
                         &mut pending_tool_calls,
                         &synthetic_tool_results,
                         &computer_call_ids,
-                    )
+                    )?
                     .into_iter()
                     .map(opaque_input_item),
                 );

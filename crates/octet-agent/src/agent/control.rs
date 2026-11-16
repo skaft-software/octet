@@ -200,6 +200,10 @@ pub(super) fn control_input_bytes(input: &UserInput) -> usize {
                         };
                         source.saturating_add(audio.transcript.as_ref().map_or(0, String::len))
                     }
+                    InputPart::Media(Media::Video(video)) => video
+                        .data
+                        .len()
+                        .saturating_add(octet_ai::video::MAX_FRAME_BYTES),
                     InputPart::Media(Media::Document(document)) => document
                         .data
                         .len()

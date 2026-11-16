@@ -1,4 +1,4 @@
-# Images, audio and PDFs
+# Images, audio, video and PDFs
 
 [Documentation](README.md) · [Providers](providers.md) · [Security](../SECURITY.md)
 
@@ -9,7 +9,7 @@ To ask about a sound and a screenshot:
 1. Pick a model whose route supports the media.
 2. Paste or drop each file path through the terminal, or select an `@` path
    completion.
-3. Check for `[Audio #N]`, `[Image #N]` and `[PDF #N]` chips before you send.
+3. Check for `[Audio #N]`, `[Image #N]`, `[Video … #N]` and `[PDF #N]` chips before you send.
 
 ```text
 Describe the sound in the audio. Compare the screenshot with this repository's
@@ -45,9 +45,8 @@ rest keep their order and payload.
 Attachments stay in order with the text. Each submission admits at most **8
 images / 20 MiB of inline image bytes** before decoding. That doesn't limit
 separate `read` tool results. Unsupported formats, unreadable files and
-oversized files fail with a message. Video paths are never native media: an
-explicit video attachment is refused with a diagnostic and stays visible as
-text. Recognizing a file isn't the same as the provider accepting it. Native
+oversized files fail with a message. Local video attachments and `read` use the
+[video contract](#video) below. Recognizing a file isn't the same as the provider accepting it. Native
 audio needs both a capable model and a supported format on its selected route.
 Gemini, Vertex AI and Google-compatible OpenCode routes send inline audio bytes
 as `inlineData`; OpenRouter keeps its Chat WAV/MP3 format contract. Responses
@@ -93,13 +92,13 @@ request fits the provider's total request limit.
 
 ### Durable recorded media
 
-Admitted image, audio and PDF bytes are stored in the session JSONL, not as paths
+Admitted image, audio, video and PDF bytes are stored in the session JSONL, not as paths
 that must be re-read. Replacing or deleting the original file does not change a
 later turn, branch or resumed session. Terminal summaries/previews never trim
 model-visible audio. Model switching derives a compatible request without
 rewriting that durable input.
 
-Clones share immutable-byte base64 preparation; each clip/image/PDF is encoded
+Clones share immutable-byte base64 preparation; each audio clip/image/PDF is encoded
 once per process unless its bytes change. Resume reconstructs preparation from
 the stored bytes once. Constructing the final HTTP body still copies the bytes
 that must go over the wire. Preflight bounds encoded media at **64 MiB**, and a
@@ -117,6 +116,70 @@ session. Upload and file-state failures preserve local history and report the
 preparation stage. Review [Gemini Files](https://ai.google.dev/gemini-api/docs/files)
 and [Vertex audio fileData](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/audio-understanding)
 before authorizing provider checks.
+
+### Video
+
+Drop/paste or `@`-select a local MP4/M4V, MOV, WebM/MKV, AVI, MPEG/MPG,
+WMV, FLV, 3GP or OGV file, or ask the built-in `read` tool to open it.
+The cap is **10 MiB of original bytes per video**. TUI/Rust-agent submissions
+accept at most **two videos**, sharing the eight-image budget (each video reserves
+four images) and **20 MiB** aggregate source-byte budget with images. The
+native host's typed `media` paths and RPC `images` upload remain image/audio and
+image-only interfaces respectively; name a video for `read` instead.
+Remote video reads are not enabled.
+
+On an **image-capable route**, including **openai-codex / Responses**, octet
+samples **four frames** at the midpoints of four equal duration intervals
+(12.5%, 37.5%, 62.5%, 87.5%). Each JPEG fits within **768×768 pixels**;
+together they occupy at most **4 MiB**. Text immediately before each image gives
+its requested timestamp in seconds from the start. The composer chip and read
+result show **“video sent as 4 frames”**. These are sparse visual samples, not
+continuous video understanding; **audio is not sent** on this fallback.
+
+The [Responses API](https://platform.openai.com/docs/api-reference/responses/create)
+accepts `input_text`, `input_image` and `input_file`, not a native video input
+part. Image capability permits frame analysis, not sending an MP4 as an image
+or inventing `input_video`. Catalog/provider image assertions remain the admission
+contract; a models.dev `video` listing alone does not enable a wire codec.
+`ModelSpec::supports_video_input()` reports native video or frame-capable image
+input, while `effective_input_modalities()` includes `Video` only for native
+Google video. Google `generateContent` routes with an explicit video capability,
+or image-capable `gemini-*` models, keep the **original container** as native
+`inlineData` with its video MIME type, including any audio. They do not run a
+local decoder. Google's whole-request **20 MB** ceiling still applies; native
+video Files uploads are not implemented.
+
+Frame sampling needs **FFmpeg and FFprobe on PATH**. The existing `image` decoder
+handles still images only; octet uses fixed, non-shell subprocess arguments rather
+than adding a video codec dependency. Install a maintained FFmpeg distribution
+from your OS package manager. Only whitelisted local containers/protocols are
+opened; source frames are capped at **16 million pixels**, duration at **24 hours**,
+decoder allocation size at **64 MiB**, and the complete preparation at **30 seconds**.
+JPEG output and private scratch are bounded and removed after preparation.
+A timeout kills and reaps the decoder. The decoder is not an OS sandbox.
+
+The **original video bytes** stay in session JSONL, including tool reads; deleting
+or replacing the source path does not affect later turns or resume. Sampled frames
+are shared in memory across turns and rebuilt from those durable bytes after a
+restart. Keep FFmpeg available for resumed frame analysis; changing decoder
+versions may change JPEG bytes. Missing decoders or invalid clips produce an
+actionable preparation error before a new sampled user attachment is committed. A saved
+video whose frames cannot be prepared uses an explanatory placeholder so the
+session can continue; a read result reports the problem and retains its source.
+Switching to a text-only model also derives a placeholder without erasing video.
+
+For Pi compatibility, the reference defines only `ImageContent` for binary visual
+input (`packages/ai/src/types.ts:438–442`), sniffs still images
+(`packages/coding-agent/src/utils/mime.ts:7–24`) and returns image blocks from
+`read` (`packages/coding-agent/src/core/tools/read.ts:128–149`); it has no video
+attachment/frame decoder. Its Responses image mapping is
+`packages/ai/src/api/openai-responses-shared.ts:93–109, 307–320`. octet's native
+media layer owns durable video and projects ordinary image parts for that wire
+contract; the optional Pi process is not required.
+
+Offline tests use a tiny synthetic video to check frame timestamps, bounded
+images, protocol bytes, tool-result placement and durable resume. This proves
+local request construction, not live model recognition or provider acceptance.
 
 ### PDFs
 

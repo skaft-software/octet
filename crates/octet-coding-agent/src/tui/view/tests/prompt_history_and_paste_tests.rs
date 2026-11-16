@@ -741,6 +741,7 @@ fn explicit_paste_wires_quoted_escaped_batches_and_preserves_duplicate_payloads(
                 _ => panic!("expected inline audio"),
             },
             octet_ai::Media::Document(document) => document.data.as_ref(),
+            octet_ai::Media::Video(video) => video.data.as_ref(),
         }
     }
     assert_eq!(inline_bytes(media[0]), b"first image bytes");
@@ -882,11 +883,11 @@ fn explicit_paste_rejections_keep_input_visible_and_explain_the_boundary() {
     );
 
     let mut unsupported_video = InteractiveShell::test_shell();
-    unsupported_video.set_input_modalities(all_modalities());
+    unsupported_video.set_input_modalities(octet_ai::ModalitySet::none());
     assert_rejected(
         &mut unsupported_video,
         video.display().to_string(),
-        "unsupported video input",
+        "does not accept video",
     );
 }
 

@@ -5205,3 +5205,100 @@ mod prepared_authority {
         assert_eq!(bound.calls.load(Ordering::SeqCst), 0);
     }
 }
+
+fn video_input_fixture() -> InputPart {
+    InputPart::Media(Media::video_bytes(
+        bytes::Bytes::from_static(include_bytes!("../../../octet-ai/src/video/tiny.mp4")),
+        "video/mp4".parse().unwrap(),
+    ))
+}
+
+#[tokio::test]
+async fn video_admission_is_bounded_and_original_survives_session_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("video.jsonl");
+    let mut agent = active_tool_test_agent(
+        dir.path(),
+        Session::create(&path).unwrap(),
+        ExtensionHost::new(),
+    );
+    let too_many = UserInput::from(vec![video_input_fixture(); 3]);
+    assert!(matches!(
+        agent.prompt(too_many).await,
+        Err(AgentError::ImageInputBatchLimit)
+    ));
+    assert!(agent.session().entries().is_empty());
+    let mixed = UserInput::from(vec![
+        video_input_fixture(),
+        video_input_fixture(),
+        image_input_fixture(false),
+    ]);
+    assert!(matches!(
+        agent.prompt(mixed).await,
+        Err(AgentError::ImageInputBatchLimit)
+    ));
+    let run = agent
+        .prompt(UserInput::from(vec![video_input_fixture()]))
+        .await
+        .unwrap();
+    drop(run);
+    let context = agent.session().context().unwrap();
+    let Message::User(user) = &context[0] else {
+        unreachable!()
+    };
+    let UserPart::Media(Media::Video(video)) = &user.content[0] else {
+        unreachable!()
+    };
+    assert_eq!(video.cached_frames().unwrap().len(), 4);
+    drop(context);
+    drop(agent);
+    let reopened = Session::open(&path).unwrap();
+    let context = reopened.context().unwrap();
+    let Message::User(user) = &context[0] else {
+        unreachable!()
+    };
+    let UserPart::Media(Media::Video(video)) = &user.content[0] else {
+        unreachable!()
+    };
+    assert_eq!(
+        video.data.as_ref(),
+        include_bytes!("../../../octet-ai/src/video/tiny.mp4")
+    );
+    assert_eq!(video.sampled_frames().unwrap().len(), 4);
+}
+
+#[test]
+fn video_tool_lowering_preserves_source_and_reports_frame_delivery() {
+    let model = tool_media_model(
+        Protocol::OpenAiResponses,
+        octet_ai::ModalitySet::none().with(Modality::Image),
+    );
+    let InputPart::Media(media) = video_input_fixture() else {
+        unreachable!()
+    };
+    let output = Ok(ToolOutput::new("read=video").with_media(media));
+    let (message, accepted, text, is_error, _) = lower_tool_result(
+        octet_ai::ToolCallId("call".into()),
+        &output,
+        &model,
+        4096,
+        Vec::new(),
+    );
+    assert!(!is_error);
+    assert_eq!(accepted, [ToolOutputMediaKind::Video]);
+    assert!(text.contains("video sent as 4 frames"));
+    assert!(matches!(message.content[0], UserPart::ToolResult(_)));
+    assert!(matches!(
+        message.content[1],
+        UserPart::Media(Media::Video(_))
+    ));
+    let resumed: UserMessage =
+        serde_json::from_slice(&serde_json::to_vec(&message).unwrap()).unwrap();
+    let UserPart::Media(Media::Video(video)) = &resumed.content[1] else {
+        unreachable!()
+    };
+    assert_eq!(
+        video.data.as_ref(),
+        include_bytes!("../../../octet-ai/src/video/tiny.mp4")
+    );
+}

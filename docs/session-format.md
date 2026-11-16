@@ -78,6 +78,14 @@ Conversation entries commit complete semantic boundaries, not provisional
 streaming deltas. Auxiliary observations below and the assistant sidecar are
 separate; neither proves completion or an exactly-once external effect.
 
+## Recorded video
+
+A canonical `Media::Video` contains base64 `data` (the original container bytes)
+and `media_type`. It stores no source-path dependency or decoder scratch paths.
+Frame caches are process-local and reconstructed from these bytes on resume;
+provider projection never replaces this durable value. See [video input](media.md#video)
+for sampling limits, decoder requirements and model-switch placeholders.
+
 ## Auxiliary invocation state
 
 ```json

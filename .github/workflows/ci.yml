@@ -227,15 +227,17 @@ jobs:
           mkdir -p extensions/octet-pi-compat/node_modules/@earendil-works
           ln -s "$PWD/scripts/fixtures/pi-reference/node_modules/@earendil-works/pi-ai" \
             extensions/octet-pi-compat/node_modules/@earendil-works/pi-ai
-      - name: Install ripgrep for the search tool
+      - name: Install ripgrep and video decoder test tools
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq ripgrep
+            sudo apt-get install -y -qq ripgrep ffmpeg
           else
-            brew install ripgrep
+            brew install ripgrep ffmpeg
           fi
           rg --version
+          ffmpeg -version
+          ffprobe -version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Cold compilation has its own bound; retain the full execution budget.
       # rust-cache saves only after success, so a lockfile change compiles cold

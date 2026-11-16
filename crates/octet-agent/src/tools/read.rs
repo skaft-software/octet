@@ -36,6 +36,7 @@ const REMOTE_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 enum MediaKind {
     Image(Mime),
     Audio(AudioFormat),
+    Video(Mime),
 }
 
 impl MediaKind {
@@ -43,16 +44,18 @@ impl MediaKind {
         match self {
             Self::Image(_) => MAX_IMAGE_BYTES,
             Self::Audio(_) => MAX_AUDIO_BYTES,
+            Self::Video(_) => octet_ai::video::MAX_VIDEO_BYTES,
         }
     }
 
-    fn media_type(&self) -> &'static str {
+    fn media_type(&self) -> &str {
         match self {
             Self::Image(mime) if mime.essence_str() == "image/png" => "image/png",
             Self::Image(mime) if mime.essence_str() == "image/jpeg" => "image/jpeg",
             Self::Image(mime) if mime.essence_str() == "image/gif" => "image/gif",
             Self::Image(mime) if mime.essence_str() == "image/webp" => "image/webp",
             Self::Image(_) => "image",
+            Self::Video(mime) => mime.as_ref(),
             Self::Audio(AudioFormat::Wav) => "audio/wav",
             Self::Audio(AudioFormat::Aac) => "audio/aac",
             Self::Audio(AudioFormat::Mp3) => "audio/mpeg",
@@ -66,6 +69,7 @@ impl MediaKind {
         match self {
             Self::Image(mime) => Media::image_bytes(Bytes::from(bytes), mime),
             Self::Audio(format) => Media::audio_bytes(Bytes::from(bytes), format),
+            Self::Video(mime) => Media::video_bytes(Bytes::from(bytes), mime),
         }
     }
 }
@@ -92,15 +96,15 @@ impl Tool for ReadTool {
             async_execution: false,
             constrained_sampling: None,
             name: "read".to_string(),
-            description: "Read text, images, or audio. `path` may be a workspace-relative local path, \
+            description: "Read text, images, audio, or local video. `path` may be a workspace-relative local path, \
                           an absolute/~/ path when trusted-local access is enabled, a local `file://` \
                           URL, or an HTTPS image/audio URL when remote reads are explicitly enabled. \
                           Text returns numbered lines plus a whole-file \
-                          hash and continuation metadata. Image/audio returns bounded structured media \
+                          hash and continuation metadata. Image/audio/video returns bounded structured media \
                           for protocol-aware ingestion and a payload-free summary for the TUI; the active \
                           model may reject a recognized audio format it cannot accept. For independent \
                           file inspections, request all read calls together in one turn. Existing \
-                          bracketed [Image #N]/[Audio #N] attachments are already included in the prompt \
+                          bracketed [Image #N]/[Audio #N]/[Video #N] attachments are already included in the prompt \
                           and must not be read again."
                 .to_string(),
             parameters: serde_json::json!({
@@ -913,7 +917,7 @@ fn media_kind_for_name(value: &str) -> Option<MediaKind> {
         "flac" => Some(MediaKind::Audio(AudioFormat::Flac)),
         "opus" | "ogg" => Some(MediaKind::Audio(AudioFormat::Opus)),
         "aac" | "m4a" => Some(MediaKind::Audio(AudioFormat::Aac)),
-        _ => None,
+        other => octet_ai::video::video_mime(other).map(MediaKind::Video),
     }
 }
 
@@ -957,6 +961,21 @@ fn validated_media_kind(
 }
 
 fn sniff_media_kind(bytes: &[u8], hint: Option<&MediaKind>) -> Option<MediaKind> {
+    if let Some(MediaKind::Video(mime)) = hint {
+        let valid = match mime.essence_str() {
+            "video/mp4" | "video/quicktime" | "video/3gpp" => bytes.get(4..8) == Some(b"ftyp"),
+            "video/webm" | "video/x-matroska" => bytes.starts_with(b"\x1a\x45\xdf\xa3"),
+            "video/x-msvideo" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"AVI "),
+            "video/ogg" => bytes.starts_with(b"OggS"),
+            "video/mpeg" => bytes.starts_with(b"\x00\x00\x01"),
+            "video/x-flv" => bytes.starts_with(b"FLV"),
+            "video/x-ms-wmv" => bytes.starts_with(b"\x30\x26\xb2\x75"),
+            _ => false,
+        };
+        if valid {
+            return hint.cloned();
+        }
+    }
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(MediaKind::Image(image_mime("image/png")));
     }
@@ -1019,10 +1038,11 @@ fn media_output(
     }
     let hash = content_hash(&bytes);
     let byte_len = bytes.len();
-    let media_type = kind.media_type();
+    let media_type = kind.media_type().to_owned();
     let read_kind = match &kind {
         MediaKind::Image(_) => "vision",
         MediaKind::Audio(_) => "audio",
+        MediaKind::Video(_) => "video (native where supported; otherwise video sent as 4 frames)",
     };
     let media = kind.into_media(bytes);
     Ok(ToolOutput::new(format!(

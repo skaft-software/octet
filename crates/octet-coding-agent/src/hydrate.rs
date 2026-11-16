@@ -592,6 +592,9 @@ fn media_marker(media: &octet_ai::Media) -> String {
                 _ => format!("[audio {format}]"),
             }
         }
+        octet_ai::Media::Video(video) => {
+            format!("[video · {}]", human_bytes(video.data.len() as u64))
+        }
         octet_ai::Media::Document(document) => format!(
             "[PDF {} · {}]",
             document.file_name(),

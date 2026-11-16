@@ -26,15 +26,36 @@ fn media_bytes(media: &Media) -> usize {
             _ => 0,
         },
         Media::Document(document) => document.data.len(),
+        Media::Video(video) => video.data.len(),
     }
 }
 
 /// Preflight before constructing any base64 or JSON values. It bounds the
 /// largest temporary media representation independently from token estimates.
 pub(crate) fn estimated_media_bytes(request: &Request) -> usize {
+    estimated_media_bytes_for(request, true)
+}
+
+fn estimated_media_bytes_for(request: &Request, native_video: bool) -> usize {
     let mut total = 0usize;
     let mut add = |media: &Media| {
-        total = total.saturating_add(media_bytes(media).div_ceil(3).saturating_mul(4));
+        let bytes = match media {
+            Media::Video(video) if !native_video => {
+                video
+                    .cached_frames()
+                    .map_or(crate::video::MAX_FRAME_BYTES, |frames| {
+                        frames
+                            .iter()
+                            .map(|frame| match &frame.image.source {
+                                crate::ImageSource::Inline(bytes) => bytes.len(),
+                                _ => 0,
+                            })
+                            .sum()
+                    })
+            }
+            _ => media_bytes(media),
+        };
+        total = total.saturating_add(bytes.div_ceil(3).saturating_mul(4));
     };
     for message in &request.messages {
         match message {
@@ -66,7 +87,7 @@ pub(crate) fn estimated_media_bytes(request: &Request) -> usize {
 }
 
 pub(crate) fn check_media_budget(model: &Model, request: &Request) -> Result<usize, AiError> {
-    let total = estimated_media_bytes(request);
+    let total = estimated_media_bytes_for(request, model.spec.supports_native_video());
     if total > MAX_REQUEST_BYTES {
         Err(limit_error(model, MAX_REQUEST_BYTES))
     } else {

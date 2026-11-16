@@ -366,6 +366,7 @@ fn octet_media(media: &Media) -> Value {
         }),
         Media::Audio(_) => json!({"type": "audio"}),
         Media::Document(_) => json!({"type": "document"}),
+        Media::Video(_) => json!({"type": "video"}),
     }
 }
 

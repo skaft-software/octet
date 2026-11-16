@@ -40,6 +40,7 @@ anyhow = "1"
 dirs = "5"
 fs2 = "0.4"
 getrandom = "0.4"
+tempfile = "3"
 ring = "0.17"
 
 [target.'cfg(unix)'.dependencies]
@@ -58,4 +59,3 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "net", "io-util"] }
 wiremock = "=0.6.5"
 pretty_assertions = "1"
-tempfile = "3"

@@ -167,7 +167,8 @@ fn is_media_annotation(text: &str) -> bool {
     let trimmed = text.trim();
     (trimmed.starts_with("[attached image: ")
         || trimmed.starts_with("[attached audio: ")
-        || trimmed.starts_with("[attached PDF: "))
+        || trimmed.starts_with("[attached PDF: ")
+        || trimmed.starts_with("[attached video: "))
         && trimmed.ends_with(']')
 }
 
@@ -199,6 +200,7 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
                     Media::Image(_) => MAX_IMAGE_BYTES,
                     Media::Audio(_) => MAX_AUDIO_BYTES,
                     Media::Document(_) => MAX_PDF_BYTES,
+                    Media::Video(_) => octet_ai::video::MAX_VIDEO_BYTES as u64,
                 };
                 debug_assert!(*byte_len <= limit, "attached media exceeded its size cap");
                 if !text_run.is_empty() {
@@ -216,6 +218,7 @@ pub fn compose(display_text: String, ledger: &mut AttachmentLedger) -> ComposedI
                     Media::Image(_) => format!("[attached image: {path}]"),
                     Media::Audio(_) => format!("[attached audio: {path}]"),
                     Media::Document(_) => format!("[attached PDF: {path}]"),
+                    Media::Video(_) => format!("[attached video: {path}]"),
                 };
                 parts.push(InputPart::Text(annotation));
                 parts.push(InputPart::Media(media.clone()));

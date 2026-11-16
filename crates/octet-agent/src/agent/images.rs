@@ -42,7 +42,20 @@ pub(super) fn image_preparation_limits(
         .collect();
     let mut count = 0usize;
     let mut bytes = 0usize;
+    let mut videos = 0;
     for part in input.parts.iter().chain(&custom_parts) {
+        if let InputPart::Media(Media::Video(video)) = part {
+            octet_ai::video::validate_video(video)?;
+            if !model.spec.supports_video_input() {
+                return Err(AiError::Unsupported(octet_ai::UnsupportedError::Video).into());
+            }
+            videos += 1;
+            count += octet_ai::video::VIDEO_FRAMES;
+            bytes = bytes.saturating_add(video.data.len());
+            if videos > 2 || count > MAX_IMAGES_PER_INPUT || bytes > MAX_IMAGE_INPUT_BYTES {
+                return Err(AgentError::ImageInputBatchLimit);
+            }
+        }
         if let InputPart::Media(Media::Image(image)) = part {
             count += 1;
             if let ImageSource::Inline(data) = &image.source {
@@ -56,7 +69,7 @@ pub(super) fn image_preparation_limits(
             }
         }
     }
-    if count > 0
+    if count > videos * octet_ai::video::VIDEO_FRAMES
         && !model
             .spec
             .effective_input_modalities()
@@ -89,17 +102,23 @@ pub(super) async fn prepare_user_images(
     if !input.parts.iter().any(|part| {
         matches!(part,
             InputPart::Media(Media::Image(image)) if matches!(image.source, ImageSource::Inline(_))
-        )
+        ) || matches!(part, InputPart::Media(Media::Video(_)))
     }) && !input.custom_messages.iter().any(|custom| matches!(&custom.content,
         CustomMessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, CustomMessagePart::Image { .. })))) {
         return Ok(input);
     }
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = CancelBlockingImages(Arc::clone(&cancelled));
+    let native_video = model.spec.supports_native_video();
     let worker = tokio::task::spawn_blocking(move || {
         for part in &mut input.parts {
             if cancelled.load(Ordering::Acquire) {
                 return Err(AgentError::Cancelled);
+            }
+            if let InputPart::Media(Media::Video(video)) = part {
+                if !native_video {
+                    video.sampled_frames()?;
+                }
             }
             if let InputPart::Media(Media::Image(image)) = part {
                 *image = octet_ai::prepare_user_image(image, limits)?;

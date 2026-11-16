@@ -347,6 +347,26 @@ pub(super) fn lower_tool_media_part(
                 }
             }
         }
+        Media::Video(video) => {
+            if model.spec.supports_video_input() {
+                accepted_kinds.push(ToolOutputMediaKind::Video);
+                adjacent_media.push(media.clone());
+                if !model.spec.supports_native_video() {
+                    match video.sampled_frames() {
+                        Ok(frames) => {
+                            omissions.push(format!("video sent as {} frames", frames.len()))
+                        }
+                        Err(error) => omissions.push(format!(
+                            "{error}; original video retained, continuing without frames"
+                        )),
+                    }
+                }
+            } else {
+                // Retain raw bytes even on a text-only model; replay derives a placeholder.
+                adjacent_media.push(media.clone());
+                omissions.push(format!("[video omitted: provider {} model {} needs image or native video input; original retained]", model.spec.endpoint.0, model.spec.api_name));
+            }
+        }
         Media::Audio(audio) => {
             if !model
                 .spec
