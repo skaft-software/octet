@@ -1,4 +1,5 @@
 use std::cell::Ref;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::transcript_render::{
@@ -44,6 +45,7 @@ impl SurfaceGeometry {
 pub(super) struct RenderedTranscriptBlock {
     pub(super) lines: Vec<String>,
     pub(super) geometry: SurfaceGeometry,
+    pub(super) tool_copy: Option<Arc<super::tool_render::ToolRows>>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +67,9 @@ pub(super) struct TranscriptCache {
     /// turn viewport-sized receipt/selection work into a history-wide scan.
     nonempty_blocks: Vec<usize>,
     pub(super) block_geometries: Vec<SurfaceGeometry>,
+    // Exact disclosed text/spans emitted during tool layout, without styled rows.
+    // Shares the layout revision, width, theme and disclosure invalidation.
+    pub(super) block_tool_copy: Vec<Option<Arc<super::tool_render::ToolRows>>>,
     pub(super) block_revisions: Vec<u64>,
     /// Blocks changed since the last layout pass. Keeping this explicit avoids
     /// scanning every historic block for each streamed token.
@@ -123,7 +128,8 @@ impl TranscriptCache {
         let cached_blocks = self.block_revisions.len();
         let metadata_aligned = self.block_starts.len() == cached_blocks
             && self.block_lengths.len() == cached_blocks
-            && self.block_geometries.len() == cached_blocks;
+            && self.block_geometries.len() == cached_blocks
+            && self.block_tool_copy.len() == cached_blocks;
         if !metadata_aligned || cached_blocks > block_count {
             return false;
         }
@@ -141,6 +147,7 @@ impl TranscriptCache {
             let keep = self.nonempty_blocks.partition_point(|block| *block < index);
             self.nonempty_blocks.truncate(keep);
             self.block_geometries.truncate(index);
+            self.block_tool_copy.truncate(index);
             self.block_revisions.truncate(index);
         }
         self.dirty_blocks.retain(|dirty| *dirty < index);
@@ -163,6 +170,7 @@ impl Default for TranscriptCache {
             block_lengths: Vec::new(),
             nonempty_blocks: Vec::new(),
             block_geometries: Vec::new(),
+            block_tool_copy: Vec::new(),
             block_revisions: Vec::new(),
             dirty_blocks: Vec::new(),
             dirty: true,
@@ -282,6 +290,7 @@ impl ShellState {
                 cache.block_lengths.clear();
                 cache.nonempty_blocks.clear();
                 cache.block_geometries.clear();
+                cache.block_tool_copy.clear();
                 cache.block_revisions.clear();
                 cache.dirty_blocks.clear();
                 cache.width = Some(width);
@@ -321,6 +330,7 @@ impl ShellState {
                     cache.block_lengths.push(length);
                     cache.record_block_length(index, length);
                     cache.block_geometries.push(rendered.geometry);
+                    cache.block_tool_copy.push(rendered.tool_copy);
                     cache.block_revisions.push(self.block_revisions[index]);
                 }
             } else {
@@ -365,6 +375,7 @@ impl ShellState {
                     cache.block_lengths.push(length);
                     cache.record_block_length(index, length);
                     cache.block_geometries.push(rendered.geometry);
+                    cache.block_tool_copy.push(rendered.tool_copy);
                     cache.block_revisions.push(self.block_revisions[index]);
                 }
 
@@ -419,6 +430,7 @@ impl ShellState {
                         cache.block_lengths[index] = new_length;
                         cache.record_block_length(index, new_length);
                         cache.block_geometries[index] = update.geometry;
+                        cache.block_tool_copy[index] = None;
                         cache.block_revisions[index] = self.block_revisions[index];
 
                         let delta = new_length as isize - old_length as isize;
@@ -460,6 +472,7 @@ impl ShellState {
                     cache.block_lengths[index] = new_length;
                     cache.record_block_length(index, new_length);
                     cache.block_geometries[index] = rendered.geometry;
+                    cache.block_tool_copy[index] = rendered.tool_copy;
                     cache.block_revisions[index] = self.block_revisions[index];
 
                     let delta = new_length as isize - old_length as isize;
@@ -874,6 +887,7 @@ mod tests {
             block_lengths: vec![1],
             nonempty_blocks: vec![0],
             block_geometries: vec![SurfaceGeometry::default()],
+            block_tool_copy: vec![None],
             block_revisions: vec![0],
             dirty_blocks: Vec::new(),
             dirty: true,

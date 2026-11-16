@@ -141,11 +141,25 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
 
 /// A tool's copy projection uses exactly the sanitized fields and disclosure
 /// window used by the presenter, not the complete retained tool result.
+/// Cached projections contain only copy text/spans; styled rows live in the line cache.
 fn presented_tool(
     state: &ShellState,
     index: usize,
     content_width: Option<u16>,
-) -> super::tool_render::ToolRows {
+) -> std::sync::Arc<super::tool_render::ToolRows> {
+    {
+        let cache = state.transcript_cache.borrow();
+        if !cache.dirty
+            && cache.width == Some(state.transcript_content_width(state.size.0))
+            && cache.block_revisions.get(index) == state.block_revisions.get(index)
+            && content_width
+                .is_none_or(|width| cache.block_geometries[index].content_width == width)
+        {
+            if let Some(projected) = &cache.block_tool_copy[index] {
+                return projected.clone();
+            }
+        }
+    }
     let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
         unreachable!()
     };
@@ -167,14 +181,14 @@ fn presented_tool(
         state.transcript_content_width(state.size.0),
         state.verbose_tools,
     );
-    super::transcript_render::render_tool(
+    std::sync::Arc::new(super::transcript_render::render_tool(
         panel,
         &state.theme,
         &state.theme.rich_renderer(),
         content_width.unwrap_or(plan.geometry.content_width),
         state.verbose_tools,
         plan.content_role,
-    )
+    ))
 }
 
 pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> String {
@@ -184,7 +198,7 @@ pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> Str
     #[cfg(test)]
     super::fullscreen_work_tests::record(|work| work.messages_visited += 1);
     let text = match block {
-        TranscriptBlock::Tool(_) => presented_tool(state, index, None).text,
+        TranscriptBlock::Tool(_) => presented_tool(state, index, None).text.clone(),
         TranscriptBlock::Reasoning(reasoning)
             if !reasoning.reasoning_expanded && !state.verbose_tools =>
         {

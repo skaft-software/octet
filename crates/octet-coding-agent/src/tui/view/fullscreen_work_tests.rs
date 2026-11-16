@@ -257,3 +257,71 @@ fn fullscreen_edits_and_frames_skip_zero_height_history() {
     assert_eq!(samples[0], samples[1]);
     assert_eq!(samples[1], samples[2]);
 }
+
+#[test]
+fn fullscreen_long_tool_scroll_reuses_layout_copy_projection() {
+    let mut samples = Vec::new();
+    for messages in [100_usize, 1_000, 5_000] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        {
+            let mut state = shell.state.borrow_mut();
+            state.application_viewport_requested = true;
+            state.render_threaded = true;
+            for index in 0..messages {
+                let tail = index.saturating_sub(messages - 12);
+                if index >= messages - 12 && tail % 3 == 0 {
+                    let args = serde_json::json!({"command": "printf 'fixture 界é'"});
+                    let panel = ToolPanel::new(
+                        octet_ai::ToolCallId(format!("tool-{index}")),
+                        "bash".into(),
+                        args.to_string(),
+                        crate::presentation::summarize_tool("bash", &args),
+                        "retained output 界é\n".repeat(1_000),
+                        true,
+                        false,
+                        None,
+                        None,
+                    );
+                    state.push_block(TranscriptBlock::Tool(Box::new(panel)));
+                } else {
+                    state.push_block(TranscriptBlock::Notice(format!("message-{tail:02} 界é")));
+                }
+            }
+        }
+        let component = ShellComponent::isolated(shell.state.clone(), true);
+        paint(&shell, &component);
+        sexy_tui_rs::render_metrics::enable(true);
+        let mut wrapped = 0;
+        let mut highlights = 0;
+        let mut laid_out = 0;
+        // Cross tool boundaries, evict visible mappings, reverse and re-enter.
+        for direction in [-1, 1] {
+            for _ in 0..96 {
+                sexy_tui_rs::render_metrics::reset();
+                shell.scroll_lines(direction);
+                paint(&shell, &component);
+                let work = sexy_tui_rs::render_metrics::snapshot();
+                wrapped = wrapped.max(work.wrapped);
+                highlights = highlights.max(work.highlights);
+                laid_out += work.laid_out;
+            }
+        }
+        sexy_tui_rs::render_metrics::enable(false);
+        eprintln!(
+            "messages={messages}: wrapped={wrapped} highlights={highlights} laid_out={laid_out}"
+        );
+        assert_eq!(laid_out, 0);
+        assert_eq!(
+            highlights, 0,
+            "copy mappings must reuse the tool's laid-out presentation"
+        );
+        assert!(
+            wrapped <= 16,
+            "viewport entry rewrapped {wrapped} input lines"
+        );
+        assert_eq!(shell.state.borrow().scroll_from_bottom.get(), 0);
+        samples.push((wrapped, highlights, laid_out));
+    }
+    assert!(samples.windows(2).all(|pair| pair[0] == pair[1]));
+}

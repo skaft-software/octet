@@ -64,6 +64,7 @@
 - Transcript queue and omission counts use singular nouns for one row or byte.
 - Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.
 - Wheel events publish immediately during idle and active work, keeping continuous input independent of timer wakeups.
+- Scrolling reuses tool selection projections to avoid rewrapping and highlighting long collapsed outputs on each frame.
 - Wheel scrolling moves the transcript over hints and viewport edges while the scrollbar holds a pointer press.
 - Fullscreen wheel, selection and picker navigation preempt the stream frame timer just like composer edits.
 - Gemini file preparation validates requests before uploading recorded audio.

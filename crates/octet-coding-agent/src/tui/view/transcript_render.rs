@@ -465,6 +465,7 @@ pub(super) fn render_block_planned_with_rainbow(
         return RenderedTranscriptBlock {
             lines: Vec::new(),
             geometry: super::transcript_cache::SurfaceGeometry::default(),
+            tool_copy: None,
         };
     }
     let width = plan.geometry.content_width;
@@ -479,6 +480,7 @@ pub(super) fn render_block_planned_with_rainbow(
         TranscriptBlock::Reasoning(reasoning) if !reasoning.reasoning_expanded
     );
     let mut geometry = plan.geometry;
+    let mut tool_copy = None;
     let mut lines = match block {
         TranscriptBlock::User {
             text,
@@ -575,17 +577,19 @@ pub(super) fn render_block_planned_with_rainbow(
             status_shimmer_frame,
             rainbow_strength,
         ),
-        TranscriptBlock::Tool(panel) => finish_transcript_block(
-            render_tool(
+        TranscriptBlock::Tool(panel) => {
+            let mut projected = render_tool(
                 panel,
                 theme,
                 rich_renderer,
                 width,
                 verbose_tools,
                 plan.content_role,
-            )
-            .lines,
-        ),
+            );
+            let lines = std::mem::take(&mut projected.lines);
+            tool_copy = Some(std::sync::Arc::new(projected));
+            finish_transcript_block(lines)
+        }
         TranscriptBlock::Outcome(outcome) => {
             render_outcome(outcome, theme, width, subagents_running)
         }
@@ -677,6 +681,7 @@ pub(super) fn render_block_planned_with_rainbow(
         return RenderedTranscriptBlock {
             lines,
             geometry: SurfaceGeometry::default(),
+            tool_copy,
         };
     }
     if plan.event_spacing && matches!(block, TranscriptBlock::Reasoning(_)) {
@@ -728,7 +733,11 @@ pub(super) fn render_block_planned_with_rainbow(
         collapsed_reasoning,
         marker,
     );
-    RenderedTranscriptBlock { lines, geometry }
+    RenderedTranscriptBlock {
+        lines,
+        geometry,
+        tool_copy,
+    }
 }
 
 #[cfg(test)]

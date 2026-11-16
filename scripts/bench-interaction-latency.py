@@ -18,6 +18,7 @@ import platform
 import pty
 import re
 import select
+import signal
 import struct
 import statistics
 import subprocess
@@ -123,7 +124,7 @@ def frame_summary(frames):
     return result
 
 
-def run(binary, turns, rounds, scaling=False):
+def run(binary, turns, rounds, scaling=False, profile_signal=None):
     with tempfile.TemporaryDirectory(prefix="octet-interaction-") as tmp:
         home, workspace, sessions = mixed_fixture(Path(tmp), turns)
         # Explicit context metadata makes the synthetic catalog ready offline.
@@ -209,6 +210,8 @@ def run(binary, turns, rounds, scaling=False):
                     hydrate_ms = (time.monotonic() - started) * 1000
                     send(b"\x1b[F", "key", delay=.3)
                     first_wheel = sum(expected.values()) + 1
+                    if profile_signal is not None:
+                        os.kill(child.pid, profile_signal)
                     # Fixed schedules cover unmerged notches and sustained
                     # trackpad traffic; no acknowledgement-dependent slowdowns.
                     for gap in (.02, .004, .001):
@@ -216,6 +219,8 @@ def run(binary, turns, rounds, scaling=False):
                             for _ in range(rounds * 8):
                                 send(f"\x1b[<{direction};20;12M".encode(), "wheel", delay=gap)
                             drain(.2)
+                    if profile_signal is not None:
+                        os.kill(child.pid, profile_signal)
                     last_wheel = sum(expected.values())
                     motion = []
                 else:
@@ -307,6 +312,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--messages", type=int, help="Scaling mode: complete 100/1000/5000-message branch (multiple of four)")
+    parser.add_argument("--profile-signal", choices=("SIGUSR1", "SIGUSR2"),
+                        help="Toggle a paused external sampler around the scaling wheel phase")
     parser.add_argument("--turns", type=int, default=1000)
     parser.add_argument("--rounds", type=int, default=20)
     args = parser.parse_args()
@@ -316,8 +323,12 @@ def main():
         if args.messages < 4 or args.messages % 4:
             parser.error("messages must be a positive multiple of four")
         args.turns = args.messages // 4
+    if args.profile_signal and args.messages is None:
+        parser.error("--profile-signal requires --messages and a sampler configured for that signal")
     binary = args.binary.resolve()
-    samples, motion, kitty_commands, details = run(binary, args.turns, args.rounds, args.messages is not None)
+    profile_signal = getattr(signal, args.profile_signal) if args.profile_signal else None
+    samples, motion, kitty_commands, details = run(
+        binary, args.turns, args.rounds, args.messages is not None, profile_signal)
     print(json.dumps({"schema": "octet.interaction-latency.v1", "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                       "system": platform.platform(), "turns": args.turns, "rounds": args.rounds,
                       "viewport": [120, 40], "fixture": "tools-and-png", "kitty_commands": kitty_commands, "motion": motion,

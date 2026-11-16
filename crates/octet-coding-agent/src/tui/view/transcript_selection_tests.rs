@@ -1313,3 +1313,99 @@ fn unchanged_tail_selection_costs_nothing_without_prewarming() {
         "an unchanged tail frame re-projected the whole answer"
     );
 }
+
+#[test]
+fn tool_layout_copy_cache_follows_revision_reflow_theme_and_disclosure() {
+    use super::super::InteractiveShell;
+    use std::sync::Arc;
+
+    fn projection(shell: &InteractiveShell) -> Arc<super::super::tool_render::ToolRows> {
+        let state = shell.state.borrow();
+        let _ = state.rendered_transcript(state.size.0);
+        let projected = presented_tool(&state, 0, None);
+        let cache = state.transcript_cache.borrow();
+        assert!(Arc::ptr_eq(
+            &projected,
+            cache.block_tool_copy[0].as_ref().unwrap()
+        ));
+        assert!(
+            projected.lines.is_empty(),
+            "styled rows belong to the line cache only"
+        );
+        let plan = super::super::surface_layout::compile_surface_plan_for_render(
+            None,
+            &state.transcript[0],
+            &state.theme,
+            state.transcript_content_width(state.size.0),
+            state.verbose_tools,
+        );
+        let TranscriptBlock::Tool(panel) = &state.transcript[0] else {
+            unreachable!()
+        };
+        let fresh = super::super::transcript_render::render_tool(
+            panel,
+            &state.theme,
+            &state.theme.rich_renderer(),
+            plan.geometry.content_width,
+            state.verbose_tools,
+            plan.content_role,
+        );
+        assert_eq!(projected.text, fresh.text);
+        let spans = |rows: &super::super::tool_render::ToolRows| {
+            rows.copy_rows
+                .iter()
+                .map(|row| row.as_ref().map(|row| (row.source.clone(), row.left)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&projected), spans(&fresh));
+        projected
+    }
+
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 24);
+    shell.state.borrow_mut().application_viewport_requested = true;
+    let body = (0..40)
+        .map(|row| format!("output-{row:02} 界é repeated context "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    shell
+        .state
+        .borrow_mut()
+        .push_block(TranscriptBlock::Tool(Box::new(selection_panel(
+            "bash",
+            serde_json::json!({"command": "printf fixture"}),
+            body,
+        ))));
+    let mut old = projection(&shell);
+    assert!(Arc::ptr_eq(&old, &projection(&shell)));
+    assert!(!old.text.contains("output-20"));
+    for change in 0..5 {
+        match change {
+            0 => {
+                shell.toggle_verbose_tools();
+            }
+            1 => shell.set_size(42, 24),
+            2 => shell.set_theme(shell.theme()),
+            3 => {
+                let mut state = shell.state.borrow_mut();
+                let TranscriptBlock::Tool(panel) = &mut state.transcript[0] else {
+                    unreachable!()
+                };
+                panel.output = "REPLACED 界é\n".repeat(40);
+                state.touch_block(0);
+            }
+            _ => {
+                shell.toggle_verbose_tools();
+            }
+        }
+        let next = projection(&shell);
+        assert!(!Arc::ptr_eq(&old, &next));
+        if change == 0 {
+            assert!(next.text.contains("output-20"));
+        }
+        if change >= 3 {
+            assert!(next.text.contains("REPLACED"));
+        }
+        old = next;
+    }
+}

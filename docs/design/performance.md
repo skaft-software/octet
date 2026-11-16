@@ -195,7 +195,7 @@ file and compare identically instrumented builds. Normal sessions retain only an
 atomic input/publication clock, not timing samples.
 
 The offline Unix PTY driver uses a disposable home, a 100-model manual catalog,
-1,000 synthetic turns with paired tool cards and 100 inline PNGs, and 4 ms wheel,
+1,000 synthetic turns with paired long tool cards and inline PNGs, and 4 ms wheel,
 selection, slash-filter and arrow bursts. Its synthetic Ghostty capability profile
 exercises Kitty image commands (not a physical terminal). Separate settled wheel
 probes at 0/1/4 ms gaps report actual rows moved from completed-frame geometry, independently of the button label. It verifies trace counts, the final composer marker, clean exit,
@@ -291,8 +291,78 @@ work stayed zero, but frames wrapped up to 2,004 lines, invoked highlighting twi
 and requested approximately 2.7 MB in 43,900 allocations. Rebuilding tool copy
 projections during geometry capture dominates those periodic spikes. These are
 within-run descriptive quantiles, not independent-trial tail guarantees. Linux
-`perf` sampling on this host is blocked by `perf_event_paranoid=4`; no flamegraph
-is claimed. Re-run sampling on an authorized profiling host.
+`perf` sampling on this host is blocked by `perf_event_paranoid=4`; the follow-up
+uses userspace clock sampling instead, as described below.
+
+#### Tool projection cache: measured fix
+
+Native tool layout now retains the exact sanitized/disclosed copy text and source
+spans it already produced; styled rows move into the existing row cache and are
+not duplicated. Geometry, anchor and selection projection share those spans.
+Revision, reflow, theme, disclosure, tail truncation and structural replacement
+use existing layout invalidation. Cache misses on the semantic input/copy path
+retain the complete presenter fallback. Extra retained space is proportional to
+disclosed tool text/rows, not hidden output; history and cold layout remain O(n).
+
+A deterministic failing-then-passing regression crosses tool boundaries, reverses
+and re-enters cards with 1,000-line outputs at 100/1,000/5,000 blocks. Peak wrapper
+input falls from 4,004 lines to zero; highlighter invocations fall from four to
+zero. A separate regression compares cached text/spans with fresh rendering after
+revision, width, theme and disclosure changes. Existing copy tests still assert
+Unicode, repeated rows, omitted/private text, diffs and offscreen selection.
+
+Two new paired trials per cell alternate before/after order on the same shared
+host. The table reports medians of the two within-run quantiles/variances, not
+pooled percentiles or independent-trial p99 estimates. Earlier unpaired runs
+above had a different host-speed regime and must not be compared directly with
+these candidate timings. Each run includes 1,920 wheel reports at 120×40:
+
+| Build | Messages | Event → write before p50/p95/p99 (ms) | After p50/p95/p99 (ms) | Frame variance before → after (ms²) |
+| --- | ---: | --- | --- | --- |
+| Debug | 100 | 6.355 / 26.845 / 34.845 | 4.405 / 10.206 / 10.704 | 22.798 → 11.453 |
+| Debug | 1,000 | 6.355 / 27.121 / 35.178 | 4.430 / 10.225 / 10.777 | 23.245 → 11.351 |
+| Debug | 5,000 | 6.586 / 27.221 / 35.582 | 4.467 / 10.252 / 10.875 | 23.502 → 11.534 |
+| Release | 100 | 1.428 / 7.073 / 7.249 | 1.327 / 1.629 / 1.685 | 3.019 → 0.166 |
+| Release | 1,000 | 1.514 / 6.901 / 7.131 | 1.371 / 1.639 / 1.732 | 2.842 → 0.164 |
+| Release | 5,000 | 1.418 / 7.069 / 7.679 | 1.324 / 1.652 / 1.700 | 3.043 → 0.174 |
+
+| Build | Messages | After frame p50/p95/p99 (ms) | Peak sampled RSS before → after (KiB, median of runs) | Merged reports before → after (two runs) |
+| --- | ---: | --- | --- | --- |
+| Debug | 100 | 3.298 / 10.025 / 10.737 | 117,138 → 113,806 | 573,571 → 407,407 |
+| Debug | 1,000 | 3.296 / 10.042 / 10.758 | 199,612 → 196,988 | 576,572 → 411,408 |
+| Debug | 5,000 | 3.324 / 10.065 / 10.448 | 541,196 → 538,346 | 575,576 → 413,409 |
+| Release | 100 | 1.231 / 1.496 / 1.543 | 63,634 → 64,516 | 49,52 → 0,0 |
+| Release | 1,000 | 1.270 / 1.506 / 1.539 | 148,706 → 146,618 | 48,46 → 0,3 |
+| Release | 5,000 | 1.245 / 1.518 / 1.559 | 490,338 → 489,004 | 50,50 → 0,0 |
+
+All 24 paired runs preserve all reports, move exactly 1,920 rows, and have zero
+zero-motion frames. Merging means multiple deltas presented by one frame, not
+lost navigation. Peak frame work at every size is zero relaid-out rows, at most
+98 mapped rows and four geometry blocks. Wrapper input/highlighter calls fall
+from 2,004/two to zero/zero; allocation requests fall from about 43,900/2.70 MB
+to 1,830/0.270 MB. Mapped rows can exceed viewport height on first entry to a long
+non-tool block. Its block-local alignment and visible Unicode/ANSI work remain;
+no general O(visible rows) mapping claim or constant total-RSS claim follows.
+No session-length-dependent steady scroll work is observed in this fixture.
+
+#### Release sampling without kernel perf access
+
+GNU `gprofng collect app` works here using a userspace clock sampler. Build the
+profiling example with `CARGO_PROFILE_RELEASE_STRIP=none` to retain symbols. A
+local executable wrapper should `exec gprofng collect app -a off -F off -p hi
+-y USR2 -o /absolute/path/scroll.er /absolute/path/interaction-profile "$@"`.
+Pass that wrapper as the driver's binary and add `--messages 5000 --rounds 40
+--profile-signal SIGUSR2`. Collection starts paused; the driver signals the same
+process immediately before/after the wheel phase, excluding startup/hydration.
+Use `gprofng display text -overview -limit 30 -functions /absolute/path/scroll.er`
+for function attribution. Keep the exact executable or archive it with the
+experiment. Do not send this signal to a normal uninstrumented binary.
+
+The final 5,000-message release wheel phase sampled 2.290 CPU seconds: grapheme
+iteration accounts for 32.39% exclusive; `visible_width` and `slice_with_width`
+account for 32.04% and 24.07% inclusive (overlapping). Remaining work is dominated
+by viewport Unicode/ANSI handling, not tool wrapping/highlighting. Sampling and
+allocation tracing add overhead; that run is not included in the paired tables.
 
 ### Terminal wheel granularity
 
@@ -372,7 +442,8 @@ tests. `painted_copy_rows` clones the whole painted block on the private/inline
 path. Anchor conversion and selection decoration create fresh alignment memos;
 `BlockCopyMemo::reusable_rows` still compares complete text and prior painted
 prefixes. Alignment searches can cost O(rows × copy bytes) on decorated rows.
-Tool copy projection re-renders disclosed output and traverses its prefix.
+Tool copy projection reuses disclosed text/spans from native layout, but expanded
+output mapping can still traverse its block-local prefix.
 Completed receipts retain O(v) rows, but constructing them can still cost O(B)
 or worse. The nonempty-block index now skips zero-height runs for geometry and
 selection painting; k counts only blocks with painted rows. Image cropping

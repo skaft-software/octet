@@ -11,7 +11,7 @@ pub(in crate::tui::view) struct ToolCopyRow {
     pub(in crate::tui::view) left: u16,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(in crate::tui::view) struct ToolRows {
     pub(in crate::tui::view) lines: Vec<String>,
     pub(in crate::tui::view) text: String,

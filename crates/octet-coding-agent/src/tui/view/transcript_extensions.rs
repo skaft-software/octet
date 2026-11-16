@@ -233,6 +233,7 @@ impl ShellState {
         };
         if lines.is_empty() {
             return Some(RenderedTranscriptBlock {
+                tool_copy: None,
                 lines,
                 geometry: SurfaceGeometry::default(),
             });
@@ -251,6 +252,7 @@ impl ShellState {
             frame.is_some_and(|frame| frame.response.render_shell.as_deref() == Some("self"));
         if self_shell {
             return Some(RenderedTranscriptBlock {
+                tool_copy: None,
                 lines,
                 geometry: SurfaceGeometry {
                     content_width: plan.geometry.content_width,
@@ -276,6 +278,7 @@ impl ShellState {
             marker,
         );
         Some(RenderedTranscriptBlock {
+            tool_copy: None,
             lines,
             geometry: plan.geometry,
         })

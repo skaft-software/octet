@@ -2,6 +2,8 @@ import base64
 import importlib.util
 import json
 import tempfile
+import subprocess
+import sys
 from pathlib import Path
 import unittest
 
@@ -55,3 +57,10 @@ class LatencySummaryTests(unittest.TestCase):
         self.assertEqual(result["p99_ms"], 99)
         self.assertEqual(result["work_max"]["mapped"], 500)
         self.assertGreater(result["variance_ms2"], 0)
+
+
+    def test_sampler_signal_requires_explicit_scaling_mode(self):
+        result = subprocess.run([sys.executable, str(Path(latency.__file__)), "/unused",
+                                 "--profile-signal", "SIGUSR2"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--profile-signal requires --messages", result.stderr)
