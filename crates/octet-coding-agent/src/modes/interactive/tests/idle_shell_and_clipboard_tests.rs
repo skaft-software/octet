@@ -439,3 +439,17 @@ async fn clipboard_gesture_is_consumed_on_the_active_run_path_too() {
     assert_eq!(shell.pending(), "steer text");
     clipboard_read::clear_test_text();
 }
+
+#[tokio::test(start_paused = true)]
+async fn wheel_publication_is_due_without_a_second_frame_interval() {
+    let mut tick = tokio::time::interval(Duration::from_millis(16));
+    tick.tick().await; // consume the interval's initial immediate tick
+    let mut dirty = false;
+    schedule_scroll_frame(&mut tick, &mut dirty);
+    assert!(dirty);
+    assert!(futures_util::poll!(Box::pin(tick.tick())).is_ready());
+    dirty = false;
+    schedule_scroll_frame(&mut tick, &mut dirty);
+    schedule_scroll_frame(&mut tick, &mut dirty); // preserve burst coalescing
+    assert!(futures_util::poll!(Box::pin(tick.tick())).is_ready());
+}

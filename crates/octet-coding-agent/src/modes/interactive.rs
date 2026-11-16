@@ -645,6 +645,16 @@ enum Idle {
     Quit,
 }
 
+// Adjacent ready wheel events share one publication on the input owner.
+fn schedule_scroll_frame(tick: &mut Interval, dirty: &mut bool) {
+    if !*dirty {
+        // Rendering already coalesces on its capacity-one channel. This wake
+        // only lets ready input drain first; it must not add another 16 ms slot.
+        tick.reset_immediately();
+        *dirty = true;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_prompt<S>(
     shell: &mut InteractiveShell,
@@ -793,7 +803,7 @@ where
                     }
                     InputAction::ScrollLines(direction) => {
                         shell.scroll_lines(direction);
-                        scroll_dirty = true;
+                        schedule_scroll_frame(scroll_tick, &mut scroll_dirty);
                     }
                     InputAction::JumpToTail => {
                         shell.jump_to_tail();
@@ -857,9 +867,8 @@ where
                     | InputAction::Queue(_) | InputAction::Steer(_) => {}
                 }
             }
-            // Mouse/trackpad events arrive in bursts. Apply every delta to
-            // state, but draw at most once per frame so a large transcript
-            // cannot leave a backlog that appears as post-scroll inertia.
+            // Apply every ready delta before publishing once. The first wheel
+            // event arms this wake immediately; only the renderer owns pacing.
             _ = scroll_tick.tick(), if scroll_dirty => {
                 shell.render();
                 scroll_dirty = false;
@@ -4937,7 +4946,7 @@ where
                     }
                     InputAction::ScrollLines(direction) => {
                         shell.scroll_lines(direction);
-                        scroll_dirty = true;
+                        schedule_scroll_frame(scroll_tick, &mut scroll_dirty);
                     }
                     InputAction::JumpToTail => {
                         shell.jump_to_tail();
@@ -13288,9 +13297,8 @@ async fn run_interactive_once(
         shell.leave();
         return Ok(InteractiveExit::Finished);
     }
-    // The shell owns a dedicated renderer thread, but sexy-tui still renders
-    // synchronously when that thread receives a request. This clock only
-    // coalesces high-rate wheel input on the input loop.
+    // The wheel wake coalesces ready input before notifying the renderer. Each
+    // burst resets it immediately; its nominal period never delays input.
     let mut scroll_tick = tokio::time::interval(Duration::from_millis(16));
     scroll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut extension_tick = tokio::time::interval(Duration::from_millis(50));

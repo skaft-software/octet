@@ -81,6 +81,7 @@
 - Enabling Pi compatibility returns editable control while factories load with a visible status and hook-readiness tracing.
 - Model discovery keeps capability, pricing and audio provenance together during route registration.
 - Pi editors acknowledge completed no-op input across native panel focus changes while preserving the draft and stale-write fences.
+- Wheel bursts publish promptly after ready input drains, preserving every scroll delta without a second frame-period wait.
 
 ## [0.10.4] - 2026-11-12
 

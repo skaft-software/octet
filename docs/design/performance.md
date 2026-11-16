@@ -216,6 +216,12 @@ Non-editing navigation therefore bypasses that timer too. The sequence credited
 to a completed frame is captured before rendering; events during a write still
 preempt the following slot. Semantic-only updates retain the 16 ms pacing budget.
 
+The idle and active input owners arm their wheel-publication wake immediately
+on the first delta of a burst. Already-ready input still drains before that wake,
+and all deltas update state in order; the capacity-one renderer channel coalesces
+presentation. The input owner no longer waits for a second periodic 16 ms slot
+before notifying the renderer.
+
 ### Fullscreen navigation and selection audit
 
 For unchanged fullscreen application-owned history, navigation retains the
