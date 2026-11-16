@@ -1079,6 +1079,13 @@ prove that a provider's implicit breakpoint remains eligible when a user/tool-re
 group is extended. The local audit covers all builtin Responses models, including
 GPT-6 Luna, and declared Flex fixtures without claiming live hits or tier availability.
 
+Payload hooks preserve the codec's bytes and field order for unchanged JSON
+subtrees, including when a hook returns an identical payload or changes only a
+control. New fields append after existing fields; intentional edits and deletions
+still take effect. This applies to synchronous and asynchronous native HTTP
+payload hooks, without retaining extra history snapshots. Hooks that change
+instructions, tools or earlier messages intentionally change that prefix.
+
 These annotations do not remove or reorder context. Compaction, rolling
 screenshot bounds, changed tools/instructions and context hooks can still
 invalidate earlier prefixes. Cache availability, minimum sizes, TTLs and routing

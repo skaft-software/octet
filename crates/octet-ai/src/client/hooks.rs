@@ -54,7 +54,7 @@ pub(super) fn apply_payload_hook(
     let Some(replacement) = hook.on_payload(payload, &host_model)? else {
         return Ok(body);
     };
-    encode_hook_body(&replacement)
+    encode_hook_body(&body, &replacement)
 }
 
 /// The reserved check includes removals and every repeated value, not just the
@@ -83,14 +83,14 @@ fn decode_hook_body(body: &[u8]) -> Result<serde_json::Value, AiError> {
         .map_err(|_| AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into())))
 }
 
-fn encode_hook_body(payload: &serde_json::Value) -> Result<bytes::Bytes, AiError> {
+fn encode_hook_body(original: &[u8], payload: &serde_json::Value) -> Result<bytes::Bytes, AiError> {
     if !payload.is_object() && !payload.is_array() {
         return Err(crate::ConfigError::Parse(
             "provider hook body must be an object or array".into(),
         )
         .into());
     }
-    let encoded = serde_json::to_vec(payload).map_err(|_| {
+    let encoded = super::wire_patch::encode(original, payload).map_err(|_| {
         AiError::Decode(DecodeError::Json("invalid provider hook JSON body".into()))
     })?;
     if encoded.len() > MAX_HOOKED_BODY_BYTES {
@@ -140,7 +140,7 @@ impl ProviderRequestAttempt {
                     .before_request(&self.context, decode_hook_body(&body)?)
                     .await?
                 {
-                    body = encode_hook_body(&payload)?;
+                    body = encode_hook_body(&body, &payload)?;
                 }
             }
             Ok(body)
@@ -263,3 +263,7 @@ pub(super) fn open_custom_http_continuation(
             .await
     })
 }
+
+#[cfg(test)]
+#[path = "hooks_tests.rs"]
+mod tests;

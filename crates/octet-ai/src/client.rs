@@ -23,6 +23,7 @@ pub(crate) mod hooks;
 mod stream;
 mod transport;
 mod websocket;
+mod wire_patch;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};

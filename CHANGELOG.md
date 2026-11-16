@@ -102,6 +102,7 @@
 - Pi extension load failures and discarded stalled factories appear as grouped, actionable errors while healthy siblings continue.
 - Pi streaming observers receive subsequent events as soon as their handler settles, independently of dispatcher status delivery.
 - Cache accounting honors explicit final zero counters and counts one-hour writes once in session reports.
+- Payload hooks retain unchanged request bytes and field order across turns, preserving stable cache prefixes.
 
 ## [0.10.4] - 2026-11-12
 
