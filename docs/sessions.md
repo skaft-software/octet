@@ -109,12 +109,11 @@ leaves, including abandoned forks (which never count as active context).
 
 ## Recovery
 
-When a provider context projection changes existing messages or instructions in
-an opaque Responses replay, octet refuses the projection rather than discarding
-provider reasoning or completed tool results. The refusal names the Responses
-route and unsupported boundary. Disable or reconfigure the context-modifying
-extension and retry the original session; do not edit its stored reasoning.
-Text-only user messages appended by a context hook remain supported.
+Pi-compatible context hooks can edit messages, change instructions or append
+media while continuing an opaque Responses session. The wire request encodes
+the projected context. Unchanged assistant messages retain their own opaque
+output verbatim; edited or removed assistants cannot inherit another message's
+reasoning. Hook projections never rewrite the saved session.
 
 `delete` moves the files to `.trash/`. `repair` makes an owner-private backup,
 then removes only an interrupted final append. A corrupted completed record is

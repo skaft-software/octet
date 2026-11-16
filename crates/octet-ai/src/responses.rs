@@ -363,6 +363,74 @@ pub fn encode_responses_replay(
     crate::protocol::openai_responses::encode_replay_input(model, system, items)
 }
 
+/// Encodes a hook projection, retaining authoritative output only for unchanged
+/// assistant messages from the original route-affine replay window.
+///
+/// Reasoning belongs to its assistant message, never to a position in the new
+/// context. Edited or removed messages cannot inherit a neighbouring sidecar.
+pub fn encode_responses_projection(
+    model: &Model,
+    system: Option<&str>,
+    messages: &[Message],
+    original: &[Message],
+    replay: &[ResponsesReplayItem],
+) -> Result<ResponsesInput, crate::AiError> {
+    // Pi compatibility: packages/ai/src/api/openai-responses-shared.ts:326-409
+    // encodes the post-hook messages, replaying signed reasoning inside its own
+    // assistant verbatim. Rust owns the wire codec and durable sidecar boundary;
+    // the extension adapter cannot associate those opaque outputs itself.
+    let outputs = replay
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ResponsesReplayItem::Output(_) | ResponsesReplayItem::LocalAssistant(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    let assistants = original
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant(assistant) => Some(assistant),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // A native checkpoint replaces a prefix; its subsequent outputs correspond
+    // to the suffix of canonical assistants, not to the compacted-away turns.
+    let mut by_message =
+        std::collections::HashMap::<Vec<u8>, std::collections::VecDeque<ResponsesOutput>>::new();
+    for (assistant, item) in assistants
+        .iter()
+        .rev()
+        .zip(outputs.iter().rev())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if let ResponsesReplayItem::Output(output) = item {
+            by_message
+                .entry(serde_json::to_vec(assistant).expect("assistant serializes"))
+                .or_default()
+                .push_back(output.clone());
+        }
+    }
+    let projected = messages
+        .iter()
+        .map(|message| match message {
+            Message::User(user) => ResponsesReplayItem::User(user.clone()),
+            Message::Assistant(assistant) => {
+                let output = by_message
+                    .get_mut(&serde_json::to_vec(assistant).expect("assistant serializes"))
+                    .and_then(|outputs| outputs.pop_front());
+                output
+                    .map(ResponsesReplayItem::Output)
+                    .unwrap_or_else(|| ResponsesReplayItem::LocalAssistant(assistant.clone()))
+            }
+        })
+        .collect::<Vec<_>>();
+    encode_responses_replay(model, system, &projected)
+}
+
 /// Encodes ordinary canonical messages using the same input mapper as opaque
 /// replay. This is crate-visible so the private HTTP codec cannot drift from
 /// the public replay encoder.

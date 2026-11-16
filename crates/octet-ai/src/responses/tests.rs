@@ -119,3 +119,53 @@ fn compact_output_requires_one_nonempty_encrypted_checkpoint() {
     .unwrap();
     assert!(output.has_valid_compaction());
 }
+
+#[test]
+fn projection_keeps_opaque_reasoning_with_its_own_unchanged_assistant() {
+    use crate::{AssistantPart, ModelCatalog, ModelId};
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let assistant = |text: &str| {
+        Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: model.spec.protocol,
+            content: vec![AssistantPart::Text(text.into())],
+        })
+    };
+    let original = vec![assistant("first"), assistant("second")];
+    let output = |id: &str, text: &str| {
+        ResponsesOutput::new(vec![
+        ResponsesItem::new(serde_json::json!({"type":"reasoning", "id":id, "summary":[], "encrypted_content":id, "future":{"verbatim":true}})).unwrap(),
+        ResponsesItem::new(serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":text}]})).unwrap(),
+    ])
+    };
+    let first = output("r1", "first");
+    let second = output("r2", "second");
+    let replay = vec![
+        ResponsesReplayItem::Output(first),
+        ResponsesReplayItem::Output(second.clone()),
+    ];
+    for projected in [
+        vec![original[1].clone()],
+        vec![assistant("edited first"), original[1].clone()],
+    ] {
+        let input =
+            encode_responses_projection(&model, Some("new system"), &projected, &original, &replay)
+                .unwrap();
+        let reasoning = input
+            .items()
+            .iter()
+            .filter(|item| item.as_json()["type"] == "reasoning")
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, vec![&second.items()[0]]);
+        assert_eq!(
+            input.items()[0].as_json()["content"][0]["text"],
+            "new system"
+        );
+    }
+    // Removing every assistant cannot leave free-floating reasoning behind.
+    let input = encode_responses_projection(&model, None, &[], &original, &replay).unwrap();
+    assert!(input.items().is_empty());
+}

@@ -1238,7 +1238,7 @@ async fn opaque_replay_keeps_appended_context_after_local_compaction_and_tool_re
 }
 
 #[tokio::test]
-async fn persisted_opaque_projection_refusal_identifies_route_and_boundary() {
+async fn persisted_opaque_projection_continues_without_changing_session() {
     for route in ["openai", "openai-codex"] {
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join("session.jsonl");
@@ -1302,8 +1302,8 @@ async fn persisted_opaque_projection_refusal_identifies_route_and_boundary() {
         assert!(serde_json::to_string(input)
             .unwrap()
             .contains("opaque-state"));
-        let hook: Arc<dyn ProviderContextHook> = Arc::new(UnsupportedOpaqueProjection("edit"));
-        let error = project_provider_context(
+        let hook: Arc<dyn ProviderContextHook> = Arc::new(OpaqueProjection("edit"));
+        let projected = project_provider_context(
             canonical,
             &[hook],
             &identity(),
@@ -1313,12 +1313,15 @@ async fn persisted_opaque_projection_refusal_identifies_route_and_boundary() {
             &mut vec![],
         )
         .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("provider context projection"), "{error}");
-        assert!(error.contains(route), "{error}");
-        assert!(error.contains("existing messages"), "{error}");
-        assert!(error.contains("disable"), "{error}");
+        .unwrap();
+        let input = projected.responses.unwrap().input.unwrap();
+        assert_eq!(
+            input.items()[1].as_json()["content"][0]["text"],
+            "rewritten"
+        );
+        assert!(serde_json::to_string(&input)
+            .unwrap()
+            .contains("opaque-state"));
         drop(session);
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
@@ -1357,9 +1360,9 @@ async fn opaque_replay_keeps_native_checkpoint_when_context_is_appended() {
     );
 }
 
-struct UnsupportedOpaqueProjection(&'static str);
+struct OpaqueProjection(&'static str);
 #[async_trait::async_trait]
-impl ProviderContextHook for UnsupportedOpaqueProjection {
+impl ProviderContextHook for OpaqueProjection {
     async fn project_context(
         &self,
         request: &Request,
@@ -1388,8 +1391,8 @@ impl ProviderContextHook for UnsupportedOpaqueProjection {
             "empty" => messages.push(Message::User(UserMessage { content: vec![] })),
             "media" => messages.push(Message::User(UserMessage {
                 content: vec![UserPart::Media(Media::Image(octet_ai::ImageMedia {
-                    source: ImageSource::Inline(bytes::Bytes::from_static(b"fixture")),
-                    media_type: None,
+                    source: ImageSource::Url("https://example.test/image.png".parse().unwrap()),
+                    media_type: Some("image/png".parse().unwrap()),
                     detail: None,
                 }))],
             })),
@@ -1404,59 +1407,86 @@ impl ProviderContextHook for UnsupportedOpaqueProjection {
 }
 
 #[tokio::test]
-async fn opaque_replay_rejects_edits_deletions_and_forged_suffixes() {
+async fn opaque_replay_continues_edits_deletions_and_non_text_suffixes() {
     let mut model = model();
     Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
     let mut canonical = request();
-    canonical.responses = Some(ResponsesOptions::full_replay(ResponsesInput::default()));
-    for mutation in [
-        "edit",
-        "remove",
-        "system",
-        "assistant",
-        "result",
-        "empty",
-        "media",
-    ] {
-        let hook: Arc<dyn ProviderContextHook> = Arc::new(UnsupportedOpaqueProjection(mutation));
-        assert!(
-            matches!(
-                project_with_fresh_session(
-                    canonical.clone(),
-                    &[hook],
-                    &identity(),
-                    &model,
-                    &AbortFlag::default()
-                )
-                .await,
-                Err(AgentError::ProviderContextPreparation(_))
-            ),
-            "opaque replay must not silently accept {mutation}"
-        );
+    canonical.responses = Some(ResponsesOptions::full_replay(
+        octet_ai::responses::encode_responses_replay(
+            &model,
+            canonical.system.as_deref(),
+            &[ResponsesReplayItem::User(UserMessage {
+                content: vec![UserPart::Text("canonical user".into())],
+            })],
+        )
+        .unwrap(),
+    ));
+    for mutation in ["edit", "remove", "system", "assistant", "empty", "media"] {
+        let hook: Arc<dyn ProviderContextHook> = Arc::new(OpaqueProjection(mutation));
+        let projected = project_with_fresh_session(
+            canonical.clone(),
+            &[hook],
+            &identity(),
+            &model,
+            &AbortFlag::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("opaque replay must continue {mutation}: {error}"));
+        let input = projected.responses.unwrap().input.unwrap();
+        let json = serde_json::to_string(&input).unwrap();
+        match mutation {
+            "edit" => assert!(json.contains("rewritten") && !json.contains("canonical user")),
+            "remove" => assert!(!json.contains("canonical user")),
+            "system" => {
+                assert!(json.contains("rewritten system") && !json.contains("canonical system"))
+            }
+            "assistant" => assert!(json.contains("invented")),
+            "media" => assert!(json.contains("https://example.test/image.png")),
+            "empty" => assert!(json.contains("canonical user")),
+            _ => unreachable!(),
+        }
     }
 }
 
 #[tokio::test]
-async fn opaque_replay_change_is_refused_instead_of_ignored_or_discarded() {
+async fn opaque_projection_still_rejects_forged_tool_results() {
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+    let mut canonical = request();
+    canonical.responses = Some(ResponsesOptions::full_replay(ResponsesInput::default()));
+    let hook: Arc<dyn ProviderContextHook> = Arc::new(OpaqueProjection("result"));
+    let error = project_with_fresh_session(
+        canonical,
+        &[hook],
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("orphan or duplicate tool result"));
+}
+
+#[tokio::test]
+async fn opaque_replay_change_is_encoded() {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let hook: Arc<dyn ProviderContextHook> = Arc::new(Rewrite {
         system: None,
         text: "changed".into(),
         observations,
     });
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
     let mut request = request();
     request.responses = Some(ResponsesOptions::full_replay(ResponsesInput::default()));
-    assert!(matches!(
-        project_with_fresh_session(
-            request,
-            &[hook],
-            &identity(),
-            &model(),
-            &AbortFlag::default()
-        )
-        .await,
-        Err(AgentError::ProviderContextPreparation(_))
-    ));
+    let projected =
+        project_with_fresh_session(request, &[hook], &identity(), &model, &AbortFlag::default())
+            .await
+            .unwrap();
+    let input = projected.responses.unwrap().input.unwrap();
+    assert_eq!(input.items()[0].as_json()["content"][0]["text"], "changed");
 }
 
 struct AppendHook {

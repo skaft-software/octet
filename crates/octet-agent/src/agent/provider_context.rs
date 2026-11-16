@@ -477,11 +477,10 @@ async fn project_context_hooks(
             }
         }
         validate_size(&request)?;
-        // The opaque input, not `messages`, is what the Responses codec sends.
-        // An unchanged prefix plus new text-only user messages has an exact
-        // projection: retain every authoritative item, then encode the suffix
-        // with the same replay mapper. Other edits still need provenance that
-        // this boundary does not have and must not be silently ignored.
+        // Pi compatibility: packages/ai/src/api/openai-responses-shared.ts:300-409
+        // encodes the context after hooks, including edits and non-text suffixes.
+        // Preserve native checkpoints on the common unchanged-prefix path; for
+        // edits, associate each opaque output with its own unchanged assistant.
         if request
             .responses
             .as_ref()
@@ -494,53 +493,42 @@ async fn project_context_hooks(
                 && serde_json::to_vec(&accepted_before_hook.messages).expect("messages serialize")
                     == serde_json::to_vec(&request.messages[..prefix_len])
                         .expect("messages serialize");
-            let appended = suffix.filter(|messages| {
-                messages.iter().all(|message| match message {
-                    Message::User(user) => {
-                        !user.content.is_empty()
-                            && user
-                                .content
-                                .iter()
-                                .all(|part| matches!(part, UserPart::Text(_)))
-                    }
-                    Message::Assistant(_) => false,
-                })
-            });
-            if !unchanged_prefix || appended.is_none() {
-                let boundary = if accepted_before_hook.system != request.system {
-                    "system instructions changed"
-                } else if !unchanged_prefix {
-                    "existing messages changed or were removed"
-                } else {
-                    "appended messages are not text-only user messages"
-                };
-                return Err(refused_owned(format!(
-                    "provider context projection on Responses route {} cannot replay opaque input: {boundary}; disable or reconfigure the context-modifying extension and retry without changing the session",
-                    bounded_name(&model.endpoint.id.0)
-                )));
-            }
-            let appended = appended.expect("checked above");
-            if !appended.is_empty() {
-                let replay = appended
+            let input = if unchanged_prefix {
+                let replay = suffix
+                    .unwrap()
                     .iter()
                     .map(|message| match message {
                         Message::User(user) => ResponsesReplayItem::User(user.clone()),
-                        Message::Assistant(_) => unreachable!("suffix contains only users"),
+                        Message::Assistant(assistant) => {
+                            ResponsesReplayItem::LocalAssistant(assistant.clone())
+                        }
                     })
                     .collect::<Vec<_>>();
-                let addition =
-                    octet_ai::responses::encode_responses_replay(model, None, &replay)
-                        .map_err(|_| refused("could not encode appended Responses context"))?;
-                let input = request
+                let addition = octet_ai::responses::encode_responses_replay(model, None, &replay)?;
+                let mut items = accepted_before_hook
                     .responses
-                    .as_mut()
-                    .and_then(|options| options.input.as_mut())
-                    .expect("opaque input was checked above");
-                let mut items = std::mem::take(input).into_items();
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .as_ref()
+                    .unwrap()
+                    .items()
+                    .to_vec();
                 items.extend(addition.into_items());
-                *input = ResponsesInput::new(items);
-                validate_size(&request)?;
-            }
+                ResponsesInput::new(items)
+            } else {
+                let replay =
+                    session.responses_replay_snapshot(&model.endpoint.id, &model.spec.id)?;
+                octet_ai::responses::encode_responses_projection(
+                    model,
+                    request.system.as_deref(),
+                    &request.messages,
+                    &canonical.messages,
+                    replay.as_deref().map(Vec::as_slice).unwrap_or_default(),
+                )?
+            };
+            request.responses.as_mut().unwrap().input = Some(input);
+            validate_size(&request)?;
         }
         validate_identities(&canonical, &request, model)?;
         // Name the failing validation. The alternative — a bare "invalid
