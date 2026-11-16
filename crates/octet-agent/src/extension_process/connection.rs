@@ -1368,9 +1368,12 @@ impl ProcessConnection {
             && read_std_lock(&self.protocol).supports(liveness::FEATURE);
         // The dispatcher supplies individual bounded deadlines. Its input/UI
         // waits are legitimately unbounded; the ordinary whole-request timeout
-        // must not mistake those for a hung child.
+        // must not mistake those for a hung child. Terminal listeners are not
+        // prompt input hooks: Pi packages/tui/src/tui.ts:1095-1110 invokes them
+        // synchronously. Keep the native per-key deadline so a blocked child
+        // cannot freeze typing, even when dispatcher supervision is negotiated.
         let timed = async {
-            if monitored {
+            if monitored && method != "ui/terminal-input/intercept" {
                 Ok((&mut operation).await)
             } else {
                 tokio::time::timeout(timeout, &mut operation).await

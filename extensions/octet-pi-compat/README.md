@@ -364,8 +364,8 @@ native workspace trust keep their original host gate.
 reserved actions and the open slash popup, listeners run synchronously in registration
 order over the raw terminal spelling, and a listener can consume input
 (`{consume:true}`, including an empty replacement) or replace it (`{data}`).
-The whole chain is bounded to 50 ms per event; a listener that does not answer
-is latched off (with one bounded diagnostic) and that event is delivered
+The whole chain is bounded to 1 s per event, including with dispatcher supervision;
+a listener that does not answer is latched off (with one bounded diagnostic) and that event is delivered
 unchanged, so a stuck factory cannot freeze typing. A listener that throws is
 reported once and keeps its subscription, and the original input still reaches
 the host. Ctrl+G is reserved only for explicit fullscreen rescue, Ctrl+D stays

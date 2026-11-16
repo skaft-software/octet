@@ -638,6 +638,11 @@ export default pi => pi.registerCommand('listen', {handler: (_, ctx) => {
     )
     .await;
     command(&mut app, &mut shell, "listen").await.unwrap();
+    assert!(app
+        .executable_extensions
+        .test_process("octet-pi-compat")
+        .unwrap()
+        .supports_feature("dispatcher_liveness_v1"));
     let draft = "hanging handler must not slow subsequent typing";
     let (notices, elapsed) = type_through_listener(
         &mut app,

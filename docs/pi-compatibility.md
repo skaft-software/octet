@@ -407,7 +407,9 @@ order over the raw terminal spelling. They may consume or replace one event. The
 host waits for a slow listener with input held in order, as Pi does. Only a
 chain that has not answered after 1 s is treated as hung: its listener is
 latched off with one warning and the held input is delivered unchanged, because
-Pi would block typing indefinitely. Input past the 256-byte wire bound bypasses the chain. Editor
+Pi would block typing indefinitely. This per-key deadline remains active with
+dispatcher supervision; terminal listeners are separate from unbounded prompt
+`input` hooks and user dialogs. Input past the 256-byte wire bound bypasses the chain. Editor
 submissions use native idle/busy admission; refusals preserve component paste and
 undo state. The adapter's `Editor` and `CustomEditor` now share a synchronous
 native-backed facade: sexy-tui-rs owns editing state, caret, undo/history/paste
