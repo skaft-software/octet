@@ -333,6 +333,7 @@ impl Default for ResourceProtocolLimits {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionProtocolRequest {
+    #[cfg(feature = "agent")]
     /// Exact host-selected session-repair.v2 encoded-byte/record profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_snapshot_transport_v1: Option<session_leaf::transport::SessionSnapshotProfile>,
@@ -354,6 +355,7 @@ pub struct ExtensionProtocolRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionProtocolResponse {
+    #[cfg(feature = "agent")]
     /// Exact host-selected session-repair.v2 encoded-byte/record profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_snapshot_transport_v1: Option<session_leaf::transport::SessionSnapshotProfile>,

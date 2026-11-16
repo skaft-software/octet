@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) const FEATURE: &str = "run_system_prompt_read_v1";
+#[cfg(feature = "agent")]
 static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -14,6 +15,7 @@ struct Scope {
     cancellation: CancellationToken,
 }
 
+#[cfg(feature = "agent")]
 pub(super) struct Guard {
     mailbox: Arc<Mailbox>,
     owner: ExtensionResourceOwner,
@@ -21,6 +23,7 @@ pub(super) struct Guard {
 }
 
 impl Mailbox {
+    #[cfg(feature = "agent")]
     pub(super) fn bind(
         self: &Arc<Self>,
         owner: ExtensionResourceOwner,
@@ -48,12 +51,14 @@ impl Mailbox {
     }
 }
 
+#[cfg(feature = "agent")]
 impl Guard {
     pub(super) fn scope(&self) -> &str {
         &self.scope.id
     }
 }
 
+#[cfg(feature = "agent")]
 impl Drop for Guard {
     fn drop(&mut self) {
         let mut scopes = lock_std_mutex(&self.mailbox.scopes);

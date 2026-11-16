@@ -1,3 +1,6 @@
+use super::super::provider_pipeline::{
+    apply_pipeline_headers, pipeline_header_projection, ProviderPipelineReply,
+};
 use super::super::tests::{trusted_descriptor, write_executable_script};
 use super::*;
 use crate::{Agent, AgentConfig, EffectBroker, ExtensionHost, SandboxConfig};

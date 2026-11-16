@@ -564,6 +564,7 @@ impl ExtensionProcess {
         // reverse requests. Wake in-flight waits and stop only this owner's
         // worker trees; requesting shutdown is not a settlement receipt.
         connection.pending_changed.notify_waiters();
+        #[cfg(feature = "agent")]
         if let Some(service) = read_std_lock(&self.inner.delegation_service).clone() {
             service.shutdown_owner(session_id);
         }

@@ -199,6 +199,7 @@ pub(super) const API_0_2_OPTIONAL_FEATURES: &[&str] = &[
     EXTENSION_FEATURE_MODEL_CATALOG,
 ];
 
+#[cfg(feature = "agent")]
 pub(super) const MAX_EXTENSION_AGENT_WAIT_MS: u64 = 60_000;
 
 pub(super) const MAX_EXTENSION_SECRET_NAME_BYTES: usize = 64;

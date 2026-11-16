@@ -9,19 +9,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
+#[cfg(feature = "agent")]
 use crate::cache_warmer::{CacheWarmingAction, CacheWarmingDecision};
+#[cfg(feature = "agent")]
 use crate::events::AgentEvent;
+#[cfg(feature = "agent")]
+use crate::extension_operations::OperationSelection;
 use crate::extension_operations::{
     cursor_binding, cursor_offset, matching_slots, ApplicableOperationsPage,
-    ApplicableOperationsRequest, OperationDiscovery, OperationSelection, DISCOVERY_TOOL_NAME,
+    ApplicableOperationsRequest, OperationDiscovery, DISCOVERY_TOOL_NAME,
 };
 use crate::extension_process::{ExtensionProcess, ExtensionResourceOwner};
+#[cfg(feature = "agent")]
 use crate::input::UserInput;
 use crate::tool::{Tool, ToolContext, ToolError};
-use octet_ai::{Model, ModelId, Protocol, StopReason, ToolDef};
+use octet_ai::ToolDef;
+#[cfg(feature = "agent")]
+use octet_ai::{Model, ModelId, Protocol, StopReason};
 use tokio::sync::Notify;
 
 type ToolPolicy = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+#[cfg(feature = "agent")]
 type ModelAndCallableTools = (u64, Vec<Arc<dyn Tool>>, Vec<Arc<dyn Tool>>);
 
 /// Implemented by any extension the agent loads.
@@ -34,6 +42,7 @@ pub trait Extension: Send + Sync {
     fn register(&self, host: &mut ExtensionHost);
 }
 
+#[cfg(feature = "agent")]
 /// Observes agent events without modifying them.
 ///
 /// Observers are invoked synchronously, in registration order, immediately
@@ -163,6 +172,7 @@ pub trait ToolCallHook: Send + Sync {
     );
 }
 
+#[cfg(feature = "agent")]
 /// Reason a host-controlled provider retry is being considered.
 ///
 /// The host derives this classification from a redacted provider failure. It
@@ -180,12 +190,14 @@ pub enum ProviderRetryKind {
     WaitingForNetwork,
 }
 
+#[cfg(feature = "agent")]
 /// Largest additional delay a provider-retry hook may add to one host retry.
 ///
 /// Hooks can only add delay; they cannot shorten a provider `Retry-After` or
 /// the host's deterministic backoff.
 pub const MAX_PROVIDER_RETRY_ADDITIONAL_DELAY: Duration = Duration::from_secs(5);
 
+#[cfg(feature = "agent")]
 /// Read-only context for a typed provider-retry advisory hook.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRetryContext {
@@ -207,6 +219,7 @@ pub struct ProviderRetryContext {
     pub kind: ProviderRetryKind,
 }
 
+#[cfg(feature = "agent")]
 /// Non-authoritative advice returned by a provider-retry hook.
 ///
 /// [`Retry`](Self::Retry) cannot create a retry when the host has exhausted a
@@ -231,6 +244,7 @@ pub enum ProviderRetryAdvice {
     Stop,
 }
 
+#[cfg(feature = "agent")]
 /// Typed, bounded advisory hook invoked only after the host has independently
 /// established that a provider retry is safe and within its retry budget.
 #[async_trait::async_trait]
@@ -239,6 +253,7 @@ pub trait ProviderRetryHook: Send + Sync {
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice;
 }
 
+#[cfg(feature = "agent")]
 /// Read-only economics and owner identity for one due cache refresh.
 ///
 /// No prompt, provider credentials, transport, or mutable session is exposed.
@@ -252,6 +267,7 @@ pub struct CacheWarmingDecisionContext {
     pub resource_owner: String,
 }
 
+#[cfg(feature = "agent")]
 /// Optional advice before each due, independently eligible cache refresh.
 ///
 /// The host invokes hooks in registration order; the last returned action wins.
@@ -266,6 +282,8 @@ pub trait CacheWarmingDecisionHook: Send + Sync {
     ) -> Option<CacheWarmingAction>;
 }
 
+#[cfg(feature = "agent")]
+#[cfg(feature = "agent")]
 /// Host-derived identity for one effective provider-context preparation.
 ///
 /// These values fence a projection to the session branch and advertised tool
@@ -299,6 +317,7 @@ pub struct ProviderContextProjection {
     pub tools: Option<Vec<octet_ai::ToolDef>>,
 }
 
+#[cfg(feature = "agent")]
 /// Outcome for a context callback, keeping remote cancellation distinct from
 /// ordinary extension failures.
 pub enum ProviderContextHookError {
@@ -314,6 +333,7 @@ pub enum ProviderContextHookError {
     Refused,
 }
 
+#[cfg(feature = "agent")]
 /// Run-owned service for authoritative private session appends while a context
 /// hook is pending. Implementations own a bounded typed queue, not a writer.
 /// Dropping the service must revoke its grants and refuse all unclaimed leaves.
@@ -347,6 +367,7 @@ pub trait ProviderContextSessionWait: Send {
     ) -> Result<(), String>;
 }
 
+#[cfg(feature = "agent")]
 /// Context preparation before provider planning, admission and request freeze.
 ///
 /// Hooks run in registration order against the last validated effective
@@ -402,6 +423,7 @@ pub trait ProviderContextHook: Send + Sync {
     ) -> Result<Option<ProviderContextProjection>, String>;
 }
 
+#[cfg(feature = "agent")]
 /// Optional API 0.4 replacement for local parent-model summarization.
 /// The host selects this only for a vision-capable active model and owns the
 /// history boundary, validation, checkpoint and subsequent replay.
@@ -413,6 +435,7 @@ pub trait CompactionStrategy: Send + Sync {
         -> Result<Vec<Vec<u8>>, String>;
 }
 
+#[cfg(feature = "agent")]
 /// Stable semantic summary of a completed assistant turn before it becomes a
 /// durable session entry.
 ///
@@ -441,6 +464,7 @@ pub struct AssistantPersistenceContext {
     pub media_part_count: usize,
 }
 
+#[cfg(feature = "agent")]
 /// Extension-owned value proposed for one completed assistant entry.
 ///
 /// The host validates shape and size at the session append boundary, adds the
@@ -454,6 +478,7 @@ pub struct PersistenceMetadataProposal {
     process_generation: Option<u64>,
 }
 
+#[cfg(feature = "agent")]
 impl PersistenceMetadataProposal {
     /// Creates one native extension-owned metadata proposal.
     pub fn new(public: bool, value: serde_json::Value) -> Self {
@@ -477,6 +502,7 @@ impl PersistenceMetadataProposal {
     }
 }
 
+#[cfg(feature = "agent")]
 /// Typed hook that can attach one namespaced metadata value to a completed
 /// assistant turn before its atomic persistence boundary.
 #[async_trait::async_trait]
@@ -665,6 +691,7 @@ pub struct PostMutationRescan {
     pub resource_ids: Vec<String>,
 }
 
+#[cfg(feature = "agent")]
 #[derive(Clone)]
 pub(crate) struct RegisteredPersistenceMetadataHook {
     pub(crate) namespace: String,
@@ -696,6 +723,7 @@ pub(crate) struct DynamicToolRegistry {
     /// the intersection of these names with that surface.
     active_names: Option<BTreeSet<String>>,
     // One bounded projection window; never an accumulating second catalog.
+    #[cfg(feature = "agent")]
     operation_selection: Option<OperationSelection>,
 }
 
@@ -779,14 +807,17 @@ impl DynamicToolRegistry {
             .skip(offset)
             .take(limit)
             .collect::<Vec<_>>();
-        self.operation_selection = Some(OperationSelection {
-            owner: owner.clone(),
-            resource: request.resource.clone(),
-            ids: operations
-                .iter()
-                .map(|operation| operation.id.clone())
-                .collect(),
-        });
+        #[cfg(feature = "agent")]
+        {
+            self.operation_selection = Some(OperationSelection {
+                owner: owner.clone(),
+                resource: request.resource.clone(),
+                ids: operations
+                    .iter()
+                    .map(|operation| operation.id.clone())
+                    .collect(),
+            });
+        }
         self.revision = self.revision.saturating_add(1);
         let next_cursor = has_more.then(|| {
             format!(
@@ -1261,18 +1292,27 @@ fn validate_dynamic_catalog(
 #[derive(Clone)]
 pub struct ExtensionHost {
     pub(crate) tools: Vec<Arc<dyn Tool>>,
+    #[cfg(feature = "agent")]
     pub(crate) observers: Vec<Arc<dyn EventObserver>>,
     pub(crate) tool_call_hooks: Vec<Arc<dyn ToolCallHook>>,
+    #[cfg(feature = "agent")]
     pub(crate) provider_retry_hooks: Vec<Arc<dyn ProviderRetryHook>>,
+    #[cfg(feature = "agent")]
     pub(crate) cache_warming_decision_hooks: Vec<Arc<dyn CacheWarmingDecisionHook>>,
+    #[cfg(feature = "agent")]
     pub(crate) provider_context_hooks: Vec<Arc<dyn ProviderContextHook>>,
+    #[cfg(feature = "agent")]
     pub(crate) session_operation_hooks: Vec<Arc<dyn crate::compaction::SessionOperationHook>>,
     pub(crate) provider_request_hooks:
         Vec<Arc<dyn crate::extension_provider::ProviderRequestHookFactory>>,
+    #[cfg(feature = "agent")]
     pub(crate) compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+    #[cfg(feature = "agent")]
     pub(crate) duplicate_compaction_strategy: bool,
+    #[cfg(feature = "agent")]
     pub(crate) persistence_metadata_hooks: Vec<RegisteredPersistenceMetadataHook>,
     pub(crate) duplicate_tools: Vec<String>,
+    #[cfg(feature = "agent")]
     pub(crate) invalid_metadata_namespaces: Vec<String>,
     dynamic_tools: Arc<RwLock<DynamicToolRegistry>>,
     pi_builtin_registrations: HashMap<String, Weak<dyn Tool>>,
@@ -1282,17 +1322,26 @@ impl Default for ExtensionHost {
     fn default() -> Self {
         Self {
             tools: Vec::new(),
+            #[cfg(feature = "agent")]
             observers: Vec::new(),
             tool_call_hooks: Vec::new(),
+            #[cfg(feature = "agent")]
             provider_retry_hooks: Vec::new(),
+            #[cfg(feature = "agent")]
             cache_warming_decision_hooks: Vec::new(),
+            #[cfg(feature = "agent")]
             provider_context_hooks: Vec::new(),
+            #[cfg(feature = "agent")]
             session_operation_hooks: Vec::new(),
             provider_request_hooks: Vec::new(),
+            #[cfg(feature = "agent")]
             compaction_strategy: None,
+            #[cfg(feature = "agent")]
             duplicate_compaction_strategy: false,
+            #[cfg(feature = "agent")]
             persistence_metadata_hooks: Vec::new(),
             duplicate_tools: Vec::new(),
+            #[cfg(feature = "agent")]
             invalid_metadata_namespaces: Vec::new(),
             dynamic_tools: Arc::new(RwLock::new(DynamicToolRegistry::default())),
             pi_builtin_registrations: HashMap::new(),
@@ -1316,10 +1365,12 @@ impl ExtensionHost {
         self.tool_arc(Arc::new(tool));
     }
 
+    #[cfg(feature = "tools")]
     pub(crate) fn builtin_tool(&mut self, tool: impl Tool + 'static) {
         self.register_tool_arc(Arc::new(tool), true);
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn composition_builtin_tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools
             .iter()
@@ -1337,6 +1388,7 @@ impl ExtensionHost {
         self.register_tool_arc(tool, false);
     }
 
+    #[cfg(feature = "agent")]
     /// Retarget an already installed host tool without changing its catalog or
     /// active selection. Session-scoped delegation uses the same definitions.
     pub(crate) fn replace_static_tool(&mut self, tool: Arc<dyn Tool>) {
@@ -1445,6 +1497,7 @@ impl ExtensionHost {
         Ok(registration)
     }
 
+    #[cfg(feature = "agent")]
     /// Registers an event observer.
     pub fn observe(&mut self, observer: impl EventObserver + 'static) {
         self.observers.push(Arc::new(observer));
@@ -1455,17 +1508,20 @@ impl ExtensionHost {
         self.tool_call_hooks.push(Arc::new(hook));
     }
 
+    #[cfg(feature = "agent")]
     /// Register a non-authoritative provider-retry advisory hook.
     pub fn provider_retry_hook(&mut self, hook: impl ProviderRetryHook + 'static) {
         self.provider_retry_hooks.push(Arc::new(hook));
     }
 
+    #[cfg(feature = "agent")]
     /// Register cache-refresh advice in deterministic invocation order.
     /// The last hook returning an action wins, within the host's existing limits.
     pub fn cache_warming_decision_hook(&mut self, hook: impl CacheWarmingDecisionHook + 'static) {
         self.cache_warming_decision_hooks.push(Arc::new(hook));
     }
 
+    #[cfg(feature = "agent")]
     /// Register effective provider-context preparation in deterministic order.
     ///
     /// Registration alone does not negotiate or advertise a subprocess feature.
@@ -1473,6 +1529,7 @@ impl ExtensionHost {
         self.provider_context_hooks.push(Arc::new(hook));
     }
 
+    #[cfg(feature = "agent")]
     /// Register cancellable compaction and durable tree operation callbacks.
     pub fn session_operation_hook(
         &mut self,
@@ -1489,6 +1546,7 @@ impl ExtensionHost {
         self.provider_request_hooks.push(Arc::new(factory));
     }
 
+    #[cfg(feature = "agent")]
     /// Register the one active local-compaction strategy. Competing providers
     /// are rejected when the Agent is constructed instead of depending on load order.
     pub fn compaction_strategy(&mut self, strategy: impl CompactionStrategy + 'static) {
@@ -1499,6 +1557,7 @@ impl ExtensionHost {
         }
     }
 
+    #[cfg(feature = "agent")]
     /// Register a typed pre-persistence metadata hook under one extension-owned
     /// namespace.
     ///
@@ -1591,6 +1650,7 @@ impl ExtensionHost {
         dynamic.catalog_policy_epoch = dynamic.catalog_policy_epoch.saturating_add(1);
     }
 
+    #[cfg(feature = "agent")]
     /// Builds a detached child host whose provider and execution surfaces are
     /// both restricted to the requested upper-bound allowlist.
     ///
@@ -1755,6 +1815,7 @@ impl ExtensionHost {
         serde_json::json!({"active_tools":names,"all_tools":tools})
     }
 
+    #[cfg(feature = "agent")]
     /// Every host-policed registered tool name, sorted, including names that
     /// are currently deactivated by [`Self::set_active_tools`].
     ///
@@ -1817,6 +1878,7 @@ impl ExtensionHost {
         DynamicToolRegistry::discover(&self.dynamic_tools, session_id, request)
     }
 
+    #[cfg(feature = "agent")]
     /// Provider-only projection. Registered/active tool APIs continue to use
     /// `tool_snapshot`, including all ordinary tools and all registered names.
     pub(crate) fn model_tool_snapshot(&self, owner: &str) -> (u64, Vec<Arc<dyn Tool>>) {
@@ -1881,6 +1943,7 @@ impl ExtensionHost {
         }
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn model_and_callable_tool_snapshot(&self, owner: &str) -> ModelAndCallableTools {
         loop {
             let (revision, model) = self.model_tool_snapshot(owner);
@@ -1921,6 +1984,7 @@ impl ExtensionHost {
         }
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn model_tool_definitions(&self, owner: &str) -> Vec<ToolDef> {
         crate::tool_composition::advertised_surface(&self.model_tool_snapshot(owner).1)
     }

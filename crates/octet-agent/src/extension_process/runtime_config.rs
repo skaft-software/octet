@@ -191,6 +191,7 @@ pub(super) struct OfferedHostServices {
     pub(super) approvals: bool,
     pub(super) secrets: bool,
     pub(super) pi_settings: bool,
+    #[cfg(feature = "agent")]
     /// Effective physical frame offered for the paired session-repair.v2
     /// profile; zero means the pair is not offered this process.
     pub(super) max_message_bytes: usize,

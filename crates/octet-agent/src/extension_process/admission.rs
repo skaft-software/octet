@@ -525,6 +525,7 @@ pub(super) fn insert_child_request(
         cancel_on_response_abort: StdMutex::new(None),
         composition_cancellation: StdMutex::new(None),
         inference_id: StdMutex::new(None),
+        #[cfg(feature = "agent")]
         session_leaf_cancel: StdMutex::new(None),
     });
     match children.entry(id) {
@@ -725,6 +726,7 @@ fn cancel_active_children_keeping(
         .collect::<Vec<_>>();
     let mut settled = Vec::new();
     for (id, response_state) in matching {
+        #[cfg(feature = "agent")]
         if let Some(cancel) = lock_std_mutex(&response_state.session_leaf_cancel).as_ref() {
             // The leaf receipt owns the definitive terminal response, including
             // when cancellation loses to the actual session commit claim.

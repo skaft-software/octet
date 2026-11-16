@@ -135,8 +135,40 @@ Ultra may separately depend on `octet-agent` for its tools and extension
 infrastructure, but must not run its agent loop or call `Agent::prompt`.
 That independent dependency does not permit a reverse dependency from
 `octet-ai`, or require the coding frontend, bootstrap or terminal initialization.
-The provider-only fixture remains an `octet-ai`-only consumer. There is no blanket
-tool/extension extraction or public infrastructure API migration in this work.
+The provider-only fixture remains an `octet-ai`-only consumer. For an independent
+tool/extension host, select the reduced agent package explicitly:
+
+```toml
+octet-agent = { git = "https://github.com/skaft-software/octet", rev = "<reviewed revision>", default-features = false, features = ["tools", "extensions"] }
+```
+
+`agent` is default-on and preserves the existing API. It enables built-in tools
+and extensions plus the agent loop, session persistence/replay, compaction,
+provider-context preparation, delegation, goals, cache warming and telemetry.
+Disabling it omits those implementation modules, not just their public exports.
+`extensions` provides the process host and shared tool/resource/effect contracts;
+`tools` adds the built-ins and enables `extensions` because built-ins use the same
+registration contracts. With no features the package exports no infrastructure.
+Cargo features are additive: another dependency enabling `agent` restores the
+loop, so check the **resolved** feature graph in the downstream application.
+
+Reduced hosts construct `ToolContext` with caller-owned workspace, sandbox,
+execution/resource identities, tool names, progress and cancellation. Its
+session-backed `active_skills` field and journal-append progress operations exist
+only with `agent`; extension host snapshots remain caller-supplied
+`ExtensionHostState`. Shared custom-message vocabulary, entry identifiers and
+error types contain no session writer. Existing default-feature import paths
+remain available.
+
+The reduced process host retains manifest loading/discovery, trust/activation,
+process supervision, tool calls, hooks, resources and the effect broker. Native
+agent-session delegation and session-leaf/history transport are not offered,
+even when `config.agent_sessions` is true. Agent-owned context preparation and
+compaction callbacks are not registered. Generic host request/data contracts do
+not start an agent or provide persistence: the embedding application must bind
+and consume the services it offers. `UnsafeHost` remains ambient OS authority,
+not isolation. Direct tool callers own effect classification/admission and result
+settlement; importing a tool does not install an orchestration loop.
 
 Ultra retains its one reducer, durable writer, deterministic scheduler,
 approvals, budgets and settlement authority. Jev/TypeSafe remains its first

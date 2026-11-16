@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(feature = "agent")]
 use crate::session_writer::SessionWriter;
 use crate::tool::{PartialOutputCheckpointSink, ToolError};
 use serde::{Deserialize, Serialize};
@@ -336,6 +337,7 @@ struct StoreState {
 pub struct DurableInvocationStore {
     limits: StoreLimits,
     state: Mutex<StoreState>,
+    #[cfg(feature = "agent")]
     journal: Option<Arc<SessionWriter>>,
 }
 
@@ -357,17 +359,23 @@ impl DurableInvocationStore {
         Self {
             limits,
             state: Mutex::new(StoreState::default()),
+            #[cfg(feature = "agent")]
             journal: None,
         }
     }
 
+    #[cfg(feature = "agent")]
+    #[cfg(feature = "agent")]
     pub(crate) fn with_journal(journal: Arc<SessionWriter>) -> Self {
         Self {
+            #[cfg(feature = "agent")]
             journal: Some(journal),
             ..Self::new()
         }
     }
 
+    #[cfg(feature = "agent")]
+    #[cfg(feature = "agent")]
     pub(crate) fn attach_journal(mut self, journal: Arc<SessionWriter>) -> Self {
         self.journal = Some(journal);
         self
@@ -375,13 +383,14 @@ impl DurableInvocationStore {
 
     fn persist_record(
         &self,
-        scope: &InvocationScope,
-        record: &InvocationRecord,
+        _scope: &InvocationScope,
+        _record: &InvocationRecord,
     ) -> Result<(), InvocationError> {
+        #[cfg(feature = "agent")]
         if let Some(journal) = &self.journal {
             let value = crate::session::SessionRecord::ToolInvocation {
-                scope: scope.clone(),
-                record: record.clone(),
+                scope: _scope.clone(),
+                record: _record.clone(),
             };
             let mut bytes =
                 serde_json::to_vec(&value).map_err(|e| InvocationError::Corrupt(e.to_string()))?;
@@ -393,6 +402,7 @@ impl DurableInvocationStore {
         Ok(())
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn restore(
         &self,
         scope: InvocationScope,
@@ -452,6 +462,7 @@ impl DurableInvocationStore {
         Ok(())
     }
 
+    #[cfg(feature = "agent")]
     /// The transcript result is the settlement record. Holding this lock over
     /// its synced append makes cleanup and late-write fencing one mutation.
     pub(crate) fn commit_results<T>(
@@ -474,10 +485,12 @@ impl DurableInvocationStore {
         Ok(result)
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn close(&self) {
         self.lock_state().closed = true;
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn restore_result(&self, scope: &InvocationScope) {
         // Replay every branch's result, not only the selected ancestry. The
         // transcript is the tombstone; this lightweight index prevents issuing
@@ -487,6 +500,7 @@ impl DurableInvocationStore {
         state.invocations.remove(scope);
     }
 
+    #[cfg(feature = "agent")]
     /// Observe an existing checkpoint without minting an execution capability.
     pub(crate) fn partial_output_for_scope(
         &self,

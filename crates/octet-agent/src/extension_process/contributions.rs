@@ -105,7 +105,7 @@ pub enum ExtensionPostMutationDisposition {
 pub struct ExtensionHookOutput {
     /// Custom messages returned by before_agent_start, appended after the prompt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub custom_messages: Vec<crate::session::CustomMessage>,
+    pub custom_messages: Vec<crate::extension_message::CustomMessage>,
     /// Raw-input decision applied before prompt expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_event: Option<serde_json::Value>,
@@ -129,6 +129,7 @@ pub struct ExtensionHookOutput {
     /// Advice accepted only for a typed `provider_retry` hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_retry: Option<ExtensionProviderRetryAdvice>,
+    #[cfg(feature = "agent")]
     /// Advisory action returned only from the API 0.4 cache-refresh hook.
     /// Absence or null is no opinion; neither action expands host authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -582,7 +583,7 @@ pub enum ExtensionMessageInjection {
         text: String,
         /// Optional ordered text/image input, not custom-message metadata.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        content: Option<crate::session::CustomMessageContent>,
+        content: Option<crate::extension_message::CustomMessageContent>,
         /// Delivery while a run is active.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deliver_as: Option<ExtensionMessageDelivery>,
@@ -592,14 +593,14 @@ pub enum ExtensionMessageInjection {
         /// Extension-defined message type.
         custom_type: String,
         /// Original string or ordered text blocks.
-        content: crate::session::CustomMessageContent,
+        content: crate::extension_message::CustomMessageContent,
         /// Whether the transcript shows the message.
         #[serde(default)]
         display: bool,
         /// Extension-defined data that the model never sees.
         #[serde(
             default,
-            deserialize_with = "crate::session::deserialize_custom_message_details",
+            deserialize_with = "crate::extension_message::deserialize_custom_message_details",
             skip_serializing_if = "Option::is_none"
         )]
         details: Option<serde_json::Value>,
@@ -645,7 +646,7 @@ impl ExtensionMessageInjection {
                 details,
                 ..
             } => {
-                return crate::session::CustomMessage {
+                return crate::extension_message::CustomMessage {
                     custom_type: custom_type.clone(),
                     content: content.clone(),
                     display: *display,

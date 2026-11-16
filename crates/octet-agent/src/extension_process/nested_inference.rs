@@ -374,7 +374,7 @@ pub(super) fn dispatch(
         } else {
             match result {
                 Ok(response) => serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{
-                    "message":response.message,"usage":response.usage,"cost":response.cost,"stop_reason":response.stop_reason,"timestamp":crate::session::now_unix_millis()
+                    "message":response.message,"usage":response.usage,"cost":response.cost,"stop_reason":response.stop_reason,"timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)).unwrap_or_default()
                 }}),
                 Err(_) => error(&id, -32002, "native inference failed or is unavailable"),
             }

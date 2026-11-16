@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[cfg(feature = "agent")]
 #[async_trait::async_trait]
 impl ProviderRetryHook for ExtensionProcess {
     async fn provider_retry(&self, context: &ProviderRetryContext) -> ProviderRetryAdvice {
@@ -59,8 +60,10 @@ impl ProviderRetryHook for ExtensionProcess {
 
 // This local cap is further shortened by the Agent's aggregate hook/refresh
 // deadline. Advice never receives its own extension of a refresh deadline.
+#[cfg(feature = "agent")]
 const CACHE_WARMING_DECISION_TIMEOUT: Duration = Duration::from_millis(200);
 
+#[cfg(feature = "agent")]
 #[async_trait::async_trait]
 impl CacheWarmingDecisionHook for ExtensionProcess {
     async fn cache_warming_decision(
@@ -120,6 +123,7 @@ impl CacheWarmingDecisionHook for ExtensionProcess {
     }
 }
 
+#[cfg(feature = "agent")]
 #[async_trait::async_trait]
 impl PersistenceMetadataHook for ExtensionProcess {
     async fn before_assistant_persist(
@@ -169,6 +173,7 @@ impl PersistenceMetadataHook for ExtensionProcess {
     }
 }
 
+#[cfg(feature = "agent")]
 #[async_trait::async_trait]
 impl CompactionStrategy for ExtensionProcess {
     async fn render(
@@ -224,7 +229,9 @@ impl CompactionStrategy for ExtensionProcess {
 impl Extension for ExtensionProcess {
     fn register(&self, host: &mut ExtensionHost) {
         self.register_dynamic_tool_catalog(host);
+        #[cfg(feature = "agent")]
         host.observe(self.clone());
+        #[cfg(feature = "agent")]
         if self.api_version() == EXTENSION_API_VERSION_0_4
             && self.supports_feature(EXTENSION_FEATURE_SESSION_ENTRIES)
             && self
@@ -239,6 +246,7 @@ impl Extension for ExtensionProcess {
         if self.has_provider_pipeline_hooks() {
             host.provider_request_hook(self.clone());
         }
+        #[cfg(feature = "agent")]
         if self.api_version() == EXTENSION_API_VERSION_0_4
             && self.supports_feature(EXTENSION_FEATURE_SESSION_ENTRIES)
             && self
@@ -249,6 +257,7 @@ impl Extension for ExtensionProcess {
         {
             host.provider_context_hook(self.clone());
         }
+        #[cfg(feature = "agent")]
         if self.api_version() == EXTENSION_API_VERSION_0_4
             && self.supports_feature(EXTENSION_FEATURE_COMPACTION_STRATEGY)
             && self
@@ -259,6 +268,7 @@ impl Extension for ExtensionProcess {
         {
             host.compaction_strategy(self.clone());
         }
+        #[cfg(feature = "agent")]
         if self.api_version() == EXTENSION_API_VERSION_0_4
             && self.supports_feature(EXTENSION_FEATURE_CACHE_WARMING_DECISION)
             && self
@@ -277,6 +287,7 @@ impl Extension for ExtensionProcess {
         }) {
             host.tool_call_hook(self.clone());
         }
+        #[cfg(feature = "agent")]
         if uses_api_0_2_capabilities(self.api_version())
             && self
                 .inner
@@ -286,6 +297,7 @@ impl Extension for ExtensionProcess {
         {
             host.provider_retry_hook(self.clone());
         }
+        #[cfg(feature = "agent")]
         if uses_api_0_2_capabilities(self.api_version())
             && self
                 .inner
@@ -390,6 +402,7 @@ impl ExtensionProcess {
 }
 
 impl ExtensionProcess {
+    #[cfg(feature = "agent")]
     pub(super) fn observe_agent_event(&self, event: &AgentEvent, resource_owner: Option<&str>) {
         match event {
             AgentEvent::ToolStarted { id, name, args } => {
@@ -512,6 +525,7 @@ impl ExtensionProcess {
     }
 }
 
+#[cfg(feature = "agent")]
 impl EventObserver for ExtensionProcess {
     fn bind_run_system_prompt(
         &self,
@@ -629,7 +643,9 @@ impl ExtensionProcess {
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
         let connection = read_std_lock(&self.inner.connection).clone();
         let execution = self.tool_execution_context(context, connection.generation);
+        #[cfg(feature = "agent")]
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol));
+        #[cfg(feature = "agent")]
         if routed {
             // Only the actually admitted causal seam may bind the routed
             // linked invocation: the driver proves the sole Session writer is
@@ -979,15 +995,18 @@ impl ExtensionProcess {
                 process_generation,
             });
         }
-        execution.host.active_skills = context
-            .active_skills
-            .iter()
-            .map(|skill| ExtensionActiveSkill {
-                id: skill.descriptor.id.clone(),
-                name: skill.descriptor.name.clone(),
-                version: skill.descriptor.version.clone(),
-            })
-            .collect();
+        #[cfg(feature = "agent")]
+        {
+            execution.host.active_skills = context
+                .active_skills
+                .iter()
+                .map(|skill| ExtensionActiveSkill {
+                    id: skill.descriptor.id.clone(),
+                    name: skill.descriptor.name.clone(),
+                    version: skill.descriptor.version.clone(),
+                })
+                .collect();
+        }
         execution
     }
 

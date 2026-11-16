@@ -52,18 +52,24 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::artifact::{ArtifactId, ArtifactPublication, ArtifactSource, ArtifactStore};
+#[cfg(feature = "agent")]
 use crate::cache_warmer::CacheWarmingAction;
+#[cfg(feature = "agent")]
 use crate::delegation::{
     ExtensionAgentSessionPolicy, ExtensionDelegationService, ExtensionDelegationSpawnRequest,
 };
 use crate::effect::{EffectPolicy, ToolEffect};
+#[cfg(feature = "agent")]
 use crate::events::AgentEvent;
+#[cfg(feature = "agent")]
 use crate::extension::{
     AssistantPersistenceContext, CacheWarmingDecisionContext, CacheWarmingDecisionHook,
-    CompactionStrategy, DynamicToolRegistration, EventObserver, Extension, ExtensionHost,
-    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
-    PostMutationDisposition, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
-    ToolCallHook,
+    CompactionStrategy, EventObserver, PersistenceMetadataHook, PersistenceMetadataProposal,
+    ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
+};
+use crate::extension::{
+    DynamicToolRegistration, Extension, ExtensionHost, PostMutationContext,
+    PostMutationDisposition, ToolCallHook,
 };
 use crate::extension_api_v03 as api_v03;
 use crate::extension_api_v04 as api_v04;
@@ -92,6 +98,7 @@ mod event_bus;
 pub use event_bus::ExtensionEventBus;
 
 mod admission;
+#[cfg(feature = "agent")]
 mod agent_sessions;
 mod bulk;
 mod composition;
@@ -106,6 +113,7 @@ pub use self::mcp::ExtensionMcpRequest;
 mod lifecycle_events;
 mod liveness;
 mod manifest;
+#[cfg(feature = "agent")]
 mod message_events;
 mod model_control;
 mod native_provider;
@@ -116,9 +124,11 @@ mod process_api;
 mod terminal_input;
 pub use terminal_input::EXTENSION_FEATURE_TERMINAL_INPUT_INTERCEPT;
 mod transcript_render;
+#[cfg(feature = "agent")]
+pub use transcript_render::transcript_private_entry;
 pub use transcript_render::{
-    transcript_private_entry, TranscriptInvalidation, TranscriptRenderContent,
-    TranscriptRenderRequest, TranscriptRenderResponse, EXTENSION_FEATURE_TRANSCRIPT_RENDER,
+    TranscriptInvalidation, TranscriptRenderContent, TranscriptRenderRequest,
+    TranscriptRenderResponse, EXTENSION_FEATURE_TRANSCRIPT_RENDER,
 };
 mod process_group;
 mod process_hooks;
@@ -126,8 +136,10 @@ mod process_state;
 mod prompt_read;
 mod protocol;
 mod protocol_line;
+#[cfg(feature = "agent")]
 mod provider_context;
 mod provider_hooks;
+mod provider_pipeline;
 mod provider_stream;
 mod python_runtime;
 pub use python_runtime::{provision_python_runtime, PythonRuntimeConfig, PythonRuntimeSetup};
@@ -140,6 +152,7 @@ pub use resource_paths::{
     ExtensionDefaultModel, ExtensionResourceDiscoveryReason, ExtensionResourcePaths,
     ExtensionSourceInfo, EXTENSION_FEATURE_COMMAND_CATALOG, EXTENSION_FEATURE_RESOURCE_PATHS,
 };
+#[cfg(feature = "agent")]
 use session_control::{dispatch_session_compaction, dispatch_session_control};
 pub use session_control::{
     EXTENSION_FEATURE_SESSION_COMPACTION_V1, EXTENSION_FEATURE_SESSION_CONTROL_V1,
@@ -160,8 +173,10 @@ pub use pi_settings::PiSettingsConfig;
 mod runtime_commands;
 pub use runtime_commands::EXTENSION_FEATURE_RUNTIME_COMMAND_REGISTRATION_V1;
 mod runtime_config;
+#[cfg(feature = "agent")]
 pub mod session_leaf;
 mod spawn;
+#[cfg(feature = "agent")]
 pub(crate) use spawn::entrypoint_outside_extension;
 mod startup_trace;
 pub use self::startup_trace::set_startup_trace_sink;
@@ -174,6 +189,7 @@ mod validation;
 
 pub use self::admission::validate_extension_flag_value;
 use self::admission::*;
+#[cfg(feature = "agent")]
 use self::agent_sessions::register_agent_session_request;
 use self::composition::*;
 use self::connection::*;
@@ -220,7 +236,6 @@ pub use self::host_requests::AgentSessionEventsRequest;
 pub use self::host_requests::AgentSessionListRequest;
 pub use self::host_requests::AgentSessionMessageRequest;
 pub use self::host_requests::AgentSessionModelsRequest;
-pub use self::host_requests::AgentSessionPolicy;
 pub use self::host_requests::AgentSessionSpawnRequest;
 pub use self::host_requests::AgentSessionTargetRequest;
 pub use self::host_requests::AgentSessionWaitRequest;
@@ -266,6 +281,7 @@ pub use self::host_requests::MAX_EXTENSION_MODEL_CATALOG_ROWS;
 pub use self::host_requests::MAX_EXTENSION_MODEL_FIELD_BYTES;
 pub use self::host_requests::MAX_EXTENSION_MODEL_INPUTS;
 use self::host_requests::*;
+pub use self::host_requests::{AgentModelSelection, AgentSessionPolicy};
 pub use self::lifecycle_events::ExtensionEvent;
 pub use self::lifecycle_events::ExtensionOperationToken;
 pub use self::lifecycle_events::ExtensionSessionCompactionResult;

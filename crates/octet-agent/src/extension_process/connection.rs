@@ -73,6 +73,7 @@ pub(super) struct ProcessConnection {
     pub(super) resources: Resources,
     pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
+    #[cfg(feature = "agent")]
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) prompt_reads: Arc<prompt_read::Mailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
@@ -84,6 +85,7 @@ pub(super) struct ProcessConnection {
     pub(super) draining: Arc<AtomicBool>,
     pub(super) active_admissions: AtomicU64,
     pub(super) slots: StdRwLock<Arc<Semaphore>>,
+    #[cfg(feature = "agent")]
     pub(super) publications: StdMutex<session_leaf::transport::PublicationPump>,
     pub(super) registered_shortcuts: StdMutex<HashSet<String>>,
     pub(super) frame_limit: Arc<ProtocolFrameLimit>,
@@ -199,6 +201,7 @@ pub(super) struct ChildResponseState {
     pub(super) cancel_on_response_abort: StdMutex<Option<String>>,
     pub(super) composition_cancellation: StdMutex<Option<CancellationToken>>,
     pub(super) inference_id: StdMutex<Option<String>>,
+    #[cfg(feature = "agent")]
     pub(super) session_leaf_cancel: StdMutex<Option<crate::session_leaf::SessionLeafCancelHandle>>,
 }
 
@@ -729,6 +732,7 @@ pub(super) async fn reap_failed_extension(
 }
 
 impl ProcessConnection {
+    #[cfg(feature = "agent")]
     /// Selected v2 profile, or the deterministic frame-derived candidate for
     /// test-installed gates. Never invents a wider frame than the connection.
     pub(super) fn session_profile(
@@ -1010,7 +1014,10 @@ impl ProcessConnection {
         tool_admission: Option<Arc<ToolResultAdmission>>,
         provider_route: Option<&mut crate::extension_provider::ExtensionProviderRoute>,
     ) -> Result<serde_json::Value, ExtensionRuntimeError> {
+        #[cfg(feature = "agent")]
         let routed = session_leaf::owner_routes_enabled(&read_std_lock(&self.protocol));
+        #[cfg(not(feature = "agent"))]
+        let routed = false;
         // Lifecycle hooks execute factory code too: routed requests cannot use
         // the legacy lifecycle semaphore bypass. Shutdown is transport control.
         let liveness_query = method == methods::STATUS_COLLECT
@@ -1071,7 +1078,7 @@ impl ProcessConnection {
             } else {
                 None
             };
-            let mut slot = if use_request_slot {
+            let slot = if use_request_slot {
                 let slots = read_std_lock(&connection.slots).clone();
                 Some(if routed {
                     slots.try_acquire_owned().map_err(|error| match error {
@@ -1090,6 +1097,10 @@ impl ProcessConnection {
             } else {
                 None
             };
+            #[cfg(feature = "agent")]
+            let mut slot = slot;
+            #[cfg(not(feature = "agent"))]
+            let _slot = slot;
             if use_request_slot && connection.draining.load(Ordering::Acquire) {
                 return Err(ExtensionRuntimeError::Closed(
                     "extension generation is draining".into(),
@@ -1106,6 +1117,7 @@ impl ProcessConnection {
                     }
                 }
             }
+            #[cfg(feature = "agent")]
             session_leaf::attach_request_session_mirror(
                 &connection,
                 resource_owner.as_ref(),
@@ -1121,6 +1133,7 @@ impl ProcessConnection {
                 .map_err(|_| {
                     ExtensionRuntimeError::Protocol("extension request identity exhausted".into())
                 })?;
+            #[cfg(feature = "agent")]
             let _views = session_leaf::transport::attach(
                 &connection,
                 id,
@@ -1187,6 +1200,7 @@ impl ProcessConnection {
             }
             {
                 let mut pending = lock_std_mutex(&connection.pending);
+                #[cfg(feature = "agent")]
                 if routed {
                     if let Some(permit) = slot.take() {
                         lock_std_mutex(&connection.session_leaf.execution_slots).insert(id, permit);
@@ -1559,6 +1573,7 @@ impl ProcessConnection {
         let Some(request) = request else {
             return;
         };
+        #[cfg(feature = "agent")]
         lock_std_mutex(&self.session_leaf.transport).settle(id);
         self.pending_changed.notify_waiters();
         let _ = request
@@ -1576,6 +1591,7 @@ impl ProcessConnection {
             )
             .is_err();
         if !frame_was_admitted {
+            #[cfg(feature = "agent")]
             self.session_leaf.settle_execution(id);
             lock_std_mutex(&self.resources).settle_execution(id);
             self.resource_cleanup_changed.notify_one();
@@ -1619,7 +1635,9 @@ impl ProcessConnection {
         tokio::spawn(async move {
             tokio::time::sleep(connection.cancellation_grace).await;
             let unresolved = lock_std_mutex(&connection.tombstones).contains(id)
-                || lock_std_mutex(&connection.resources).execution_pending(id)
+                || lock_std_mutex(&connection.resources).execution_pending(id);
+            #[cfg(feature = "agent")]
+            let unresolved = unresolved
                 || lock_std_mutex(&connection.session_leaf.execution_slots).contains_key(&id);
             if unresolved && !connection.closed.load(Ordering::Acquire) {
                 update_health(
@@ -2006,7 +2024,9 @@ impl ProcessConnection {
             return false;
         }
         read_std_lock(&self.slots).close();
+        #[cfg(feature = "agent")]
         lock_std_mutex(&self.publications).clear_queued();
+        #[cfg(feature = "agent")]
         self.session_leaf.clear();
         self.remote_ui.clear();
         update_health(&self.health, ExtensionHealthState::Draining, None);
@@ -2150,6 +2170,7 @@ impl ProcessConnection {
             }
         };
         self.closed.store(true, Ordering::Release);
+        #[cfg(feature = "agent")]
         self.session_leaf.terminate_execution();
         lock_std_mutex(&self.resources).terminate_generation();
         self.resource_cleanup_changed.notify_one();
@@ -2163,6 +2184,7 @@ impl ProcessConnection {
     pub(super) async fn terminate(&self) {
         lock_std_mutex(&self.resources).retire_generation();
         self.draining.store(true, Ordering::Release);
+        #[cfg(feature = "agent")]
         self.session_leaf.clear();
         self.remote_ui.clear();
         lock_std_mutex(&self.child_requests).clear();
@@ -2173,6 +2195,7 @@ impl ProcessConnection {
         let _ = child.kill().await;
         let _ = child.wait().await;
         self.closed.store(true, Ordering::Release);
+        #[cfg(feature = "agent")]
         self.session_leaf.terminate_execution();
         lock_std_mutex(&self.resources).terminate_generation();
         self.resource_cleanup_changed.notify_one();
@@ -2194,12 +2217,14 @@ impl ProcessConnection {
 
 impl Drop for ProcessConnection {
     fn drop(&mut self) {
+        #[cfg(feature = "agent")]
         self.session_leaf.clear();
         self.remote_ui.clear();
         lock_std_mutex(&self.child_requests).clear();
         self.remove_provider_owner();
         lock_std_mutex(&self.provider_streams).clear();
         self.process_group.terminate_now();
+        #[cfg(feature = "agent")]
         self.session_leaf.terminate_execution();
         self.settle_artifacts();
     }

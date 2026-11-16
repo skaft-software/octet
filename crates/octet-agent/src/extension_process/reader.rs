@@ -7,6 +7,7 @@ pub(super) struct ProtocolReadState {
     pub(super) resources: Resources,
     pub(super) resource_cleanup_changed: Arc<Notify>,
     pub(super) issued_resource_owners: IssuedResourceOwners,
+    #[cfg(feature = "agent")]
     pub(super) session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     pub(super) prompt_reads: Arc<prompt_read::Mailbox>,
     pub(super) remote_ui: Arc<RemoteUiMailbox>,
@@ -34,6 +35,7 @@ pub(super) struct ProtocolReadState {
     pub(super) tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
     pub(super) command_catalog: Arc<StdRwLock<Vec<CommandDefinition>>>,
     pub(super) catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
+    #[cfg(feature = "agent")]
     pub(super) delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     pub(super) session_lifecycle: Option<ExtensionSessionLifecycleService>,
     pub(super) event_bus: Option<Arc<ExtensionEventBus>>,
@@ -54,6 +56,7 @@ impl ProtocolReadState {
     }
 }
 
+#[cfg(feature = "agent")]
 pub(super) enum AgentSessionOperation {
     Models {
         query: Option<String>,
@@ -92,6 +95,7 @@ pub(super) enum AgentSessionOperation {
     },
 }
 
+#[cfg(feature = "agent")]
 pub(super) async fn execute_agent_session_operation(
     service: ExtensionDelegationService,
     resource_owner: String,
@@ -154,6 +158,7 @@ pub(super) async fn execute_agent_session_operation(
     }
 }
 
+#[cfg(feature = "agent")]
 pub(super) fn queue_agent_session_operation(
     state: &ProtocolReadState,
     request_id: ExtensionRequestId,
@@ -285,6 +290,7 @@ pub(super) fn queue_agent_session_operation(
     Ok(())
 }
 
+#[cfg(feature = "agent")]
 /// Use the existing lifecycle queue and child-worker slot, retaining both native
 /// cancellation and accounting settlement even after the reverse caller leaves.
 pub(super) fn queue_session_compaction_operation(
@@ -918,7 +924,7 @@ pub(super) async fn read_protocol_stdout<R>(
     resources: Resources,
     resource_cleanup_changed: Arc<Notify>,
     issued_resource_owners: IssuedResourceOwners,
-    session_leaf: Arc<session_leaf::SessionLeafMailbox>,
+    #[cfg(feature = "agent")] session_leaf: Arc<session_leaf::SessionLeafMailbox>,
     prompt_reads: Arc<prompt_read::Mailbox>,
     remote_ui: Arc<RemoteUiMailbox>,
     pending_changed: Arc<Notify>,
@@ -942,7 +948,9 @@ pub(super) async fn read_protocol_stdout<R>(
     tool_catalog: Arc<StdRwLock<Vec<ToolDefinition>>>,
     command_catalog: Arc<StdRwLock<Vec<CommandDefinition>>>,
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
-    delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
+    #[cfg(feature = "agent")] delegation_service: Arc<
+        StdRwLock<Option<ExtensionDelegationService>>,
+    >,
     session_lifecycle: Option<ExtensionSessionLifecycleService>,
     event_bus: Option<Arc<ExtensionEventBus>>,
     approval_store: Arc<ExtensionApprovalStore>,
@@ -964,6 +972,7 @@ pub(super) async fn read_protocol_stdout<R>(
         resources,
         resource_cleanup_changed,
         issued_resource_owners,
+        #[cfg(feature = "agent")]
         session_leaf,
         prompt_reads,
         remote_ui,
@@ -991,6 +1000,7 @@ pub(super) async fn read_protocol_stdout<R>(
         tool_catalog,
         command_catalog,
         catalog_updates,
+        #[cfg(feature = "agent")]
         delegation_service,
         session_lifecycle,
         event_bus,
@@ -1074,6 +1084,7 @@ pub(super) async fn read_protocol_stdout<R>(
     state.closed.store(true, Ordering::Release);
     lock_std_mutex(&state.resources).retire_generation();
     state.resource_cleanup_changed.notify_one();
+    #[cfg(feature = "agent")]
     state.session_leaf.clear();
     state.remote_ui.clear();
     lock_std_mutex(&state.issued_resource_owners).clear();

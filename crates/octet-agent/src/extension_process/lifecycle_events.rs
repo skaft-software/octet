@@ -390,8 +390,10 @@ pub struct ExtensionSessionLifecycleRequest {
 }
 
 enum SessionLifecycleResponse {
+    #[cfg(feature = "agent")]
     Setup(oneshot::Sender<Result<serde_json::Value, String>>),
     SessionId(oneshot::Sender<Result<String, ExtensionSessionLifecycleError>>),
+    #[cfg(feature = "agent")]
     Compaction(oneshot::Sender<Result<ExtensionSessionCompactionResult, String>>),
     ModelControl(oneshot::Sender<Result<serde_json::Value, String>>),
 }
@@ -399,8 +401,10 @@ enum SessionLifecycleResponse {
 impl SessionLifecycleResponse {
     fn is_closed(&self) -> bool {
         match self {
+            #[cfg(feature = "agent")]
             Self::Setup(response) => response.is_closed(),
             Self::SessionId(response) => response.is_closed(),
+            #[cfg(feature = "agent")]
             Self::Compaction(response) => response.is_closed(),
             Self::ModelControl(response) => response.is_closed(),
         }
@@ -411,12 +415,14 @@ impl SessionLifecycleResponse {
             Self::SessionId(response) => {
                 let _ = response.send(Err(ExtensionSessionLifecycleError::Unavailable));
             }
+            #[cfg(feature = "agent")]
             Self::Setup(response) => {
                 let _ = response.send(Err("session setup owner retired".into()));
             }
             Self::ModelControl(response) => {
                 let _ = response.send(Err("model selection owner retired".into()));
             }
+            #[cfg(feature = "agent")]
             Self::Compaction(response) => {
                 let _ = response.send(Err(
                     "session compaction was cancelled or its owner retired".into()
@@ -553,6 +559,7 @@ impl ExtensionSessionLifecycleService {
         Ok(receiver)
     }
 
+    #[cfg(feature = "agent")]
     pub(super) fn try_submit_setup(
         &self,
         operation: ExtensionSessionLifecycleOperation,
@@ -568,6 +575,7 @@ impl ExtensionSessionLifecycleService {
         Ok(receiver)
     }
 
+    #[cfg(feature = "agent")]
     pub(super) fn try_submit_compaction(
         &self,
         instructions: Option<String>,
@@ -727,6 +735,7 @@ impl ExtensionSessionLifecycleRequest {
         let _ = response.send(result);
     }
 
+    #[cfg(feature = "agent")]
     /// Settle a setup operation only after the actual native mutation.
     pub fn respond_setup(self, result: Result<serde_json::Value, String>) {
         let SessionLifecycleResponse::Setup(response) = self.response else {
@@ -735,6 +744,7 @@ impl ExtensionSessionLifecycleRequest {
         let _ = response.send(result);
     }
 
+    #[cfg(feature = "agent")]
     /// Deliver replacement cancellation/errors to either receipt shape.
     pub fn respond_replacement(self, result: Result<String, ExtensionSessionLifecycleError>) {
         if matches!(&self.response, SessionLifecycleResponse::Setup(_)) {
@@ -759,6 +769,7 @@ impl ExtensionSessionLifecycleRequest {
         let _ = response.send(result);
     }
 
+    #[cfg(feature = "agent")]
     /// Settle only after native compaction and its after-hook. An error may follow
     /// a durable commit: it is never permission to roll back or replay the request.
     pub fn respond_compaction(self, result: Result<ExtensionSessionCompactionResult, String>) {

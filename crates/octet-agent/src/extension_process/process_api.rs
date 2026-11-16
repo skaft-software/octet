@@ -62,6 +62,7 @@ impl ExtensionProcess {
             })?;
         let approval_store = Arc::new(ExtensionApprovalStore::new());
         let (catalog_updates, catalog_update_rx) = mpsc::channel(DYNAMIC_CATALOG_QUEUE_CAPACITY);
+        #[cfg(feature = "agent")]
         let delegation_service = Arc::new(StdRwLock::new(None));
         let generation = 1;
         let instance_id = new_extension_instance_id();
@@ -74,6 +75,7 @@ impl ExtensionProcess {
             events.clone(),
             artifact_store.clone(),
             catalog_updates.clone(),
+            #[cfg(feature = "agent")]
             Arc::clone(&delegation_service),
             Arc::clone(&approval_store),
             false,
@@ -102,6 +104,7 @@ impl ExtensionProcess {
                 session_hooks: StdMutex::new(BTreeMap::new()),
                 dynamic_tool_registration: StdMutex::new(None),
                 dynamic_tool_registration_ready: Notify::new(),
+                #[cfg(feature = "agent")]
                 delegation_service,
                 catalog_updates,
             }),
@@ -173,6 +176,7 @@ impl ExtensionProcess {
         supported
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn bind_agent_session_service(
         &self,
         service: ExtensionDelegationService,
@@ -235,10 +239,11 @@ impl ExtensionProcess {
         state: ExtensionHostState,
         connection: Arc<ProcessConnection>,
         mirror_changed: bool,
-        mirror_refreshed: bool,
+        _mirror_refreshed: bool,
         mut retired_owner: Option<String>,
     ) {
         let replaced_session;
+        #[cfg(feature = "agent")]
         let pending_messages_changed;
         {
             let mut current = write_std_lock(&self.inner.host_state);
@@ -246,8 +251,13 @@ impl ExtensionProcess {
                 return;
             }
             replaced_session = current.session_id != state.session_id || retired_owner.is_some();
-            pending_messages_changed = current.has_pending_messages != state.has_pending_messages;
-            if replaced_session && !mirror_refreshed {
+            #[cfg(feature = "agent")]
+            {
+                pending_messages_changed =
+                    current.has_pending_messages != state.has_pending_messages;
+            }
+            #[cfg(feature = "agent")]
+            if replaced_session && !_mirror_refreshed {
                 if let Some(previous) = lock_std_mutex(&connection.session_leaf.mirror).take() {
                     retired_owner = Some(previous.owner.session_id);
                 }
@@ -265,12 +275,14 @@ impl ExtensionProcess {
             lock_std_mutex(&connection.issued_resource_owners)
                 .retain(|issued| issued.session_id != owner);
             connection.pending_changed.notify_waiters();
+            #[cfg(feature = "agent")]
             if let Some(service) = read_std_lock(&self.inner.delegation_service).clone() {
                 service.shutdown_owner(&owner);
             }
             connection.resource_cleanup_changed.notify_one();
         }
         let protocol = read_std_lock(&connection.protocol);
+        #[cfg(feature = "agent")]
         if pending_messages_changed
             && !replaced_session
             && session_leaf::owner_routes_enabled(&protocol)
@@ -311,7 +323,10 @@ impl ExtensionProcess {
         // The bounded surface map supplies at most sixteen distinct owners.
         for owner in connection.remote_ui.owners() {
             if lock_std_mutex(&connection.issued_resource_owners).contains(&owner) {
-                let mut host = serde_json::to_value(&state).expect("host state serializes");
+                let host = serde_json::to_value(&state).expect("host state serializes");
+                #[cfg(feature = "agent")]
+                let mut host = host;
+                #[cfg(feature = "agent")]
                 if let Err(error) =
                     session_leaf::attach_session_mirror(&connection, &owner, &mut host, true)
                 {
@@ -331,6 +346,7 @@ impl ExtensionProcess {
                     // A retained mirror must not remain usable after losing a
                     // replacement. Retire the generation rather than present
                     // an old complete snapshot as the current session.
+                    #[cfg(feature = "agent")]
                     if lock_std_mutex(&connection.session_leaf.mirror).is_some() {
                         connection.begin_drain();
                         connection.kill_process_group();
@@ -795,6 +811,7 @@ impl ExtensionProcess {
             }
             params["context"] = serde_json::to_value(context)
                 .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+            #[cfg(feature = "agent")]
             session_leaf::attach_request_session_mirror(
                 &endpoint.connection,
                 Some(&resource_owner),
@@ -932,29 +949,31 @@ impl ExtensionProcess {
             process_generation: connection.generation,
         });
         let resource_owner = context.resource_owner.clone();
-        let mut params =
-            if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
-                let params = api_v03::ToolCallParams {
-                    name: definition.name.clone(),
-                    arguments,
-                    context: serde_json::to_value(context)
-                        .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
-                };
-                api_v03::validate_tool_call_params(&params).map_err(api_v03_protocol_error)?;
-                serde_json::to_value(params)
-            } else {
-                serde_json::to_value(ToolCallRequest {
-                    name: definition.name.clone(),
-                    arguments,
-                    catalog_revision,
-                    context,
-                })
-            }
-            .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
+        let params = if read_std_lock(&connection.protocol).version == EXTENSION_API_VERSION_0_3 {
+            let params = api_v03::ToolCallParams {
+                name: definition.name.clone(),
+                arguments,
+                context: serde_json::to_value(context)
+                    .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?,
+            };
+            api_v03::validate_tool_call_params(&params).map_err(api_v03_protocol_error)?;
+            serde_json::to_value(params)
+        } else {
+            serde_json::to_value(ToolCallRequest {
+                name: definition.name.clone(),
+                arguments,
+                catalog_revision,
+                context,
+            })
+        }
+        .map_err(|error| ExtensionRuntimeError::Protocol(error.to_string()))?;
         // A routed tool body appends under the grant of the operation's own
         // driver lease (the one `before_tool_call` already bound), never
         // grant-less: the host's leaf fences stay exactly as for hooks. Without
         // the causal driver (parallel waves, probes) the request is unchanged.
+        #[cfg(feature = "agent")]
+        let mut params = params;
+        #[cfg(feature = "agent")]
         let _linked_views =
             if session_leaf::owner_routes_enabled(&read_std_lock(&connection.protocol)) {
                 match (progress.session_driver(), resource_owner.as_ref()) {
@@ -1995,11 +2014,12 @@ impl ExtensionProcess {
         Ok(())
     }
 
+    #[cfg(feature = "agent")]
     /// Emit an actual committed custom message without changing the assistant coalescer.
     pub fn notify_custom_message_committed(
         &self,
         entry_id: &crate::session::EntryId,
-        message: &crate::session::CustomMessage,
+        message: &crate::extension_message::CustomMessage,
         timestamp_unix_ms: u64,
     ) -> Result<(), ExtensionRuntimeError> {
         let payload = ExtensionMessageLifecycle {
@@ -2765,6 +2785,7 @@ impl ExtensionProcess {
             candidate_events,
             self.inner.artifact_store.clone(),
             self.inner.catalog_updates.clone(),
+            #[cfg(feature = "agent")]
             Arc::clone(&self.inner.delegation_service),
             Arc::clone(&self.inner.approval_store),
             true,
@@ -3030,28 +3051,32 @@ impl ExtensionProcess {
             // This is a host-owned observation, not a retained append grant.
             // Rebind only at accepted cutover, after old callbacks settled;
             // failed candidates never receive or alter the active mirror.
-            let mut mirror = lock_std_mutex(&previous.session_leaf.mirror).clone();
-            if let Some(mirror) = &mut mirror {
-                if session_leaf::owner_routes_enabled(&read_std_lock(&replacement.protocol)) {
-                    let result = replacement.session_profile().and_then(|profile| {
-                        lock_std_mutex(&replacement.session_leaf.transport).rebind_current(
-                            &lock_std_mutex(&previous.session_leaf.transport),
-                            &mirror.owner,
-                            generation,
-                            &profile,
-                        )
-                    });
-                    if let Err(error) = result {
-                        let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
-                            message: format!(
-                                "session history unavailable after process reload: {error}"
-                            ),
+            #[cfg(feature = "agent")]
+            {
+                let mut mirror = lock_std_mutex(&previous.session_leaf.mirror).clone();
+                if let Some(mirror) = &mut mirror {
+                    #[cfg(feature = "agent")]
+                    if session_leaf::owner_routes_enabled(&read_std_lock(&replacement.protocol)) {
+                        let result = replacement.session_profile().and_then(|profile| {
+                            lock_std_mutex(&replacement.session_leaf.transport).rebind_current(
+                                &lock_std_mutex(&previous.session_leaf.transport),
+                                &mirror.owner,
+                                generation,
+                                &profile,
+                            )
                         });
+                        if let Err(error) = result {
+                            let _ = self.inner.events.send(ExtensionEvent::Diagnostic {
+                                message: format!(
+                                    "session history unavailable after process reload: {error}"
+                                ),
+                            });
+                        }
                     }
+                    mirror.rebind_generation(generation);
                 }
-                mirror.rebind_generation(generation);
+                *lock_std_mutex(&replacement.session_leaf.mirror) = mirror;
             }
-            *lock_std_mutex(&replacement.session_leaf.mirror) = mirror;
             *active = Arc::clone(&replacement);
             replacement.activate_post_initialize();
             self.inner.generation.store(generation, Ordering::Release);
@@ -3182,6 +3207,7 @@ impl ExtensionProcess {
         if let Some(registration) = lock_std_mutex(&self.inner.dynamic_tool_registration).as_ref() {
             registration.remove();
         }
+        #[cfg(feature = "agent")]
         if let Some(service) = write_std_lock(&self.inner.delegation_service).take() {
             service.shutdown_owned();
         }

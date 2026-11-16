@@ -15,7 +15,12 @@ categories = ["development-tools"]
 workspace = true
 
 [features]
-benchmarks = []
+default = ["agent"]
+agent = ["tools", "extensions"]
+# Built-ins use the same registration/resource contracts as process tools.
+tools = ["extensions"]
+extensions = []
+benchmarks = ["agent"]
 
 [dependencies]
 octet-ai = { version = "=0.10.4", path = "../octet-ai" }

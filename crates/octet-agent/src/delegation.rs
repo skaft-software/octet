@@ -450,26 +450,7 @@ impl DelegationBinding {
     }
 }
 
-/// Secret-free requested or host-confirmed worker selection.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentModelSelection {
-    /// Configured provider identifier.
-    pub provider: String,
-    /// Configured model identifier or resolved host model.
-    pub model: String,
-    /// Reasoning selection or supported choices.
-    pub reasoning: String,
-}
-impl Default for AgentModelSelection {
-    fn default() -> Self {
-        Self {
-            provider: "inherit".into(),
-            model: "inherit".into(),
-            reasoning: "inherit".into(),
-        }
-    }
-}
+pub use crate::extension_process::AgentModelSelection;
 /// Bounded public configured-model discovery record. Never include transport or credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentModelDescriptor {

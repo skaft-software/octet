@@ -116,6 +116,7 @@ pub trait ToolCompositionService: Send + Sync {
     async fn store(&self, set: Map<String, Value>, delete: Vec<String>) -> Result<(), ToolError>;
 }
 
+#[cfg(feature = "agent")]
 /// Lossless canonical result projection for private composition transport.
 /// In particular, absent structured content is not changed to explicit null.
 pub(crate) fn native_result_value(output: &crate::tool::ToolOutput) -> Result<Value, ToolError> {
@@ -189,6 +190,7 @@ pub enum ToolCompositionRecord {
 }
 
 impl ToolCompositionRecord {
+    #[cfg(feature = "agent")]
     pub(crate) fn valid(&self) -> bool {
         let short = |s: &str| !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control);
         match self {
@@ -227,6 +229,7 @@ impl ToolCompositionRecord {
     }
 }
 
+#[cfg(feature = "agent")]
 pub(crate) fn validate_store_writes(
     set: &Map<String, Value>,
     delete: &[String],
@@ -257,6 +260,7 @@ pub(crate) fn validate_store_writes(
     .map_err(|error| ToolError::new(error.to_string()))
 }
 
+#[cfg(feature = "agent")]
 pub(crate) fn callable_catalog(tools: &[Arc<dyn Tool>]) -> Vec<Value> {
     tools.iter().filter(|tool| tool.composition_config().is_none() && tool.exposure().callable(true)).map(|tool| {
         let definition = tool.definition();
@@ -270,6 +274,7 @@ pub(crate) fn callable_catalog(tools: &[Arc<dyn Tool>]) -> Vec<Value> {
     }).collect()
 }
 
+#[cfg(feature = "agent")]
 /// Creates a bounded model-visible presentation without changing execution policy.
 /// The ordinary direct registry remains the exact advertised set; nested-only
 /// tools live in the separately frozen composition surface.
@@ -447,6 +452,7 @@ fn schema_type(schema: &Value, depth: usize) -> String {
     }
 }
 
+#[cfg(feature = "agent")]
 pub(crate) fn restore_store(session: &crate::session::Session, tool: &str) -> Map<String, Value> {
     let mut chain = Vec::new();
     let mut cursor = session.head();

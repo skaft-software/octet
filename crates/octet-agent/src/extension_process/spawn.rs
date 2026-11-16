@@ -1,5 +1,6 @@
 //! Spawning an extension process: entrypoint staging and platform launch.
 
+#[cfg(feature = "agent")]
 use super::session_leaf::transport::{self, SessionSnapshotProfile};
 use super::*;
 
@@ -13,7 +14,9 @@ pub(super) async fn spawn_connection(
     events: broadcast::Sender<ExtensionEvent>,
     artifact_store: ArtifactStore,
     catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
-    delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
+    #[cfg(feature = "agent")] delegation_service: Arc<
+        StdRwLock<Option<ExtensionDelegationService>>,
+    >,
     approval_store: Arc<ExtensionApprovalStore>,
     defer_post_initialize: bool,
 ) -> Result<(Arc<ProcessConnection>, ExtensionContributions), ExtensionRuntimeError> {
@@ -184,6 +187,7 @@ pub(super) async fn spawn_connection(
 
     let pending = Arc::new(StdMutex::new(HashMap::new()));
     let issued_resource_owners = Arc::new(StdMutex::new(HashSet::new()));
+    #[cfg(feature = "agent")]
     let session_leaf = Arc::new(session_leaf::SessionLeafMailbox::default());
     let prompt_reads = Arc::new(prompt_read::Mailbox::default());
     let remote_ui = Arc::new(RemoteUiMailbox::new(
@@ -280,6 +284,7 @@ pub(super) async fn spawn_connection(
         Arc::clone(&resources),
         Arc::clone(&resource_cleanup_changed),
         Arc::clone(&issued_resource_owners),
+        #[cfg(feature = "agent")]
         Arc::clone(&session_leaf),
         Arc::clone(&prompt_reads),
         Arc::clone(&remote_ui),
@@ -304,6 +309,7 @@ pub(super) async fn spawn_connection(
         Arc::clone(&tool_catalog),
         Arc::clone(&command_catalog),
         catalog_updates,
+        #[cfg(feature = "agent")]
         delegation_service,
         session_lifecycle.clone(),
         config.event_bus.clone(),
@@ -345,6 +351,7 @@ pub(super) async fn spawn_connection(
         resources,
         resource_cleanup_changed: Arc::clone(&resource_cleanup_changed),
         issued_resource_owners,
+        #[cfg(feature = "agent")]
         session_leaf,
         prompt_reads,
         remote_ui,
@@ -356,6 +363,7 @@ pub(super) async fn spawn_connection(
         draining,
         active_admissions: AtomicU64::new(0),
         slots: StdRwLock::new(Arc::new(Semaphore::new(config.max_pending_requests))),
+        #[cfg(feature = "agent")]
         publications: StdMutex::new(session_leaf::transport::PublicationPump::default()),
         registered_shortcuts: StdMutex::new(HashSet::new()),
         frame_limit,
@@ -397,14 +405,18 @@ pub(super) async fn spawn_connection(
     artifact_guard.disarm();
     // The paired owner-routes/history-transport profile is offered only when
     // the physical frame can carry its counted maximum-ID envelopes.
+    #[cfg(feature = "agent")]
     let session_offer = (descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4)
         .then(|| SessionSnapshotProfile::for_frame(config.max_message_bytes).ok())
         .flatten();
+    #[cfg(feature = "agent")]
     let session_offer_frame = if session_offer.is_some() {
         config.max_message_bytes
     } else {
         0
     };
+    #[cfg(not(feature = "agent"))]
+    let session_offer_frame = 0;
     let offered_host_services = OfferedHostServices {
         provider_proxy: config.provider_registry.is_some()
             && descriptor.manifest.contributes.providers
@@ -423,18 +435,20 @@ pub(super) async fn spawn_connection(
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
         bulk_objects: config.bulk_store.is_some()
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
-        agent_sessions: config.agent_sessions,
+        agent_sessions: cfg!(feature = "agent") && config.agent_sessions,
         tool_composition: config.tool_composition
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
-        session_lifecycle: session_lifecycle.is_some(),
-        session_compaction: session_lifecycle
-            .as_ref()
-            .is_some_and(|service| service.supports_compaction()),
+        session_lifecycle: cfg!(feature = "agent") && session_lifecycle.is_some(),
+        session_compaction: cfg!(feature = "agent")
+            && session_lifecycle
+                .as_ref()
+                .is_some_and(|service| service.supports_compaction()),
         approvals: config.approvals,
         secrets: config.secret_broker.is_some()
             && !descriptor.manifest.capabilities.secrets.is_empty(),
         pi_settings: config.pi_settings.is_some()
             && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_4,
+        #[cfg(feature = "agent")]
         max_message_bytes: session_offer_frame,
     };
     let mut required_features = API_0_2_REQUIRED_FEATURES
@@ -599,6 +613,7 @@ pub(super) async fn spawn_connection(
             optional_features.push(prompt_read::FEATURE.to_owned());
         }
     }
+    #[cfg(feature = "agent")]
     if let Some(profile) = &session_offer {
         optional_features.push(transport::OWNER_ROUTES.to_owned());
         optional_features.push(transport::SNAPSHOT_TRANSPORT.to_owned());
@@ -680,6 +695,7 @@ pub(super) async fn spawn_connection(
             flag_values,
             protocol: (uses_api_0_2_capabilities(&descriptor.manifest.api_version)).then(|| {
                 ExtensionProtocolRequest {
+                    #[cfg(feature = "agent")]
                     session_snapshot_transport_v1: session_offer.clone(),
                     version: descriptor.manifest.api_version.clone(),
                     required_features,
@@ -785,6 +801,7 @@ pub(super) async fn spawn_connection(
             .install_selected_api_v03(contract.limits.max_frame_bytes);
     }
     *write_std_lock(&connection.slots) = Arc::new(Semaphore::new(protocol.max_concurrent_requests));
+    #[cfg(feature = "agent")]
     if session_offer.is_some() && protocol.supports(transport::SNAPSHOT_TRANSPORT) {
         *write_std_lock(&connection.session_leaf.profile) = session_offer;
     }

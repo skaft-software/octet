@@ -178,6 +178,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        #[cfg(feature = "agent")]
         if session_leaf::transport::dispatch(state, object, method, params.clone())? {
             return Ok(());
         }
@@ -213,9 +214,11 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             {
                 dispatch_model_control(state, object, params)?;
             }
+            #[cfg(feature = "agent")]
             methods::SESSION_COMPACT => {
                 dispatch_session_compaction(state, object, params)?;
             }
+            #[cfg(feature = "agent")]
             "session/setup"
             | "session/wait_for_idle"
             | "session/create"
@@ -622,9 +625,11 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     .ok_or_else(|| "cancel request requires id".to_owned())?;
                 let request_id: ExtensionRequestId = serde_json::from_value(id)
                     .map_err(|error| format!("invalid cancel request id: {error}"))?;
-                if !session_leaf::cancel_leaf_child(state, &request_id)
-                    && !cancel_composition_request(state, &request_id)?
-                {
+                #[cfg(feature = "agent")]
+                let leaf_cancelled = session_leaf::cancel_leaf_child(state, &request_id);
+                #[cfg(not(feature = "agent"))]
+                let leaf_cancelled = false;
+                if !leaf_cancelled && !cancel_composition_request(state, &request_id)? {
                     settle_child_request(&state.child_requests, &request_id);
                 }
             }
@@ -1288,6 +1293,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 })?;
             }
             methods::SESSION_APPEND_ENTRY => {
+                #[cfg(feature = "agent")]
                 if session_leaf::dispatch_append_request(state, object, params.clone())? {
                     return Ok(());
                 }
@@ -1476,7 +1482,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 else {
                     unreachable!()
                 };
-                let custom = crate::session::CustomMessage {
+                let custom = crate::extension_message::CustomMessage {
                     custom_type: custom_type.clone(),
                     content: content.clone(),
                     display: *display,
@@ -1794,6 +1800,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     }
                 })?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_SPAWN => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_SPAWN)?;
@@ -1838,6 +1845,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_MESSAGE => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_MESSAGE)?;
@@ -1863,6 +1871,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_FOLLOW_UP => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_FOLLOW_UP)?;
@@ -1888,6 +1897,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_MODELS => {
                 let id = parse_child_request_id(object, methods::AGENT_MODELS)?;
                 if let Err(error) = require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)
@@ -1919,6 +1929,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_LIST => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_LIST)?;
@@ -1941,6 +1952,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_WAIT => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_WAIT)?;
@@ -1969,6 +1981,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_INTERRUPT => {
                 require_feature(state, EXTENSION_FEATURE_AGENT_SESSIONS)?;
                 let id = parse_child_request_id(object, methods::AGENT_INTERRUPT)?;
@@ -1993,6 +2006,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                     request.resource_owner,
                 )?;
             }
+            #[cfg(feature = "agent")]
             methods::AGENT_EVENTS | methods::AGENT_STOP => {
                 let id = parse_child_request_id(object, method)?;
                 let feature = if method == methods::AGENT_EVENTS {
@@ -2247,7 +2261,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
         // Tear down the whole generation, rather than unlock one execution.
         return Err("response requires exactly one of result or error".into());
     }
-    let mut reply = if let Some(error) = object.get("error") {
+    let reply = if let Some(error) = object.get("error") {
         if read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_3 {
             let error: api_v03::ErrorObject = serde_json::from_value(error.clone())
                 .map_err(|decode| format!("invalid API 0.3 JSON-RPC error: {decode}"))?;
@@ -2268,8 +2282,11 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
             "response requires result or error".into(),
         ))
     };
+    #[cfg(feature = "agent")]
+    let mut reply = reply;
     let request = {
         let mut pending = lock_std_mutex(&state.pending);
+        #[cfg(feature = "agent")]
         if pending
             .get(&id)
             .is_some_and(|p| p.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE)
@@ -2282,9 +2299,11 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                 }
             }
         }
+        #[cfg(feature = "agent")]
         lock_std_mutex(&state.session_leaf.transport).settle(id);
         // This recognized terminal settles execution-held request capacity too,
         // even when cancellation already removed the ordinary pending waiter.
+        #[cfg(feature = "agent")]
         state.session_leaf.settle_execution(id);
         // This recognized terminal settles native execution even if the caller
         // has gone away or its bounded late-response tombstone was pruned.

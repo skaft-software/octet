@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "agent")]
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use octet_ai::{Media, ToolDef, Usage};
@@ -414,6 +416,7 @@ impl ToolProgressDecoration {
     }
 }
 
+#[cfg(feature = "agent")]
 /// Reply channel for session-entry append operations.
 type SessionReplyTx = Arc<
     std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<crate::session::EntryId, String>>>>,
@@ -559,9 +562,11 @@ pub enum ToolProgress {
         /// Number of semantic session-entry events that were dropped.
         events: u64,
     },
+    #[cfg(feature = "agent")]
     /// Internal channel event to append a session entry from a tool.
     #[doc(hidden)]
     SessionEvent(Box<crate::session::EntryValue>, SessionReplyTx),
+    #[cfg(feature = "agent")]
     /// Host-only synced metadata sidecar; never forwarded to a frontend.
     #[doc(hidden)]
     SessionMetadataEvent(Box<crate::session::EntryMetadata>, SessionReplyTx),
@@ -585,7 +590,9 @@ impl std::fmt::Debug for ToolProgress {
                 .field("bytes", bytes)
                 .field("events", events)
                 .finish(),
+            #[cfg(feature = "agent")]
             Self::SessionEvent(ev, _) => f.debug_tuple("SessionEvent").field(ev).finish(),
+            #[cfg(feature = "agent")]
             Self::SessionMetadataEvent(_, _) => f.write_str("SessionMetadataEvent"),
         }
     }
@@ -623,6 +630,7 @@ pub struct ToolProgressSink {
     tool_call_id: Option<String>,
     parent_tool_call_id: Option<String>,
     programmatic: bool,
+    #[cfg(feature = "agent")]
     session_driver: Option<crate::extension_process::session_leaf::driver::SessionDriverRoute>,
 }
 
@@ -641,6 +649,7 @@ impl ToolProgressSink {
             tool_call_id: None,
             parent_tool_call_id: None,
             programmatic: false,
+            #[cfg(feature = "agent")]
             session_driver: None,
         }
     }
@@ -668,10 +677,12 @@ impl ToolProgressSink {
             tool_call_id: None,
             parent_tool_call_id: None,
             programmatic: false,
+            #[cfg(feature = "agent")]
             session_driver: None,
         }
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn with_tool_call_identity(mut self, id: String, parent: Option<String>) -> Self {
         self.tool_call_id = Some(id);
         self.parent_tool_call_id = parent;
@@ -685,6 +696,7 @@ impl ToolProgressSink {
         )
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn with_invocation(
         mut self,
         invocation: crate::tools::durability::InvocationHandle,
@@ -693,6 +705,7 @@ impl ToolProgressSink {
         self
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn with_composition(
         mut self,
         service: Arc<dyn crate::tool_composition::ToolCompositionService>,
@@ -707,6 +720,7 @@ impl ToolProgressSink {
         self.composition.clone()
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn with_inference(
         mut self,
         service: Arc<dyn crate::tool_inference::ToolInferenceService>,
@@ -721,6 +735,7 @@ impl ToolProgressSink {
         self.inference.clone()
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn with_session_driver(
         mut self,
         route: crate::extension_process::session_leaf::driver::SessionDriverRoute,
@@ -729,12 +744,14 @@ impl ToolProgressSink {
         self
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn session_driver(
         &self,
     ) -> Option<crate::extension_process::session_leaf::driver::SessionDriverRoute> {
         self.session_driver.clone()
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn for_nested_call(&self) -> Self {
         let mut sink = self.clone();
         // Nested calls must not inherit replay memos or recursive authority.
@@ -750,10 +767,12 @@ impl ToolProgressSink {
         self.programmatic
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) async fn forward_semantic(&self, progress: ToolProgress) {
         let _ = self.tx.send(progress).await;
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) async fn append_metadata(
         &self,
         metadata: crate::session::EntryMetadata,
@@ -890,6 +909,7 @@ impl ToolProgressSink {
         answer.await.ok().flatten()
     }
 
+    #[cfg(feature = "agent")]
     /// Returns dropped output bytes and session-entry events since the last
     /// call, resetting both counters. `pub(crate)` — only the agent loop calls
     /// this.
@@ -909,6 +929,7 @@ impl ToolProgressSink {
             ToolProgress::Confirmation(_) => (0, 1),
             ToolProgress::Input(_) => (0, 1),
             ToolProgress::Dropped { .. } => (0, 0),
+            #[cfg(feature = "agent")]
             ToolProgress::SessionEvent { .. } | ToolProgress::SessionMetadataEvent { .. } => (0, 1),
         };
         match self.tx.try_send(msg) {
@@ -977,6 +998,7 @@ pub struct ToolContext<'a> {
     /// Durable session-derived owner for extension resources. Unlike
     /// `execution_scope`, this survives Agent rebuilds and process reloads.
     pub resource_owner: &'a str,
+    #[cfg(feature = "agent")]
     /// Active skills resolved from the session immediately before this tool
     /// call. Tools may use it to authorize skill-scoped operations.
     pub active_skills: &'a [crate::session::SkillActivatedSnapshot],
@@ -1025,6 +1047,7 @@ impl ToolContext<'_> {
         sandbox::display_path(self.workspace, path, self.sandbox.allow_external_paths)
     }
 
+    #[cfg(feature = "agent")]
     /// Appends a custom entry value to the active session.
     /// Returns the resulting EntryId.
     pub async fn append_session_entry(
@@ -1170,6 +1193,7 @@ impl ToolOutputDetails {
         self.structured_content.is_none() && self.metadata.is_none()
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn into_validated(self) -> Result<Self, ToolOutputValidationError> {
         Self::try_new(self.structured_content, self.metadata)
     }
@@ -1299,16 +1323,20 @@ impl std::io::Write for JsonByteCounter {
     }
 }
 
+#[cfg(feature = "agent")]
 type ToolOutputResolution = Box<dyn FnOnce() + Send + 'static>;
 
+#[cfg(feature = "agent")]
 struct ToolOutputCommitState {
     hooks: Option<(ToolOutputResolution, ToolOutputResolution)>,
 }
 
+#[cfg(feature = "agent")]
 struct ToolOutputCommitInner {
     state: Mutex<ToolOutputCommitState>,
 }
 
+#[cfg(feature = "agent")]
 impl Drop for ToolOutputCommitInner {
     fn drop(&mut self) {
         let state = self
@@ -1321,11 +1349,13 @@ impl Drop for ToolOutputCommitInner {
     }
 }
 
+#[cfg(feature = "agent")]
 #[derive(Clone)]
 struct ToolOutputCommit {
     inner: Arc<ToolOutputCommitInner>,
 }
 
+#[cfg(feature = "agent")]
 impl std::fmt::Debug for ToolOutputCommit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let pending = self
@@ -1342,6 +1372,7 @@ impl std::fmt::Debug for ToolOutputCommit {
     }
 }
 
+#[cfg(feature = "agent")]
 impl ToolOutputCommit {
     fn new(
         commit: impl FnOnce() + Send + 'static,
@@ -1566,6 +1597,7 @@ pub struct ToolOutput {
     details: ToolOutputDetails,
     programmatic_content: Option<serde_json::Value>,
     is_error: bool,
+    #[cfg(feature = "agent")]
     delivery_commit: Option<ToolOutputCommit>,
     presentation_images_omitted: bool,
     terminate: bool,
@@ -1619,6 +1651,7 @@ impl ToolOutput {
             details: ToolOutputDetails::default(),
             programmatic_content: None,
             is_error: false,
+            #[cfg(feature = "agent")]
             delivery_commit: None,
             presentation_images_omitted: false,
             terminate: false,
@@ -1659,6 +1692,7 @@ impl ToolOutput {
             details: ToolOutputDetails::default(),
             programmatic_content: None,
             is_error: false,
+            #[cfg(feature = "agent")]
             delivery_commit: None,
             presentation_images_omitted: false,
             terminate: false,
@@ -1804,6 +1838,7 @@ impl ToolOutput {
         self.terminate
     }
 
+    #[cfg(feature = "agent")]
     /// Enrich only the owning frontend's stripped output, never observer copies.
     /// Candidates must come from the authoritative lowered durable message.
     pub(crate) fn with_owner_presentation_images<'a>(
@@ -1849,6 +1884,7 @@ impl ToolOutput {
         self
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn attach_owner_presentation_images(&mut self, images: Self) {
         self.presentation_images_omitted = images.presentation_images_omitted;
         self.content_parts.extend(
@@ -1885,6 +1921,7 @@ impl ToolOutput {
         &self.media_kinds
     }
 
+    #[cfg(feature = "agent")]
     /// Appends a bounded host diagnostic to the model-visible text while
     /// keeping structured parts and their compact text representation aligned.
     /// This is used for generic execution diagnostics, never for user content.
@@ -1907,6 +1944,7 @@ impl ToolOutput {
         self
     }
 
+    #[cfg(feature = "agent")]
     /// Installs internal resolution hooks for work that is acknowledged only
     /// after this output is durably appended to the session. Dropping every
     /// copy without resolution rolls the provisional delivery back.
@@ -1919,10 +1957,12 @@ impl ToolOutput {
         self
     }
 
+    #[cfg(feature = "agent")]
     pub(crate) fn has_delivery_commit(&self) -> bool {
         self.delivery_commit.is_some()
     }
 
+    #[cfg(feature = "agent")]
     /// Resolve provisional work after the agent's durable tool-result boundary.
     /// `delivered` must be false when generic output limiting changed the text.
     pub(crate) fn resolve_delivery(&self, delivered: bool) {
@@ -1965,6 +2005,7 @@ impl ToolOutput {
             details: self.details.clone(),
             programmatic_content: None,
             is_error: self.is_error,
+            #[cfg(feature = "agent")]
             delivery_commit: None,
             presentation_images_omitted: false,
             terminate: self.terminate,

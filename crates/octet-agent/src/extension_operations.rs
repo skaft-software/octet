@@ -1,6 +1,7 @@
 //! Host-owned exact nominal operation lookup. Discovery changes presentation,
 //! never resource ownership, invocation arguments, effects or execution policy.
 
+#[cfg(feature = "agent")]
 use std::collections::BTreeSet;
 use std::sync::{RwLock, Weak};
 
@@ -64,6 +65,7 @@ pub struct ApplicableOperationsPage {
     pub next_cursor: Option<String>,
 }
 
+#[cfg(feature = "agent")]
 #[derive(Clone)]
 pub(crate) struct OperationSelection {
     pub(crate) owner: ExtensionResourceOwner,
@@ -71,6 +73,7 @@ pub(crate) struct OperationSelection {
     pub(crate) ids: BTreeSet<String>,
 }
 
+#[cfg(feature = "agent")]
 impl OperationSelection {
     pub(crate) fn includes(&self, operation: &OperationSnapshot, owner: &str) -> bool {
         self.owner.session_id == owner

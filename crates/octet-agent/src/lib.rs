@@ -1,4 +1,5 @@
-#![deny(missing_docs)]
+#![cfg_attr(feature = "extensions", deny(missing_docs))]
+#![cfg(feature = "extensions")]
 
 //! `octet-agent` — stateful agent loop with tool execution and event streaming.
 //!
@@ -16,6 +17,8 @@
 //! # Example
 //!
 //! ```no_run
+//! # #[cfg(feature = "agent")]
+//! # {
 //! use octet_agent::{
 //!     Agent, AgentConfig, CoreTools, EffectBroker, ExtensionHost, SandboxConfig, Session,
 //! };
@@ -55,6 +58,7 @@
 //! println!("{}", output.text);
 //! # Ok(())
 //! # }
+//! # }
 //! ```
 //!
 //! # Crash semantics
@@ -66,14 +70,21 @@
 //! Session appends are synced before returning; see [`session`] for the
 //! precise persistence and recovery rules.
 
+#[cfg(feature = "agent")]
 pub mod agent;
 pub mod artifact;
+#[cfg(feature = "agent")]
 pub mod cache;
+#[cfg(feature = "agent")]
 pub mod cache_warmer;
+#[cfg(feature = "agent")]
 pub mod compaction;
+#[cfg(feature = "agent")]
 pub mod context;
+#[cfg(feature = "agent")]
 pub mod delegation;
 pub mod effect;
+#[cfg(feature = "agent")]
 pub mod events;
 pub mod extension;
 pub mod extension_api_policy;
@@ -84,24 +95,34 @@ pub(crate) mod extension_bulk;
 mod extension_bulk_host;
 pub mod extension_diagnostics;
 pub mod extension_menu;
+pub mod extension_message;
 pub mod extension_operations;
 pub mod extension_policy;
 pub mod extension_presentation;
 pub mod extension_process;
 pub mod extension_provider;
 pub mod extension_remote_ui;
+#[cfg(feature = "agent")]
 pub mod extension_runtime;
 pub mod extension_secret;
+#[cfg(feature = "agent")]
 pub mod goal_driver;
+#[cfg(feature = "agent")]
 pub mod goal_store;
 pub mod input;
 pub mod sandbox;
 pub mod secure_fs;
+#[cfg(feature = "agent")]
 pub mod session;
+#[cfg(feature = "agent")]
 pub mod session_leaf;
+pub mod session_types;
+#[cfg(feature = "agent")]
 mod session_writer;
 /// The generic skill substrate containing descriptors, load errors, trust levels, and the registry trait.
+#[cfg(feature = "agent")]
 pub mod skills;
+#[cfg(feature = "agent")]
 pub mod telemetry;
 pub mod tool;
 pub mod tool_composition;
@@ -109,6 +130,7 @@ pub mod tool_composition;
 pub mod tool_inference;
 pub mod tools;
 
+#[cfg(feature = "agent")]
 pub use agent::{
     public_error_diagnostic, Agent, AgentCompactionMode, AgentConfig, AgentError, CompletionPolicy,
     PreparedHostPrompt, PreparedPromptMode, PreparedSteering, RequestContextEstimate, Run,
@@ -121,14 +143,17 @@ pub use artifact::{
     DEFAULT_MAX_ARTIFACT_GENERATION_BYTES, DEFAULT_MAX_INLINE_ARTIFACT_BYTES,
     MAX_ARTIFACT_RELATIVE_PATH_BYTES,
 };
+#[cfg(feature = "agent")]
 pub use cache::{
     analyze_session_cache, analyze_session_cache_stats, CacheMiss, CacheStats,
     CACHE_MISS_NOISE_TOKENS,
 };
+#[cfg(feature = "agent")]
 pub use cache_warmer::{
     CacheWarmMode, CacheWarmingAction, CacheWarmingDecision, CacheWarmingPhase, CacheWarmingState,
     CacheWarmingStatus,
 };
+#[cfg(feature = "agent")]
 pub use compaction::{
     build_branch_handoff_message, build_handoff_message, build_turn_prefix_handoff_message,
     choose_first_kept_by_tokens, finish_branch_handoff, finish_handoff, format_file_operations,
@@ -136,10 +161,12 @@ pub use compaction::{
     CompactionDetails, HandoffPreparation, BRANCH_SUMMARY_PREAMBLE, DEFAULT_KEEP_RECENT_TOKENS,
     SUMMARIZATION_SYSTEM_PROMPT, SUMMARY_OUTPUT_TOKENS, TURN_PREFIX_OUTPUT_TOKENS,
 };
+#[cfg(feature = "agent")]
 pub use context::{
     ActiveContextCompaction, ContextBreakdown, ContextSnapshot, FinishedContextCompaction,
     RunPhase, RunTerminalState,
 };
+#[cfg(feature = "agent")]
 pub use delegation::{
     delegated_session_reference, delegation_runtime_supports,
     extension_delegated_session_matches_owner, DelegatedAgentStatus, DelegationConfig,
@@ -150,21 +177,25 @@ pub use effect::{
     EffectPolicy, EffectReceipt, ToolEffect, ToolPolicyDenialCode, EFFECT_POLICY_VERSION,
     MAX_EFFECT_GRANTS, MAX_EFFECT_GRANT_TTL, MAX_EFFECT_INTENT_BYTES,
 };
+#[cfg(feature = "agent")]
 pub use events::{
     AgentEvent, CompactionInfo, CompactionKind, CompactionReason, Control,
     DelegationOrchestrationProvenance, DelegationPolicySource, DelegationTelemetryChild,
     DelegationTelemetrySnapshot, FinishReason, OutputChannel, ProviderOperation, QueueDeliveryMode,
     ToolPolicyDecision,
 };
+#[cfg(feature = "agent")]
 pub use extension::{
-    AssistantPersistenceContext, CompactionStrategy, EventObserver, Extension, ExtensionHost,
-    PersistenceMetadataHook, PersistenceMetadataProposal, PostMutationContext,
-    PostMutationDisposition, PostMutationKind, PostMutationRescan, PostMutationState,
-    ProviderContextHook, ProviderContextProjection, ProviderContextProjectionContext,
-    ProviderContextSessionWait, ProviderRetryAdvice, ProviderRetryContext, ProviderRetryHook,
-    ProviderRetryKind, ToolCallHook, MAX_POST_MUTATION_AFFECTED_RESOURCES,
-    MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
+    AssistantPersistenceContext, CompactionStrategy, EventObserver, PersistenceMetadataHook,
+    PersistenceMetadataProposal, ProviderContextHook, ProviderContextProjection,
+    ProviderContextProjectionContext, ProviderContextSessionWait, ProviderRetryAdvice,
+    ProviderRetryContext, ProviderRetryHook, ProviderRetryKind,
     MAX_PROVIDER_RETRY_ADDITIONAL_DELAY,
+};
+pub use extension::{
+    Extension, ExtensionHost, PostMutationContext, PostMutationDisposition, PostMutationKind,
+    PostMutationRescan, PostMutationState, ToolCallHook, MAX_POST_MUTATION_AFFECTED_RESOURCES,
+    MAX_POST_MUTATION_ID_BYTES, MAX_POST_MUTATION_RESOURCE_ID_BYTES,
 };
 pub use extension_bulk::{BlobDigest, BlobRef, BulkError, BulkLimits};
 pub use extension_bulk_host::BulkStorage;
@@ -251,11 +282,13 @@ pub use extension_secret::{
     ExtensionSecretBroker, ExtensionSecretError, ExtensionSecretRequest, ExtensionSecretValue,
     MAX_EXTENSION_SECRET_BYTES,
 };
+#[cfg(feature = "agent")]
 pub use goal_driver::{
     continuation_prompt, detect_goal_marker, GoalContinuation, GoalDecision, GoalDriver,
     GoalDriverError, GoalMarker, GoalState, GoalStatus, GoalStore, GoalTurnSource,
     DEFAULT_GOAL_GRACE_PERIOD, GOAL_CONTINUATION_PROMPT_TEMPLATE,
 };
+#[cfg(feature = "agent")]
 pub use goal_store::{
     DurableGoalStore, DurableGoalStoreError, GoalAction, MAX_GOAL_OBJECTIVE_BYTES,
     MAX_GOAL_TURN_BUDGET,
@@ -265,6 +298,7 @@ pub use sandbox::{
     EffectivePolicyValue, EffectiveToolPolicy, PolicyValueSource, SandboxConfig, ShellPathSummary,
     ShellSelection, ToolPolicyProvenance, DEFAULT_MAX_OUTPUT_BYTES,
 };
+#[cfg(feature = "agent")]
 pub use session::{
     compaction_summary_text, CacheWarmRecord, CacheWarmState, Checkpoint, Entry, EntryId,
     EntryMetadata, EntryValue, ExtensionEntryMetadata, ExtensionMetadataProvenance, Session,
@@ -274,10 +308,12 @@ pub use session::{
     MAX_EXTENSION_ENTRY_METADATA_VALUE_BYTES, MODEL_VISIBLE_TOOL_IMAGE_LIMIT,
     TOOL_IMAGE_PLACEHOLDER,
 };
+#[cfg(feature = "agent")]
 pub use skills::{
     ContentHash, LoadedSkill, SkillActivationId, SkillDescriptor, SkillId, SkillLoadError,
     SkillQuery, SkillRegistry, SkillSearchResult, SkillSource, SkillTrust,
 };
+#[cfg(feature = "agent")]
 pub use telemetry::{TelemetryObserver, TELEMETRY_SCHEMA};
 pub use tool::{
     batch_requests_termination, collect_tool_prompt_contributions, content_hash,
@@ -289,4 +325,5 @@ pub use tool::{
     ToolPromptContribution, MAX_PROGRESS_CHUNK_BYTES, MAX_TOOL_METADATA_BYTES,
     MAX_TOOL_STRUCTURED_CONTENT_BYTES,
 };
+#[cfg(feature = "tools")]
 pub use tools::{BashTool, CoreTools, EditTool, ReadTool, WriteTool};

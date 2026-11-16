@@ -15,7 +15,7 @@ pub struct UserInput {
     /// Ordered content parts.
     pub parts: Vec<InputPart>,
     /// Custom messages appended as independent entries after the user prompt.
-    pub custom_messages: Vec<crate::session::CustomMessage>,
+    pub custom_messages: Vec<crate::extension_message::CustomMessage>,
 }
 
 /// One part of a [`UserInput`].
@@ -53,13 +53,14 @@ impl From<Vec<InputPart>> for UserInput {
 
 impl UserInput {
     /// A custom-only prompt, without a substitute user message.
-    pub fn from_custom(message: crate::session::CustomMessage) -> Self {
+    pub fn from_custom(message: crate::extension_message::CustomMessage) -> Self {
         Self {
             parts: Vec::new(),
             custom_messages: vec![message],
         }
     }
 
+    #[cfg(feature = "agent")]
     /// Persist the prompt and each custom message independently, in Pi order.
     /// Returns the first entry, which is also the run's checkpoint prompt.
     pub fn append_to(

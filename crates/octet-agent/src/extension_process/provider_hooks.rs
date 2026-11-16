@@ -112,7 +112,7 @@ impl ProviderHooksJob {
                     return Err(provider_unavailable_error());
                 }
                 let mut headers = reqwest::header::HeaderMap::new();
-                provider_context::apply_pipeline_headers(
+                provider_pipeline::apply_pipeline_headers(
                     &mut headers,
                     request.headers.ok_or_else(provider_unavailable_error)?,
                 )?;
@@ -121,7 +121,7 @@ impl ProviderHooksJob {
                         return Err(provider_unavailable_error());
                     }
                     self.hooks.headers(&mut headers).await?;
-                    serde_json::json!({"headers": provider_context::pipeline_header_projection(&headers)?})
+                    serde_json::json!({"headers": provider_pipeline::pipeline_header_projection(&headers)?})
                 } else {
                     let status = request
                         .status
@@ -160,7 +160,7 @@ struct HookRequest {
     #[serde(default)]
     payload: Option<serde_json::Value>,
     #[serde(default)]
-    headers: Option<BTreeMap<String, Option<provider_context::PipelineHeaderValue>>>,
+    headers: Option<BTreeMap<String, Option<provider_pipeline::PipelineHeaderValue>>>,
     #[serde(default)]
     status: Option<u16>,
 }

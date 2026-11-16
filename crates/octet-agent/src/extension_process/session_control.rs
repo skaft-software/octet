@@ -1,6 +1,8 @@
 //! Owner-scoped API 0.4 access to the existing foreground session driver.
+#[cfg(feature = "agent")]
 use super::*;
 
+#[cfg(feature = "agent")]
 mod replacement;
 
 #[cfg(test)]
@@ -12,6 +14,7 @@ pub const EXTENSION_FEATURE_SESSION_CONTROL_V1: &str = "session_control_v1";
 /// API 0.4 terminal, owner-fenced local compaction on a real idle consumer.
 pub const EXTENSION_FEATURE_SESSION_COMPACTION_V1: &str = "session_compaction_v1";
 
+#[cfg(feature = "agent")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionCompactionRequest {
@@ -23,6 +26,7 @@ struct SessionCompactionRequest {
     callback: bool,
 }
 
+#[cfg(feature = "agent")]
 pub(super) fn dispatch_session_compaction(
     state: &ProtocolReadState,
     object: &serde_json::Map<String, serde_json::Value>,
@@ -119,6 +123,7 @@ pub(super) fn dispatch_session_compaction(
     )
 }
 
+#[cfg(feature = "agent")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionControlRequest {
@@ -138,6 +143,7 @@ struct SessionControlRequest {
     #[serde(default)]
     setup: bool,
 }
+#[cfg(feature = "agent")]
 impl OwnerScopedHostRequest for SessionControlRequest {
     fn parent_request_id(&self) -> u64 {
         self.parent_request_id
@@ -147,6 +153,7 @@ impl OwnerScopedHostRequest for SessionControlRequest {
     }
 }
 
+#[cfg(feature = "agent")]
 pub(super) fn dispatch_session_control(
     state: &ProtocolReadState,
     object: &serde_json::Map<String, serde_json::Value>,

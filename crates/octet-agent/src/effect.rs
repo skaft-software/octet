@@ -861,6 +861,7 @@ pub enum EffectBrokerError {
 }
 
 impl EffectBrokerError {
+    #[cfg(feature = "agent")]
     /// Map an admission failure to the stable diagnostic code that explains it
     /// without carrying its model-facing text or any intent contents.
     pub(crate) fn policy_denial_code(&self) -> ToolPolicyDenialCode {

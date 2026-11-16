@@ -474,6 +474,7 @@ pub(super) fn negotiate_contributions_with_host_services(
                     "run_system_prompt_read_v1 requires system_prompt_read".into(),
                 ));
             }
+            #[cfg(feature = "agent")]
             let session_offer = (offered_host_services.max_message_bytes > 0)
                 .then(|| {
                     session_leaf::transport::SessionSnapshotProfile::for_frame(
@@ -482,6 +483,7 @@ pub(super) fn negotiate_contributions_with_host_services(
                     .ok()
                 })
                 .flatten();
+            #[cfg(feature = "agent")]
             if session_offer.is_some() {
                 allowed.insert(session_leaf::transport::OWNER_ROUTES);
                 allowed.insert(session_leaf::transport::SNAPSHOT_TRANSPORT);
@@ -497,62 +499,66 @@ pub(super) fn negotiate_contributions_with_host_services(
                     "extension advertised unknown feature `{feature}`"
                 )));
             }
-            let paired = [
-                session_leaf::transport::OWNER_ROUTES,
-                session_leaf::transport::SNAPSHOT_TRANSPORT,
-            ];
-            let selected = paired
-                .iter()
-                .filter(|name| features.contains(**name))
-                .count();
-            if selected == 1 {
-                return Err(ExtensionRuntimeError::Protocol(
+            #[cfg(feature = "agent")]
+            {
+                let paired = [
+                    session_leaf::transport::OWNER_ROUTES,
+                    session_leaf::transport::SNAPSHOT_TRANSPORT,
+                ];
+                let selected = paired
+                    .iter()
+                    .filter(|name| features.contains(**name))
+                    .count();
+                if selected == 1 {
+                    return Err(ExtensionRuntimeError::Protocol(
                     "session_owner_routes_v1 and session_snapshot_transport_v1 must be negotiated together"
                         .into(),
                 ));
-            }
-            if features.contains(session_leaf::transport::APPEND_RECEIPTS) && selected != 2 {
-                return Err(ExtensionRuntimeError::Protocol(
-                    "session_append_receipts_v1 requires the paired session transport features"
-                        .into(),
-                ));
-            }
-            if selected == 2 {
-                let Some(offer) = session_offer.as_ref() else {
+                }
+                if features.contains(session_leaf::transport::APPEND_RECEIPTS) && selected != 2 {
                     return Err(ExtensionRuntimeError::Protocol(
-                        "session history transport was selected but not offered by this host"
+                        "session_append_receipts_v1 requires the paired session transport features"
                             .into(),
                     ));
-                };
-                if !features.contains(EXTENSION_FEATURE_SESSION_ENTRIES) {
-                    return Err(ExtensionRuntimeError::Protocol(
-                        "session history transport requires negotiated session_entries".into(),
-                    ));
                 }
-                if negotiated.limits.max_concurrent_requests < 2 {
-                    return Err(ExtensionRuntimeError::Protocol(
-                        "session history transport requires max_concurrent_requests >= 2".into(),
-                    ));
-                }
-                if negotiated.limits.max_message_bytes
-                    != Some(offered_host_services.max_message_bytes)
+                if selected == 2 {
+                    let Some(offer) = session_offer.as_ref() else {
+                        return Err(ExtensionRuntimeError::Protocol(
+                            "session history transport was selected but not offered by this host"
+                                .into(),
+                        ));
+                    };
+                    if !features.contains(EXTENSION_FEATURE_SESSION_ENTRIES) {
+                        return Err(ExtensionRuntimeError::Protocol(
+                            "session history transport requires negotiated session_entries".into(),
+                        ));
+                    }
+                    if negotiated.limits.max_concurrent_requests < 2 {
+                        return Err(ExtensionRuntimeError::Protocol(
+                            "session history transport requires max_concurrent_requests >= 2"
+                                .into(),
+                        ));
+                    }
+                    if negotiated.limits.max_message_bytes
+                        != Some(offered_host_services.max_message_bytes)
+                    {
+                        return Err(ExtensionRuntimeError::Protocol(
+                            "selected session transport frame must equal the host offer".into(),
+                        ));
+                    }
+                    if negotiated.session_snapshot_transport_v1.as_ref() != Some(offer) {
+                        return Err(ExtensionRuntimeError::Protocol(
+                            "selected session snapshot profile must equal the host offer".into(),
+                        ));
+                    }
+                } else if negotiated.session_snapshot_transport_v1.is_some()
+                    || negotiated.limits.max_message_bytes.is_some()
                 {
                     return Err(ExtensionRuntimeError::Protocol(
-                        "selected session transport frame must equal the host offer".into(),
+                        "session snapshot profile requires the paired session transport features"
+                            .into(),
                     ));
                 }
-                if negotiated.session_snapshot_transport_v1.as_ref() != Some(offer) {
-                    return Err(ExtensionRuntimeError::Protocol(
-                        "selected session snapshot profile must equal the host offer".into(),
-                    ));
-                }
-            } else if negotiated.session_snapshot_transport_v1.is_some()
-                || negotiated.limits.max_message_bytes.is_some()
-            {
-                return Err(ExtensionRuntimeError::Protocol(
-                    "session snapshot profile requires the paired session transport features"
-                        .into(),
-                ));
             }
             if let Some(feature) = API_0_2_REQUIRED_FEATURES
                 .iter()

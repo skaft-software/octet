@@ -82,7 +82,7 @@ pub struct ToolCatalogUpdateResponse {
 pub struct AgentSessionPolicy {
     /// Optional configured provider, model and reasoning selection.
     #[serde(default)]
-    pub model_selection: Option<crate::delegation::AgentModelSelection>,
+    pub model_selection: Option<AgentModelSelection>,
     /// Requested upper-bound tool allowlist. Accepted standard tools are
     /// `read`, `edit`, `write`, and `bash`.
     pub tools: Vec<String>,
@@ -113,6 +113,7 @@ pub struct AgentSessionPolicy {
     pub timeout_ms: Option<u64>,
 }
 
+#[cfg(feature = "agent")]
 impl From<AgentSessionPolicy> for ExtensionAgentSessionPolicy {
     fn from(policy: AgentSessionPolicy) -> Self {
         Self {
@@ -406,14 +407,14 @@ pub struct SessionSendMessageRequest {
     /// Extension-defined message type.
     pub custom_type: String,
     /// Original string or ordered text blocks.
-    pub content: crate::session::CustomMessageContent,
+    pub content: crate::extension_message::CustomMessageContent,
     /// Whether the transcript shows the message.
     #[serde(default)]
     pub display: bool,
     /// Extension-defined data that the model never sees.
     #[serde(
         default,
-        deserialize_with = "crate::session::deserialize_custom_message_details",
+        deserialize_with = "crate::extension_message::deserialize_custom_message_details",
         skip_serializing_if = "Option::is_none"
     )]
     pub details: Option<serde_json::Value>,
@@ -439,7 +440,7 @@ pub struct SessionSendUserMessageRequest {
     pub text: String,
     /// Ordered text/image content, mutually exclusive with nonempty text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<crate::session::CustomMessageContent>,
+    pub content: Option<crate::extension_message::CustomMessageContent>,
     /// Pi `deliverAs` while a run is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliver_as: Option<ExtensionMessageDelivery>,
@@ -1040,4 +1041,25 @@ pub(super) enum ExtensionToolContentPart {
         #[serde(default)]
         transcript: Option<String>,
     },
+}
+
+/// Secret-free requested or host-confirmed worker selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentModelSelection {
+    /// Configured provider identifier.
+    pub provider: String,
+    /// Configured model identifier or resolved host model.
+    pub model: String,
+    /// Reasoning selection or supported choices.
+    pub reasoning: String,
+}
+impl Default for AgentModelSelection {
+    fn default() -> Self {
+        Self {
+            provider: "inherit".into(),
+            model: "inherit".into(),
+            reasoning: "inherit".into(),
+        }
+    }
 }

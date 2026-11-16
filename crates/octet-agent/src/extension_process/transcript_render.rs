@@ -194,6 +194,7 @@ impl TranscriptRenderResponse {
     }
 }
 
+#[cfg(feature = "agent")]
 /// Project only one namespace's private entry. No unrelated metadata is disclosed.
 pub fn transcript_private_entry(entry: &crate::session::Entry, namespace: &str) -> Option<Value> {
     let payload: crate::session::ExtensionEntry = serde_json::from_value(

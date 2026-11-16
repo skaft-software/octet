@@ -266,6 +266,7 @@ pub(super) struct ExtensionProcessInner {
     pub(super) session_hooks: StdMutex<BTreeMap<String, ActiveSessionHookBinding>>,
     pub(super) dynamic_tool_registration: StdMutex<Option<DynamicToolRegistration>>,
     pub(super) dynamic_tool_registration_ready: Notify,
+    #[cfg(feature = "agent")]
     pub(super) delegation_service: Arc<StdRwLock<Option<ExtensionDelegationService>>>,
     pub(super) catalog_updates: mpsc::Sender<CatalogUpdateRequest>,
 }
@@ -316,6 +317,7 @@ pub(super) struct ActiveLifecycleTurn {
 
 pub(super) struct ActiveLifecycleTool {
     pub(super) name: String,
+    #[cfg(feature = "agent")]
     pub(super) arguments: serde_json::Value,
     pub(super) started_at: Instant,
     pub(super) context: ExtensionLifecycleTurnContext,

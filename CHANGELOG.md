@@ -4,6 +4,7 @@
 
 ### Added
 
+- Build tools and the extension process host independently with octet-agent's default agent feature disabled.
 - Document the tool and extension-host module dependencies for independent embedding.
 
 - Document independent tool and extension use while retaining caller control flow outside the agent loop.

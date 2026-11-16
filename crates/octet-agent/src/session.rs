@@ -61,7 +61,6 @@ use crate::tools::durability::{
     DurableInvocationStore, InvocationHandle, InvocationRecord, InvocationScope,
 };
 
-use base64::Engine as _;
 use fs2::FileExt;
 use octet_ai::{
     Cost, EndpointId, Message, ModelId, StopReason, Usage, UserMessage, UserPart,
@@ -70,9 +69,7 @@ use octet_ai::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-/// Identifier of a session entry. Unique within one session file.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-pub struct EntryId(pub String);
+pub use crate::session_types::{EntryId, SessionError};
 
 /// A durable restore point written after one submitted prompt completes.
 ///
@@ -451,197 +448,7 @@ fn valid_extension_metadata_value(
     }
 }
 
-/// Pi custom-message content, retained without joining distinct text blocks.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum CustomMessageContent {
-    /// A single string.
-    Text(String),
-    /// Ordered text and inline image blocks.
-    Parts(Vec<CustomMessagePart>),
-}
-
-/// A model-visible text block in a Pi custom message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CustomMessagePart {
-    /// Text content.
-    Text {
-        /// Model-visible text.
-        text: String,
-    },
-    /// Inline image content in Pi's persisted shape.
-    Image {
-        /// Canonical base64 encoded native image bytes.
-        data: String,
-        /// Native PNG/JPEG/GIF/WebP MIME type.
-        #[serde(rename = "mimeType")]
-        mime_type: String,
-    },
-}
-
-impl CustomMessagePart {
-    /// Decode a bounded inline image without fetching remote media.
-    pub fn image(&self) -> Result<Option<octet_ai::ImageMedia>, SessionError> {
-        let Self::Image { data, mime_type } = self else {
-            return Ok(None);
-        };
-        if data.len() > 4 * octet_ai::MAX_USER_IMAGE_BYTES.div_ceil(3)
-            || !matches!(
-                mime_type.as_str(),
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-            )
-        {
-            return Err(SessionError::Limit(
-                "custom image exceeds bounds or has unsupported MIME".into(),
-            ));
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|_| SessionError::Limit("custom image must be canonical base64".into()))?;
-        if bytes.len() > octet_ai::MAX_USER_IMAGE_BYTES
-            || base64::engine::general_purpose::STANDARD.encode(&bytes) != *data
-        {
-            return Err(SessionError::Limit(
-                "custom image exceeds bounds or has invalid base64".into(),
-            ));
-        }
-        Ok(Some(octet_ai::ImageMedia {
-            preparation: Default::default(),
-            source: octet_ai::ImageSource::Inline(bytes.into()),
-            media_type: Some(mime_type.parse().expect("validated image MIME")),
-            detail: None,
-        }))
-    }
-}
-
-impl CustomMessageContent {
-    /// Validate the complete text/media batch at message ingestion.
-    pub fn validate(&self) -> Result<(), SessionError> {
-        let text = self.text();
-        if text.len() > 256 * 1024
-            || text
-                .chars()
-                .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
-        {
-            return Err(SessionError::Limit(
-                "message text exceeds bounds or contains controls".into(),
-            ));
-        }
-        if let Self::Parts(parts) = self {
-            if parts.len() > 256 {
-                return Err(SessionError::Limit("too many message parts".into()));
-            }
-            let (mut count, mut bytes) = (0usize, 0usize);
-            for part in parts {
-                if let Some(image) = part.image()? {
-                    count += 1;
-                    if let octet_ai::ImageSource::Inline(data) = image.source {
-                        bytes += data.len();
-                    }
-                }
-            }
-            if count > 8 || bytes > 20 * 1024 * 1024 {
-                return Err(SessionError::Limit(
-                    "message image batch exceeds bounds".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Native input projection, preserving ordered text and image parts.
-    pub fn input_parts(&self) -> Vec<crate::InputPart> {
-        match self {
-            Self::Text(text) => vec![crate::InputPart::Text(text.clone())],
-            Self::Parts(parts) => parts
-                .iter()
-                .map(|part| match part {
-                    CustomMessagePart::Text { text } => crate::InputPart::Text(text.clone()),
-                    CustomMessagePart::Image { .. } => {
-                        crate::InputPart::Media(octet_ai::Media::Image(
-                            part.image()
-                                .expect("validated custom image")
-                                .expect("image variant"),
-                        ))
-                    }
-                })
-                .collect(),
-        }
-    }
-
-    /// Payload-free display summary.
-    pub fn text(&self) -> String {
-        match self {
-            Self::Text(text) => text.clone(),
-            Self::Parts(parts) => parts
-                .iter()
-                .map(|part| match part {
-                    CustomMessagePart::Text { text } => text.as_str(),
-                    CustomMessagePart::Image { .. } => "[image]",
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-}
-
-/// Typed durable Pi custom-message data. The canonical body is user content;
-/// these fields remain outside provider context, including `details`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CustomMessage {
-    /// Extension-defined message type.
-    pub custom_type: String,
-    /// Original string or ordered content blocks.
-    pub content: CustomMessageContent,
-    /// Whether this message appears in the transcript.
-    pub display: bool,
-    /// Inert extension data, never sent to the model. Explicit null is retained.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_custom_message_details",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub details: Option<serde_json::Value>,
-}
-
-pub(crate) fn deserialize_custom_message_details<'de, D>(
-    deserializer: D,
-) -> Result<Option<serde_json::Value>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde_json::Value::deserialize(deserializer).map(Some)
-}
-
-impl CustomMessage {
-    /// Validate bounded inert message data at the host ingestion boundary.
-    pub fn validate(&self) -> Result<(), SessionError> {
-        self.content.validate()?;
-        if self.custom_type.len() > 128
-            || self.custom_type.chars().any(char::is_control)
-            || self.details.as_ref().is_some_and(|value| {
-                serde_json::to_vec(value).map_or(true, |encoded| encoded.len() > 64 * 1024)
-            })
-        {
-            return Err(SessionError::Limit(
-                "custom message exceeds bounds or contains controls".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Canonical model projection; display and details have no effect on it.
-    pub fn user_parts(&self) -> Vec<UserPart> {
-        crate::UserInput::from(self.content.input_parts()).into_user_parts()
-    }
-
-    /// Human-readable content summary.
-    pub fn text(&self) -> String {
-        self.content.text()
-    }
-}
+pub use crate::extension_message::{CustomMessage, CustomMessageContent, CustomMessagePart};
 
 /// Stable presentation metadata attached to a durable session entry.
 ///
@@ -1402,62 +1209,6 @@ pub(crate) fn now_unix_millis() -> u64 {
         .unwrap_or_default()
 }
 
-/// Session errors.
-#[derive(Debug, thiserror::Error)]
-pub enum SessionError {
-    /// Filesystem failure.
-    #[error("session io error: {0}")]
-    Io(#[from] std::io::Error),
-    /// A record failed to serialize.
-    #[error("session serialization error: {0}")]
-    Serde(String),
-    /// A completed (non-final) record failed to parse or violated an invariant.
-    #[error("corrupt session record at line {line}: {message}")]
-    Corrupt {
-        /// 1-based line number of the offending record.
-        line: usize,
-        /// What was wrong with it.
-        message: String,
-    },
-    /// A configured session parsing/resource bound was exceeded.
-    #[error("session limit exceeded: {0}")]
-    Limit(String),
-    /// Another session handle changed the file after this one was opened.
-    #[error("session was modified by another process; reopen it before writing")]
-    ConcurrentModification,
-    /// An operation referenced an entry ID that does not exist.
-    #[error("unknown session entry: {0:?}")]
-    UnknownEntry(EntryId),
-    /// A compaction/checkpoint entry is not an ancestor of the current head.
-    #[error("entry {0:?} is not an ancestor of the current head")]
-    NotAncestor(EntryId),
-    /// An operation requires a non-empty session.
-    #[error("the session has no current head")]
-    EmptySession,
-    /// No durable checkpoint exists for the supplied prompt entry.
-    #[error("no checkpoint exists for prompt entry {0:?}")]
-    UnknownCheckpoint(EntryId),
-    /// A Responses assistant sidecar belongs to another endpoint/model route.
-    #[error(
-        "Responses replay route mismatch for assistant {assistant:?}: expected {expected_endpoint}/{expected_model}, found {actual_endpoint}/{actual_model}"
-    )]
-    ResponsesRouteMismatch {
-        /// Assistant entry whose sidecar was inspected.
-        assistant: EntryId,
-        /// Endpoint selected for the new request.
-        expected_endpoint: String,
-        /// Model selected for the new request.
-        expected_model: String,
-        /// Endpoint recorded on the sidecar.
-        actual_endpoint: String,
-        /// Model recorded on the sidecar.
-        actual_model: String,
-    },
-    /// A Responses sidecar was not appended at its required branch boundary.
-    #[error("invalid Responses sidecar: {0}")]
-    InvalidResponsesSidecar(String),
-}
-
 /// One route's immutable replay projection. Ordinary appends inspect only the
 /// suffix below `head`; checkout, compaction and route changes rebuild it.
 struct ResponsesReplayCache {
@@ -1602,15 +1353,3 @@ mod tool_inference_tests;
 
 #[cfg(test)]
 mod tests;
-
-impl CustomMessage {
-    /// Pi message projection for a real durable lifecycle boundary.
-    pub fn lifecycle_value(&self, timestamp_unix_ms: u64) -> serde_json::Value {
-        let mut value = serde_json::json!({"role":"custom", "customType":self.custom_type,
-            "content":self.content, "display":self.display, "timestamp":timestamp_unix_ms});
-        if let Some(details) = &self.details {
-            value["details"] = details.clone();
-        }
-        value
-    }
-}

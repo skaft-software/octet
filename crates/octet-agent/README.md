@@ -2,6 +2,12 @@
 
 Stateful agent loop with tool execution and event streaming for octet.
 
+The default `agent` Cargo feature includes the complete runtime. Independent
+hosts can disable default features and select `tools,extensions` to compile the
+built-in tools and process extension host without the loop or session writer.
+See [provider embedding](../../docs/provider-embedding.md#ultras-downstream-boundary)
+and the [module map](../../docs/maintainers/agent-feature-boundary.md).
+
 `octet-agent` sits above [`octet-ai`](../octet-ai): it reconstructs provider
 requests from a persistent, branchable JSONL session, drives the model
 stream, executes tool calls through a small extension boundary, persists
