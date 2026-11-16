@@ -626,6 +626,7 @@ impl InteractiveShell {
                                 } else {
                                     EditAction::Down
                                 },
+                                PromptHistoryKey::Dedicated,
                             );
                         }
                         drop(state);

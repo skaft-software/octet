@@ -196,9 +196,17 @@ fn prompt_history_single_line_drafts_recall_immediately_idle_and_active() {
             let run = active.then(|| shell.begin_run("background work"));
             shell.apply_edit(EditAction::Up);
             assert_eq!(shell.pending(), "newest\nmultiline");
+            // A recalled entry opens on its last row, so one Up reaches its
+            // first row and the next one leaves it (#381). This test used to
+            // expect every Up to replace the entry.
+            shell.apply_edit(EditAction::Up);
+            assert_eq!(shell.pending(), "newest\nmultiline");
             shell.apply_edit(EditAction::Up);
             assert_eq!(shell.pending(), "oldest\nmultiline");
             shell.apply_edit(EditAction::Up);
+            shell.apply_edit(EditAction::Up);
+            assert_eq!(shell.pending(), "oldest\nmultiline", "oldest wrapped");
+            shell.apply_edit(EditAction::Down);
             assert_eq!(shell.pending(), "oldest\nmultiline");
             shell.apply_edit(EditAction::Down);
             assert_eq!(shell.pending(), "newest\nmultiline");
@@ -208,6 +216,246 @@ fn prompt_history_single_line_drafts_recall_immediately_idle_and_active() {
             assert_eq!(shell.current_run_id(), run);
         }
     }
+}
+
+fn composer_cursor_row(shell: &InteractiveShell) -> usize {
+    let state = shell.state.borrow();
+    let geometry = crate::tui::composer_surface::composer_editor_geometry(&state, state.size.0);
+    let row = state.composer_editor_projection(geometry).cursor_row();
+    row
+}
+
+#[test]
+fn recalled_multiline_prompt_moves_between_its_rows_before_leaving_at_a_boundary() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("older");
+    shell.apply_edit(EditAction::Paste("sent line\n".repeat(20)));
+    let sent = shell.drain_composed();
+    shell.on_composed_prompt_submitted(&sent);
+    shell.on_prompt_submitted("one\ntwo\nthree");
+    shell.prefill_editor("draft".into());
+    shell.state.borrow_mut().editor.set_cursor(2);
+
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "one\ntwo\nthree");
+    assert_eq!(composer_cursor_row(&shell), 2);
+
+    // Interior rows belong to the editor: the entry and the saved draft stay.
+    for row in [1, 0] {
+        shell.apply_edit(EditAction::Up);
+        assert_eq!(shell.pending(), "one\ntwo\nthree", "Up replaced the entry");
+        assert_eq!(composer_cursor_row(&shell), row);
+        assert!(shell.state.borrow().prompt_history_navigation.is_some());
+    }
+    for row in [1, 2] {
+        shell.apply_edit(EditAction::Down);
+        assert_eq!(
+            shell.pending(),
+            "one\ntwo\nthree",
+            "Down replaced the entry"
+        );
+        assert_eq!(composer_cursor_row(&shell), row);
+        assert!(shell.state.borrow().prompt_history_navigation.is_some());
+    }
+
+    // First row: older entry, with its paste payload still attached.
+    shell.apply_edit(EditAction::Up);
+    shell.apply_edit(EditAction::Up);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), sent.display_text);
+    assert!(!shell.state.borrow().ledger.is_empty());
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "older");
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "older", "oldest history wrapped");
+
+    // Last row: newer entries, then the exact draft without wrapping.
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), sent.display_text);
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), "one\ntwo\nthree");
+    assert_eq!(composer_cursor_row(&shell), 2);
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), "draft");
+    assert_eq!(shell.state.borrow().editor.cursor(), 2);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+    assert!(shell.state.borrow().ledger.is_empty());
+    assert_eq!(shell.state.borrow().prompt_history.len(), 3);
+}
+
+#[test]
+fn recalled_wrapped_prompt_moves_between_its_visual_rows_before_leaving() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(16, 24);
+    shell.on_prompt_submitted("previous");
+    let wrapped = "a wrapped sent prompt with several visual rows";
+    shell.on_prompt_submitted(wrapped);
+
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), wrapped);
+    let last_row = composer_cursor_row(&shell);
+    assert!(last_row >= 2, "fixture must wrap across several rows");
+
+    for row in (0..last_row).rev() {
+        shell.apply_edit(EditAction::Up);
+        assert_eq!(shell.pending(), wrapped, "Up replaced the wrapped entry");
+        assert_eq!(composer_cursor_row(&shell), row);
+    }
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), wrapped, "Down replaced the wrapped entry");
+    assert_eq!(composer_cursor_row(&shell), 1);
+    shell.apply_edit(EditAction::Up);
+    shell.apply_edit(EditAction::Up);
+    assert_eq!(shell.pending(), "previous");
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), wrapped);
+    shell.apply_edit(EditAction::Down);
+    assert_eq!(shell.pending(), "");
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+}
+
+/// Send one key through the composer's dispatch path, applying the edit it
+/// translates to the way the interactive loop does.
+fn press_key(
+    shell: &mut InteractiveShell,
+    code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> crate::tui::keymap::InputAction {
+    use crate::tui::keymap::InputAction;
+    let event = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(code, modifiers));
+    let action = shell.translate_input(Some(event), false);
+    match &action {
+        InputAction::Edit(edit) => shell.apply_edit(edit.clone()),
+        InputAction::EditQueued => shell.edit_queued_message(),
+        _ => {}
+    }
+    action
+}
+
+fn press_arrow(
+    shell: &mut InteractiveShell,
+    code: crossterm::event::KeyCode,
+) -> crate::tui::keymap::InputAction {
+    press_key(shell, code, crossterm::event::KeyModifiers::NONE)
+}
+
+#[test]
+fn picker_and_suggestions_keep_their_arrows_while_a_multiline_prompt_is_recalled() {
+    use crate::tui::keymap::InputAction;
+    use crossterm::event::KeyCode;
+
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["src", "srv"] {
+        std::fs::create_dir_all(dir.path().join(name)).unwrap();
+    }
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_workspace(dir.path().to_path_buf());
+    shell.on_prompt_submitted("older");
+    let recalled = "one\ntwo\ninspect ./sr";
+    shell.on_prompt_submitted(recalled);
+
+    assert_eq!(
+        press_arrow(&mut shell, KeyCode::Up),
+        InputAction::Edit(EditAction::Up)
+    );
+    assert_eq!(shell.pending(), recalled);
+    let unchanged = |shell: &InteractiveShell, row: usize, context: &str| {
+        assert_eq!(shell.pending(), recalled, "{context}");
+        assert_eq!(composer_cursor_row(shell), row, "{context}");
+        assert!(
+            shell.state.borrow().prompt_history_navigation.is_some(),
+            "{context}"
+        );
+    };
+
+    // Visible path suggestions own the arrows on the recalled entry's last
+    // row: Down selects the next suggestion instead of returning to the draft.
+    assert_eq!(input_path_suggestions(&shell.state.borrow()).len(), 2);
+    assert_eq!(shell.state.borrow().path_selection, 0);
+    press_arrow(&mut shell, KeyCode::Down);
+    assert_eq!(shell.state.borrow().path_selection, 1);
+    unchanged(&shell, 2, "Down left the entry under a suggestion menu");
+    press_arrow(&mut shell, KeyCode::Up);
+    assert_eq!(shell.state.borrow().path_selection, 0);
+    unchanged(&shell, 2, "Up moved the cursor under a suggestion menu");
+
+    // A picker owns every arrow: the hidden entry neither moves nor changes.
+    open_select_panel(&mut shell, &["alpha", "beta", "gamma"]);
+    for (code, selected) in [(KeyCode::Down, 1), (KeyCode::Down, 2), (KeyCode::Up, 1)] {
+        assert_eq!(press_arrow(&mut shell, code), InputAction::Ignore);
+        shell.panel_input(&panel_key(code));
+        assert_eq!(panel_state(&shell).1, selected);
+        unchanged(&shell, 2, "a picker arrow reached the recalled entry");
+    }
+    shell.close_panel();
+    unchanged(&shell, 2, "closing the picker disturbed the recalled entry");
+    assert_eq!(shell.state.borrow().prompt_history.len(), 2);
+}
+
+#[test]
+fn queued_message_editing_stays_separate_from_a_recalled_multiline_prompt() {
+    use crate::tui::keymap::InputAction;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    // Windows and WSL use the Windows-flavoured key set, which binds Alt+Q.
+    let wsl = cfg!(target_os = "linux")
+        && (std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::env::var_os("WSL_INTEROP").is_some());
+    let dequeue = if cfg!(windows) || wsl {
+        KeyCode::Char('q')
+    } else {
+        KeyCode::Up
+    };
+
+    let mut shell = InteractiveShell::test_shell();
+    shell.on_prompt_submitted("older");
+    shell.on_prompt_submitted("one\ntwo\nthree");
+    shell.apply_edit(EditAction::Paste("queued line\n".repeat(20)));
+    let queued = shell.drain_composed();
+    let queued_display = queued.display_text.clone();
+    shell.queue_follow_up(queued);
+
+    // The edit-queued key on an interior row of a recalled entry is neither a
+    // history arrow nor allowed to overwrite the entry: the queue is intact.
+    press_arrow(&mut shell, KeyCode::Up);
+    press_arrow(&mut shell, KeyCode::Up);
+    assert_eq!(composer_cursor_row(&shell), 1);
+    assert_eq!(
+        press_key(&mut shell, dequeue, KeyModifiers::ALT),
+        InputAction::EditQueued
+    );
+    assert_eq!(shell.pending(), "one\ntwo\nthree");
+    assert_eq!(composer_cursor_row(&shell), 1);
+    assert!(shell.state.borrow().prompt_history_navigation.is_some());
+    assert_eq!(shell.state.borrow().follow_up_queue.len(), 1);
+
+    // Back on the empty draft, the same key recalls the queued message as an
+    // ordinary draft, outside history, with its paste payload.
+    press_arrow(&mut shell, KeyCode::Down);
+    press_arrow(&mut shell, KeyCode::Down);
+    assert_eq!(shell.pending(), "");
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+    press_key(&mut shell, dequeue, KeyModifiers::ALT);
+    assert_eq!(shell.pending(), queued_display);
+    assert!(shell.state.borrow().follow_up_queue.is_empty());
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+    assert!(!shell.state.borrow().ledger.is_empty());
+
+    // Arrows then treat it as the draft: history opens above it and Down
+    // returns it with the payload, never requeueing or submitting it.
+    press_arrow(&mut shell, KeyCode::Up);
+    assert_eq!(shell.pending(), "one\ntwo\nthree");
+    for _ in 0..3 {
+        press_arrow(&mut shell, KeyCode::Down);
+    }
+    assert_eq!(shell.pending(), queued_display);
+    assert!(shell.state.borrow().prompt_history_navigation.is_none());
+    assert!(shell.state.borrow().follow_up_queue.is_empty());
+    assert_eq!(shell.state.borrow().prompt_history.len(), 2);
+    assert!(matches!(
+        shell.drain_composed().parts.as_slice(),
+        [octet_agent::InputPart::Text(text)] if text == &"queued line\n".repeat(20)
+    ));
 }
 
 #[test]
