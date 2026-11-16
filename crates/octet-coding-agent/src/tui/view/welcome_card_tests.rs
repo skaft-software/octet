@@ -842,6 +842,19 @@ fn click_reaction_is_local_bounded_and_stops() {
             now + std::time::Duration::from_millis(n * 50)
         ));
         assert!((state.welcome_reaction.unwrap().phase - expected_phase).abs() < 0.0001);
+        let blink_started = state.welcome_reaction.unwrap().blink_started;
+        if next_time
+            .duration_since(previous.blink_started)
+            .as_secs_f32()
+            < crate::tui::splash::BLINK_DURATION
+        {
+            assert_eq!(
+                blink_started, previous.blink_started,
+                "rapid clicks must not freeze the face"
+            );
+        } else {
+            assert_eq!(blink_started, next_time);
+        }
     }
     assert!(state.welcome_reaction.unwrap().strength > 0.9);
     assert!(state.welcome_reaction.unwrap().strength <= 1.0);

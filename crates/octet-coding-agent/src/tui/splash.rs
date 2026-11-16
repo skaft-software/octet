@@ -3,6 +3,7 @@
 use crate::tui::theme::OctetTheme;
 
 pub(crate) const DURATION: f32 = 2.2;
+pub(crate) const BLINK_DURATION: f32 = 0.94;
 const BYTE: &[u8; 8] = b"01101111";
 const COLORS: [(u8, u8, u8); 8] = [
     (0x4b, 0x8d, 0xff),
@@ -35,7 +36,7 @@ pub(crate) fn render_logo(
         model_accent,
         solid_color,
         (0.0, 0.0),
-        false,
+        None,
     )
 }
 
@@ -43,6 +44,7 @@ pub(crate) fn render_logo(
 pub(crate) fn render_reaction(
     theme: &OctetTheme,
     elapsed: f32,
+    blink_elapsed: f32,
     strength: f32,
     phase: f32,
     model_accent: Option<(u8, u8, u8)>,
@@ -56,7 +58,7 @@ pub(crate) fn render_reaction(
         model_accent,
         solid_color,
         (strength, phase + rainbow_travel(elapsed, strength)),
-        true,
+        Some(blink_elapsed),
     )
 }
 
@@ -64,13 +66,27 @@ pub(crate) fn render_reaction(
 /// phase across clicks so accelerating never jumps back to the first colour.
 pub(crate) fn rainbow_travel(elapsed: f32, strength: f32) -> f32 {
     let t = elapsed.min(DURATION);
-    1.5 * t + 10.5 * strength * (t - t * t / (2.0 * DURATION))
+    1.5 * t + 16.5 * strength * (t - t * t / (2.0 * DURATION))
 }
 
-/// Two brief closures, separated by a readable open pause.
-/// Two states are enough at this scale: partial blocks look like flicker.
-fn blink_closed(elapsed: f32) -> bool {
-    (0.04..0.12).contains(&elapsed) || (0.26..0.34).contains(&elapsed)
+/// A quick squeeze followed by a softer second blink. Smoothstep gives each
+/// stroke a gentle start and landing; reopening takes longer than closing.
+fn blink_lift(elapsed: f32) -> f32 {
+    for (start, close, reopen) in [(0.04, 0.08, 0.16), (0.48, 0.10, 0.20)] {
+        let t = elapsed - start;
+        if t < 0.0 || t >= close + 0.08 + reopen {
+            continue;
+        }
+        let x = if t < close {
+            t / close
+        } else if t < close + 0.08 {
+            1.0
+        } else {
+            1.0 - (t - close - 0.08) / reopen
+        };
+        return x * x * (3.0 - 2.0 * x);
+    }
+    0.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -82,7 +98,7 @@ fn render_mark(
     model_accent: Option<(u8, u8, u8)>,
     solid_color: Option<(u8, u8, u8)>,
     rainbow: (f32, f32),
-    blink: bool,
+    blink: Option<f32>,
 ) -> Vec<String> {
     let width = width.min(42);
     let rows = symbol_rows.min(21);
@@ -122,9 +138,12 @@ fn render_mark(
             let mut line = " ".repeat(left_pad);
             for (column, bit) in BYTE.iter().enumerate() {
                 let upper_eye = *bit == b'0' && row < top_pad + column_width;
-                // The right eye trails by one existing animation tick.
-                let eye_elapsed = elapsed - if column == 3 { 0.04 } else { 0.0 };
-                if upper_eye && !(blink && blink_closed(eye_elapsed)) {
+                // Only the upper eye cells move; the base never pulses.
+                let lift = blink.map_or(0.0, |t| {
+                    blink_lift(t - if column == 3 { 0.08 } else { 0.0 })
+                });
+                let level = (lift * 8.0).round() as usize;
+                if upper_eye && level == 0 {
                     line.push_str(&blank);
                     continue;
                 }
@@ -161,7 +180,14 @@ fn render_mark(
                         rainbow.0 * (1.0 - elapsed / DURATION).clamp(0.0, 1.0),
                     );
                 }
-                line.push_str(&theme.rgb_fg(color, &filled));
+                let eye = if theme.unicode() {
+                    [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][level]
+                } else if level >= 4 {
+                    "#"
+                } else {
+                    " "
+                };
+                line.push_str(&theme.rgb_fg(color, if upper_eye { eye } else { &filled }));
             }
             line.push_str(&" ".repeat(right_pad));
             line
@@ -555,7 +581,7 @@ mod reaction_tests {
     fn rainbow_moves_right_accelerates_with_energy_and_coasts_down() {
         let theme = crate::tui::theme::test_theme();
         let colors = |phase| {
-            render_reaction(&theme, 0.0, 1.0, phase, None, None)[1]
+            render_reaction(&theme, 0.0, 0.0, 1.0, phase, None, None)[1]
                 .split("\x1b[38;2;")
                 .skip(1)
                 .map(|part| part.split('m').next().unwrap().to_owned())
@@ -587,52 +613,64 @@ mod reaction_tests {
                 .map(|s| sexy_tui_rs::strip_terminal_sequences(&s))
                 .collect::<Vec<_>>()
         };
-        for elapsed in [0.10, 0.32] {
-            let blink = plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None));
-            assert_eq!(blink, ["████████", "████████"]);
-        }
-        for elapsed in [0.0, 0.40, 0.85] {
+        for elapsed in [0.0, BLINK_DURATION, 1.2] {
             assert_eq!(
-                plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None)),
+                plain(render_reaction(
+                    &theme, elapsed, elapsed, 0.0, 0.0, None, None
+                )),
                 [" ██ ████", "████████"]
             );
         }
-        for (elapsed, upper) in [
-            (0.06, "███ ████"),
-            (0.14, " ███████"),
-            (0.28, "███ ████"),
-            (0.36, " ███████"),
-        ] {
-            assert_eq!(
-                plain(render_reaction(&theme, elapsed, 0.0, 0.0, None, None)),
-                [upper, "████████"]
-            );
-        }
         for ms in 0..=1000 {
+            let elapsed = ms as f32 / 1000.0;
             let rows = plain(render_reaction(
-                &theme,
-                ms as f32 / 1000.0,
-                0.0,
-                0.0,
-                None,
-                None,
+                &theme, elapsed, elapsed, 0.0, 0.0, None, None,
             ));
-            assert!([" ██ ████", "███ ████", " ███████", "████████"].contains(&rows[0].as_str()));
+            assert_eq!(rows[0].chars().count(), 8);
             assert_eq!(rows[1], "████████");
+            let upper: Vec<_> = rows[0].chars().collect();
+            for column in [1, 2, 4, 5, 6, 7] {
+                assert_eq!(upper[column], '█');
+            }
+            // The right eye is exactly the left eye from 80 ms earlier.
+            if ms >= 80 {
+                let earlier = plain(render_reaction(
+                    &theme,
+                    elapsed,
+                    elapsed - 0.08,
+                    0.0,
+                    0.0,
+                    None,
+                    None,
+                ));
+                assert_eq!(upper[3], earlier[0].chars().next().unwrap());
+            }
+        }
+        let half = plain(render_reaction(&theme, 0.08, 0.08, 0.0, 0.0, None, None));
+        assert_eq!(half, ["▄██ ████", "████████"]);
+        for elapsed in [0.16, 0.62] {
+            assert_eq!(
+                plain(render_reaction(
+                    &theme, elapsed, elapsed, 0.0, 0.0, None, None
+                ))[0]
+                    .chars()
+                    .next(),
+                Some('█')
+            );
         }
         let normal = render_logo(&theme, 8, 2, DURATION, None, None);
         assert_eq!(
-            render_reaction(&theme, DURATION, 1.0, 0.0, None, None),
+            render_reaction(&theme, DURATION, DURATION, 1.0, 0.0, None, None),
             normal
         );
-        let sweep = render_reaction(&theme, 0.4, 0.0, 0.0, None, None);
-        let rainbow = render_reaction(&theme, 0.4, 1.0, 0.0, None, None);
+        let sweep = render_reaction(&theme, 0.4, 0.4, 0.0, 0.0, None, None);
+        let rainbow = render_reaction(&theme, 0.4, 0.4, 1.0, 0.0, None, None);
         assert_ne!(sweep, rainbow);
         assert_eq!(plain(sweep), plain(rainbow));
         let solid = Some((217, 119, 87));
         assert_eq!(
-            render_reaction(&theme, 0.4, 0.0, 0.0, None, solid),
-            render_reaction(&theme, 0.4, 1.0, 0.0, None, solid)
+            render_reaction(&theme, 0.4, 0.4, 0.0, 0.0, None, solid),
+            render_reaction(&theme, 0.4, 0.4, 1.0, 0.0, None, solid)
         );
     }
 }

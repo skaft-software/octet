@@ -32,6 +32,7 @@ fn changelog_hint(state: &ShellState, width: u16) -> String {
 #[derive(Clone, Copy)]
 pub(super) struct MarkReaction {
     started: Instant,
+    blink_started: Instant,
     strength: f32,
     phase: f32,
 }
@@ -101,8 +102,17 @@ pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Ins
             ))
         .rem_euclid(6.0)
     });
+    // Let an in-flight expression finish even while clicks rev the rainbow.
+    let blink_started = state
+        .welcome_reaction
+        .filter(|previous| {
+            now.duration_since(previous.blink_started).as_secs_f32()
+                < crate::tui::splash::BLINK_DURATION
+        })
+        .map_or(now, |previous| previous.blink_started);
     state.welcome_reaction = Some(MarkReaction {
         started: now,
+        blink_started,
         strength,
         phase,
     });
@@ -443,6 +453,7 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             logo = crate::tui::splash::render_reaction(
                 &state.theme,
                 reaction.started.elapsed().as_secs_f32(),
+                reaction.blink_started.elapsed().as_secs_f32(),
                 reaction.strength,
                 reaction.phase,
                 adaptive_accent,

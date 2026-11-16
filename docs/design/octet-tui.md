@@ -92,13 +92,16 @@ cards prioritize identity, setup, and permission state. The budget changes on
 resize, not draft edits. The terminal background remains unchanged.
 User-customized ANSI16 palettes can still affect actual contrast.
 
-The compact native mark stays static until clicked. A left click raises both
-short bars for two 80 ms closures separated by a 140 ms open gap. The right
-eye trails the left by 40 ms on closing and reopening.
-Only open and closed states are drawn, with no intermediate glyphs or idle
-blinks. The existing 2.2-second highlight
+The compact native mark stays static until clicked, with its canonical glyphs,
+colours and footprint unchanged at rest. A click raises only the two short bars:
+a quick eased squeeze, then a softer second blink, each holding closed for
+80 ms and reopening more slowly. The right eye trails the left by 80 ms.
+Partial-height blocks soften the motion within the existing upper eye cells;
+the baseline and other six bars never move. Rapid clicks let the expression
+finish rather than restarting it mid-stroke. There are no idle blinks.
+The existing 2.2-second highlight
 sweep accompanies it. Rapid clicks build a left-to-right rainbow cycle; faster
-clicks increase colour intensity and cycling speed (at most two revolutions per
+clicks increase colour intensity and cycling speed (at most three revolutions per
 second). Hue position is continuous across clicks, then slows and fades back to
 the normal palette; explicitly themed splash colours keep their hue. This is
 truecolor, animation-enabled decoration only. The existing scheduler owns the click reaction

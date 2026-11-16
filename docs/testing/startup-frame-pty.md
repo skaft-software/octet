@@ -223,13 +223,14 @@ settlement, stale resize geometry, reduced motion, lower colour capabilities,
 and preservation of explicitly themed hues. These are terminal-byte/VT checks,
 not attended visual acceptance.
 
-Blinks use only the existing open and closed shapes, with an 80 ms closure
-and a 140 ms open gap for doubles. The right eye trails the left by 40 ms. Blinking is click-only: the visible welcome
-does not schedule idle animation or redraw itself while waiting for input.
-Clicks retain their double blink and rainbow. Only the two short bars rise toward the `1`
-position; their lower cells and the other six bars never move.
+Blinks ease through partial-height blocks in the two upper eye cells: a quick
+squeeze and a softer second blink, each holding closed for 80 ms before a
+slower reopening. The right eye trails the left by 80 ms. Unit tests check that
+exact offset, fixed baseline and six full-height bars, canonical rest geometry,
+and uninterrupted blink timing across rapid clicks. Blinking is click-only:
+the welcome does not schedule idle animation or redraw while waiting for input.
 
 Rainbow regressions check left-to-right colour travel, seamless wrapping,
 phase continuity between clicks, faster cycling at higher click energy, and
-smooth deceleration after release. Cycling speed is bounded at two revolutions
+smooth deceleration after release. Cycling speed is bounded at three revolutions
 per second; no frame queue or physics runtime is used.
