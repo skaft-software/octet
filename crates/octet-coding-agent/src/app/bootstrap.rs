@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use crate::tui::terminal::TerminalInput as EventStream;
 use anyhow::Context;
-use futures_util::StreamExt;
 use octet_agent::extension_runtime::ExtensionRuntimeManager;
 use octet_agent::secure_fs::{create_regular_file_for_append, open_regular_file_for_append};
 use octet_agent::{
@@ -513,13 +512,6 @@ fn strict_env(name: &str) -> anyhow::Result<Option<String>> {
 
 fn blocking_discovery_client(timeout: Duration) -> reqwest::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-}
-
-fn discovery_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
