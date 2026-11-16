@@ -31,6 +31,8 @@ pub(super) struct SessionMirror {
     // The native owner is published even without session_entries negotiation.
     // None is an unnegotiated/unavailable projection, never an empty session.
     // Remember failures so callbacks cannot fall back to an older view.
+    // Counted transport stores identity facts only; its immutable View owns the
+    // document, expanded on demand for admitted inline replacement receipts.
     value: Option<serde_json::Value>,
 }
 
@@ -878,7 +880,24 @@ pub(in crate::extension_process) fn merge_routed_session_facts(
             "session setup facts unavailable; no stale session facts".into(),
         ));
     };
-    merge_session_snapshot(host, facts);
+    if owner_routes_enabled(&read_std_lock(&connection.protocol)) {
+        let revision = facts
+            .get("session_view_revision")
+            .and_then(serde_json::Value::as_u64);
+        drop(slot);
+        let view = lock_std_mutex(&connection.session_leaf.transport)
+            .current
+            .get(owner)
+            .and_then(Option::as_ref)
+            .cloned()
+            .filter(|view| Some(view.descriptor.view_revision) == revision)
+            .ok_or_else(|| {
+                ExtensionRuntimeError::Protocol("session setup facts revision changed".into())
+            })?;
+        merge_session_snapshot(host, &transport::host_facts(&view)?);
+    } else {
+        merge_session_snapshot(host, facts);
+    }
     Ok(())
 }
 

@@ -609,6 +609,16 @@ their original revision. Copied observations gain no authority to replay opaque
 native continuations. The matched 16/160/1600-entry work-count fixtures live in
 `test/session-mirror-large.test.mjs` and `test/session-transport.test.mjs`.
 
+The native host shares encoded immutable history between unchanged owner-bound
+publications and invocation snapshots, keyed by native handle/mutation identity
+and namespace. Each invocation retains its own revision, preparation and quota
+reservation. Ordinary publication keeps only identity facts in the native mirror;
+setup/replacement receipts expand full inline facts only when requested. Changed
+native histories still require complete encoding and transfer. The native
+`unchanged_invocation_history_work_is_flat` fixture counts entry serialization
+and inline-history parsing at 16, 160 and 1600 entries, including mutation and
+namespace invalidation checks.
+
 Negotiated API 0.4 `session_append_receipts_v1` requires `session_entries` and
 both `session_snapshot_transport_v1`/`session_owner_routes_v1`. Grant-less appends
 from live hooks, commands, shortcuts and tools then publish the actual native durable

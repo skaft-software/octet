@@ -77,12 +77,13 @@ impl Drop for Reservation {
 
 pub(in crate::extension_process) struct View {
     // Declaration order is intentional: bytes are dropped before the quota.
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     pub(in crate::extension_process) descriptor: Descriptor,
     /// Native content identity a history view was encoded from. `None` for
     /// invocation payloads and copied replacement views, which never satisfy
     /// an unchanged-publication check.
     pub(in crate::extension_process) source: Option<crate::session::SessionViewIdentity>,
+    namespace: Option<String>,
     _reservation: Reservation,
 }
 struct Transfer {
@@ -297,6 +298,7 @@ impl Store {
                     bytes: view.bytes.clone(),
                     descriptor,
                     source: None,
+                    namespace: None,
                     _reservation: reservation,
                 })),
             );
@@ -325,9 +327,10 @@ impl Store {
             ..history.descriptor.clone()
         };
         Ok(Arc::new(View {
-            bytes: encoded,
+            bytes: Arc::new(encoded),
             descriptor,
             source: None,
+            namespace: None,
             _reservation: reservation,
         }))
     }
@@ -557,12 +560,28 @@ impl Store {
     }
 }
 
+/// Publication needs only identity facts. Expand history only when an admitted
+/// setup/replacement receipt explicitly consumes the complete inline snapshot.
+pub(in crate::extension_process) fn publication_facts(view: &View) -> Value {
+    json!({
+        "session_leaf_id": view.descriptor.head,
+        "session_view_revision": view.descriptor.view_revision,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_FACT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The legacy-shaped session facts an admitted setup/replacement receipt
 /// carries: same records as the counted document, branch expanded to entries.
 /// One representation of history; only the delivery channel differs.
 pub(in crate::extension_process) fn host_facts(
     view: &View,
 ) -> Result<Value, ExtensionRuntimeError> {
+    #[cfg(test)]
+    HOST_FACT_BYTES.with(|count| count.set(count.get() + view.bytes.len()));
     let document: Value = serde_json::from_slice(&view.bytes).map_err(|_| unavailable())?;
     let entries = document.get("entries").cloned().ok_or_else(unavailable)?;
     let mut by_id = HashMap::new();

@@ -198,12 +198,9 @@ pub(in crate::extension_process) fn publish(
             result
         };
         let view = result?;
-        // Identity is transport-independent: the paired profile keeps the exact
-        // owner fence and the same counted session facts in the mirror slot that
-        // admitted setup/replacement receipts read synchronously, while hooks and
-        // reads travel through parent-bound chunk handles. No legacy whole-frame
-        // legacy snapshot is built for it.
-        let facts = super::host_facts(&view)?;
+        // Publication tracks identity only. Complete inline history is expanded
+        // on demand for setup/replacement receipts; ordinary hooks use chunks.
+        let facts = super::publication_facts(&view);
         let (changed, retired_owner) = {
             let mut slot = lock_std_mutex(&connection.session_leaf.mirror);
             let mirror = SessionMirror {

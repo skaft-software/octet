@@ -116,7 +116,7 @@ fn reload_history_rebind_charges_new_generation_without_copying_authority() {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(read["data"].as_str().unwrap())
         .unwrap();
-    assert_eq!(decoded, view.bytes);
+    assert_eq!(decoded.as_slice(), view.bytes.as_slice());
     assert!(replacement.next_revision().unwrap() > revision);
     replacement.clear();
     drop(rebound);
