@@ -94,6 +94,26 @@ test('factory throws on load and reload leave sibling callbacks working', async 
   }
 });
 
+test('completed callbacks accept later events while completion publication waits', async t => {
+  const { HookBudget } = await import('../lib/handler-budget.mjs');
+  let release;
+  const publication = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const runtime = {
+    dispatcher: { async begin() { return {}; }, finish: () => publication },
+    backgroundError: error => assert.fail(error),
+  };
+  const store = { pending: new Set(), controller: new AbortController() };
+  const entry = { label: 'stream observer' };
+  let calls = 0;
+  const run = () => new HookBudget(runtime, store, 'message_update').run(entry, { ...store }, () => ++calls);
+  assert.deepEqual(await run(), { ran: true, value: 1 });
+  // Completion telemetry is still awaiting its transport ACK, but the handler
+  // itself has settled and must receive the next event without replay or loss.
+  assert.deepEqual(await run(), { ran: true, value: 2 });
+  assert.equal(calls, 2);
+});
+
 test('interrupted callback records cannot exhaust healthy dispatcher capacity', async () => {
   const { Dispatcher } = await import('../lib/dispatcher.mjs');
   const dispatcher = new Dispatcher({initialized:false});

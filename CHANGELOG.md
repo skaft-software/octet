@@ -94,6 +94,7 @@
 - Wheel bursts publish promptly after ready input drains, preserving every scroll delta without a second frame-period wait.
 - Pi terminal listeners retain their one-second fail-open deadline with dispatcher supervision, keeping subsequent typing responsive.
 - Pi extension load failures and discarded stalled factories appear as grouped, actionable errors while healthy siblings continue.
+- Pi streaming observers receive subsequent events as soon as their handler settles, independently of dispatcher status delivery.
 
 ## [0.10.4] - 2026-11-12
 

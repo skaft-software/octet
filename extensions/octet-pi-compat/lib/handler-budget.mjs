@@ -226,8 +226,11 @@ export class HookBudget {
     const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
     if (budget) entry.busy = true;
     settled.then(async late => {
-      await this.runtime.dispatcher?.finish(callback);
+      // Pi packages/agent/src/agent-loop.ts:434-450 delivers every stream
+      // update. A settled handler is available again before telemetry waits
+      // for its transport ACK; that wait must not skip the next observation.
       if (budget) entry.busy = false;
+      await this.runtime.dispatcher?.finish(callback);
       // The hook stopped waiting for this one: detached out of its budget,
       // preempted by a quit, or a run the host cancelled.
       if (!child.detached && !store.controller.signal.aborted) return;

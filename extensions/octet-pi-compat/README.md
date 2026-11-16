@@ -1094,7 +1094,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The isolated rebased-candidate adapter run, with two test files in parallel, is
-**1639 tests: 1606 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1649 tests: 1616 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the

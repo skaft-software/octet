@@ -290,7 +290,10 @@ not end a prompt-phase wait on the extension's behalf: cancellation, owner
 generations and process supervision do.
 A handler that outlives its share keeps running but is no longer waited for. It
 is named once in `[Extension issues]`, and later hooks skip it while it is still
-busy. A tool-call callback that cannot answer is skipped with a warning; only
+busy. Once its callback settles, the handler can receive the next event even
+while dispatcher completion telemetry awaits transport acknowledgement; telemetry
+does not make a completed handler busy or suppress streaming observations.
+A tool-call callback that cannot answer is skipped with a warning; only
 an explicit veto blocks the call. Open UI prompts are unbounded for every callback:
 the user's answer time is excluded, and execution resumes with its remaining budget.
 
