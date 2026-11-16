@@ -58,6 +58,7 @@
 - Audio admission, codec errors and replay placeholders identify the provider and model when a route cannot accept a clip.
 - Completed tool durations display identically live and after resuming a session.
 - Provider HTTP failures show redacted structured error messages, codes and types, including pretty-printed Responses error bodies.
+- Plain-mode outcomes use compact durations with explicit completion, failure and interruption labels.
 
 ## [0.10.4] - 2026-11-12
 

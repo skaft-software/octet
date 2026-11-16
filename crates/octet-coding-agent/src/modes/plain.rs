@@ -898,7 +898,16 @@ mod tests {
             elapsed: Duration::from_secs(2),
             reason: "command exited 1".into(),
         });
-        assert_eq!(failed, "[failed] command exited 1 - 2.0s");
+        // Plain outcomes share the adaptive formatter: whole seconds omit
+        // fractional trailing zeroes just like completed outcomes.
+        assert_eq!(failed, "[failed] command exited 1 - 2s");
+        assert!(failed.is_ascii());
+
+        let interrupted = outcome_text(&RunOutcome::Interrupted {
+            elapsed: Duration::from_secs(2),
+        });
+        assert_eq!(interrupted, "[interrupted] 2s");
+        assert!(interrupted.is_ascii());
     }
 
     #[test]

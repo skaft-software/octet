@@ -38,7 +38,9 @@ identifier rather than globally overriding `TERM` to hide a detection problem.
 
 The first three share one agent loop, providers, sessions, safety policy and
 cancellation. Print mode still has tools, so add [tool limits](tools.md) if you
-want none. Plain and print send readiness diagnostics to stderr.
+want none. Plain and print send readiness diagnostics to stderr. Plain outcomes
+use explicit `[completed]`, `[failed]`, and `[interrupted]` labels with the shared
+compact duration format: `1.2s` or `2s`, omitting fractional trailing zeroes.
 
 [Cache warming](cache-warming.md) defaults to `streaming`; `idle` also runs while
 the retained host waits for input, without delaying input, reload or shutdown.
