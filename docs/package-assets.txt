@@ -240,6 +240,7 @@ text docs/instructions.md
 text docs/linux.md
 text docs/maintainers/README.md
 text docs/maintainers/conventions.md
+text docs/maintainers/agent-feature-boundary.md
 text docs/maintainers/provider-boundary.md
 text docs/maintainers/recorded-audio-qualification.md
 text docs/maintainers/pi-v0.10-candidate.md
