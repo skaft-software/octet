@@ -330,13 +330,19 @@ pub enum UnsupportedError {
     /// The requested reasoning execution mode is not available on this route.
     #[error("Reasoning mode is unsupported")]
     ReasoningMode,
-    /// Reasoning continuation state protocol mismatch.
-    #[error("Reasoning state mismatch: have {have:?}, want {want:?}")]
+    /// Reasoning continuation state is incompatible with the target protocol or model.
+    #[error(
+        "Reasoning state mismatch: have {have:?} model {have_model:?}, want {want:?} model {want_model:?}"
+    )]
     ReasoningStateMismatch {
         /// The protocol of the reasoning state.
         have: crate::types::Protocol,
+        /// The source model of the reasoning state.
+        have_model: crate::types::ModelId,
         /// The target protocol.
         want: crate::types::Protocol,
+        /// The target model.
+        want_model: crate::types::ModelId,
     },
     /// Provider media references are not supported.
     #[error("Provider media references are unsupported")]

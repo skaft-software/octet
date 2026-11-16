@@ -672,7 +672,9 @@ pub(crate) fn validate_request(
                                     return Err(AiError::Unsupported(
                                         UnsupportedError::ReasoningStateMismatch {
                                             have: assistant.protocol,
+                                            have_model: assistant.model.clone(),
                                             want: protocol,
+                                            want_model: target_model.clone(),
                                         },
                                     ));
                                 }
@@ -724,7 +726,9 @@ pub(crate) fn validate_request(
                                         return Err(AiError::Unsupported(
                                             UnsupportedError::ReasoningStateMismatch {
                                                 have: state.protocol,
+                                                have_model: state.model.clone(),
                                                 want: protocol,
+                                                want_model: target_model.clone(),
                                             },
                                         ));
                                     }

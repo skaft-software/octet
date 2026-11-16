@@ -128,9 +128,13 @@ When a session switches models or protocols, encoding drops the previous
 model's reasoning (including readable thinking) and normalizes tool-call IDs.
 Same-model signed and redacted blocks stay available for continuation, even with
 empty text. The saved session retains the original reasoning and tool IDs.
+Offline agent tests cover a saved Codex Terra session with encrypted reasoning
+and a tool call resumed on Sol, as well as verbatim same-model Terra replay.
+Both paths continue through a new tool turn without changing the saved prefix.
 
 Malformed or unsigned same-model Bedrock reasoning blocks fail. Strict mode
-rejects incompatible continuation state; Lossy mode drops it with diagnostics
+rejects incompatible continuation state and identifies both source and target
+models, including when their protocols match; Lossy mode drops it with diagnostics
 rather than turning opaque state into plaintext. Buffers remain under the existing
 aggregate response limit. Opaque replay fields serialize unchanged for durable
 continuation, but their Debug representations are redacted.

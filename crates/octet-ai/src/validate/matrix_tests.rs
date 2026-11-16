@@ -434,6 +434,41 @@ fn reasoning_state_mismatch() {
     ));
 }
 
+#[test]
+fn reasoning_state_same_protocol_mismatch_names_both_models() {
+    let mut req = base_request();
+    req.messages = vec![Message::Assistant(AssistantMessage {
+        content: vec![AssistantPart::Reasoning(ReasoningPart {
+            text: None,
+            state: Some(ReasoningState {
+                protocol: Protocol::OpenAiResponses,
+                model: ModelId("codex/gpt-6.1-terra".into()),
+                kind: ReasoningStateKind::OpenAiReasoning {
+                    item_id: Some("rs_private".into()),
+                    encrypted_content: Some("private-encrypted-state".into()),
+                },
+            }),
+        })],
+        model: ModelId("codex/gpt-6.1-terra".into()),
+        protocol: Protocol::OpenAiResponses,
+    })];
+    let error = validate_request(
+        &req,
+        &caps(false, false, false, false, true, false),
+        &limits(),
+        Protocol::OpenAiResponses,
+        &ModelId("codex/gpt-6.1-sol".into()),
+        Strict,
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("codex/gpt-6.1-terra"), "{message}");
+    assert!(message.contains("codex/gpt-6.1-sol"), "{message}");
+    assert!(message.contains("OpenAiResponses"), "{message}");
+    assert!(!message.contains("have OpenAiResponses, want OpenAiResponses"));
+    assert!(!message.contains("private"), "{message}");
+}
+
 // --- structured output without capability ---
 #[test]
 fn structured_output_without_capability() {

@@ -55,6 +55,7 @@
 - Pi session mirrors index single-entry reads and maintain ordinary appends without rescanning earlier history.
 - Prompts continue while an extension append process restarts, and fresh callbacks use the current generation.
 - Resumed sessions drop foreign-model thinking from provider requests while preserving saved reasoning and normalizing tool-call IDs.
+- Reasoning continuation errors identify source and target models, including switches between models on the same protocol.
 - Native Pi snapshots share unchanged encoded history and expand inline replacement history only when requested.
 - Audio admission, codec errors and replay placeholders identify the provider and model when a route cannot accept a clip.
 - Completed tool durations display identically live and after resuming a session.
