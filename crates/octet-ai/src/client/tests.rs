@@ -418,3 +418,66 @@ fn structured_http_error_sanitization_is_bounded_valid_json() {
     assert!(!body.contains("private prompt"));
     assert!(!body.contains('\x1b'));
 }
+
+#[tokio::test]
+async fn google_files_proxy_preflight_precedes_credentials_and_upload() {
+    let direct = wiremock::MockServer::start().await;
+    let client = AiClient::try_with_proxy_environment(std::collections::BTreeMap::from([(
+        "HTTP_PROXY".into(),
+        "socks5://127.0.0.1:1080".into(),
+    )]))
+    .unwrap();
+    let mut model = crate::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&crate::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
+    Arc::make_mut(&mut model.spec).capabilities.input_modalities =
+        crate::ModalitySet::none().with(crate::Modality::Audio);
+    let mut request = crate::test_fixtures::base_request();
+    request.messages = vec![crate::Message::User(crate::UserMessage {
+        content: vec![crate::UserPart::Media(crate::Media::audio_bytes(
+            bytes::Bytes::from(vec![42; 12_000_000]),
+            crate::AudioFormat::Wav,
+        ))],
+    })];
+    let upload = url::Url::parse(&format!("{}/upload/v1beta/files", direct.uri())).unwrap();
+    // No API key: the proxy-stage error must win over credential resolution.
+    let error = client
+        .prepare_google_files(
+            &model,
+            &mut request,
+            &upload,
+            &std::collections::BTreeMap::new(),
+            &HostRequestOptions::default(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("audio file preparation") && error.contains("proxy"),
+        "{error}"
+    );
+    assert!(direct.received_requests().await.unwrap().is_empty());
+    // With a credential available, metadata and bytes must still never go direct.
+    let options = HostRequestOptions {
+        api_key: Some(crate::Secret::from("private-key")),
+        ..Default::default()
+    };
+    let error = client
+        .prepare_google_files(
+            &model,
+            &mut request,
+            &upload,
+            &std::collections::BTreeMap::new(),
+            &options,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("audio file preparation") && error.contains("proxy"),
+        "{error}"
+    );
+    assert!(direct.received_requests().await.unwrap().is_empty());
+}

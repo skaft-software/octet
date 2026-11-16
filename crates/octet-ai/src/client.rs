@@ -1024,6 +1024,36 @@ impl AiClient {
         result.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))
     }
 
+    async fn prepare_google_files(
+        &self,
+        model: &Model,
+        request: &mut Request,
+        upload: &url::Url,
+        environment: &std::collections::BTreeMap<String, String>,
+        host_options: &HostRequestOptions,
+    ) -> Result<(), AiError> {
+        // Files is a credential-bearing provider request, just like inference.
+        // Pi rejects unsupported proxy schemes before dispatch:
+        // packages/ai/src/utils/node-http-proxy.ts:141-160.
+        self.request_proxy(upload).map_err(|_| {
+            crate::ConfigError::Parse(format!(
+                "provider {} model {}: audio file preparation: invalid or unsupported HTTP proxy configuration (only HTTP/HTTPS proxies are supported)",
+                model.endpoint.id.0, model.spec.api_name
+            ))
+        })?;
+        let mut headers = model.endpoint.default_headers.clone();
+        merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
+        let resolved = crate::auth::resolve_headers_with_api_key(
+            &model.endpoint.auth,
+            environment,
+            host_options.api_key.as_ref(),
+        )
+        .await
+        .map_err(AiError::Auth)?;
+        headers.extend(resolved.headers);
+        crate::google_files::prepare(&self.http, model, request, upload, headers).await
+    }
+
     async fn stream_once(
         &self,
         model: &Model,
@@ -1191,17 +1221,8 @@ impl AiClient {
         req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
         if let Some(upload) = crate::google_files::upload_base(model) {
             if crate::recorded_audio::estimated_media_bytes(&req) >= 16_000_000 {
-                let mut headers = model.endpoint.default_headers.clone();
-                merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
-                let resolved = crate::auth::resolve_headers_with_api_key(
-                    &model.endpoint.auth,
-                    environment,
-                    host_options.api_key.as_ref(),
-                )
-                .await
-                .map_err(AiError::Auth)?;
-                headers.extend(resolved.headers);
-                crate::google_files::prepare(&self.http, model, &mut req, &upload, headers).await?;
+                self.prepare_google_files(model, &mut req, &upload, environment, host_options)
+                    .await?;
             }
         }
         let tool_definitions = req.tools.clone();

@@ -159,7 +159,10 @@ Earlier audio reads remain in history and are re-sent: an album can exceed the
 request-byte limit even when every track fits individually and token context
 remains. On the built-in Gemini Developer API route, an estimated 16 MB of
 encoded media triggers the documented resumable Files API before constructing
-`generateContent`. File preparation validates request settings and tool schemas before any upload.
+`generateContent`. File preparation validates request settings, tool schemas and the
+upload URL's proxy configuration before resolving credentials or making any Files
+request. Unsupported or malformed proxies fail closed with an audio preparation
+stage error; they never select a direct provider connection.
 Audio uploads finalize, wait for `ACTIVE` within a bounded
 60-second preparation deadline, and become `fileData` parts in their original
 positions. Vertex can use explicitly supplied `gs://bucket/object` audio

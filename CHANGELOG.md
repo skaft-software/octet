@@ -53,6 +53,7 @@
 - Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.
 - Fullscreen wheel, selection and picker navigation preempt the stream frame timer just like composer edits.
 - Gemini file preparation validates requests before uploading recorded audio.
+- Gemini audio uploads validate proxies before resolving credentials, and invalid proxy settings keep all HTTP transport fail-closed.
 - OpenRouter audio discovery retains explicit and catalog capability sources through fresh inventories, cached replay and model admission.
 - Native context observers borrow accepted requests and compute request-shape diagnostics only when preparation is refused.
 - Pi child text and reasoning observations share immutable strings and update byte budgets from new deltas.

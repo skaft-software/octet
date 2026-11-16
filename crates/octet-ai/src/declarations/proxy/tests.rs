@@ -206,3 +206,27 @@ fn an_overlay_replaces_both_cases_of_the_variables_it_sets() {
         "variables the overlay does not set keep their ambient value"
     );
 }
+
+#[tokio::test]
+async fn proxy_callback_never_sends_direct_on_configuration_errors() {
+    use std::sync::Arc;
+    use wiremock::MockServer;
+    let direct = MockServer::start().await;
+    for value in ["socks5://127.0.0.1:1080", "http://["] {
+        let env = Arc::new(ProxyEnvironment::new(BTreeMap::from([(
+            "HTTP_PROXY".into(),
+            value.into(),
+        )])));
+        let http = env.configure(reqwest::Client::builder()).build().unwrap();
+        let result = http
+            .post(direct.uri())
+            .body("private recording")
+            .send()
+            .await;
+        assert!(
+            direct.received_requests().await.unwrap().is_empty(),
+            "{value}: direct endpoint received a request"
+        );
+        assert!(result.is_err(), "invalid proxy must fail closed");
+    }
+}

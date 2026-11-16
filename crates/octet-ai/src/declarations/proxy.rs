@@ -244,10 +244,16 @@ impl ProxyEnvironment {
     ) -> reqwest::ClientBuilder {
         // Disable reqwest's independent environment/OS resolver; otherwise a
         // NO_PROXY exclusion could fall through to a second proxy policy.
+        // reqwest's callback has no error channel (even conversion errors are
+        // treated as no proxy). Keep missed preflights fail-closed by selecting
+        // an unusable local proxy, never a direct provider connection. Port zero
+        // cannot host a proxy; no configured URL or credential is used here.
+        let blocked = url::Url::parse("http://127.0.0.1:0").expect("fixed blocking proxy URL");
         builder
             .no_proxy()
             .proxy(reqwest::Proxy::custom(move |target| {
-                self.resolve(target).ok().flatten()
+                self.resolve(target)
+                    .unwrap_or_else(|_| Some(blocked.clone()))
             }))
     }
 }
