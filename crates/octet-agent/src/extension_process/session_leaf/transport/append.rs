@@ -29,8 +29,13 @@ impl ExtensionProcess {
         let valid = generation == connection.generation
             && children.get(id).is_some_and(|child| {
                 pending.get(&child.parent_request_id).is_some_and(|parent| {
-                    parent.method == methods::COMMAND_EXECUTE
-                        && parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
+                    // Pi starts shortcut handlers without an idle gate, using the
+                    // same append service as commands (packages/coding-agent/src/
+                    // modes/interactive/interactive-mode.ts:2382-2394).
+                    matches!(
+                        parent.method.as_str(),
+                        methods::COMMAND_EXECUTE | methods::SHORTCUT_EXECUTE
+                    ) && parent.terminal.load(Ordering::Acquire) == REQUEST_ACTIVE
                         && parent
                             .resource_owner
                             .as_ref()
@@ -42,7 +47,7 @@ impl ExtensionProcess {
         } else {
             Err((
                 ExtensionRequestFailure::NotForegroundOwner,
-                "active response append requires its live command owner".into(),
+                "active response append requires its live command or shortcut owner".into(),
             ))
         }
     }

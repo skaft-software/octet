@@ -706,7 +706,8 @@ from live hooks, commands, shortcuts and tools then publish the actual native du
 entry into that invocation's pinned view before returning. Receipt revision,
 head, ancestry and view quotas must match; no session-leaf grant is minted.
 Immediate sessionManager getters therefore see the committed ID, parent and
-native timestamp. Busy commands use the owning native Run's bounded append lane,
+native timestamp. Busy commands and live keyboard shortcuts use the owning native
+Run's bounded append lane with the same parent, owner and generation checks,
 not an idle-only queue. Counted receipts chain intervening native entries into the
 command's pinned view with namespace, revision, ancestry and quota checks intact.
 A waiting response hook may append afterwards only across the exact head-and-byte

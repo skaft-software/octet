@@ -397,3 +397,62 @@ async fn static_name_collision_and_reload_do_not_reuse_dynamic_authority() {
     assert!(session.entries().is_empty());
     process.shutdown().await;
 }
+
+#[tokio::test]
+async fn live_shortcut_append_uses_response_writer_and_rejects_other_parent_methods() {
+    let (_temp, process, mut session, mut events) = fixture().await;
+    let context = process.current_context_for_resource_owner(session.resource_owner_key());
+    let call = tokio::spawn({
+        let process = process.clone();
+        async move {
+            let (started, _) = oneshot::channel();
+            process
+                .execute_shortcut_controlled("static", context, started)
+                .await
+        }
+    });
+    let (id, generation, entry_type, data) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ExtensionEvent::SessionEntryRequested {
+                request_id,
+                generation,
+                operation: ExtensionSessionEntryOperation::Append { entry_type, data },
+                ..
+            } = events.recv().await.unwrap()
+            {
+                break (request_id, generation, entry_type, data);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let owner = session.resource_owner_key();
+    assert!(process
+        .validate_run_session_append(&id, generation + 1, &owner)
+        .is_err());
+    assert!(process
+        .validate_run_session_append(&id, generation, "foreign")
+        .is_err());
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let parent = lock_std_mutex(&connection.child_requests)[&id].parent_request_id;
+    {
+        let mut pending = lock_std_mutex(&connection.pending);
+        pending.get_mut(&parent).unwrap().method = methods::HOOK_RUN.into();
+    }
+    assert!(process
+        .validate_run_session_append(&id, generation, &owner)
+        .is_err());
+    lock_std_mutex(&connection.pending)
+        .get_mut(&parent)
+        .unwrap()
+        .method = methods::SHORTCUT_EXECUTE.into();
+    let receipt = process
+        .append_run_session_entry_request(&id, generation, &mut session, &entry_type, data, 0)
+        .unwrap();
+    assert_eq!(receipt["entry_id"], receipt["head"]);
+    assert!(call.await.unwrap().is_ok());
+    let reopened = Session::open_read_only(session.path()).unwrap();
+    assert_eq!(reopened.entries().len(), 1);
+    assert!(process.is_running());
+    assert!(process.shutdown().await);
+}
