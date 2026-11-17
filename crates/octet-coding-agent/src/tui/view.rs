@@ -1673,6 +1673,7 @@ enum ScreenPressTarget {
     Link(String),
     Composer(composer::mouse::ComposerPress),
     Completion(composer_pointer::CompletionHit),
+    Splash,
 }
 
 struct ScreenPress {
@@ -7662,17 +7663,19 @@ impl InteractiveShell {
     /// Shift+click extends an existing selection without activating links.
     pub fn begin_transcript_selection(&mut self, row: u16, col: u16, extend: bool) {
         self.reset_input_interaction();
-        self.state.borrow_mut().cancel_transcript_pointer();
         if self.begin_composer_pointer(row, col, extend) {
             return;
         }
-        self.state.borrow_mut().composer_selection = None;
         let link = (!extend)
             .then(|| self.transcript_link_at_screen_cell(row, col))
             .flatten();
         let mut state = self.state.borrow_mut();
-        state.welcome_text_selection = None;
-        state.welcome_last_click = None;
+        let anchor = state
+            .transcript_selection
+            .as_ref()
+            .filter(|_| extend)
+            .map(|selection| selection.anchor);
+        state.clear_text_selection();
         state.selection_pointer_cell = Some((row, col));
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
             state.pending_selection_anchor = None;
@@ -7691,11 +7694,7 @@ impl InteractiveShell {
             // Shift-click: anchor from the prior selection (if any),
             // focus at the clicked position. Start the selection
             // immediately.
-            let anchor = state
-                .transcript_selection
-                .as_ref()
-                .map(|selection| selection.anchor)
-                .unwrap_or(position);
+            let anchor = anchor.unwrap_or(position);
             state.transcript_selection = Some(TranscriptSelection {
                 anchor,
                 focus: position,
@@ -7703,9 +7702,7 @@ impl InteractiveShell {
             state.pending_selection_anchor = None;
             state.selection_dragging = true;
         } else {
-            // Plain click: defer selection creation until the first
-            // movement. If the pointer is released without moving, the
-            // prior selection is cleared in `end_transcript_selection`.
+            // Plain click: defer selection creation until the first movement.
             state.pending_selection_anchor = Some(position);
             state.selection_dragging = false;
             state.pending_screen_press =
@@ -7843,6 +7840,19 @@ impl InteractiveShell {
             self.end_composer_pointer(row, col);
             return;
         }
+        if state
+            .pending_screen_press
+            .as_ref()
+            .is_some_and(|press| matches!(press.target, ScreenPressTarget::Splash))
+        {
+            state.pending_screen_press = None;
+            if state.gesture_render_geometry().is_none() {
+                return;
+            }
+            drop(state);
+            let _ = self.copy_selected_plain_text();
+            return;
+        }
         let pressed_link = state.pending_screen_press.take();
         let last_cell = state.selection_pointer_cell;
         if state.render_threaded && state.gesture_render_geometry().is_none() {
@@ -7965,8 +7975,7 @@ impl InteractiveShell {
                 Some(format!("could not load older session history: {error}"));
         }
         let mut state = self.state.borrow_mut();
-        state.welcome_text_selection = None;
-        state.welcome_last_click = None;
+        state.clear_text_selection();
         let Some(last) = state.transcript.len().checked_sub(1) else {
             state.transcript_selection = None;
             return;
@@ -9972,6 +9981,8 @@ mod extension_theme;
 pub(crate) use extension_theme::ExtensionPaletteKey;
 #[cfg(test)]
 mod composer_mouse_tests;
+#[cfg(test)]
+mod selection_ownership_tests;
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;

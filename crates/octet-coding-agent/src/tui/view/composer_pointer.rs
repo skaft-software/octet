@@ -70,6 +70,7 @@ impl InteractiveShell {
                 })
                 .cloned();
             if let Some(hit) = hit {
+                state.clear_text_selection();
                 state.pending_screen_press = Some(ScreenPress {
                     cell: (row, col),
                     moved: extend,
@@ -108,6 +109,7 @@ impl InteractiveShell {
             return false;
         };
         let anchor = geometry.offset(row, col, false);
+        state.clear_text_selection();
         state.pending_screen_press = Some(ScreenPress {
             cell: (row, col),
             moved: extend,
@@ -115,10 +117,6 @@ impl InteractiveShell {
             target: ScreenPressTarget::Composer(ComposerPress { geometry, anchor }),
         });
         state.selection_pointer_cell = Some((row, col));
-        state.pending_selection_anchor = None;
-        state.selection_dragging = false;
-        state.transcript_selection = None;
-        state.composer_selection = None;
         true
     }
 
@@ -126,7 +124,10 @@ impl InteractiveShell {
         let Some(press) = state.pending_screen_press.as_ref() else {
             return false;
         };
-        if matches!(press.target, ScreenPressTarget::Link(_)) {
+        if !matches!(
+            press.target,
+            ScreenPressTarget::Composer(_) | ScreenPressTarget::Completion(_)
+        ) {
             return false;
         }
         let focused = if matches!(press.target, ScreenPressTarget::Completion(_)) {
@@ -196,7 +197,7 @@ impl InteractiveShell {
                 }
                 return;
             }
-            ScreenPressTarget::Link(_) => unreachable!(),
+            ScreenPressTarget::Link(_) | ScreenPressTarget::Splash => unreachable!(),
         };
         // Pi compatibility: packages/tui/src/components/editor.ts:655-700.
         // Only the screen's synthesized left click places a cursor. Presses,

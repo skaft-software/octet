@@ -68,6 +68,7 @@
 - Pi editors render from bounded local native observations while Rust retains editing and history authority.
 - Pi editors keep large completion menus responsive with display-only paint observations and actionable bounded host replies.
 - Splash clicks keep the byte mark fully painted and text selection confined to the clicked word.
+- Fullscreen selections belong to one surface at a time, and splash words copy on release.
 - Small upward scrolls keep the chosen transcript position through repaints, streaming and live-row height changes.
 - Composer clicks and completion selection use the painted rows beneath the independent working indicator during streaming.
 - Custom editors reserve space for working indicators and host chrome, keeping tall snapshots inside short terminal windows.

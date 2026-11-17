@@ -91,12 +91,17 @@ pub(super) fn click_splash(
             now.saturating_duration_since(*at) <= std::time::Duration::from_millis(500)
                 && previous == &word
         });
-    state.transcript_selection = None;
-    state.pending_selection_anchor = None;
-    state.selection_dragging = false;
-    state.deferred_pointer_press = None;
-    state.pending_screen_press = None;
+    state.clear_text_selection();
     state.welcome_text_selection = repeated.then(|| word.clone());
+    // Pi compatibility: packages/tui/src/tui-alt-screen.ts:1339-1378,1398-1404
+    // retains word-selection press ownership until release-to-copy. Keep the
+    // splash range row-local rather than promoting it into transcript dragging.
+    state.pending_screen_press = Some(super::ScreenPress {
+        cell: (row, col),
+        target: super::ScreenPressTarget::Splash,
+        moved: false,
+        fence: super::renderer_geometry::GeometryFence::capture(state),
+    });
     state.welcome_last_click = Some((now, word));
     true
 }

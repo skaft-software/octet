@@ -307,7 +307,11 @@ between pointer-motion events. Wheel/trackpad scrolling during a drag extends
 the range at the pointer; scrolling after release extends the retained range
 and refreshes its clipboard copy. Click-drag highlights transcript text without
 Shift. Release immediately copies it and briefly shows **Copied selection**;
-Ctrl+Shift+C copies the current selection again. Streaming text, tool completion,
+Ctrl+Shift+C copies the current selection again. Selecting in the transcript,
+composer or splash clears the previous surface's range and pending gesture;
+Ctrl+Shift+A selects only the transcript. Double-clicking splash text selects
+one word on its row and copies it once on release. Byte-mark clicks clear the
+selection without copying. Streaming text, tool completion,
 working animations and worker updates preserve semantic endpoints outside their
 changes. Focus changes, resize and replacement surfaces cancel an active drag,
 so a late release cannot copy a previous range. Reflow under

@@ -7,6 +7,18 @@ pub(super) const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 const COPY_NOTICE_DURATION: Duration = Duration::from_millis(1500);
 
 impl ShellState {
+    /// Displace both the retained range and its pending gesture before another
+    /// surface selects. Pi compatibility: packages/tui/src/tui-alt-screen.ts:
+    /// 1335-1405 has one screen-level range; component clicks clear it at 1372.
+    /// Native terminal ownership keeps this transition in Rust, not the adapter.
+    pub(super) fn clear_text_selection(&mut self) {
+        self.cancel_transcript_pointer();
+        self.transcript_selection = None;
+        self.composer_selection = None;
+        self.welcome_text_selection = None;
+        self.welcome_last_click = None;
+    }
+
     pub(super) fn cancel_transcript_pointer(&mut self) {
         self.pending_selection_anchor = None;
         self.selection_pointer_cell = None;

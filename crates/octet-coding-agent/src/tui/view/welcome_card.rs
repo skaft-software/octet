@@ -104,13 +104,7 @@ pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Ins
     if !hit {
         return false;
     }
-    state.transcript_selection = None;
-    state.pending_selection_anchor = None;
-    state.selection_dragging = false;
-    state.deferred_pointer_press = None;
-    state.pending_screen_press = None;
-    state.welcome_text_selection = None;
-    state.welcome_last_click = None;
+    state.clear_text_selection();
     if !interactive_mark(state) {
         return true;
     }
