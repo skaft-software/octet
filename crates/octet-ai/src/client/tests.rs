@@ -388,70 +388,12 @@ fn transport_diagnostic_truncation_preserves_utf8_boundaries() {
 }
 
 #[test]
-fn http_diagnostics_omit_untrusted_error_text_and_classifications() {
-    for body in [
-        serde_json::json!({"error": {"message": "ValueError: confidential prompt", "code": "confidential_prompt", "type": "remote_exception"}}).to_string(),
-        serde_json::json!({"error": {"detail": "confidential prompt"}}).to_string(),
-        serde_json::json!({"description": "confidential prompt"}).to_string(),
-        serde_json::json!({"error": "confidential prompt"}).to_string(),
-        "ValueError: confidential prompt".into(),
-        "{\"error\": {\"message\": \"confidential prompt".into(),
-    ] {
-        let error = sanitize_ai_error(&CredentialRedactor::default(), AiError::Http(HttpError {
-            status: http::StatusCode::BAD_REQUEST, request_id: None, retry_after: None,
-            provider_code: Some("confidential_prompt".into()), body_snippet: Some(body), retryable: false,
-        }));
-        let AiError::Http(error) = error else { unreachable!() };
-        assert_eq!(error.status, http::StatusCode::BAD_REQUEST);
-        assert!(error.provider_code.is_none(), "{error:?}");
-        assert!(error.body_snippet.is_none(), "{error:?}");
-    }
-}
-
-#[test]
-fn http_diagnostics_retain_only_known_classifications() {
-    for (body, expected) in [
-        (
-            serde_json::json!({"error": {"code": "rate_limit_exceeded", "message": "private prompt"}}),
-            "rate_limit_exceeded",
-        ),
-        (
-            serde_json::json!({"error": {"code": "private_prompt", "type": "invalid_request_error"}}),
-            "invalid_request_error",
-        ),
-        (
-            serde_json::json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "private prompt"}}),
-            "403",
-        ),
-    ] {
-        let error = sanitize_ai_error(
-            &CredentialRedactor::default(),
-            AiError::Http(HttpError {
-                status: http::StatusCode::BAD_REQUEST,
-                request_id: None,
-                retry_after: None,
-                provider_code: None,
-                body_snippet: Some(body.to_string()),
-                retryable: false,
-            }),
-        );
-        let AiError::Http(error) = error else {
-            unreachable!()
-        };
-        assert_eq!(error.provider_code.as_deref(), Some(expected));
-        let snippet = error.body_snippet.unwrap();
-        assert!(!snippet.contains("private"));
-        assert!(serde_json::from_str::<serde_json::Value>(&snippet).is_ok());
-    }
-}
-
-#[test]
 fn structured_http_error_sanitization_is_bounded_valid_json() {
     let body = serde_json::to_string_pretty(&serde_json::json!({
         "error": {
             "message": "\"\\\u{1b}\n界".repeat(1000),
             "code": "\\\"".repeat(1000),
-            "type": "invalid_request_error",
+            "type": "\\\"".repeat(1000),
         },
         "request": {"prompt": "private prompt"},
     }))

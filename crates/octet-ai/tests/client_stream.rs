@@ -1784,11 +1784,8 @@ async fn test_client_stream_http_error_handling() {
         assert_eq!(http_err.status.as_u16(), 400);
         let snippet = http_err.body_snippet.as_ref().unwrap();
         assert!(snippet.contains("invalid_request_error"));
-        assert!(!snippet.contains("Failed parameters"));
-        assert_eq!(
-            http_err.provider_code,
-            Some("invalid_request_error".to_string())
-        );
+        assert!(snippet.contains("Failed parameters"));
+        assert_eq!(http_err.provider_code, Some("invalid_val".to_string()));
         assert_eq!(http_err.request_id, Some("req-abc-123".to_string()));
     } else {
         panic!("Expected HttpError");
@@ -1849,7 +1846,12 @@ async fn http_error_diagnostics_redact_request_credentials_and_controls() {
     let AiError::Http(http) = &error else {
         panic!("expected HTTP error, got {error:?}");
     };
-    assert!(http.body_snippet.is_none(), "free-form bodies are private");
+    let snippet = http.body_snippet.as_deref().expect("body snippet");
+    assert_eq!(snippet.matches("[REDACTED]").count(), 2, "{snippet:?}");
+    assert!(
+        snippet.contains(r"\u{1b}]52;c;YXR0YWNr\u{7}"),
+        "{snippet:?}"
+    );
     assert_secret_and_controls_are_absent(&error, &[AUTH_SECRET, HEADER_SECRET]);
 }
 
@@ -2873,15 +2875,20 @@ async fn responses_bad_request_retains_structured_error_without_request_data() {
             panic!("{error:?}")
         };
         assert_eq!(http.status.as_u16(), 400);
-        assert_eq!(http.provider_code.as_deref(), Some("invalid_request_error"));
+        assert_eq!(
+            http.provider_code.as_deref(),
+            Some("invalid_reasoning_pair")
+        );
         let body: serde_json::Value = serde_json::from_str(http.body_snippet.as_deref().unwrap())
             .expect("redacted diagnostic stays valid JSON");
         assert_eq!(body["error"]["type"], "invalid_request_error");
-        assert!(body["error"].get("message").is_none());
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("requires its paired function call"));
         let rendered = format!("{error} {error:?}");
         for private in [
             "test-api-key",
-            "requires its paired function call",
             "PRIVATE_PROMPT_MUST_NOT_APPEAR",
             "PRIVATE_HEADER_MUST_NOT_APPEAR",
         ] {

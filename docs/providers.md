@@ -1106,13 +1106,12 @@ billable work, not a repair for unstable prefixes. The credential-free
 
 ## Provider errors
 
-HTTP failures show the status and recognized provider error classifications
-(code, type or status) from a finite allowlist, including Responses and Codex.
-Free-form messages, details, descriptions, unknown classifications and raw bodies
-stay private, even inside structured errors: providers can echo prompts or remote
-exceptions there. Other diagnostic metadata is credential-redacted,
-control-escaped and bounded. Use the shape-only request trace below to diagnose
-request shape without disclosing content.
+HTTP failures show the provider's structured error code, type and message, when
+available, including pretty-printed Responses and Codex error bodies. Diagnostic
+fields are credential-redacted, control-escaped and bounded. Echoed request,
+prompt and header fields outside the structured error are omitted. A body with
+no structured error still reports its HTTP status; use the shape-only request
+trace below when the provider supplies no explanation.
 
 ## Provider request trace
 

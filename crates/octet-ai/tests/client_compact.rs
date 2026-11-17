@@ -616,10 +616,7 @@ async fn compact_http_errors_preserve_retry_metadata_and_taxonomy() {
         assert_eq!(error.status.as_u16(), status);
         assert_eq!(error.request_id.as_deref(), Some("req-compact"));
         assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
-        assert_eq!(
-            error.provider_code, None,
-            "unknown classifications stay private"
-        );
+        assert_eq!(error.provider_code.as_deref(), Some("compact_error"));
         assert_eq!(error.retryable, retryable);
     }
 }
