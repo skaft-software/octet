@@ -460,3 +460,37 @@ test('tool guard consumes result fields once under bounded dispatcher supervisio
   assert.equal(reads, 1);
   assert.equal(runtime.dispatcher.snapshot().callbacks.length, 0);
 });
+
+test('a 4.2 second context dialog leaves execution budget for context_with_system', async t => {
+  const { performance } = await import('node:perf_hooks');
+  let now = 0, asked = false;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runtime, store, errors } = harness();
+  runtime.features.add('session_entries'); runtime.features.add('remote_ui');
+  runtime.active.set(store.id, store);
+  runtime.transport.request = async method => {
+    assert.equal(method, 'confirmation/request');
+    asked = true;
+    return new Promise(resolve => setTimeout(() => resolve({ confirmed: true }), 4200));
+  };
+  runtime.events.set('context', [{ factory: 0, async handler(_event, ctx) {
+    assert.equal(await ctx.ui.confirm('Continue?', 'Context question'), true);
+  } }]);
+  runtime.events.set('context_with_system', [{ factory: 1, handler(event) {
+    event.messages[0].content = 'second phase ran';
+  } }]);
+  const pending = projectContext(runtime, {
+    hook: 'provider_context', context: { workspace: '/actual', resource_owner: owner, host: {} },
+    session_leaf: { grant_id: 'a'.repeat(64), activation_epoch: 1, operation_id: 'provider-context:1', owner, expected_head: null },
+    payload: { request: { system: 'base', messages: [], tools: [] },
+      preparation: { resource_owner: owner.session_id, session_id: 'actual-session', head: null, tool_generation: 1 } },
+  }, store);
+  for (let i = 0; i < 30 && !asked; i++) await Promise.resolve();
+  assert.equal(asked, true);
+  now += 4200;
+  t.mock.timers.tick(4200);
+  const result = await pending;
+  assert.equal(result.provider_context?.system, 'second phase ran');
+  assert.equal(errors.length, 0);
+});

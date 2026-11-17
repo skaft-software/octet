@@ -144,13 +144,13 @@ export class UserWait {
 export class HookBudget {
   // `budget` is undefined for the phases Pi leaves unbudgeted; the runner then
   // only has to notice a cancelled or preempted run.
-  constructor(runtime, store, event, started = performance.now()) {
+  constructor(runtime, store, event, { started = performance.now(), excluded = 0 } = {}) {
     this.runtime = runtime; this.store = store; this.event = event;
     this.budget = budgetFor(event);
     this.perHandler = this.budget?.perHandler; this.total = this.budget?.total;
     this.started = started;
     this.detached = new Map(); // factory path -> milliseconds actually waited
-    this.excluded = 0; // milliseconds the hook's handlers spent awaiting the user
+    this.excluded = excluded; // milliseconds the hook's handlers spent awaiting the user
   }
 
   // Keep a small shared reserve for healthy handlers reached late, but never

@@ -375,8 +375,10 @@ export async function projectContext(runtime, params, store) {
       });
       const originalTools = JSON.stringify(tools);
       let full = [strict({ role: 'system', content: system ?? '', toolsAdded: tools, sections: undefined, toolsRemoved: undefined }, 'system message'), ...messages];
-      // Both context phases run inside the same host request and deadline.
-      const fullBudget = new HookBudget(runtime, store, 'context_with_system', contextBudget.started);
+      // Pi packages/coding-agent/src/core/extensions/runner.ts:1305-1365
+      // runs both phases sequentially. Carry the complete elapsed accounting,
+      // including excluded user time, within this same host request/deadline.
+      const fullBudget = new HookBudget(runtime, store, 'context_with_system', contextBudget);
       for (const entry of [...runtime.events.get('context_with_system') || []]) {
         live(); const child = { ...store, factory: entry.factory }, visible = copyContext(full);
         let result;

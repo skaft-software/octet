@@ -626,7 +626,10 @@ and context stage and skipped; only provenance-tagged native refusals, actual
 cancellation and tracked host failures stop preparation. The native system stays
 separate. Each handler's complete candidate, including message content conversion,
 is validated before acceptance; malformed results warn and leave the last accepted
-projection available to later handlers. Only canonical messages and system are
+projection available to later handlers. Both context phases carry the same elapsed
+execution accounting, including excluded UI-answer time, so a dialog in `context`
+does not spend the following `context_with_system` phase's execution budget.
+Only canonical messages and system are
 returned, never replacement tools, credentials, route or Session.
 Text, tool calls/results and Pi custom messages have explicit translations.
 Context callbacks can retain unchanged, provenance-bound OpenAI encrypted reasoning

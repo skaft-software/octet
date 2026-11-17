@@ -49,8 +49,8 @@ test('provider-context phases share a budget below the native request deadline',
   try {
     assert.deepEqual(budgetFor('context'), { perHandler: 2000, total: 4000 });
     assert.deepEqual(budgetFor('context_with_system'), { perHandler: 2000, total: 4000 });
-    const first = new HookBudget({}, {}, 'context', performance.now() - 4001);
-    const second = new HookBudget({}, {}, 'context_with_system', first.started);
+    const first = new HookBudget({}, {}, 'context', { started: performance.now() - 4001 });
+    const second = new HookBudget({}, {}, 'context_with_system', first);
     assert.equal(second.wait(), 0, 'the second phase cannot start a new total budget');
   } finally {
     if (previous !== undefined) process.env.OCTET_PI_HANDLER_BUDGET_MS = previous;
