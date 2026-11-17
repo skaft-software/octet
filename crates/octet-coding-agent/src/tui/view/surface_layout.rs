@@ -536,7 +536,12 @@ pub(super) fn compile_surface_plan_for_render<'a>(
             matches!(previous, TranscriptBlock::Subagents(_)) && !plan.event_spacing,
         )
     });
-    let leading_padding = if event_spacing {
+    // Consecutive roster bands share the predecessor's bottom cushion as
+    // their separator instead of stacking two cushions and a host gap.
+    let shared_roster_cushion = cushioned_subagent && previous_cushioned_subagent;
+    let leading_padding = if shared_roster_cushion {
+        0
+    } else if event_spacing {
         // A heading separates the surface seam from the event itself; leave the
         // breathing row after it. Borderless seams combine by max, not addition.
         usize::from(has_heading_row || previous_blank == 0)
@@ -575,7 +580,9 @@ pub(super) fn compile_surface_plan_for_render<'a>(
                     }
             )
     };
-    let transition_rows = if cushioned_subagent {
+    let transition_rows = if shared_roster_cushion {
+        0
+    } else if cushioned_subagent {
         // Host separation is outside the painted band, not its interior row.
         usize::from(previous_blank == 0)
     } else if event_spacing

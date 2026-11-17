@@ -780,13 +780,14 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             );
         }
     }
+    // Only spawn, stop and continue open waves; a settled wait is observation.
     assert_eq!(
         state
             .transcript
             .iter()
             .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
             .count(),
-        4
+        3
     );
     assert!(!state
         .rendered_transcript(120)
@@ -810,7 +811,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
             .iter()
             .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
             .count(),
-        4
+        3
     );
     assert!(!state
         .rendered_transcript(120)
@@ -835,7 +836,7 @@ fn subagent_hydration_hides_calls_and_results_across_batches_and_id_reuse() {
         ],
     );
     assert!(
-        matches!(&state.transcript[4], TranscriptBlock::Tool(panel) if panel.finished && panel.is_error && panel.output == "ordinary failure")
+        matches!(&state.transcript[3], TranscriptBlock::Tool(panel) if panel.finished && panel.is_error && panel.output == "ordinary failure")
     );
 }
 

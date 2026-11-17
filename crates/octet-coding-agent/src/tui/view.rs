@@ -640,6 +640,8 @@ struct SubagentTranscript {
     failed: usize,
     stopped: usize,
     live_workers: Vec<SubagentWorkerLine>,
+    /// High-water mark of detail rows used by this live wave, not its membership.
+    peak_worker_rows: usize,
     /// Reconstructed from durable orchestration call/results, not worker telemetry.
     hydrated: bool,
     /// Stable members of this wave, excluding workers retained from earlier runs.
@@ -655,6 +657,7 @@ impl SubagentTranscript {
             failed: 0,
             stopped: 0,
             live_workers: Vec::new(),
+            peak_worker_rows: 0,
             hydrated: false,
             worker_ids: previous.map_or_else(Vec::new, |previous| previous.worker_ids.clone()),
         };
@@ -720,17 +723,23 @@ impl SubagentTranscript {
                 output_estimated: child.estimated_output_tokens.is_some(),
             })
             .collect();
+        if summary.active_count() > 0 && !summary.live_workers.is_empty() {
+            let used = summary.live_workers.len()
+                + usize::from(summary.active_count() > summary.live_workers.len());
+            summary.peak_worker_rows = used
+                .max(previous.map_or(0, Self::reserved_worker_rows))
+                .min(summary.total());
+        }
         summary
     }
 
-    /// Detail slots belong to the whole wave, not just its still-running
-    /// members. Reuse vacated slots until settlement so the live tail can only
-    /// grow when another worker joins, never bounce as siblings finish.
+    /// Reuse only detail slots the wave actually used. Finishing siblings do
+    /// not shrink the live tail, and serial arrivals do not add empty slots.
     fn reserved_worker_rows(&self) -> usize {
         if self.active_count() == 0 || self.live_workers.is_empty() {
             return 0;
         }
-        self.worker_ids.len().min(4) + usize::from(self.worker_ids.len() > 4)
+        self.peak_worker_rows
     }
 
     fn active_count(&self) -> usize {
@@ -2886,6 +2895,22 @@ impl ShellState {
         let summary = SubagentTranscript::from_view(&view, previous, &current_workers);
         self.subagent_activity = Some(view);
         if let Some(index) = live_index {
+            // A continuation or repeated observation can settle to the same
+            // content-free summary. Keep the inspector current without adding
+            // another identical historical roster for those same workers.
+            let duplicate = !is_active
+                && self.transcript[..index]
+                    .iter()
+                    .rev()
+                    .find_map(|block| match block {
+                        TranscriptBlock::Subagents(previous) => Some(previous == &summary),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+            if duplicate {
+                self.remove_transient_activity_block(index);
+                return;
+            }
             if self.transcript.get(index).is_some_and(|block| matches!(block, TranscriptBlock::Subagents(previous) if previous != &summary)) {
                 self.transcript[index] = TranscriptBlock::Subagents(summary);
                 self.touch_block(index);
@@ -9964,6 +9989,9 @@ mod ordinary_surface_contract_tests;
 mod path_completion_tests;
 #[cfg(test)]
 mod resume_bookkeeping_tests;
+#[cfg(test)]
+#[path = "view/roster_regression_tests.rs"]
+mod roster_regression_tests;
 #[cfg(test)]
 mod startup_readiness_tests;
 #[cfg(test)]

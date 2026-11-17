@@ -108,8 +108,12 @@ Live text and reasoning output estimates publish at a coalesced cadence of about
 30 updates per second per worker (33 ms), including the last delta of a burst
 when the provider pauses. The bounded host watch stream replaces old snapshots;
 no `/subagents` command or keypress is needed to refresh the inline counts.
-The transcript accepts host revisions in order and reserves worker-detail slots
-until the active block settles, so finishing siblings do not bounce earlier rows.
+The transcript accepts host revisions in order and reserves only the peak number
+of worker-detail rows used by the live wave, bounded by its current child count.
+Finishing siblings do not bounce earlier rows; settlement releases those slots.
+Repeated waits and status checks keep one history entry for unchanged work,
+including across compaction. Identical settled summaries for the same workers
+are omitted, and consecutive roster bands share one spacing row.
 `~` means a UTF-8-byte estimate, not provider-reported or billed usage. Reported
 totals replace estimates on settlement; retries discard their provisional counts.
 No estimate enters token/cost budgets or the exactly-once delegated ledger.

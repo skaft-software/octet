@@ -319,10 +319,14 @@ tokens, compacted with `K`/`M`/`B`/`T` suffixes. An inline
 `/subagents stop all` heading hint is shown only for live activity. Input includes
 uncached, cache-read, and cache-write usage; streamed
 output estimates carry `~` until provider usage settles. Later parent output
-is placed above this tail. Detail slots are reserved for all members of the
-active wave (four rows plus an overflow slot), growing only when workers join
-and shrinking at settlement. Active-event and idle-watch deliveries share one
-host-revision watermark; cached extension inspector projections cannot overwrite
+is placed above this tail. Detail slots retain the live wave's peak used rows
+(up to four child lines plus overflow), bounded by its current child count;
+serial arrivals do not reserve unused membership slots. Settlement releases the
+reservation and omits a summary identical to the previous roster for the same
+workers. Replayed waits observe existing activity rather than opening another
+wave. Consecutive padded roster bands share one spacing row. Active-event and
+idle-watch deliveries share one host-revision watermark; cached extension
+inspector projections cannot overwrite
 native telemetry. Session hydration resets that ownership. Settlement fixes the
 summary in place without per-worker notices. Ctrl+O retains disclosure; the
 worker list exposes the complete roster, exact outcomes/reasons, model, tools,

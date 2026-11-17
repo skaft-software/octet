@@ -37,6 +37,7 @@ fn summary(running: usize, hydrated: bool) -> SubagentTranscript {
         stopped: 0,
         hydrated,
         live_workers: Vec::new(),
+        peak_worker_rows: 0,
         worker_ids: Vec::new(),
     }
 }
@@ -234,4 +235,36 @@ fn a_hydrated_summary_below_a_live_roster_keeps_its_own_cursor() {
         matches!(state.transcript.last(), Some(TranscriptBlock::Subagents(summary))
         if !summary.hydrated && summary.running == 2 && summary.succeeded == 0 && summary.failed == 0)
     );
+}
+
+#[test]
+fn roster_replayed_waits_and_status_do_not_start_another_wave() {
+    let items = vec![
+        call("spawn", "subagent_spawn"),
+        result("spawn", "accepted", false),
+        TranscriptItem::CompactionMarker {
+            summary: "mid-wave checkpoint".into(),
+        },
+        call("wait-1", "subagent_wait"),
+        result("wait-1", "unchanged fleet", false),
+        call("status", "subagent_status"),
+        result("status", "unchanged fleet", false),
+        call("wait-2", "subagent_wait"),
+        result("wait-2", "unchanged fleet", false),
+    ];
+    for chunk_size in [1, 2, items.len()] {
+        let mut state = state();
+        for chunk in items.chunks(chunk_size) {
+            append_hydrated_items(&mut state, chunk.iter().cloned());
+        }
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|block| matches!(block, TranscriptBlock::Subagents(_)))
+                .count(),
+            1
+        );
+        assert!(state.hydrated_pending_subagent_calls.is_empty());
+    }
 }

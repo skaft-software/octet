@@ -466,8 +466,10 @@ its normal wrapping and disclosure.
 While workers are active, a bounded, tool-like **Subagents** block in the
 transcript updates in place. It no longer stays pinned above the input. Its
 heading counts worker states, and up to four child lines show active tasks with
-input and output tokens. Detail slots grow as workers join and stay reserved
-until the block settles, including when a sibling fails or finishes. Older host
+input and output tokens. Only the wave's peak used detail rows stay reserved
+until settlement, including when a sibling fails or finishes; retained workers
+never add unused slots. Repeated waits and status checks keep unchanged history
+compact, and consecutive roster bands share one spacing row. Older host
 snapshots and cached inspector projections do not replace newer live telemetry.
 Ctrl+O keeps disclosure. `/subagents` opens the live worker list, including
 during a run, with the complete roster (up to 32) and

@@ -2,7 +2,7 @@
 use super::*;
 use sexy_tui_rs::Component;
 
-fn worker(name: &str, state: &str) -> octet_agent::DelegationTelemetryChild {
+pub(super) fn worker(name: &str, state: &str) -> octet_agent::DelegationTelemetryChild {
     octet_agent::DelegationTelemetryChild {
         child_id: name.into(),
         task_name: name.into(),

@@ -173,6 +173,7 @@ mod tests {
                 },
             ],
             hydrated: false,
+            peak_worker_rows: 2,
             worker_ids: vec!["reused-worker".into()],
         }
     }

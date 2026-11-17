@@ -541,6 +541,7 @@ fn subagent_lifecycle_rows_keep_neutral_host_gaps_after_bash_output() {
                 failed: 0,
                 stopped: 0,
                 live_workers: Vec::new(),
+                peak_worker_rows: 0,
                 hydrated: false,
                 worker_ids: vec!["worker-a".into(), "worker-b".into()],
             },
@@ -554,6 +555,7 @@ fn subagent_lifecycle_rows_keep_neutral_host_gaps_after_bash_output() {
                 succeeded: 0,
                 failed: 2,
                 stopped: 0,
+                peak_worker_rows: 0,
                 live_workers: Vec::new(),
                 hydrated: false,
                 worker_ids: vec!["worker-a".into(), "worker-b".into()],
@@ -761,6 +763,7 @@ fn subagents_with_worker() -> TranscriptBlock {
             output_estimated: false,
         }],
         hydrated: false,
+        peak_worker_rows: 1,
         worker_ids: vec!["spacing-worker".into()],
     })
 }
@@ -947,23 +950,31 @@ fn subagent_spacing_shares_only_neutral_neighbor_rows_at_every_density() {
                 let mut rows = before.lines;
                 rows.extend(center.lines);
                 rows.extend(after.lines);
-                assert!(painted_row(&rows[top]), "{density}: {rows:?}");
-                assert_eq!(
-                    rows[..top]
-                        .iter()
-                        .rev()
-                        .take_while(|row| neutral_blank_row(row))
-                        .count(),
-                    1,
-                    "{density}: {rows:?}"
-                );
+                if matches!(previous, TranscriptBlock::Subagents(_)) {
+                    // The preceding band's bottom cushion is the single seam;
+                    // this roster starts at its heading, without another gap.
+                    assert_eq!(center.geometry.leading_rows, 0);
+                    assert_eq!(center.geometry.transition_rows, 0);
+                    assert_blank_cells(&rows[top - 1], 80, true, 0..80);
+                } else {
+                    assert!(painted_row(&rows[top]), "{density}: {rows:?}");
+                    assert_eq!(
+                        rows[..top]
+                            .iter()
+                            .rev()
+                            .take_while(|row| neutral_blank_row(row))
+                            .count(),
+                        1,
+                        "{density}: {rows:?}"
+                    );
+                }
                 assert!(painted_row(&rows[bottom]), "{density}: {rows:?}");
                 assert_eq!(
                     rows[bottom + 1..]
                         .iter()
                         .take_while(|row| neutral_blank_row(row))
                         .count(),
-                    1,
+                    usize::from(!matches!(next, TranscriptBlock::Subagents(_))),
                     "{density}: {rows:?}"
                 );
             }
@@ -1154,4 +1165,30 @@ fn subagent_spacing_neighbor_invalidation_stays_local() {
         state.transcript_cache.borrow().dirty_blocks,
         [changed, neighbor]
     );
+}
+
+#[test]
+fn roster_consecutive_bands_share_one_spacing_row() {
+    let mut first = subagents_with_worker();
+    if let TranscriptBlock::Subagents(summary) = &mut first {
+        summary.running = 0;
+        summary.succeeded = 1;
+        summary.live_workers.clear();
+    }
+    let second = first.clone();
+    let mut themes = subagent_band_themes();
+    themes.push(("default".into(), test_theme()));
+    for (name, theme) in themes {
+        for width in [24, 80, 120] {
+            let rows = raw_rows(&[&first, &second], &theme, width);
+            let headings: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| strip_terminal_sequences(row).contains("/subagents"))
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(headings.len(), 2);
+            assert_eq!(headings[1] - headings[0] - 1, 1, "{name}/{width}: {rows:?}");
+        }
+    }
 }

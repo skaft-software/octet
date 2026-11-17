@@ -144,6 +144,7 @@
 - Enabled octet-subagents tools retain their names alongside Pi packages, with package-attributed collision warnings and working unrelated commands.
 - Codemode keeps idle runners ready for later scripts and reports actionable runner-stage errors.
 - Fullscreen live updates keep transcript, composer and footer rows aligned across working, reasoning, tool and status changes.
+- Subagent rosters coalesce unchanged settled waves, share compact spacing, and reserve only used live detail rows until settlement.
 
 ## [0.10.4] - 2026-11-12
 

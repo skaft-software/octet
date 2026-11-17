@@ -140,10 +140,13 @@ pub(super) fn append_hydrated_items(
                     // Discovery/status calls remain hidden. Actual orchestration
                     // calls restore one bounded lifecycle row from durable
                     // call/result pairs without ever rendering their arguments.
+                    // Waiting observes an existing wave; it does not create
+                    // work when every earlier orchestration call has settled.
                     if matches!(
                         name.as_str(),
                         "subagent_spawn" | "subagent_continue" | "subagent_wait" | "subagent_stop"
-                    ) && state.hydrated_pending_subagent_calls.insert(id.clone())
+                    ) && (name != "subagent_wait" || active_hydrated_subagents.is_some())
+                        && state.hydrated_pending_subagent_calls.insert(id.clone())
                     {
                         if let Some(index) =
                             active_hydrated_subagent_index(state, &mut active_hydrated_subagents)
@@ -164,6 +167,7 @@ pub(super) fn append_hydrated_items(
                                     stopped: 0,
                                     hydrated: true,
                                     live_workers: Vec::new(),
+                                    peak_worker_rows: 0,
                                     worker_ids: Vec::new(),
                                 }),
                             ));
