@@ -485,7 +485,7 @@ struct AnthropicCacheCreation {
 #[derive(Deserialize)]
 struct AnthropicOutputTokensDetails {
     #[serde(default)]
-    thinking_tokens: u64,
+    thinking_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1460,11 +1460,15 @@ fn merge_usage(existing: Usage, usage: &AnthropicResponseUsage) -> Result<Usage,
             ephemeral_5m_input_tokens: None,
         }),
         output_tokens_details: Some(AnthropicOutputTokensDetails {
-            thinking_tokens: usage
-                .output_tokens_details
-                .as_ref()
-                .map(|details| details.thinking_tokens)
-                .unwrap_or(existing.reasoning_tokens),
+            // Pi compatibility: packages/ai/src/api/anthropic-messages.ts:872-875
+            // updates reasoning only when the nested counter is present.
+            thinking_tokens: Some(
+                usage
+                    .output_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.thinking_tokens)
+                    .unwrap_or(existing.reasoning_tokens),
+            ),
         }),
     })
 }
@@ -1505,7 +1509,7 @@ fn map_usage(usage: &AnthropicResponseUsage) -> Result<Usage, AiError> {
     let reasoning = usage
         .output_tokens_details
         .as_ref()
-        .map(|d| d.thinking_tokens)
+        .and_then(|d| d.thinking_tokens)
         .unwrap_or(0);
     if reasoning > output {
         return Err(AiError::Decode(DecodeError::UsageUnderflow));

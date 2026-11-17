@@ -18,6 +18,29 @@ use crate::types::{
 };
 use std::sync::Arc;
 
+#[test]
+fn empty_output_details_preserve_thinking_usage() {
+    let first = serde_json::from_value::<AnthropicResponseUsage>(serde_json::json!({
+        "output_tokens": 10, "output_tokens_details": {"thinking_tokens": 7}
+    }))
+    .unwrap();
+    let mut usage = map_usage(&first).unwrap();
+    for details in [serde_json::json!({}), serde_json::Value::Null] {
+        let delta = serde_json::from_value::<AnthropicResponseUsage>(serde_json::json!({
+            "output_tokens": 12, "output_tokens_details": details
+        }))
+        .unwrap();
+        usage = merge_usage(usage, &delta).unwrap();
+        assert_eq!(usage.reasoning_tokens, 7);
+        assert_eq!(usage.output_tokens, 12);
+    }
+    let zero = serde_json::from_value::<AnthropicResponseUsage>(serde_json::json!({
+        "output_tokens_details": {"thinking_tokens": 0}
+    }))
+    .unwrap();
+    assert_eq!(merge_usage(usage, &zero).unwrap().reasoning_tokens, 0);
+}
+
 fn make_test_model(reasoning: bool) -> Model {
     let spec = ModelSpec {
         context_window_options: None,
