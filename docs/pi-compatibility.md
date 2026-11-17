@@ -159,8 +159,17 @@ session replacement waits for the current response to settle before the native
 host lends it the session writer. The command is not replayed at that boundary.
 Built-in native commands and prompt templates retain their existing scheduling.
 
-A Pi tool takes precedence over an optional first-party octet extension's tool
-with the same name, without disabling either process or unrelated tools.
+`pi-subagents` loads through the adapter like any other Pi package; it is not
+excluded as a replacement package. When `octet-subagents` is enabled and admitted,
+its tool names remain authoritative: conflicting Pi tools are withheld from the
+model at startup and during late registration. One warning names the Pi package
+and conflicting tools; repeated registrations do not repeat the warning in that
+adapter process. Unrelated package tools and commands remain available. Disabling
+`octet-subagents` restores the Pi tools under their original names on reload.
+See [Subagents](subagents.md) for the native fleet and wait contract.
+
+Other Pi tools take precedence over optional first-party octet extension tools
+with the same names, without disabling either process or unrelated tools.
 Overrides of native tools such as `read` and `bash` still require their explicit
 reviewed builtin-override grants.
 

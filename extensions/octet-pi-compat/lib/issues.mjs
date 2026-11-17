@@ -109,7 +109,7 @@ export function formatIssues(issues) {
   for (const issue of issues) {
     const key = JSON.stringify([issue.reason, issue.next]);
     const group = groups.get(key) ?? { names: [], issue };
-    const name = nameOf(issue.path);
+    const name = issue.name === undefined ? nameOf(issue.path) : display(issue.name, 128);
     if (!group.names.includes(name)) group.names.push(name);
     groups.set(key, group);
   }
@@ -127,6 +127,7 @@ export class ExtensionIssues {
   constructor(runtime) {
     this.runtime = runtime; this.started = false;
     this.callbacks = new Set(); this.renderers = new Set(); this.background = new Set();
+    this.toolCollisions = new Map(); this.startupToolCollisions = [];
     // Last extension-originated notice write, kept as an ordering barrier.
     this.pending = undefined;
   }
@@ -168,10 +169,22 @@ export class ExtensionIssues {
     }
     return issues;
   }
+  withheldTools(factory, names) {
+    const path = this.runtime.entrypoint(factory), seen = this.toolCollisions.get(path) ?? new Set();
+    const fresh = names.filter(name => !seen.has(name));
+    if (!fresh.length) return;
+    for (const name of fresh) seen.add(name);
+    this.toolCollisions.set(path, seen);
+    const issue = { path, name: packageDisplayName(path, true) ?? nameOf(path), level: 'warning',
+      reason: `tools ${fresh.map(name => JSON.stringify(display(name, 128))).join(', ')} withheld: octet-subagents owns these names`,
+      next: 'Other package tools and commands remain available.' };
+    if (this.started) this.publish([issue]); else this.startupToolCollisions.push(issue);
+  }
   startup() {
     if (this.started) return;
     this.started = true;
-    this.publish([...(this.runtime.excludedFactories || []).map(excludedIssue), ...(this.runtime.loadFailures || []).map(loadIssue), ...this.inertRenderers()]);
+    this.publish([...(this.runtime.excludedFactories || []).map(excludedIssue), ...(this.runtime.loadFailures || []).map(loadIssue), ...this.inertRenderers(), ...this.startupToolCollisions]);
+    this.startupToolCollisions = [];
   }
   // Called by the runtime after successful initialization or a late registration.
   reportInertRenderers() { if (this.started) this.publish(this.inertRenderers()); }

@@ -91,12 +91,13 @@ export function humanizeExtensionName(value) {
     .replace(/\b\w/g, character => character.toUpperCase());
 }
 // The declared or humanized name of the package an entry belongs to, if any.
-export function packageDisplayName(entry) {
+// Collision diagnostics request the exact package identity rather than its UI label.
+export function packageDisplayName(entry, identity = false) {
   let directory = dirname(resolve(entry));
   for (;;) {
     try {
       const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
-      const declared = manifest.pi?.displayName ?? manifest.displayName;
+      const declared = identity ? manifest.name : manifest.pi?.displayName ?? manifest.displayName;
       if (typeof declared === 'string' && declared.trim()) return bounded(declared.trim(), 'extension display name', 128);
       if (typeof manifest.name === 'string' && manifest.name.trim()) return bounded(humanizeExtensionName(manifest.name), 'extension display name', 128);
     } catch {}

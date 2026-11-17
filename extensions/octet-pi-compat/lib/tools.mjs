@@ -148,6 +148,13 @@ export function registerTool(runtime, factory, definition) {
     runtime.require('builtin_tool_overrides_v1');
     if (!runtime.builtinToolOverrides?.has(definition.name)) invalid(`builtin override ${definition.name} was not reviewed; configure again`);
   }
+  // Pi packages/coding-agent/src/core/extensions/loader.ts:293-304 replaces
+  // same-factory registrations. Native fleet ownership is a product boundary,
+  // so a late Pi replacement cannot reclaim that name or its local metadata.
+  if (runtime.loaded && runtime.nativeSubagentTools.has(definition.name)) {
+    runtime.issues.withheldTools(factory, [definition.name]);
+    return;
+  }
   if (!runtime.tools.has(definition.name) && runtime.tools.size >= 256) invalid('tool registration limit');
   const entry = { definition, factory };
   if (!runtime.loaded) { runtime.tools.set(definition.name, entry); return; }

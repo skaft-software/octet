@@ -308,6 +308,9 @@ impl ExecutableExtensions {
             ));
         }
         for (name, tools) in &withheld_tools {
+            if name == PI_BRIDGE_EXTENSION_NAME {
+                continue; // The adapter names each actual Pi package/tool in its warning.
+            }
             diagnostics.push(format!(
                 "note: extension {name:?} does not expose its tools {}: a Pi extension provides them",
                 tools.iter().cloned().collect::<Vec<_>>().join(", ")
@@ -370,6 +373,7 @@ impl ExecutableExtensions {
         crate::app::bootstrap::startup_phase("extensions.digest.begin");
         let catalog = ExtensionRuntimeCatalog::from_descriptors(descriptors.iter().cloned().map(
             |mut descriptor| {
+                pi_mirror::bind_tool_ownership(&mut descriptor, &withheld_tools);
                 descriptor.activation.enabled &= execution_allowed
                     && descriptor
                         .activation
@@ -718,17 +722,21 @@ impl ExecutableExtensions {
         let mut tool_clashes = deferred.tool_clashes.clone();
         tool_clashes.extend(turned_off);
         for (name, tools) in &withheld {
+            if name == PI_BRIDGE_EXTENSION_NAME {
+                continue; // The adapter reports only tools actually registered by a package.
+            }
             self.diagnostics.push(format!(
                 "note: extension {name:?} does not expose its tools {}: a Pi extension provides them",
                 tools.iter().cloned().collect::<Vec<_>>().join(", ")
             ));
         }
-        preparation.plan.withheld_tools = withheld;
+        preparation.plan.withheld_tools = withheld.clone();
         preparation.plan.host_state = self.host_state.lock().unwrap().clone();
         let config = self.rescan_config.as_ref().unwrap();
         let catalog =
             ExtensionRuntimeCatalog::from_descriptors(deferred.descriptors.values().cloned().map(
                 |mut descriptor| {
+                    pi_mirror::bind_tool_ownership(&mut descriptor, &withheld);
                     descriptor.activation.enabled &= config.start_extension_processes
                         && config.sandbox.process_execution_allowed()
                         && descriptor
@@ -1768,10 +1776,30 @@ fn turn_off_tool_clashes(startable: Vec<DiscoveredExtension>) -> ToolClashes {
         .collect::<BTreeSet<_>>();
     let mut turned_off = BTreeMap::new();
     let mut withheld = BTreeMap::new();
+    // Native delegation owns a different fleet from Pi async runs. Reserve all
+    // enabled subagent names, including ones a Pi factory only registers late.
+    // Pi packages/coding-agent/src/core/extensions/runner.ts:636-647 keeps the
+    // first extension registration; agent-session.ts:3641-3645 lets extensions
+    // replace builtins. This product boundary keeps the native fleet reachable.
+    let subagent_tools = owners
+        .iter()
+        .filter(|(_, owner)| owner.as_str() == SUBAGENTS_EXTENSION_NAME)
+        .map(|(tool, _)| tool.clone())
+        .collect::<BTreeSet<_>>();
+    if !subagent_tools.is_empty()
+        && startable
+            .iter()
+            .any(|descriptor| descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME)
+    {
+        withheld.insert(PI_BRIDGE_EXTENSION_NAME.to_owned(), subagent_tools);
+    }
     let kept = startable
         .into_iter()
         .filter(|descriptor| {
             if descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME {
+                return true;
+            }
+            if descriptor.manifest.name == SUBAGENTS_EXTENSION_NAME {
                 return true;
             }
             if first_party_tool_owner(&descriptor.manifest.name) {
@@ -2250,7 +2278,7 @@ mod tool_clash_tests {
     /// The bridge mirrors many unrelated Pi factories. One factory's tool
     /// sharing a name with a first-party tool must not turn the others off.
     #[test]
-    fn pi_tool_precedence_withholds_only_overlapping_first_party_tools() {
+    fn pi_tool_precedence_preserves_native_subagent_tools() {
         let clashes = turn_off_tool_clashes(vec![
             descriptor("octet-web-search", &["web_search"]),
             descriptor("octet-subagents", &["subagent_wait"]),
@@ -2272,7 +2300,7 @@ mod tool_clash_tests {
             clashes.withheld,
             BTreeMap::from([
                 (
-                    "octet-subagents".to_owned(),
+                    PI_BRIDGE_EXTENSION_NAME.to_owned(),
                     BTreeSet::from(["subagent_wait".to_owned()])
                 ),
                 (
@@ -2281,6 +2309,24 @@ mod tool_clash_tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn native_subagent_ownership_reserves_late_pi_names_independent_of_order() {
+        let native = descriptor("octet-subagents", &["subagent_wait", "subagent_spawn"]);
+        let pi = descriptor(PI_BRIDGE_EXTENSION_NAME, &["pi_only"]);
+        for descriptors in [vec![native.clone(), pi.clone()], vec![pi, native]] {
+            let clashes = turn_off_tool_clashes(descriptors);
+            assert_eq!(clashes.kept.len(), 2);
+            assert!(clashes.turned_off.is_empty());
+            assert_eq!(
+                clashes.withheld,
+                BTreeMap::from([(
+                    PI_BRIDGE_EXTENSION_NAME.to_owned(),
+                    BTreeSet::from(["subagent_wait".to_owned(), "subagent_spawn".to_owned()]),
+                )])
+            );
+        }
     }
 
     #[test]

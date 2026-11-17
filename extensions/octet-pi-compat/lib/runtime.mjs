@@ -220,6 +220,7 @@ export class Runtime {
     this.dispatcher = new Dispatcher(this);
     this.issues = new ExtensionIssues(this); this.initializeEpilogue = Promise.resolve();
     this.states = new Map(); this.active = new Map(); this.features = new Set(); this.flagValues = new Map(); this.failedFactories = new Set(); this.extensionNames = new Map();
+    this.nativeSubagentTools = new Set();
     this.loaded = false; this.initialized = false; this.stopping = false; this.hookTail = Promise.resolve(); this.hookQueued = 0;
     this.maxConcurrent = 8; this.foreground = null; this.foregroundWaiters = new Set(); this.autocompleteRegistration = null; this.autocompleteStarted = false; this.autocompleteSettle = null;
     this.entrypoints = [];
@@ -641,6 +642,14 @@ export class Runtime {
     this.namespace = params.extension?.name;
     this.scratchDirectory = params.artifact_directory;
     this.initialHost = params.host || {}; this.workspace = params.workspace; this.initializingId = store.id;
+    // Product-owned configuration, not an extension API grant. Rust separately
+    // withholds these names from both initial and dynamic catalogs. Pi's runner
+    // (packages/coding-agent/src/core/extensions/runner.ts:636-647) keeps the
+    // first extension registration; native delegation must retain its own fleet.
+    const nativeSubagentTools = JSON.parse(process.env.OCTET_PI_NATIVE_SUBAGENT_TOOLS ?? '[]');
+    if (!Array.isArray(nativeSubagentTools) || nativeSubagentTools.length > 256
+      || nativeSubagentTools.some(name => typeof name !== 'string' || !/^subagent_[A-Za-z0-9_]{1,119}$/.test(name))) invalid('native subagent tool ownership');
+    this.nativeSubagentTools = new Set(nativeSubagentTools);
     for (const flag of params.flag_values || []) this.flagValues.set(flag.name, flag.value);
     await this.load();
     validateProviderInitialization(this);
@@ -687,6 +696,15 @@ export class Runtime {
     // Static reviewed shortcut declarations are admitted during native startup.
     // A reverse registration here would wait for a frontend that is not live yet.
     if (skipped ? !metadata.shortcuts.every(shortcut => (declared.shortcuts || []).some(allowed => isDeepStrictEqual(shortcut, allowed))) : !isDeepStrictEqual(declared.shortcuts || [], metadata.shortcuts)) invalid('manifest shortcuts differ from reviewed registrations');
+    // Validate the full reviewed surface before dropping local handlers. Return
+    // that surface for native negotiation; Rust filters the authoritative wire
+    // catalog. Getters/renderers must not attribute native tools to Pi handlers.
+    const withheld = new Map();
+    for (const [name, entry] of this.tools) if (this.nativeSubagentTools.has(name)) {
+      const names = withheld.get(entry.factory) ?? []; names.push(name); withheld.set(entry.factory, names);
+      this.tools.delete(name);
+    }
+    for (const [factory, names] of withheld) this.issues.withheldTools(factory, names);
     this.initialized = true;
     return {
       // Shortcuts are static on the host wire. Keep the reviewed declarations;

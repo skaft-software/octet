@@ -290,7 +290,13 @@ native workspace trust keep their original host gate.
   owner-scoped replacement keeps extension effects, scheduling, metering and
   unsafe replay classification, not the displaced builtin's privileges. Native
   retirement restores the builtin without retargeting frozen calls or replaying
-  unsafe historical calls. First-party external tool conflicts remain refused.
+  unsafe historical calls. Enabled `octet-subagents` retains its tool names:
+  conflicting Pi tools are withheld, with one package-and-tool warning per
+  process; unrelated package tools and commands remain available. The product
+  supplies `OCTET_PI_NATIVE_SUBAGENT_TOOLS` for adapter attribution and separately
+  enforces the same withholding on initial and dynamic native catalogs. No new
+  extension API authority is granted. Other first-party external conflicts retain
+  their existing native admission policy.
 - `createReadTool`, `createWriteTool`, `createEditTool`, `createBashTool`,
   `createPowerShellTool` and their `*ToolDefinition` counterparts construct local
   Pi metadata without an installation. Execution requires an admitted live tool
@@ -1138,9 +1144,9 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1653 tests: 1620 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
-and the pinned Pi provider fixture. The two additional startup-chrome regressions
-are exercised separately in `test/chrome-snapshot.test.mjs`.
+**1657 tests: 1624 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+and the pinned Pi provider fixture, including startup-chrome and subagent-collision
+regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing

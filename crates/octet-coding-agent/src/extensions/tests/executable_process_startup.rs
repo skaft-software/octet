@@ -592,3 +592,213 @@ async fn tool_clash_turns_off_the_external_extension_instead_of_failing() {
         .is_some_and(|error| error.starts_with("turned off:")));
     extensions.shutdown().await;
 }
+
+/// A real Pi factory and native executable declare incompatible wait schemas.
+/// Keep the native fleet reachable without taking the Pi package's commands away.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_subagent_collision_keeps_native_tools_and_package_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let extension_root = temp.path().join("extensions");
+    let native = extension_root.join(SUBAGENTS_EXTENSION_NAME);
+    std::fs::create_dir_all(&native).unwrap();
+    let tools = [
+        "subagent_spawn",
+        "subagent_status",
+        "subagent_wait",
+        "subagent_stop",
+        "subagent_continue",
+    ];
+    std::fs::write(native.join("extension.toml"), format!(
+        "name = \"octet-subagents\"\nversion = \"0.1.0\"\napi_version = \"0.4\"\n[entrypoint]\ncommand = \"node\"\nargs = [\"{}\"]\n[contributes]\ntools = {tools:?}\n",
+        native.join("native.mjs").display()
+    )).unwrap();
+    std::fs::write(native.join("native.mjs"), format!(r#"
+import {{ createInterface }} from 'node:readline';
+const tools = {tools}.map(name => ({{name, description:'Native fleet',parameters:{{type:'object',properties:{{target:{{type:'string'}},timeout_seconds:{{type:'number'}}}},additionalProperties:false}}}}));
+for await (const line of createInterface({{input:process.stdin}})) {{
+  const {{id,method,params}} = JSON.parse(line);
+  if (id === undefined) continue;
+  const result = method === 'initialize' ? {{api_version:'0.4',tools,commands:[],protocol:{{version:'0.4',features:params.protocol.required_features,limits:{{max_concurrent_requests:1}}}}}}
+    : method === 'tool/call' ? {{content:[{{type:'text',text:'native fleet waited'}}],is_error:false}} : {{}};
+  console.log(JSON.stringify({{jsonrpc:'2.0',id,result}}));
+  if (method === 'shutdown') process.exit(0);
+}}
+"#, tools = serde_json::json!(tools))).unwrap();
+    let package = temp.path().join("pi-subagents");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"pi-subagents","version":"0.59.0","type":"module","pi":{"extensions":["index.mjs"]}}"#,
+    )
+    .unwrap();
+    let factory = package.join("index.mjs");
+    std::fs::write(&factory, format!(r#"
+export default pi => {{
+  const tool = name => ({{name,description:'Pi async runs',parameters:{{type:'object',properties:{{all:{{type:'boolean'}}}},additionalProperties:false}},execute(){{return {{content:[{{type:'text',text:'Pi async runs'}}]}};}}}});
+  for (const name of {tools}) pi.registerTool(tool(name));
+  pi.registerTool(tool('pi_only'));
+  pi.registerCommand('package-check', {{handler() {{
+    pi.registerTool(tool('subagent_wait'));
+    pi.registerTool(tool('subagent_wait'));
+  }}}});
+}};
+"#, tools = serde_json::json!(tools))).unwrap();
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/octet-pi-compat")
+        .canonicalize()
+        .unwrap();
+    let configured = std::process::Command::new("node")
+        .arg(adapter.join("configure.mjs"))
+        .arg("--reviewed")
+        .arg("--output")
+        .arg(extension_root.join("octet-pi-compat"))
+        .arg(&factory)
+        .env("OCTET_PI_AGENT_DIR", temp.path().join("no-pi-agent"))
+        .output()
+        .unwrap();
+    assert!(
+        configured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let bridge_manifest = extension_root.join("octet-pi-compat/extension.toml");
+    let reviewed = ExtensionManifest::load(&bridge_manifest).unwrap();
+    let agent_dir = temp.path().join("pi-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        serde_json::json!({"packages":[package]}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        extension_root.join("octet-pi-compat/auto-configure.mjs"),
+        format!(
+            "import {};",
+            serde_json::json!(url::Url::from_file_path(adapter.join("auto-configure.mjs")).unwrap())
+        ),
+    )
+    .unwrap();
+    for (enabled, timing, mirror) in [
+        (true, ExtensionStartupTiming::Synchronous, false),
+        (false, ExtensionStartupTiming::Synchronous, false),
+        (true, ExtensionStartupTiming::Synchronous, true),
+        (true, ExtensionStartupTiming::AfterFirstFrame, true),
+    ] {
+        let mut manifest = reviewed.clone();
+        if mirror {
+            manifest
+                .entrypoint
+                .env
+                .insert("OCTET_PI_AUTO_MIRROR".into(), "1".into());
+            manifest.entrypoint.env.insert(
+                "OCTET_PI_AGENT_DIR".into(),
+                agent_dir.to_string_lossy().into_owned(),
+            );
+            manifest.contributes.tools.clear();
+        }
+        std::fs::write(&bridge_manifest, toml::to_string(&manifest).unwrap()).unwrap();
+        let mut config =
+            executable_extension_config(temp.path(), &extension_root, "octet-pi-compat");
+        config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
+        if enabled {
+            config
+                .enabled_extensions
+                .push(SUBAGENTS_EXTENSION_NAME.into());
+            config
+                .invocation_trusted_extensions
+                .push(SUBAGENTS_EXTENSION_NAME.into());
+        }
+        let session = Session::create(
+            temp.path()
+                .join(format!("session-{enabled}-{timing:?}-{mirror}.jsonl")),
+        )
+        .unwrap();
+        let sessions = SessionStore::new(&config.session_dir, temp.path());
+        let model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+            .unwrap();
+        let mut host = ExtensionHost::new();
+        let mut extensions =
+            ExecutableExtensions::discover_and_start_with_provider_runtime_and_reason(
+                &config,
+                &session,
+                &model,
+                &ReasoningConfig::Off,
+                &sessions,
+                &mut host,
+                None,
+                ExtensionProviderRuntime::default(),
+                crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+                None,
+                "startup",
+                timing,
+            );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while extensions.startup_pending() {
+                extensions.pump_deferred_startup(&mut host, &session).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("deferred Pi mirror settles");
+        assert_eq!(
+            extensions.processes.len(),
+            if enabled { 2 } else { 1 },
+            "{:?}",
+            extensions.diagnostics.iter().collect::<Vec<_>>()
+        );
+        let bridge = extensions
+            .processes
+            .iter()
+            .find(|process| process.descriptor().manifest.name == "octet-pi-compat")
+            .unwrap()
+            .clone();
+        let mut events = bridge.subscribe();
+        host.finalize_tool_surface();
+        let catalog = host.tool_definitions();
+        for name in tools {
+            let tool = catalog.iter().find(|tool| tool.name == name).unwrap();
+            assert_eq!(
+                tool.description,
+                if enabled {
+                    "Native fleet"
+                } else {
+                    "Pi async runs"
+                },
+                "{name}"
+            );
+            assert_eq!(tool.parameters["properties"].get("all").is_none(), enabled);
+        }
+        assert!(catalog.iter().any(|tool| tool.name == "pi_only"));
+        let output = extensions
+            .execute_command_without_confirmation("package-check", Vec::new())
+            .await
+            .unwrap()
+            .unwrap();
+        if enabled {
+            assert_eq!(output.matches("pi-subagents:").count(), 1, "{output}");
+            assert!(output.contains("octet-subagents owns"), "{output}");
+            for name in tools {
+                assert!(output.contains(name), "{name}: {output}");
+            }
+        } else {
+            assert!(!output.contains("withheld"), "{output}");
+        }
+        let mut warnings = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ExtensionEvent::Notification { notification, .. } = event {
+                if notification.level
+                    == octet_agent::extension_process::ExtensionNotificationLevel::Warning
+                {
+                    warnings.push(notification.message);
+                }
+            }
+        }
+        // Startup notices precede subscribe; repeated late registration must not
+        // repeat the package/tool warning already emitted at initialization.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        extensions.shutdown().await;
+    }
+}

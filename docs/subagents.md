@@ -118,6 +118,14 @@ This is a scheduling cadence, not a provider or terminal latency guarantee.
 The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.
 
+When `octet-subagents` is enabled and admitted, these names stay owned by octet,
+including when the Pi adapter loads `pi-subagents` or another package with the
+same tool names. Conflicting Pi tools are withheld from the model and a warning
+names the package and tools once per adapter process. The package's unrelated
+tools and commands still work. Native `subagent_wait` uses `target` and
+`timeout_seconds`, not the Pi package's async-run schema. With `octet-subagents`
+disabled, the Pi tools remain available under their original names.
+
 ## Open the fleet in panes
 
 `/subagents open-all tmux` or `/subagents open-all herdr` is the escape hatch: it plans to pluck the parent session and every

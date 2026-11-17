@@ -7,6 +7,27 @@ use octet_agent::extension_process::{sanitized_subprocess_environment, ProcessGr
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 
+/// Share the product's native subagent ownership with the Pi adapter for
+/// package-attributed warnings. The process runtime independently enforces the
+/// same withheld names; this environment value grants no tool authority.
+pub(super) fn bind_tool_ownership(
+    descriptor: &mut DiscoveredExtension,
+    withheld: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if descriptor.manifest.name == PI_BRIDGE_EXTENSION_NAME {
+        descriptor.manifest.entrypoint.env.insert(
+            "OCTET_PI_NATIVE_SUBAGENT_TOOLS".into(),
+            serde_json::to_string(
+                &withheld
+                    .get(PI_BRIDGE_EXTENSION_NAME)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .expect("tool names serialize"),
+        );
+    }
+}
+
 pub(super) fn settings_binding(
     descriptor: &DiscoveredExtension,
     workspace: &Path,

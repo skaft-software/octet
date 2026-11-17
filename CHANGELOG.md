@@ -140,6 +140,7 @@
 - Pi compatibility restores validated composer and footer templates at first paint while the live setup loads.
 - Extension slash commands run immediately during active responses, with handler failures and timeouts isolated from the running turn.
 - Subagent spawn and continuation reach inference with resource-contributing extensions while parent authority refusals identify the guard.
+- Enabled octet-subagents tools retain their names alongside Pi packages, with package-attributed collision warnings and working unrelated commands.
 
 ## [0.10.4] - 2026-11-12
 
