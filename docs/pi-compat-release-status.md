@@ -104,12 +104,12 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_helper_import_tests` | 3 | public helper imports, matrix key/package helpers, absent optional properties |
 | `pi_messages_tests` | 11 | text/images, public message events, persistence/resume, delivery, tool pairing, repeated compaction/restart and hook-fault/wire qualification |
 | `pi_model_provider_tests` | 9 | model facts, scoped views, cold interactive startup/reload facts, model/thinking selection, custom and inherited providers, request hooks and custom HTTP delegation |
-| `pi_session_replacement_tests` | 10 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch and before-hook cancellation |
+| `pi_session_replacement_tests` | 11 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch, before-hook cancellation and setup-time resource refresh |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
 | `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
 | `pi_ui_contract_tests` | 15 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane (including a slow listener) and editor calls during prompt hooks |
 | `pi_completion_tests` | 6 | composer completions through the real App, adapter and input loops |
-| `pi_renderers_tests` | 1 | real App/adapter transcript renderers, persistence, invalidation, resize and Tern |
+| `pi_renderers_tests` | 3 | real App/adapter transcript renderers, persistence, invalidation, resize, Tern and Kitty images under idle/streaming wheel scroll |
 | `resource_paths::pi_app_tests` | 8 | startup/reload, callback errors, failed mutation, imported default theme and deferred headless model facts |
 | `mcp_native_tests` | 3 | registration/replacement, execution, removal/cleanup, headless startup and missing-resident refusal |
 | `pi_original_clm_tests` | 1 (ignored) | original `pi-clm`, source unavailable here |
