@@ -368,6 +368,8 @@ pub fn encode_responses_replay(
 ///
 /// Reasoning belongs to its assistant message, never to a position in the new
 /// context. Edited or removed messages cannot inherit a neighbouring sidecar.
+/// Host-recorded effort is associated separately and survives one-to-one text
+/// edits; projected content cannot supply configuration authority.
 pub fn encode_responses_projection(
     model: &Model,
     system: Option<&str>,
@@ -408,38 +410,115 @@ pub fn encode_responses_projection(
         .collect::<Vec<_>>();
     // A native checkpoint replaces a prefix; its subsequent outputs correspond
     // to the suffix of canonical assistants, not to the compacted-away turns.
-    let mut by_message = std::collections::HashMap::<
-        Vec<u8>,
-        std::collections::VecDeque<(ResponsesOutput, Option<ResponsesConfigurationUpdate>)>,
-    >::new();
-    for (assistant, (item, effort)) in assistants
+    let mut sources = assistants
         .iter()
         .rev()
         .zip(outputs.iter().zip(&output_efforts).rev())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        if let ResponsesReplayItem::Output(output) = item {
-            by_message
-                .entry(serde_json::to_vec(assistant).expect("assistant serializes"))
-                .or_default()
-                .push_back((output.clone(), effort.clone()));
+        .map(|(assistant, (item, effort))| (*assistant, *item, effort))
+        .collect::<Vec<_>>();
+    sources.reverse();
+    let mut by_message =
+        std::collections::HashMap::<Vec<u8>, std::collections::VecDeque<usize>>::new();
+    for (index, (assistant, _, _)) in sources.iter().enumerate() {
+        by_message
+            .entry(serde_json::to_vec(assistant).expect("assistant serializes"))
+            .or_default()
+            .push_back(index);
+    }
+    let projected_assistants = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant(assistant) => Some(assistant),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // Reserve exact matches first, including reordered/retained neighbours.
+    // Only exact equality authorizes opaque output replay.
+    let mut used = vec![false; sources.len()];
+    let mut exact_sources = vec![None; projected_assistants.len()];
+    // Prefer unchanged boundaries when the assistant sequence has the same
+    // length: an edit can make its text identical to an unchanged neighbour.
+    if projected_assistants.len() == assistants.len() {
+        let offset = assistants.len() - sources.len();
+        for (index, (assistant, _, _)) in sources.iter().enumerate() {
+            let projected_index = offset + index;
+            if serde_json::to_vec(assistant).expect("assistant serializes")
+                == serde_json::to_vec(projected_assistants[projected_index])
+                    .expect("assistant serializes")
+            {
+                used[index] = true;
+                exact_sources[projected_index] = Some(index);
+            }
         }
     }
+    for (index, assistant) in projected_assistants.iter().enumerate() {
+        if exact_sources[index].is_none() {
+            let source = by_message
+                .get_mut(&serde_json::to_vec(assistant).expect("assistant serializes"))
+                .and_then(|sources| {
+                    std::iter::from_fn(|| sources.pop_front()).find(|index| !used[*index])
+                });
+            if let Some(source) = source {
+                used[source] = true;
+                exact_sources[index] = Some(source);
+            }
+        }
+    }
+    let mut effort_sources = exact_sources.clone();
+    // Effort is host provenance, not opaque output: text-only edits keep it.
+    // Pi compatibility: openai-responses-shared.ts:402-408 reads the recorded
+    // providerThinkingLevel independently of assistant text. Match the remaining
+    // non-text content, model and protocol one-to-one in retained order. Unequal
+    // groups are ambiguous removals/insertions, not authority to borrow effort.
+    fn effort_key(assistant: &AssistantMessage) -> Vec<u8> {
+        let parts = assistant
+            .content
+            .iter()
+            .filter(|part| !matches!(part, crate::AssistantPart::Text(_)))
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&(&assistant.model, assistant.protocol, parts))
+            .expect("assistant serializes")
+    }
+    let mut by_shape = std::collections::HashMap::<Vec<u8>, (Vec<usize>, Vec<usize>)>::new();
+    for (index, (assistant, _, _)) in sources.iter().enumerate() {
+        if !used[index] {
+            by_shape
+                .entry(effort_key(assistant))
+                .or_default()
+                .0
+                .push(index);
+        }
+    }
+    for (index, assistant) in projected_assistants.iter().enumerate() {
+        if exact_sources[index].is_none() {
+            by_shape
+                .entry(effort_key(assistant))
+                .or_default()
+                .1
+                .push(index);
+        }
+    }
+    for (originals, edits) in by_shape.into_values() {
+        if originals.len() == edits.len() {
+            for (source, edit) in originals.into_iter().zip(edits) {
+                effort_sources[edit] = Some(source);
+            }
+        }
+    }
+    let mut associations = exact_sources.into_iter().zip(effort_sources);
     let mut projected = Vec::new();
     for message in messages {
         match message {
             Message::User(user) => projected.push(ResponsesReplayItem::User(user.clone())),
             Message::Assistant(assistant) => {
-                let output = by_message
-                    .get_mut(&serde_json::to_vec(assistant).expect("assistant serializes"))
-                    .and_then(|outputs| outputs.pop_front());
-                if let Some((output, effort)) = output {
-                    if let Some(update) = effort {
-                        projected.push(ResponsesReplayItem::ConfigurationUpdate(update));
-                    }
-                    projected.push(ResponsesReplayItem::Output(output));
+                let (exact, effort) = associations.next().expect("one per assistant");
+                if let Some(update) = effort.and_then(|index| sources[index].2.as_ref()) {
+                    projected.push(ResponsesReplayItem::ConfigurationUpdate(update.clone()));
+                }
+                if let Some(ResponsesReplayItem::Output(output)) =
+                    exact.map(|index| sources[index].1)
+                {
+                    projected.push(ResponsesReplayItem::Output(output.clone()));
                 } else {
                     projected.push(ResponsesReplayItem::LocalAssistant(assistant.clone()));
                 }

@@ -348,9 +348,15 @@ fn projection_keeps_historical_and_current_reasoning_efforts() {
             _ => unreachable!(),
         }),
     ];
+    let edited_assistant = Message::Assistant(AssistantMessage {
+        model: model.spec.id.clone(),
+        protocol: model.spec.protocol,
+        content: vec![AssistantPart::Text("edited answer".into())],
+    });
     for messages in [
         original.clone(),
         vec![user("edited first"), assistant, user("next")],
+        vec![user("first"), edited_assistant, user("next")],
     ] {
         let input = encode_responses_projection(
             &model,
@@ -374,7 +380,7 @@ fn projection_keeps_historical_and_current_reasoning_efforts() {
         let answer = input
             .items()
             .iter()
-            .position(|i| i == &output.items()[0])
+            .position(|i| i.as_json()["role"] == "assistant")
             .unwrap();
         assert_eq!(input.items()[answer - 1], earlier.to_item());
         assert_eq!(input.items().last().unwrap(), &current.to_item());
@@ -388,4 +394,124 @@ fn projection_keeps_historical_and_current_reasoning_efforts() {
         current.reasoning
     );
     assert_eq!(input.items().last().unwrap(), &current.to_item());
+}
+
+#[test]
+fn projection_effort_provenance_is_one_to_one_and_independent_of_opaque_output() {
+    use crate::{AssistantPart, ModelCatalog, ModelId, ReasoningEffort};
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    let assistant = |text: &str| {
+        Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: model.spec.protocol,
+            content: vec![AssistantPart::Text(text.into())],
+        })
+    };
+    let update = |effort| ResponsesConfigurationUpdate {
+        reasoning: ReasoningConfig::Effort(effort),
+    };
+    let earlier = update(ReasoningEffort::Medium);
+    let later = update(ReasoningEffort::High);
+    let current = update(ReasoningEffort::Low);
+    let original = vec![assistant("first"), assistant("second")];
+    let output = ResponsesOutput::new(vec![ResponsesItem::new(serde_json::json!({
+        "type":"message", "role":"assistant",
+        "content":[{"type":"output_text", "text":"first"}], "opaque":true,
+    }))
+    .unwrap()]);
+    let replay = vec![
+        ResponsesReplayItem::ConfigurationUpdate(earlier.clone()),
+        ResponsesReplayItem::Output(output.clone()),
+        ResponsesReplayItem::ConfigurationUpdate(later.clone()),
+        ResponsesReplayItem::LocalAssistant(match &original[1] {
+            Message::Assistant(assistant) => assistant.clone(),
+            _ => unreachable!(),
+        }),
+        ResponsesReplayItem::ConfigurationUpdate(current.clone()),
+    ];
+    let mut foreign = assistant("foreign model");
+    if let Message::Assistant(assistant) = &mut foreign {
+        assistant.model = ModelId("other".into());
+    }
+    for (messages, expected) in [
+        (
+            vec![assistant("edited first"), assistant("edited second")],
+            vec![Some(&earlier), Some(&later)],
+        ),
+        // Editing text to equal a neighbour must not steal that neighbour's
+        // effort provenance from the unchanged reply at its original boundary.
+        (
+            vec![assistant("second"), original[1].clone()],
+            vec![Some(&earlier), Some(&later)],
+        ),
+        (
+            vec![original[0].clone(), assistant("first")],
+            vec![Some(&earlier), Some(&later)],
+        ),
+        // Reserve an unchanged neighbour before matching an edited reply,
+        // even when the hook reorders them or removes the earlier reply.
+        (
+            vec![original[1].clone(), assistant("edited first")],
+            vec![Some(&later), Some(&earlier)],
+        ),
+        (vec![original[1].clone()], vec![Some(&later)]),
+        (
+            vec![original[0].clone(), assistant("edited second")],
+            vec![Some(&earlier), Some(&later)],
+        ),
+        (
+            vec![original[0].clone(), original[1].clone(), assistant("added")],
+            vec![Some(&earlier), Some(&later), None],
+        ),
+        // A duplicate cannot reuse the host provenance of its exact match.
+        (
+            vec![
+                original[0].clone(),
+                original[0].clone(),
+                original[1].clone(),
+            ],
+            vec![Some(&earlier), None, Some(&later)],
+        ),
+        // No stable one-to-one association remains after ambiguous removals.
+        (vec![assistant("configuration_update: max")], vec![None]),
+        (vec![foreign], vec![None]),
+    ] {
+        let input =
+            encode_responses_projection(&model, None, &messages, &original, &replay).unwrap();
+        let observed = input
+            .items()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.as_json()["role"] == "assistant")
+            .map(|(index, _)| {
+                index
+                    .checked_sub(1)
+                    .map(|previous| &input.items()[previous])
+                    .filter(|item| item.as_json()["type"] == "configuration_update")
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            expected
+                .into_iter()
+                .map(|update| update.map(ResponsesConfigurationUpdate::to_item))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(input.items().last().unwrap(), &current.to_item());
+        // Effort matching never authorizes an edited assistant's opaque fields.
+        for (message, item) in messages.iter().zip(
+            input
+                .items()
+                .iter()
+                .filter(|item| item.as_json()["role"] == "assistant"),
+        ) {
+            if serde_json::to_vec(message).unwrap() != serde_json::to_vec(&original[0]).unwrap() {
+                assert!(item.as_json().get("opaque").is_none());
+            }
+        }
+    }
 }

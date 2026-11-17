@@ -156,8 +156,10 @@ design](design/octet-agent.md#sessions).
   Text-only assistant edits keep replayed tool-call and result IDs paired, including
   provider IDs containing punctuation or more than 64 characters.
   Hook projections on qualified Responses routes retain recorded reasoning effort
-  before retained replies and the current effort after projected history, while
-  keeping the request's pinned baseline unchanged.
+  before retained replies, including one-to-one text-only assistant edits, and the
+  current effort after projected history, while keeping the pinned baseline unchanged.
+  Effort comes only from host history; edited text cannot author configuration updates.
+  Ambiguous insertions or removals do not borrow another reply's recorded effort.
   Pi's `before_provider_request` transformation is separate: its encoded reply
   must fit the negotiated extension RPC frame, including the envelope. Larger
   replies are skipped with a warning rather than truncating provider input.

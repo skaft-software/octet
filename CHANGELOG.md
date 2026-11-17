@@ -58,6 +58,7 @@
 - Pi streaming tool arguments use incremental parsing and bounded snapshot work while preserving partial-argument previews.
 - Pi context phases carry excluded dialog time forward so later context handlers retain their execution budget.
 - Pi tool-call result getters stay under bounded supervision, with throwing getters isolated and reported by extension and stage.
+- Responses history preserves recorded reasoning effort before assistant replies whose text is edited by context hooks.
 - Responses history keeps tool-call and result IDs paired when context hooks edit assistant text.
 - Video preparation follows the active branch and compaction window.
 - Pi command appends commit during streaming responses, and adapter retirement leaves pending response observations isolated.
