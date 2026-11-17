@@ -562,8 +562,8 @@ impl Drop for AuxiliaryRecovery<'_> {
     }
 }
 
-// Auxiliary calls own an immutable, exclusively borrowed session snapshot until
-// they settle. No controls are committed or tool schema is dispatched inside
+// Auxiliary calls retain their prepared request until they settle. Only private
+// extension receipts can append while waiting; no controls or tool schema enter
 // them, so a replacement may rebuild the same request from that snapshot.
 // The accepted-attempt guard remains armed until `settle` durably records known
 // usage. Cancellation may discard the response, never its billing evidence.
@@ -587,7 +587,8 @@ where
         let result = tokio::select! {
             biased;
             _ = context.abort.wait() => return Err(AgentError::Cancelled),
-            result = call(network_deadline, Arc::clone(&context.dispatch)) => result,
+            // Auxiliary provider state is large; keep it off the Run's stack.
+            result = context.session.wait_with_run_appends(Box::pin(call(network_deadline, Arc::clone(&context.dispatch)))) => result,
         };
         let error = match result {
             Ok(value) => {
@@ -730,7 +731,7 @@ where
             biased;
             _ = context.abort.wait() => return Err(AgentError::Cancelled),
             _ = wait_network_deadline(network_deadline) => return Err(AgentError::NetworkWaitLimit { limit: context.max_network_wait.unwrap(), usage_unknown }),
-            decision = decision_future => decision,
+            decision = context.session.wait_with_run_appends(decision_future) => decision,
         };
 
         if context.abort.is_set() {
@@ -798,7 +799,7 @@ where
             biased;
             _ = context.abort.wait() => return Err(AgentError::Cancelled),
             _ = wait_network_deadline(network_deadline) => return Err(AgentError::NetworkWaitLimit { limit: context.max_network_wait.unwrap(), usage_unknown }),
-            _ = tokio::time::sleep(delay) => {},
+            _ = context.session.wait_with_run_appends(tokio::time::sleep(delay)) => {},
         }
     }
 }

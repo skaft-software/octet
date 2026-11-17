@@ -624,7 +624,9 @@ pub(super) async fn append_context_inputs(
 ) -> Result<(), AgentError> {
     for queued in std::mem::take(pending) {
         if let Some(ReservedPayload { input, reservation }) = queued.claim() {
-            let input = prepare_user_images(input, model, None).await?;
+            let input = session
+                .wait_with_run_appends(prepare_user_images(input, model, None))
+                .await?;
             input.append_to(session, None)?;
             drop(reservation);
         }
@@ -708,7 +710,10 @@ pub(super) async fn deliver_control_inputs(
         let Some(ReservedPayload { input, reservation }) = queued.claim() else {
             continue;
         };
-        let input = match prepare_user_images(input, observation.model, abort).await {
+        let input = match session
+            .wait_with_run_appends(prepare_user_images(input, observation.model, abort))
+            .await
+        {
             Ok(input) => input,
             Err(error) => {
                 let event = (!delivered.is_empty())

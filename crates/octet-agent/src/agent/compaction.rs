@@ -689,7 +689,7 @@ impl CompactionContext<'_> {
                 biased;
                 _ = self.abort.wait() => return Err(AgentError::Cancelled),
                 _ = tokio::time::sleep_until(deadline) => return Err(expired()),
-                result = strategy.render(&self.model.spec.id.0, &text, self.resource_owner) => result
+                result = self.session.wait_with_run_appends(strategy.render(&self.model.spec.id.0, &text, self.resource_owner)) => result
                     .map_err(|error| AgentError::InvalidCompactionPolicy(format!(
                         "snapcompact extension failed: {error}"
                     )))?,
@@ -746,7 +746,7 @@ impl CompactionContext<'_> {
                 biased;
                 _ = self.abort.wait() => return Err(AgentError::Cancelled),
                 _ = tokio::time::sleep_until(deadline) => return Err(expired()),
-                result = worker => result.map_err(|_| AgentError::InvalidCompactionPolicy(
+                result = self.session.wait_with_run_appends(worker) => result.map_err(|_| AgentError::InvalidCompactionPolicy(
                     "snapcompact frame validation worker failed; history was not discarded".into()
                 ))??,
             };

@@ -155,8 +155,9 @@ extension commands are available as `/<extension-owner>:<command>`.
 Extension slash commands submitted in the composer execute immediately while a
 response is running, as in Pi. The response keeps running if a handler fails or
 times out; a warning names the extension and command. `pi.appendEntry()` commits
-through the running response's original session writer before returning, even
-while response hooks await. Durable receipts make the appended entries available
+through the running response's original session writer before returning, including
+while parallel tools, background settlement, video preparation, retries or response
+hooks await. Durable receipts make the appended entries available
 to the command's immediate session getters. Adapter retirement skips pending
 response observations with a warning; committed entries and handlers are not
 replayed. A handler requesting a session replacement still waits for the current

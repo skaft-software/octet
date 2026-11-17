@@ -142,7 +142,9 @@ impl BackgroundTools {
     ) -> Result<Vec<AgentEvent>, AgentError> {
         let job = self.jobs.front_mut().expect("pending background job");
         if job.completed.is_none() {
-            let completed = job.task.as_mut().expect("running background job").await;
+            let completed = session
+                .wait_with_run_appends(job.task.as_mut().expect("running background job"))
+                .await;
             job.task = None;
             job.completed = Some(match completed {
                 Ok(completed) => completed.execution,
@@ -210,7 +212,13 @@ impl BackgroundTools {
         // The completed result and billing evidence are durable before this
         // optional wait. A dropped settlement cannot lose original media or
         // leave the job queued for a second result append.
-        prepare_tool_result_frames(&execution.result, model, Some(&self.abort)).await;
+        session
+            .wait_with_run_appends(prepare_tool_result_frames(
+                &execution.result,
+                model,
+                Some(&self.abort),
+            ))
+            .await;
         if let Some(evidence) = evidence {
             evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
         }

@@ -130,7 +130,9 @@ impl NativeState {
             payload,
             applied: None,
         });
-        control.commit_steer(prepared).await?;
+        session
+            .wait_with_run_appends(control.commit_steer(prepared))
+            .await?;
         Ok(None)
     }
     pub(super) fn update(

@@ -3,6 +3,30 @@
 use super::*;
 use crate::cache_warmer::{CacheWarmHost, CacheWarmLimits, CacheWarmStep};
 
+#[cfg(all(test, unix))]
+#[path = "turn_loop_append_tests.rs"]
+mod append_wait_tests;
+
+impl Session {
+    /// Keep the sole Run writer responsive while unrelated work is pending.
+    /// Pi runs commands immediately and appends synchronously (reference
+    /// packages/coding-agent/src/core/agent-session.ts:2120-2129,3487-3492).
+    /// The process boundary needs this pump, not a second persistence writer.
+    pub(super) async fn wait_with_run_appends<F: std::future::Future>(
+        &mut self,
+        future: F,
+    ) -> F::Output {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.run_append_ready() => { self.service_run_append(); },
+                result = &mut future => return result,
+            }
+        }
+    }
+}
+
 impl Agent {
     /// Reconciles unresolved calls from the latest persisted assistant turn.
     ///
@@ -472,7 +496,7 @@ impl Agent {
                     tokio::select! {
                         biased;
                         _ = abort.wait() => break 'run FinishReason::Aborted,
-                        changed = octet_ai::video::prepare_message_frames(&model, &candidates) => {
+                        changed = session.wait_with_run_appends(octet_ai::video::prepare_message_frames(&model, &candidates)) => {
                             if changed { context_capacity.invalidate(); }
                         }
                     }
@@ -555,7 +579,7 @@ impl Agent {
                             biased;
                             _ = abort.wait() => break 'run FinishReason::Aborted,
                             _ = wait_network_deadline(network_deadline) => break 'run FinishReason::Failed(AgentError::NetworkWaitLimit { limit: max_network_wait.unwrap(), usage_unknown: failed_usage_unknown }),
-                            decision = decision_future => decision,
+                            decision = session.wait_with_run_appends(decision_future) => decision,
                         }
                     } else {
                         ProviderRetryDecision { proceed: false, additional_delay: Duration::ZERO }
@@ -624,7 +648,7 @@ impl Agent {
                                 Some(Control::Abort) => break 'run FinishReason::Aborted,
                                 None => control_open = false,
                             },
-                            _ = &mut wait => break,
+                            _ = session.wait_with_run_appends(&mut wait) => break,
                         }
                     }
                     // Resume the ordinary safe preparation boundary, not a
@@ -1112,7 +1136,6 @@ impl Agent {
                         tokio::select! {
                             biased;
                             _ = abort.wait() => break Ok(None),
-                            _ = session.run_append_ready() => { session.service_run_append(); },
                             _ = wait_network_deadline(network_deadline) => {
                                 if opening_client.request_may_have_been_sent() {
                                     let first = !session.has_uncertain_usage();
@@ -1148,7 +1171,7 @@ impl Agent {
                                 Some(Control::Abort) => { abort.set(); break Ok(None); }
                                 None => control_open = false,
                             },
-                            result = &mut opening => {
+                            result = session.wait_with_run_appends(&mut opening) => {
                                 break if abort.is_set() { Ok(None) } else { result };
                             },
                             step = cache_warmer.next_step() => {
@@ -1289,7 +1312,7 @@ impl Agent {
                 if let Some(delta) = native_delta.as_ref().filter(|_| native.required_input && native_delta_has_results) {
                     native.required_input = false;
                     if let Some(control) = native.control.as_ref() {
-                        if let Err(error) = control.continue_with(delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                        if let Err(error) = session.wait_with_run_appends(control.continue_with(delta.clone())).await { break 'run FinishReason::Failed(error.into()); }
                     }
                 }
                 // Parity 1e.2 durability half: encode the in-flight assistant
@@ -1325,7 +1348,6 @@ impl Agent {
                     let next = tokio::select! {
                         biased;
                         _ = abort.wait() => Next::Abort,
-                        _ = session.run_append_ready() => { session.service_run_append(); continue; },
                         c = control_rx.recv(), if control_open => Next::Ctl(c),
                         Some(update) = native_updates_rx.recv() => Next::Steering(update),
                         snapshot = async {
@@ -1334,7 +1356,7 @@ impl Agent {
                                 None => std::future::pending().await,
                             }
                         }, if delegation_telemetry.is_some() => Next::Delegation(snapshot),
-                        ev = response_stream.next() => Next::Event(ev),
+                        ev = session.wait_with_run_appends(response_stream.next()) => Next::Event(ev),
                         step = cache_warmer.next_step() => Next::Warm(step),
                     };
                     // A provider/body poll can set abort after the biased abort
@@ -1355,7 +1377,7 @@ impl Agent {
                     if let Some(delta) = native_delta.as_ref().filter(|_| native.required_input && native_delta_has_results) {
                         native.required_input = false;
                         if let Some(control) = native.control.as_ref() {
-                            if let Err(error) = control.continue_with(delta.clone()).await { break 'run FinishReason::Failed(error.into()); }
+                            if let Err(error) = session.wait_with_run_appends(control.continue_with(delta.clone())).await { break 'run FinishReason::Failed(error.into()); }
                         }
                     }
                     match native.deliver(session, &control_prompt_metadata, &mut terminal_gate_evidence) {
@@ -1672,7 +1694,7 @@ impl Agent {
                     let prepared = tokio::select! {
                         biased;
                         _ = abort.wait() => Err(cancelled_tool_error()),
-                        result = tool.prepare_arguments(arguments, &resource_owner, abort.cancellation.clone()) => result,
+                        result = session.wait_with_run_appends(tool.prepare_arguments(arguments, &resource_owner, abort.cancellation.clone())) => result,
                     };
                     match prepared {
                         Ok(arguments) => {
@@ -1716,11 +1738,11 @@ impl Agent {
                     &assistant,
                     stop_reason.clone(),
                 );
-                let persistence_metadata = collect_persistence_metadata(
+                let persistence_metadata = session.wait_with_run_appends(collect_persistence_metadata(
                     &persistence_metadata_hooks,
                     &persistence_context,
                     &abort,
-                )
+                ))
                 .await;
                 let persistence_metadata = capture_tool_replay_safety(&calls, &tool_map, persistence_metadata);
 
@@ -2563,7 +2585,7 @@ impl Agent {
                                         }
                                         None => control_open = false,
                                     },
-                                    results = &mut operation => break results,
+                                    results = session.wait_with_run_appends(&mut operation) => break results,
                                     progress = wave_progress_rx.recv() => {
                                         if let Some((offset, progress)) = progress {
                                             if let ProgressSettlement::Emit(progress) =
@@ -3023,13 +3045,12 @@ impl Agent {
                                             }
                                             None => control_open = false,
                                         },
-                                        _ = session.run_append_ready() => { session.service_run_append(); },
                                         event = session_driver.next() => {
                                             if let Err(error) = session_driver.service(event, session) {
                                                 break Some(Err(ToolError::new(error)));
                                             }
                                         },
-                                        r = &mut operation => break Some(r),
+                                        r = session.wait_with_run_appends(&mut operation) => break Some(r),
                                         step = async { inference_binding.as_mut().expect("inference branch is enabled").0.next_step().await }, if inference_binding.is_some() => {
                                             match inference_binding.as_mut().expect("inference branch is enabled").0.advance(step, session) {
                                                 Ok(Some(settled)) => {
@@ -3235,7 +3256,7 @@ impl Agent {
                         }
                     };
                     let result = if let Some(after) = deferred_after {
-                        run_parallel_after_tool_hooks(
+                        session.wait_with_run_appends(run_parallel_after_tool_hooks(
                             after,
                             &tool_call_hooks,
                             result,
@@ -3245,7 +3266,7 @@ impl Agent {
                             &parallel_active_skills,
                             &registered_tools,
                             abort.cancellation.clone(),
-                        )
+                        ))
                         .await
                     } else {
                         result
@@ -3349,7 +3370,7 @@ impl Agent {
                     // work while executing. Acknowledge it only once the
                     // complete, untruncated result is in the session.
                     resolve_tool_delivery_after_persistence(&result, sandbox.max_output_bytes);
-                    prepare_tool_result_frames(&result, &model, Some(&abort)).await;
+                    session.wait_with_run_appends(prepare_tool_result_frames(&result, &model, Some(&abort))).await;
 
                     // ── Drain accepted progress before ToolFinished ───────
                     let mut drain_preview = LivePreviewPacer::new();
