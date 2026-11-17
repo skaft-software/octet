@@ -285,6 +285,7 @@ fn fullscreen_live_frames_stay_inside_the_terminal() {
                         native_editor: false,
                     }],
                     chrome: None,
+                    chrome_closed: false,
                 }
             };
         shell.set_remote_ui(footer(&mut components, "FOOTER cwd model $0".into()));
