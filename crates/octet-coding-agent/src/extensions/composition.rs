@@ -55,11 +55,11 @@ pub(super) async fn start_session_hooks_all(
                     {
                         Ok(Ok(())) => None,
                         Err(_) => Some(format!(
-                            "warning: extension {:?} session_start hook exceeded {LIFECYCLE_NOTIFY_DEADLINE:?}",
+                            "warning: {}: session_start hook timed out; session continues without its startup changes. Run /reload; update or disable the extension if this keeps happening.",
                             process.descriptor().manifest.name
                         )),
                         Ok(Err(_)) => Some(format!(
-                            "warning: extension {:?} session_start hook failed",
+                            "warning: {}: session_start hook failed; session continues without its startup changes. Run /reload; update or disable the extension if this keeps happening.",
                             process.descriptor().manifest.name
                         )),
                     }

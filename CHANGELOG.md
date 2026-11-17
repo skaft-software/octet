@@ -56,6 +56,7 @@
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.
+- Pi adapter reloads preserve session history after forced restarts and keep extension warnings actionable while responses continue.
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
 - Pi working components align with the native spinner column and preserve their spacing within narrow terminal widths.

@@ -325,18 +325,17 @@ impl ExecutableExtensions {
         self.pending_host_requests.len()
     }
 
-    pub(crate) fn discard_stale_host_requests(&mut self) -> Vec<String> {
-        let mut discarded = Vec::new();
+    pub(crate) fn discard_stale_host_requests(&mut self) -> usize {
+        let before = self.pending_host_requests.len();
         self.pending_host_requests.retain(|pending| {
-            if let Some(notice) = pending.discard_notice() {
-                discarded.push(notice);
+            if let Some(log) = pending.discard_log() {
+                self.diagnostics.push(log);
                 false
             } else {
                 true
             }
         });
-        self.diagnostics.extend(discarded.iter().cloned());
-        discarded
+        before - self.pending_host_requests.len()
     }
 
     /// Answer the requests the live shell can resolve. Session-entry requests
@@ -347,9 +346,8 @@ impl ExecutableExtensions {
                 .pending_host_requests
                 .pop_front()
                 .expect("queued request");
-            if let Some(notice) = pending.discard_notice() {
-                self.diagnostics.push(notice.clone());
-                shell.notice(notice);
+            if let Some(log) = pending.discard_log() {
+                self.diagnostics.push(log);
                 continue;
             }
             let name = pending.process.descriptor().manifest.name.clone();
@@ -815,7 +813,7 @@ impl ExecutableExtensions {
                 || pending.process.health_snapshot().generation != pending.generation
             {
                 self.diagnostics.push(format!(
-                    "warning: {}: discarded host-owned session request from stale generation {}",
+                    "debug: {}: discarded host-owned session request from stale generation {}",
                     pending.process.descriptor().manifest.name,
                     pending.generation
                 ));
@@ -1036,7 +1034,7 @@ impl ExecutableExtensions {
                 || pending.process.health_snapshot().generation != pending.generation
             {
                 self.diagnostics.push(format!(
-                    "warning: {}: discarded host-owned editor request from stale generation {}",
+                    "debug: {}: discarded host-owned editor request from stale generation {}",
                     pending.process.descriptor().manifest.name,
                     pending.generation
                 ));

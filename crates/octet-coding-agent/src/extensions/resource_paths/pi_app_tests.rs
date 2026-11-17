@@ -1148,6 +1148,15 @@ async fn configured_pi_refused_start_mutation_cannot_discover_or_become_success_
     );
     fixture.app.refresh_resource_paths_headless().await.unwrap();
     assert!(!fixture.app.resource_paths_pending());
+    let batch = fixture
+        .app
+        .executable_extensions
+        .prepare_resource_discovery(
+            octet_agent::extension_process::ExtensionResourceDiscoveryReason::Reload,
+        )
+        .unwrap()
+        .await;
+    assert_eq!(batch.diagnostics, ["warning: octet-pi-compat: resources_discover skipped because session_start failed; session continues without these resources. Run /reload; update or disable the extension if this keeps happening."]);
     // Unlike an ordinary JS throw, a tracked session mutation receives a real
     // headless-host refusal. Neither its effect nor discovery may be admitted.
     let refusal = trace(&root)

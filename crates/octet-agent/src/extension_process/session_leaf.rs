@@ -275,7 +275,7 @@ impl SessionLeafMailbox {
 
     pub(super) fn terminate_execution(&self) {
         lock_std_mutex(&self.execution_slots).clear();
-        lock_std_mutex(&self.transport).clear();
+        lock_std_mutex(&self.transport).retire_execution();
         self.fail_pending_snapshot_publication();
     }
 

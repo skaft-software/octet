@@ -174,8 +174,22 @@ impl ExecutableExtensions {
                             batch.diagnostics.push(format!("warning: {message}"));
                             batch.resource_rejection = Some(message);
                         } else {
+                            let stage = match &error {
+                                octet_agent::extension_process::ExtensionRuntimeError::Protocol(message)
+                                    if message.starts_with("resource discovery blocked:")
+                                        || message == "resource discovery requires successful settled session_start" =>
+                                {
+                                    "resources_discover skipped because session_start failed"
+                                }
+                                octet_agent::extension_process::ExtensionRuntimeError::Protocol(message)
+                                    if message.starts_with("invalid resource_paths_v1 default_thinking_level;") =>
+                                {
+                                    "resources_discover returned an invalid default_thinking_level"
+                                }
+                                _ => "resources_discover failed",
+                            };
                             batch.diagnostics.push(format!(
-                                "warning: {}: resources_discover failed; no paths admitted: {error}",
+                                "warning: {}: {stage}; session continues without these resources. Run /reload; update or disable the extension if this keeps happening.",
                                 process.descriptor().manifest.name
                             ));
                         }

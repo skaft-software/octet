@@ -64,6 +64,10 @@ impl SessionOperationInvocation for Invocation {
     }
 }
 impl SessionOperationHook for Observe {
+    fn failure_notice_name(&self) -> Option<&str> {
+        Some("test-extension")
+    }
+
     fn begin(
         &self,
         session: &Session,
@@ -567,6 +571,10 @@ async fn completed_warnings(agent: &mut Agent) -> Vec<String> {
             AgentEvent::ExtensionObservationWarning { message } => {
                 assert_eq!(terminals, 0, "warnings must precede the terminal result");
                 assert!(!message.contains("private payload"));
+                for internal in ["observer 1", "turn 0", "owner=", "instance=", "generation="] {
+                    assert!(!message.contains(internal), "{message}");
+                }
+                assert!(message.contains("Update or disable"), "{message}");
                 warnings.push(message);
             }
             AgentEvent::RunFinished { reason, .. } => {
@@ -622,8 +630,8 @@ async fn observation_error_after_committed_assistant_preserves_success_and_priva
     let mut f = fixture(vec![text("done")], Behavior::FailEnd, true, false);
     let warnings = completed_warnings(&mut f.agent).await;
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("end observer 1"));
-    assert!(warnings[0].contains("durable entries retained"));
+    assert!(warnings[0].contains("test-extension: model response end"));
+    assert!(warnings[0].contains("Session history is saved"));
     assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
     assert_eq!(*f.trace.lock().unwrap(), ["start:0", "provider:0", "end:0"]);
     assert_eq!(f.seen.lock().unwrap().len(), 2);
@@ -678,8 +686,8 @@ async fn observation_error_does_not_skip_later_hooks_or_the_next_model_turn() {
     });
     let warnings = completed_warnings(&mut f.agent).await;
     assert_eq!(warnings.len(), 2);
-    assert!(warnings[0].contains("end observer 1"));
-    assert!(warnings[0].contains("durable entries retained"));
+    assert!(warnings[0].contains("test-extension: model response end"));
+    assert!(warnings[0].contains("Session history is saved"));
     assert_eq!(f.script.calls.load(Ordering::SeqCst), 2);
     assert_eq!(result_ids(f.agent.session.entries()), ["call-one"]);
     assert_eq!(f.seen.lock().unwrap().len(), 4);
@@ -691,8 +699,8 @@ async fn observation_error_at_start_does_not_veto_the_model_request() {
     let mut f = fixture(vec![text("done")], Behavior::FailStart, false, false);
     let warnings = completed_warnings(&mut f.agent).await;
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("start observer 1"));
-    assert!(warnings[0].contains("durable entries retained"));
+    assert!(warnings[0].contains("test-extension: model response start"));
+    assert!(warnings[0].contains("Session history is saved"));
     assert_eq!(f.script.calls.load(Ordering::SeqCst), 1);
     assert_eq!(*f.trace.lock().unwrap(), ["start:0", "provider:0", "end:0"]);
 }

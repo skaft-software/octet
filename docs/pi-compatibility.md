@@ -394,6 +394,16 @@ Explicit provider models retain their full `cost.tiers` rates. The highest
 tokens selects the request-wide tariff; native accounting preserves fractional
 costs and the two-times-input rate for one-hour cache writes.
 
+Reload after a forced adapter restart retains the latest complete native session
+history for the replacement's `session_start`, before resource discovery runs.
+Retired requests, append grants and transfer handles do not cross that boundary;
+callbacks are not replayed. Harmless requests left behind by reload are recorded
+in the extension diagnostic log, not shown as transcript warnings. If startup,
+resource discovery or a model-response hook fails, the warning names the extension
+and stage, explains what was skipped, and suggests `/reload` or updating/disabling
+the extension. Responses continue and saved session history is retained. A genuine
+failed startup still withholds that adapter's resources until a fresh reload.
+
 Equivalent selected extension models rebind after a successful provider reload.
 An unrelated model's catalog update does not revoke the selected model's continuous
 authority; selected declaration changes (including change-and-restore), authorization

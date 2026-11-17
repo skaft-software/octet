@@ -1396,13 +1396,13 @@ impl ExecutableExtensions {
             self.session_hook_start_tasks.push(tokio::spawn(async move {
                 // The process owns its bounded request deadline. The shell is
                 // free to service ui/open while this hook awaits its result.
-                if let Err(error) = process
+                if process
                     .start_session_hook_binding_with_reason(owner, reason)
-                    .await
+                    .await.is_err()
                 {
                     let _ = tx
                         .send(ExtensionBackgroundUpdate::Diagnostics(vec![format!(
-                            "warning: extension {:?} session_start hook failed: {error}",
+                            "warning: {}: session_start hook failed; session continues without its startup changes. Run /reload; update or disable the extension if this keeps happening.",
                             process.descriptor().manifest.name,
                         )]))
                         .await;
@@ -1701,7 +1701,7 @@ impl ExecutableExtensions {
         self.shortcuts = shortcuts;
         output.shortcuts = diagnostics;
         output.events = self.drain_events();
-        output.events.extend(self.discard_stale_host_requests());
+        self.discard_stale_host_requests();
         // A generation replacement is a product resource mutation. Drain the
         // bounded rescan queue it just admitted so an admitted hook cannot leave
         // resolver work queued forever. Re-resolution reuses the same trusted

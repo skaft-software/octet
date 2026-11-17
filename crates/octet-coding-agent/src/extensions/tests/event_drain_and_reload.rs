@@ -149,7 +149,7 @@ async fn reload_request_losses_use_stopped_or_generation_mismatched_queue_entrie
         generation,
         operation: HostRequestOperation::Composer(ExtensionComposerOperation::Get),
     };
-    assert!(extensions.discard_stale_host_requests().is_empty());
+    assert_eq!(extensions.discard_stale_host_requests(), 0);
     extensions
         .pending_host_requests
         .push_back(pending(1, generation));
@@ -157,17 +157,21 @@ async fn reload_request_losses_use_stopped_or_generation_mismatched_queue_entrie
         .pending_host_requests
         .push_back(pending(2, generation + 1));
     assert_eq!(extensions.pending_host_request_count(), 2);
-    assert_eq!(extensions.discard_stale_host_requests().len(), 1);
+    assert_eq!(extensions.discard_stale_host_requests(), 1);
     assert_eq!(extensions.pending_host_request_count(), 1);
-    assert!(extensions.discard_stale_host_requests().is_empty());
+    assert_eq!(extensions.discard_stale_host_requests(), 0);
     process.shutdown().await;
-    assert_eq!(extensions.discard_stale_host_requests().len(), 1);
-    assert!(extensions.discard_stale_host_requests().is_empty());
+    assert_eq!(extensions.discard_stale_host_requests(), 1);
+    assert_eq!(extensions.discard_stale_host_requests(), 0);
     // A later identical occurrence is not suppressed by the earlier loss.
     extensions
         .pending_host_requests
         .push_back(pending(3, generation));
-    assert_eq!(extensions.discard_stale_host_requests().len(), 1);
+    assert_eq!(extensions.discard_stale_host_requests(), 1);
+    assert!(extensions
+        .diagnostics
+        .iter()
+        .any(|message| message.starts_with("debug:") && message.contains("stale generation")));
     extensions.shutdown().await;
 }
 

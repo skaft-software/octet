@@ -8747,12 +8747,9 @@ fn rebuild_app_with_start_reason(
     } else {
         released_extensions.release_binding_blocking();
     }
-    // These are actual queue discards, not inferred interruption risks. Use the
-    // existing terminal-aware diagnostic route: interactive lifecycle callers
-    // defer this queue through final hydration; never print into the raw frame.
-    for notice in released_extensions.discard_stale_host_requests() {
-        crate::output::stderr!("{notice}");
-    }
+    // Retirement can leave harmless requests from the previous process in the
+    // queue. Keep their discard in the diagnostic log, not the transcript.
+    released_extensions.discard_stale_host_requests();
     let released_extensions = ReleasedExtensionBindingCleanup::new(released_extensions);
     drop(app);
     let mut session = match selection {

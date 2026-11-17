@@ -197,11 +197,11 @@ pub(super) struct PendingHostRequest {
 }
 
 impl PendingHostRequest {
-    pub(super) fn discard_notice(&self) -> Option<String> {
+    pub(super) fn discard_log(&self) -> Option<String> {
         (!self.process.is_running() || self.process.health_snapshot().generation != self.generation)
             .then(|| {
                 format!(
-                    "warning: {}: discarded host-owned extension request from stale generation {}",
+                    "debug: {}: discarded host-owned extension request from stale generation {}",
                     self.process.descriptor().manifest.name,
                     self.generation
                 )

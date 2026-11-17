@@ -6113,11 +6113,7 @@ where
     // were refused here or detached by `/reload --force` before this point;
     // the durable-head hook parks the settled ones.
     let decision = loop {
-        let (decision, events) =
-            reexec_decision(&mut app, reexec, &observed, &safety, options).await;
-        for event in events {
-            shell.notice(event);
-        }
+        let decision = reexec_decision(&mut app, reexec, &observed, &safety, options).await;
         match decision {
             crate::reexec::ReexecDecision::ConfirmationRequired { redirect, .. }
                 if !options.redirect_confirmed =>
@@ -6175,23 +6171,21 @@ async fn reexec_decision(
     observed: &crate::reexec::ExecutableObservation,
     safety: &crate::reexec::LiveSafetyInputs,
     options: crate::reexec::ReexecOptions,
-) -> (crate::reexec::ReexecDecision, Vec<String>) {
+) -> crate::reexec::ReexecDecision {
     let mut hooks = InteractiveReexecHooks {
         agent: &app.agent,
         extensions: &mut app.executable_extensions,
-        discarded_requests: Vec::new(),
         parked_workers: false,
     };
     let decision = reexec
         .reexec_if_changed(observed, safety, options, &mut hooks)
         .await;
     let parked_workers = hooks.parked_workers;
-    let discarded_requests = hooks.discarded_requests;
     if parked_workers && !matches!(decision, crate::reexec::ReexecDecision::Ready(_)) {
         // The image was not replaced: this App keeps the workers it parked.
         let _ = app.agent.reattach_delegated_workers();
     }
-    (decision, discarded_requests)
+    decision
 }
 
 /// Ask the user to confirm entering a replaced or moved binary.
@@ -6538,7 +6532,6 @@ fn reload_interruption_preview(app: &App) -> Vec<String> {
 struct InteractiveReexecHooks<'a> {
     agent: &'a octet_agent::Agent,
     extensions: &'a mut crate::extensions::ExecutableExtensions,
-    discarded_requests: Vec<String>,
     /// Whether settled workers were parked for the replacement image.
     parked_workers: bool,
 }
@@ -6582,8 +6575,7 @@ impl crate::reexec::ReexecHooks for InteractiveReexecHooks<'_> {
         // hard deadline; no extension child is inherited by the replacement
         // image. The caller can rebuild children after a failed exec.
         self.extensions.shutdown().await;
-        self.discarded_requests
-            .extend(self.extensions.discard_stale_host_requests());
+        self.extensions.discard_stale_host_requests();
         Ok(())
     }
 }

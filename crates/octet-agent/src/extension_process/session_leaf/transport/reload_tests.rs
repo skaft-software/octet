@@ -122,6 +122,11 @@ fn reload_history_rebind_charges_new_generation_without_copying_authority() {
     drop(rebound);
     assert_eq!(replacement.retained(), (0, 0, 0));
     assert_eq!(previous.retained(), old_retained);
+    previous.retire_execution();
+    assert!(previous.current.get(&owner).unwrap().is_some());
+    assert!(previous.transfers.is_empty());
+    assert!(previous.parents.is_empty());
+    assert!(previous.projections.is_empty());
 }
 
 #[test]
@@ -167,10 +172,21 @@ fn reload_history_rebind_preserves_unavailability_and_refuses_new_generation_quo
 
 #[tokio::test]
 async fn reload_session_start_reads_authentic_nonempty_history_before_frontend_refresh() {
+    assert_reload_session_history(false).await;
+}
+
+#[tokio::test]
+async fn terminated_generation_reload_preserves_start_history_and_resource_discovery() {
+    assert_reload_session_history(true).await;
+}
+
+async fn assert_reload_session_history(terminate: bool) {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp.path().join("reload-history.mjs");
     std::fs::write(&factory, r#"import fs from 'node:fs';
 export default pi => {
+  pi.on('resources_discover', () => ({}));
+  pi.registerCommand('pending', { handler: () => pi.setSessionName('retired-name') });
   pi.on('session_start', (event, ctx) => {
     const entries = ctx.sessionManager.getEntries();
     const branch = ctx.sessionManager.getBranch();
@@ -182,6 +198,7 @@ export default pi => {
     let manifest = ExtensionManifest::load(&manifest_path).unwrap();
     let mut config = ExtensionRuntimeConfig::new(temp.path());
     config.supervise = false;
+    config.resource_paths = true;
     config.request_timeout = Duration::from_secs(10);
     config.host_state.has_ui = Some(false);
     let process = ExtensionProcess::start(
@@ -216,9 +233,49 @@ export default pi => {
                 .unwrap();
         } else {
             let generation = context.resource_owner.unwrap().process_generation;
+            if terminate {
+                let mut events = process.subscribe();
+                let pending_process = process.clone();
+                let context =
+                    process.current_context_for_resource_owner(session.resource_owner_key());
+                let pending = tokio::spawn(async move {
+                    pending_process
+                        .execute_command("pending", Vec::new(), context)
+                        .await
+                });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let ExtensionEvent::SessionEntryRequested {
+                            generation: old, ..
+                        } = events.recv().await.unwrap()
+                        {
+                            assert_eq!(old, generation);
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                let connection = read_std_lock(&process.inner.connection).clone();
+                connection.terminate().await;
+                assert!(
+                    pending.await.unwrap().is_err(),
+                    "retired mutation is not replayed"
+                );
+            }
             assert!(process.reload().await.unwrap().generation > generation);
         }
     }
+    let discovery = process
+        .discover_resource_paths(
+            &session.resource_owner_key(),
+            crate::extension_process::ExtensionResourceDiscoveryReason::Reload,
+        )
+        .await;
+    assert!(
+        discovery.is_ok(),
+        "replacement startup must settle: {discovery:?}"
+    );
     let observed: Vec<Value> = std::fs::read_to_string(temp.path().join("reload-history.jsonl"))
         .unwrap()
         .lines()
@@ -228,7 +285,13 @@ export default pi => {
     for (index, event) in observed.iter().enumerate() {
         assert_eq!(
             event["reason"],
-            if index == 0 { "startup" } else { "reload" }
+            if index == 0 {
+                "startup"
+            } else if terminate {
+                "resume"
+            } else {
+                "reload"
+            }
         );
         assert_eq!(event["entries"].as_array().unwrap().len(), index + 1);
         assert_eq!(event["branch"].as_array().unwrap().len(), index + 1);

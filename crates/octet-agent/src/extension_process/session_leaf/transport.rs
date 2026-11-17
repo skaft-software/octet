@@ -391,6 +391,18 @@ impl Store {
         self.transfers.retain(|_, t| t.parent != parent);
         self.projections.retain(|_, p| p.parent != parent);
     }
+    // Execution authority dies with the process; the bounded immutable host
+    // observation must survive until accepted reload can rebind its history.
+    // Pi awaits session_start before discovery on reload while retaining the
+    // native session: packages/coding-agent/src/core/agent-session.ts:3741-3778.
+    // Only Rust can preserve this observation across our process boundary.
+    pub(in crate::extension_process) fn retire_execution(&mut self) {
+        self.transfers.clear();
+        self.projections.clear();
+        self.parents.clear();
+    }
+
+    #[cfg(test)]
     pub(in crate::extension_process) fn clear(&mut self) {
         self.transfers.clear();
         self.projections.clear();

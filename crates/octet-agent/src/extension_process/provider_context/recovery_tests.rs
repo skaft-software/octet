@@ -7,6 +7,20 @@ use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningMode};
 
 #[tokio::test]
 async fn retired_context_process_continues_and_new_generation_appends_once() {
+    assert_context_recovery(false, false).await;
+}
+
+#[tokio::test]
+async fn terminated_context_process_continues_then_reload_appends_once() {
+    assert_context_recovery(true, false).await;
+}
+
+#[tokio::test]
+async fn terminated_process_observations_continue_then_reload_appends_once() {
+    assert_context_recovery(true, true).await;
+}
+
+async fn assert_context_recovery(terminate: bool, observers: bool) {
     let temp = tempfile::tempdir().unwrap();
     write_executable_script(
         &temp.path().join("extension.py"),
@@ -27,26 +41,35 @@ for line in sys.stdin:
     elif method == 'hook/run':
         p = m['params']; grant = p['session_leaf']
         with Path('calls.jsonl').open('a') as f: f.write(json.dumps(p['context']['resource_owner'])+'\n')
-        send({'jsonrpc':'2.0','id':'append','method':'session/append_entry','params':{
+        request_id = 'append-' + str(m['id'])
+        send({'jsonrpc':'2.0','id':request_id,'method':'session/append_entry','params':{
           'parent_request_id':m['id'],'entry_type':'checkpoint',
           'data':{'generation':grant['owner']['process_generation']},
           'session_leaf':{k:grant[k] for k in ['grant_id','activation_epoch','operation_id']}}})
-        receipt = json.loads(sys.stdin.readline())
+        while True:
+            receipt = json.loads(sys.stdin.readline())
+            if receipt.get('id') == request_id: break
         assert 'result' in receipt, receipt
         send({'jsonrpc':'2.0','id':m['id'],'result':{}})
 "#,
     );
-    let manifest = ExtensionManifest::parse(
-        r#"name = "recovery-process"
+    let manifest_source = r#"name = "recovery-process"
 version = "0.1.0"
 api_version = "0.4"
 [entrypoint]
 command = "extension.py"
 [contributes]
 hooks = ["provider_context"]
-"#,
-    )
-    .unwrap();
+"#;
+    let manifest_source = if observers {
+        manifest_source.replace(
+            "hooks = [\"provider_context\"]",
+            r#"hooks = ["model_turn_start", "model_turn_end"]"#,
+        )
+    } else {
+        manifest_source.to_owned()
+    };
+    let manifest = ExtensionManifest::parse(&manifest_source).unwrap();
     let mut runtime = ExtensionRuntimeConfig::new(temp.path());
     runtime.supervise = false;
     let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), runtime)
@@ -81,7 +104,12 @@ hooks = ["provider_context"]
     .unwrap();
     assert_eq!(agent.complete("first").await.unwrap().text, "answer");
     let prefix = std::fs::read(agent.session().path()).unwrap();
-    assert!(process.begin_drain());
+    if terminate {
+        let connection = read_std_lock(&process.inner.connection).clone();
+        connection.terminate().await;
+    } else {
+        assert!(process.begin_drain());
+    }
     let mut warnings = Vec::new();
     let mut run = agent.prompt("during restart").await.unwrap();
     while let Some(event) = run.next().await {
@@ -95,8 +123,18 @@ hooks = ["provider_context"]
         }
     }
     drop(run);
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("recovery-process"));
+    assert_eq!(
+        warnings.len(),
+        if observers { 2 } else { 1 },
+        "{warnings:?}"
+    );
+    for warning in &warnings {
+        assert!(warning.contains("recovery-process"), "{warning}");
+        assert!(
+            !warning.contains("observer 1") && !warning.contains("turn 0"),
+            "{warning}"
+        );
+    }
     let report = process.reload().await.unwrap();
     assert_eq!(report.generation, 2);
     assert_eq!(
@@ -109,9 +147,14 @@ hooks = ["provider_context"]
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(calls.len(), 2, "completed callbacks are never replayed");
+    let per_generation = if observers { 2 } else { 1 };
+    assert_eq!(
+        calls.len(),
+        per_generation * 2,
+        "completed callbacks are never replayed"
+    );
     assert_eq!(calls[0]["process_generation"], 1);
-    assert_eq!(calls[1]["process_generation"], 2);
+    assert_eq!(calls[per_generation]["process_generation"], 2);
     assert_eq!(
         calls[0]["extension_instance_id"],
         calls[1]["extension_instance_id"]
@@ -125,8 +168,8 @@ hooks = ["provider_context"]
         .iter()
         .filter_map(|entry| reopened.extension_entry(&entry.id, "recovery-process"))
         .collect();
-    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(checkpoints.len(), per_generation * 2);
     assert_eq!(checkpoints[0].data["generation"], 1);
-    assert_eq!(checkpoints[1].data["generation"], 2);
+    assert_eq!(checkpoints[per_generation].data["generation"], 2);
     assert!(process.shutdown().await);
 }

@@ -959,3 +959,132 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
         .unwrap()
         .contains("finish in the original session"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_reload_after_pending_request_preserves_start_discovery_and_next_turn() {
+    assert_reload_after_pending_request(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_resource_rebuild_after_pending_request_preserves_start_discovery_and_next_turn() {
+    assert_reload_after_pending_request(true).await;
+}
+
+async fn assert_reload_after_pending_request(rebuild: bool) {
+    use super::pi_contract_support::pi_ui_app;
+    let factory = r#"
+import { appendFileSync } from 'node:fs';
+export default pi => {
+  const record = row => appendFileSync(TRACE, JSON.stringify(row) + '\n');
+  pi.on('session_start', (event, ctx) => {
+    pi.appendEntry('reload-ready', { reason: event.reason });
+    ctx.ui.setStatus('reload', 'ready');
+    record({ step: 'start', reason: event.reason, pid: process.pid });
+  });
+  pi.on('resources_discover', event => { record({ step: 'discover', reason: event.reason }); return {}; });
+  pi.on('turn_start', () => record({ step: 'turn' }));
+  pi.on('context', () => {});
+  pi.registerCommand('pending', { handler: async (_, ctx) => { await ctx.ui.setEditorText('retired-draft'); } });
+};
+"#;
+    let (directory, mut app, mut shell) = pi_ui_app(factory);
+    let provider = octet_ai::FauxProvider::new(octet_ai::FauxOptions::default());
+    provider.set_responses(vec![
+        octet_ai::FauxResponse::Message(octet_ai::FauxMessage::new("before reload")),
+        octet_ai::FauxResponse::Message(octet_ai::FauxMessage::new("after reload")),
+    ]);
+    app.client
+        .register_host_stream_transport(app.model.endpoint.id.clone(), Arc::new(provider));
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut input)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.agent.complete("before").await.unwrap().text,
+        "before reload"
+    );
+    let process = app
+        .executable_extensions
+        .test_process("octet-pi-compat")
+        .unwrap();
+    request_extension_ui(&mut shell, &mut app);
+    let command_process = process.clone();
+    let context =
+        process.current_context_for_resource_owner(app.agent.session().resource_owner_key());
+    let mut command = tokio::spawn(async move {
+        command_process
+            .execute_command("pending", Vec::new(), context)
+            .await
+    });
+    // Hold an admitted reverse request across cutover, without lending the shell.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while app.executable_extensions.pending_host_request_count() == 0 {
+            app.executable_extensions.drain_events();
+            if command.is_finished() {
+                panic!("command settled: {:?}", (&mut command).await);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    if rebuild {
+        let (next, applied) = tokio::time::timeout(
+            Duration::from_secs(20),
+            reload_resources_announcing(app, &mut shell, &mut input, true),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        app = next;
+        assert!(applied);
+    } else {
+        let reloading = process.clone();
+        let reload = tokio::spawn(async move { reloading.reload().await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while process.health_snapshot().generation == 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let report = tokio::time::timeout(Duration::from_secs(20), async {
+            while !reload.is_finished() {
+                request_extension_ui(&mut shell, &mut app);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            reload.await.unwrap().unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.generation, 2);
+    }
+    let _ = command.await.unwrap();
+    let process = app
+        .executable_extensions
+        .test_process("octet-pi-compat")
+        .unwrap();
+    let owner = app.agent.session().resource_owner_key();
+    let discovery = process
+        .discover_resource_paths(
+            &owner,
+            octet_agent::extension_process::ExtensionResourceDiscoveryReason::Reload,
+        )
+        .await;
+    let visible = shell.debug_snapshot();
+    assert_eq!(
+        app.agent.complete("after").await.unwrap().text,
+        "after reload"
+    );
+    app.executable_extensions.shutdown().await;
+    assert!(discovery.is_ok(), "{discovery:?}\n{visible}");
+    assert!(!visible.contains("stale generation"), "{visible}");
+    assert!(!visible.contains("reload failed"), "{visible}");
+    assert_eq!(
+        trace(&directory)
+            .iter()
+            .filter(|row| row["step"] == "start")
+            .count(),
+        2
+    );
+}

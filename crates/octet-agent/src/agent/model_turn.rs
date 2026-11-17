@@ -171,7 +171,7 @@ impl<'a> ModelTurnHooks<'a> {
         cancellation: &CancellationToken,
     ) -> Result<(), Box<FinishReason>> {
         let deadline = tokio::time::Instant::now() + MODEL_TURN_HOOK_TIMEOUT;
-        for (index, hook) in self.hooks.iter().enumerate() {
+        for hook in self.hooks {
             let result = run_session_operation_hooks(
                 session,
                 std::slice::from_ref(hook),
@@ -185,20 +185,22 @@ impl<'a> ModelTurnHooks<'a> {
                 error,
                 SessionOperationError::Callback | SessionOperationError::Deadline
             ) {
-                let (phase, turn) = match &operation {
-                    SessionOperation::ModelTurnStart { turn_index, .. } => ("start", turn_index),
-                    SessionOperation::ModelTurnEnd { turn_index, .. } => ("end", turn_index),
+                // Pi reports a throwing observer and continues the response:
+                // packages/coding-agent/src/core/extensions/runner.ts:1096-1123.
+                let phase = match &operation {
+                    SessionOperation::ModelTurnStart { .. } => "start",
+                    SessionOperation::ModelTurnEnd { .. } => "end",
                     _ => unreachable!("model-turn observations only"),
                 };
-                let skipped = if matches!(error, SessionOperationError::Deadline) {
-                    "; remaining observers skipped at this boundary"
+                let happened = if matches!(error, SessionOperationError::Deadline) {
+                    "hook deadline exceeded; remaining hooks skipped"
                 } else {
-                    ""
+                    "hook failed and was skipped"
                 };
+                let name = hook.failure_notice_name().unwrap_or("extension");
                 self.warnings.push(AgentEvent::ExtensionObservationWarning {
                     message: format!(
-                        "model turn {turn} {phase} observer {}: {error}; durable entries retained; callback not retried{skipped}",
-                        index + 1,
+                        "{name}: model response {phase} {happened}. Response continues. Session history is saved. Update or disable the extension if this keeps happening.",
                     ),
                 });
                 if matches!(error, SessionOperationError::Deadline) {

@@ -170,6 +170,10 @@ impl ExtensionProcess {
 }
 
 impl SessionOperationHook for ExtensionProcess {
+    fn failure_notice_name(&self) -> Option<&str> {
+        Some(&self.descriptor().manifest.name)
+    }
+
     fn begin(
         &self,
         session: &Session,

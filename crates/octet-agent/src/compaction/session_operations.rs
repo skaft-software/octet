@@ -186,6 +186,11 @@ pub trait SessionOperationInvocation: Send {
 
 /// Generic session interceptor. Installed only where the owning driver polls it.
 pub trait SessionOperationHook: Send + Sync {
+    /// User-facing extension name for isolated observation failures.
+    fn failure_notice_name(&self) -> Option<&str> {
+        None
+    }
+
     /// None means this implementation does not subscribe to this event.
     /// Returning a guard must install its append producer before callback polling.
     fn begin(
