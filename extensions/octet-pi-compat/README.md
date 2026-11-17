@@ -1201,7 +1201,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1687 tests: 1654 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1702 tests: 1669 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture, including startup-chrome reconciliation, subagent-collision,
 session callback-code isolation, live worker session ownership and busy append receipt regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
