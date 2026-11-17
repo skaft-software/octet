@@ -189,6 +189,10 @@ These do not run on every push. Trigger them deliberately.
 The AddressSanitizer lane includes Python runtime setup verification. Its archive
 fixtures own a bounded set of digest pins, one per supported target, so repeated
 checks allocate no leaked static strings and the sanitizer remains enabled.
+Extension resource peers use isolated, offline Cargo builds seeded by the
+workspace lockfile. Their artifact path comes from Cargo's JSON output, so the
+checks also work when nightly places test binaries outside the profile's `deps`
+directory. Fixture build output remains under the running test profile.
 
 Provider acceptance and the panic audit may require credentials or real
 hardware. They and the live models.dev freshness check are separate from the

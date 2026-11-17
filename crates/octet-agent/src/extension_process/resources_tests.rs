@@ -12,44 +12,54 @@ const RUST: &str = include_str!("resource_fixture.rs");
 static FIXTURE_SERIAL: AtomicU64 = AtomicU64::new(0);
 static RUST_EXECUTABLE: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let temp = TempDir::new().unwrap();
-    let source = temp.path().join("fixture.rs");
-    std::fs::write(&source, RUST).unwrap();
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let library = std::fs::read_dir(&deps)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("libserde_json-")
-                && p.extension().is_some_and(|e| e == "rlib")
-        })
-        .max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap())
-        .expect("built serde_json rlib required");
-    let executable = temp.path().join("fixture");
-    let result = std::process::Command::new("rustc")
-        .arg("--edition=2021")
-        .arg("-Cdebuginfo=0")
-        .arg(&source)
-        .arg("--extern")
-        .arg(format!("serde_json={}", library.display()))
-        .arg("-L")
-        .arg(format!("dependency={}", deps.display()))
-        .arg("-o")
-        .arg(&executable)
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/main.rs"), RUST).unwrap();
+    let manifest = temp.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"octet-resource-peer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+         [workspace]\n[dependencies]\nserde_json = \"1\"\n[profile.dev]\ndebug = 0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.lock"),
+        include_str!("../../../../Cargo.lock"),
+    )
+    .unwrap();
+    // Cargo owns dependency paths, compiler selection and sanitizer linkage.
+    // Build beside the running suite, never inside the temporary source/HOME.
+    let executable = std::env::current_exe().unwrap();
+    let profile = executable
+        .ancestors()
+        .find(|path| path.join("build").is_dir())
+        .expect("Cargo profile build directory");
+    let result = std::process::Command::new("cargo")
+        .arg("build")
+        .arg("--offline")
+        .arg("--quiet")
+        .arg("--message-format=json")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(profile.join("resource-fixture"))
         .output()
-        .expect("rustc required, never skip");
+        .expect("cargo required, never skip");
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let executable = String::from_utf8(result.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|message| {
+            message
+                .get("executable")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })
+        .expect("Cargo fixture executable artifact");
     std::fs::read(executable).unwrap()
 });
 
