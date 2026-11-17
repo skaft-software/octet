@@ -2,6 +2,8 @@
 
 Install the pinned `nightly-2026-08-01` toolchain and `cargo-fuzz` 0.13.2.
 Run from the repository root; keep build output on disk, not a RAM-backed `/tmp`.
+`fuzz/Cargo.lock` mirrors the root lockfile so the pinned nightly builds the
+same dependency versions; refresh it from `Cargo.lock` after dependency updates.
 
 | Target | Exercises / assertions | Input cap |
 | --- | --- | --- |
