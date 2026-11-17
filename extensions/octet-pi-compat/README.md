@@ -433,10 +433,13 @@ deliberate differences from Pi's unbounded, blocking chain.
   local, not a claim to reproduce octet's host theme; unknown roles are explicit
   errors.
 - Selected Pi TUI components/utilities, with `Editor` and `CustomEditor` sharing
-  a synchronous native-backed facade rather than Pi's editing class. Rust owns
+  a native-backed facade rather than Pi's editing class. Rust owns
   text/caret/undo/history/paste and autocomplete state; JS retains presentation,
-  hooks and provider callback handles. `new TUI`, `ProcessTerminal`, terminal image escapes and
-  provider/auth storage have no SDK fallback and remain explicitly unsupported.
+  hooks and provider callback handles. Creation and native operations publish one
+  bounded read-only observation per editor before paint. `render()` and getters
+  reached during paint lay out that local observation without host I/O; the last
+  painted geometry reaches native navigation with the next input, outside paint.
+  `new TUI`, `ProcessTerminal`, terminal image escapes and provider/auth storage have no SDK fallback and remain explicitly unsupported.
   `createAgentSession` and coding-tool descriptors now delegate through the
   installed host-owned child facade and negotiated agent-session features only.
   Child calls retain the original host-issued owner and retire with that owner.
@@ -1149,7 +1152,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1664 tests: 1631 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1667 tests: 1634 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture, including startup-chrome and subagent-collision
 regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped

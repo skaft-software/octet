@@ -58,6 +58,9 @@
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.
 - Pi adapter reloads preserve session history after forced restarts and keep extension warnings actionable while responses continue.
 - Video reads keep input responsive during cancellable frame preparation and preserve completed results with their original bytes.
+- Pi context hooks isolate callback-owned error codes while preserving native ownership and cancellation checks.
+- Pi context hooks preserve accepted edits and run later handlers after malformed result objects or message content.
+- Pi editors render from bounded local native observations while Rust retains editing and history authority.
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
 - Pi working components align with the native spinner column and preserve their spacing within narrow terminal widths.

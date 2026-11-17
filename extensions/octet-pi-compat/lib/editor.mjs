@@ -1,7 +1,10 @@
 // Editing state lives exclusively in the foreground Rust TextEditor service.
-// This facade retains component callbacks, styles and the opaque native handle.
+// This facade retains callbacks, styles, the native handle and one read-only
+// observation. Painting never refreshes that observation through host I/O.
 import { nativeEditorCall, registerNativeEditor } from './remote-ui.mjs';
 import { bounded, invalid } from './errors.mjs';
+import { inRender, rendering } from './ui-delivery.mjs';
+import { editorFrame } from './editor-frame.mjs';
 import { SelectList } from '../node_modules/@earendil-works/pi-tui/dist/components/select-list.js';
 import { getKeybindings } from '../node_modules/@earendil-works/pi-tui/dist/keybindings.js';
 import { decodePrintableKey, isKeyRelease, matchesKey } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
@@ -47,6 +50,9 @@ export class Editor {
   #references;
   #binding;
   #final;
+  #snapshot;
+  #geometry;
+  #scroll = 0;
   focused = false;
   disableSubmit = false;
   onSubmit;
@@ -62,6 +68,7 @@ export class Editor {
     this.#id = result.editor_id;
     this.#binding = registerNativeEditor(this, this.#call, this.#id);
     this.#call.track?.(this);
+    this.#observe();
   }
   // Final native observations, taken once while the owning surface is still
   // live. Afterwards only these reads are answered locally; every write and
@@ -69,17 +76,39 @@ export class Editor {
   static #finalFields = ['text', 'expanded', 'lines', 'cursor', 'padding', 'autocomplete_max_visible'];
   retainFinalState() {
     if (this.#disposed || this.#final || !this.#call.isAlive()) return;
-    const final = new Map();
-    for (const field of Editor.#finalFields) final.set(field, this.#request({op: 'read', field}).value);
-    this.#final = final;
+    this.#observe();
+    this.#final = new Map(Editor.#finalFields.map(field => [field, this.#observed(field)]));
+  }
+  #observe() {
+    this.#snapshot = this.#call({op: 'read', field: 'paint'}, this.#id).value;
   }
   #request(operation) {
     if (this.#disposed) invalid('native editor disposed');
-    return this.#call(operation, this.#id);
+    // Pi packages/tui/src/components/editor.ts:535-536 retains the paint width
+    // for navigation. Publish geometry at input, never by making paint do I/O.
+    if (operation.op === 'input' && this.#geometry) this.#call({op: 'render', ...this.#geometry}, this.#id);
+    const reply = this.#call(operation, this.#id);
+    this.#observe();
+    if (operation.op === 'set_text') this.#scroll = 0;
+    return reply;
+  }
+  #observed(field) {
+    const snapshot = this.#snapshot;
+    if (field === 'lines') return snapshot.text.split('\n');
+    if (field === 'expanded') {
+      const pastes = new Map(snapshot.pastes);
+      return snapshot.text.replace(/\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g, (marker, id) => pastes.get(Number(id)) ?? marker);
+    }
+    if (field === 'padding') return snapshot.padding_x;
+    if (field === 'autocomplete') return snapshot.autocomplete !== null;
+    return structuredClone(snapshot[field]);
   }
   #read(field) {
     if (this.#final && !this.#call.isAlive() && this.#final.has(field)) return structuredClone(this.#final.get(field));
-    return this.#request({op: 'read', field}).value;
+    if (this.#disposed) invalid('native editor disposed');
+    if (!rendering()) this.#observe();
+    else this.#call.assertAlive();
+    return this.#observed(field);
   }
   #mutate(operation) {
     let reply = this.#request(operation);
@@ -162,7 +191,16 @@ export class Editor {
   renderTopBorder(width, hidden) { return this.borderColor(hidden ? scrollBorder('↑', hidden, width) : '─'.repeat(width)); }
   renderBottomBorder(width, hidden) { return this.borderColor(hidden ? scrollBorder('↓', hidden, width) : '─'.repeat(width)); }
   render(width) {
-    const frame = this.#request({op: 'render', width, rows: this.tui.terminal.rows});
+    return inRender(() => this.#render(width));
+  }
+  #render(width) {
+    if (this.#disposed) invalid('native editor disposed');
+    this.#call.assertAlive();
+    const rows = this.tui.terminal.rows;
+    if (![width, rows].every(value => Number.isInteger(value) && value > 0 && value <= 65535)) invalid('native editor geometry');
+    this.#geometry = { width, rows };
+    const frame = editorFrame(this.#snapshot, width, this.#geometry.rows, this.#scroll);
+    this.#scroll = frame.scroll;
     this.startupPadding = frame.padding;
     this.startupRows = frame.lines.length;
     const pad = ' '.repeat(frame.padding);

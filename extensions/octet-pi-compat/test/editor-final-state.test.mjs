@@ -19,8 +19,10 @@ function harness() {
       if (operation.op === 'create') { const editorId = `e${text.size + 1}`; text.set(editorId, ''); return { editor_id: editorId }; }
       if (operation.op === 'set_text') { text.set(id, operation.text); return { change: operation.text }; }
       if (operation.op === 'read') {
+        assert.equal(operation.field, 'paint');
         const value = text.get(id);
-        return { value: { text: value, expanded: value, lines: value.split('\n'), cursor: { line: 0, col: value.length }, padding: 0, autocomplete_max_visible: 5 }[operation.field] };
+        return { value: { text: value, cursor: { line: 0, col: value.length }, cursor_offset: value.length,
+          padding_x: 0, autocomplete_max_visible: 5, pastes: [], atoms: [], undo_history: [], autocomplete: null } };
       }
       return {};
     } },

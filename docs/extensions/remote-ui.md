@@ -185,8 +185,15 @@ owner triple. It sends `surface_id`, an optional opaque `editor_id`, and a close
 surface/process/owner, wrong mount or disposed handle refuses the call.
 
 `create` returns an opaque handle; `bind` selects the primary component editor.
-Reads, input, replacement, history, render projection and disposal all use that
-surface's native sexy-tui-rs model. The native autocomplete service issues query
+Reads, input, replacement, history and disposal all use that surface's native
+sexy-tui-rs model. A `read` with `field:"paint"` publishes a bounded read-only
+observation of text, native caret, paste atoms/recovery, undo depths and menu.
+The adapter refreshes its single observation at creation and after native
+operations, before invoking component paint. Render-time getters and layout read
+only that local observation, including on resize; they never call the host.
+The last painted geometry is supplied to native navigation at the next input,
+outside paint. No local observation can edit native text or history.
+The native autocomplete service issues query
 IDs and revisions, bounds incoming suggestions, owns selection/navigation and
 checks the originating revision before completion. Completion coordinates are
 UTF-16 line/column observations validated at the native boundary, including

@@ -87,6 +87,7 @@ enum ReadField {
     Pastes,
     UndoHistory,
     Autocomplete,
+    Paint,
 }
 
 /// Semantic key translation is an adapter hook, not editable state. Rust owns
@@ -182,6 +183,33 @@ impl Editor {
             "padding_x":self.padding, "autocomplete_max_visible":self.autocomplete_max_visible,
             "expanded":self.expanded(self.model.text()), "pastes":self.pastes.iter().filter(|(id,_)|self.markers().iter().any(|(_,_,marker_id)|marker_id == *id)).map(|(id,text)|json!([id,text])).collect::<Vec<_>>(),
             "undo_history":self.model.history_depths()})
+    }
+
+    // Process-boundary observation only. Pi-shaped layout stays in the adapter;
+    // the native model remains the sole editing, caret, paste and menu authority.
+    fn paint_snapshot(&self) -> Value {
+        let text = self.model.text();
+        let prefix = &text[..self.model.cursor()];
+        let markers = self.markers();
+        let mut offset = 0;
+        let mut units = 0;
+        let atoms = markers
+            .iter()
+            .map(|&(start, end, _)| {
+                units += text[offset..start].encode_utf16().count();
+                let first = units;
+                units += text[start..end].encode_utf16().count();
+                offset = end;
+                [first, units]
+            })
+            .collect::<Vec<_>>();
+        json!({"text":text,"revision":self.model.revision(),
+            "cursor":{"line":prefix.bytes().filter(|byte|*byte == b'\n').count(),"col":prefix.rsplit('\n').next().unwrap().encode_utf16().count()},
+            "cursor_offset":prefix.encode_utf16().count(),"atoms":atoms,
+            "padding_x":self.padding,"autocomplete_max_visible":self.autocomplete_max_visible,
+            "pastes":self.pastes.iter().filter(|(id,_)|markers.iter().any(|(_,_,marker_id)|marker_id == *id)).map(|(id,text)|json!([id,text])).collect::<Vec<_>>(),
+            "undo_history":self.model.history_depths(),
+            "autocomplete":self.menu.as_ref().filter(|menu|menu.revision == self.model.revision()).map(|menu|json!({"items":menu.items,"selected":menu.selected,"max_visible":self.autocomplete_max_visible}))})
     }
 
     fn markers(&self) -> Vec<(usize, usize, u64)> {
@@ -1006,6 +1034,7 @@ impl EditorService {
                                 .map(|(id, text)| json!([id, text]))
                                 .collect::<Vec<_>>()),
                             ReadField::UndoHistory => json!(editor.model.history_depths()),
+                            ReadField::Paint => editor.paint_snapshot(),
                             ReadField::Autocomplete => json!(editor
                                 .menu
                                 .as_ref()
@@ -1227,6 +1256,43 @@ fn bounds(detail: &str) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paint_observations_are_read_only_and_keep_native_cursor_atoms_and_menu() {
+        let mut service = EditorService::for_mount("paint".into());
+        let id = service
+            .request(
+                None,
+                json!({"op":"create","padding_x":1,"autocomplete_max_visible":5}),
+            )
+            .unwrap()["editor_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut call = |op| service.request(Some(&id), op);
+        call(json!({"op":"set_text","text":"α👩‍💻"})).unwrap();
+        call(json!({"op":"input","data":format!("\u{1b}[200~{}\u{1b}[201~", "x".repeat(1200)),"action":null,"disable_submit":false})).unwrap();
+        let before = call(json!({"op":"read"})).unwrap();
+        let paint = call(json!({"op":"read","field":"paint"})).unwrap()["value"].clone();
+        assert_eq!(call(json!({"op":"read"})).unwrap(), before);
+        assert_eq!(paint["text"], before["text"]);
+        assert_eq!(
+            paint["cursor_offset"],
+            before["text"].as_str().unwrap().encode_utf16().count()
+        );
+        assert_eq!(paint["atoms"][0][0], 6);
+        assert_eq!(paint["atoms"][0][1], paint["cursor_offset"]);
+        assert_eq!(paint["pastes"][0][1], "x".repeat(1200));
+        assert!(paint.get("lines").is_none() && paint.get("expanded").is_none());
+        assert_eq!(paint["autocomplete"], Value::Null);
+        let query = call(json!({"op":"query","force":true})).unwrap()["query"]["id"].clone();
+        call(json!({"op":"suggestions","query_id":query,"prefix":"x","items":[{"id":0,"value":"xyz","label":"xyz"}]})).unwrap();
+        assert_eq!(
+            call(json!({"op":"read","field":"paint"})).unwrap()["value"]["autocomplete"]["items"]
+                [0]["value"],
+            "xyz"
+        );
+    }
+
     #[test]
     fn component_handles_and_provider_receipts_are_bounded_and_retired() {
         let mut service = EditorService::for_mount("lease".into());

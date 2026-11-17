@@ -6,7 +6,7 @@ import { commandArgumentRequest, getAutocompleteProvider } from './completions.m
 import { piPosition } from './autocomplete-edits.mjs';
 import { sliceByColumn, truncateToWidth, visibleWidth } from '../node_modules/@earendil-works/pi-tui/dist/utils.js';
 import { isKittyProtocolActive } from '../node_modules/@earendil-works/pi-tui/dist/keys.js';
-import { inRender } from './ui-delivery.mjs';
+import { inRender, rendering } from './ui-delivery.mjs';
 import { ChromeSnapshot } from './chrome-snapshot.mjs';
 
 import { resolveFakeCursors } from './fake-cursor.mjs';
@@ -169,13 +169,17 @@ export function registerNativeEditor(component, call, id) {
 export function nativeEditorCall(tui) {
   const surface = editorSurfaces.get(tui);
   if (!surface) unsupported('native Editor', 'requires the host-supplied TUI');
-  const call = (operation, editorId) => {
-    if (operation.op === 'dispose' && (surface.closed || retiredNativeSurfaces.has(surface))) return {};
+  const assertAlive = () => {
     if (retiredNativeSurfaces.has(surface)) throw retiredNativeSurfaces.get(surface);
     if (surface.closed || !surface.opened || surface.runtime.stopping) throw rpcError(-32002, 'native editor surface retired');
+    surface.runtime.require('remote_ui'); surface.runtime.assertOwner(surface.store);
+    surface.store.controller.signal.throwIfAborted();
+  };
+  const call = (operation, editorId) => {
+    if (operation.op === 'dispose' && (surface.closed || retiredNativeSurfaces.has(surface))) return {};
+    if (rendering()) unsupported('native Editor operation during render', 'paint reads the last native observation');
+    assertAlive();
     const runtime = surface.runtime, store = surface.store;
-    runtime.require('remote_ui'); runtime.assertOwner(store);
-    store.controller.signal.throwIfAborted();
     try {
       return runtime.transport.requestSync('ui/chrome', {
         parent_request_id: store.id, resource_owner: store.state.owner,
@@ -195,6 +199,7 @@ export function nativeEditorCall(tui) {
       throw error;
     }
   };
+  call.assertAlive = assertAlive;
   call.isAlive = () => !surface.closed && !retiredNativeSurfaces.has(surface) && surface.opened && !surface.runtime.stopping;
   // Editors created on this surface, so an adapter-initiated close can retain
   // their final observable state before the native mount is released.

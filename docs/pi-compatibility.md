@@ -484,11 +484,13 @@ Pi would block typing indefinitely. This per-key deadline remains active with
 dispatcher supervision; terminal listeners are separate from unbounded prompt
 `input` hooks and user dialogs. Input past the 256-byte wire bound bypasses the chain. Editor
 submissions use native idle/busy admission; refusals preserve component paste and
-undo state. The adapter's `Editor` and `CustomEditor` now share a synchronous
-native-backed facade: sexy-tui-rs owns editing state, caret, undo/history/paste
-recovery and autocomplete state. JS supplies presentation and callback hooks,
-not a second editing engine. Registry argument menus use the bound native caret
-and mount/handle/revision/owner fences; Up/Down and Tab stay host-owned.
+undo state. The adapter's `Editor` and `CustomEditor` share a native-backed
+facade: sexy-tui-rs owns editing state, caret, undo/history/paste recovery and
+autocomplete state. Before paint, native operations publish a bounded read-only
+observation. Rendering, including getters reached during paint, uses only that
+local observation and never waits for host I/O. JS supplies presentation and
+callback hooks, not a second editing engine. Registry argument menus use the bound
+native caret and mount/handle/revision/owner fences; Up/Down and Tab stay host-owned.
 The 193 immutable Pi 1.0.2 Editor/history cases and separate ownership guard pass
 against the compiled production Rust service. Real App/adapter tests separately
 qualify admission and custom-editor registry completion/clear/retirement.
