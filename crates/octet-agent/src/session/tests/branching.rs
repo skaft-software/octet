@@ -485,8 +485,8 @@ fn usage_totals_fold_tool_turns_and_summaries_and_preserve_uncertainty() {
             agent_id: "child".into(),
             turn_count: 1,
             tool_call_count: 2,
-            endpoint: EndpointId("provider".into()),
-            model: ModelId("m".into()),
+            endpoint: Some(EndpointId("provider".into())),
+            model: Some(ModelId("m".into())),
             usage: Usage {
                 total_tokens: 40,
                 ..Usage::default()
@@ -549,8 +549,8 @@ fn delegated_usage_is_durable_and_contributes_exact_session_cost() {
             agent_id: "agent-1".into(),
             turn_count: 3,
             tool_call_count: 7,
-            endpoint: EndpointId("provider".into()),
-            model: ModelId("worker-model".into()),
+            endpoint: Some(EndpointId("provider".into())),
+            model: Some(ModelId("worker-model".into())),
             usage,
             cost: Some(cost),
         })

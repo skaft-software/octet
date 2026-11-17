@@ -99,6 +99,8 @@ pub(super) fn durable_fleet_record(record: &AgentRecord) -> DurableFleetRecord {
         turn_count: record.turn_count,
         tool_call_count: record.tool_call_count,
         usage: record.usage,
+        usage_endpoint: record.usage_endpoint.clone(),
+        usage_model: record.usage_model.clone(),
         usage_uncertain: record.usage_uncertain,
         usage_exposure: record.usage_exposure,
         cost: record.cost,

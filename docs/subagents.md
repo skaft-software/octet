@@ -142,6 +142,10 @@ totals replace estimates on settlement; retries discard their provisional counts
 No estimate enters token/cost budgets or the exactly-once delegated ledger.
 This is a scheduling cadence, not a provider or terminal latency guarantee.
 
+The parent ledger carries the child's latest provider-operation endpoint/model
+and sums the child's originally settled costs across model changes. Repeated
+snapshots and resumed sessions count each child's increments exactly once.
+
 The model-facing equivalents are `subagent_models`, `subagent_spawn`, `subagent_status`,
 `subagent_wait`, `subagent_stop`, and `subagent_continue`.
 

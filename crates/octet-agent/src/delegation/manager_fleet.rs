@@ -318,6 +318,8 @@ impl DelegationManager {
             recent_tools: VecDeque::new(),
             child_events: ChildEventLog::default(),
             usage: durable.usage,
+            usage_endpoint: durable.usage_endpoint,
+            usage_model: durable.usage_model,
             streamed_output_bytes: 0,
             usage_uncertain: durable.usage_uncertain,
             usage_exposure: durable.usage_exposure,
@@ -353,6 +355,15 @@ impl DelegationManager {
                 (Some(_), None) => record.cost = None,
                 (None, _) => {}
             }
+        }
+        if let Some(latest) = session
+            .usage_records()
+            .iter()
+            .rev()
+            .find(|usage| usage.endpoint.is_some() && usage.model.is_some())
+        {
+            record.usage_endpoint = latest.endpoint.clone();
+            record.usage_model = latest.model.clone();
         }
         record.usage_uncertain = session.has_uncertain_usage();
         record.usage_exposure = record

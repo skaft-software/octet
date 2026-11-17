@@ -5,6 +5,8 @@ use super::*;
 #[derive(Clone, Debug)]
 pub(crate) struct DelegatedUsageRecord {
     pub(crate) agent_id: String,
+    pub(crate) endpoint: Option<octet_ai::EndpointId>,
+    pub(crate) model: Option<octet_ai::ModelId>,
     pub(crate) usage: Usage,
     pub(crate) usage_uncertain: bool,
     pub(crate) usage_exposure: Option<UsageUncertaintyBound>,
@@ -77,6 +79,9 @@ pub(super) struct AgentRecord {
     /// Process-local bounded observations; never another authoritative transcript.
     pub(super) child_events: ChildEventLog,
     pub(super) usage: Usage,
+    /// Latest child provider operation; absent only in legacy snapshots.
+    pub(super) usage_endpoint: Option<octet_ai::EndpointId>,
+    pub(super) usage_model: Option<octet_ai::ModelId>,
     /// Process-local provisional generation; never part of durable/billable usage.
     pub(super) streamed_output_bytes: u64,
     pub(super) usage_uncertain: bool,
@@ -135,6 +140,10 @@ pub(super) struct DurableFleetRecord {
     pub(super) turn_count: u64,
     pub(super) tool_call_count: u64,
     pub(super) usage: Usage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_endpoint: Option<octet_ai::EndpointId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) usage_model: Option<octet_ai::ModelId>,
     pub(super) usage_uncertain: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage_exposure: Option<UsageUncertaintyBound>,
@@ -194,6 +203,8 @@ impl Default for DurableFleetRecord {
             turn_count: 0,
             tool_call_count: 0,
             usage: Usage::default(),
+            usage_endpoint: None,
+            usage_model: None,
             usage_uncertain: false,
             usage_exposure: None,
             cost: None,

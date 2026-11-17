@@ -447,6 +447,8 @@ impl DelegationManager {
                     recent_tools: VecDeque::new(),
                     child_events: ChildEventLog::default(),
                     usage: Usage::default(),
+                    usage_endpoint: Some(resolved.model.endpoint.id.clone()),
+                    usage_model: Some(resolved.model.spec.id.clone()),
                     streamed_output_bytes: 0,
                     usage_uncertain: false,
                     usage_exposure: None,

@@ -39,11 +39,13 @@ impl Session {
     /// which only assistant turns can supply — tells an assistant turn from a
     /// cache warm, a compaction, a rejected Responses turn, a terminal gate or
     /// a delegated child. The two session-total fields stay `None` because
-    /// `record_usage` is the single owner of the picodollar carry.
+    /// `record_usage` is the single owner of the picodollar carry. Only legacy
+    /// delegated snapshots may omit route labels until the child ledger recovers
+    /// them; callers never substitute the current parent's model.
     pub(super) fn provider_usage_record(
         kind: UsageRecordKind,
-        endpoint: EndpointId,
-        model: ModelId,
+        endpoint: impl Into<Option<EndpointId>>,
+        model: impl Into<Option<ModelId>>,
         usage: Usage,
         cost: Option<Cost>,
         stop_reason: Option<StopReason>,
@@ -52,8 +54,8 @@ impl Session {
             kind,
             usage,
             stop_reason,
-            endpoint: Some(endpoint),
-            model: Some(model),
+            endpoint: endpoint.into(),
+            model: model.into(),
             completed_at_unix_ms: Some(now_unix_millis()),
             cost,
             cost_microdollars: cost.map(|cost| cost.total),

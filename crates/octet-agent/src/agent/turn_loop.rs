@@ -3666,8 +3666,8 @@ impl Agent {
                         agent_id: delegated.agent_id,
                         turn_count: delegated.turn_count,
                         tool_call_count: delegated.tool_call_count,
-                        endpoint: model.endpoint.id.clone(),
-                        model: model.spec.id.clone(),
+                        endpoint: delegated.endpoint,
+                        model: delegated.model,
                         usage: delegated.usage,
                         cost: delegated.cost,
                     }) {

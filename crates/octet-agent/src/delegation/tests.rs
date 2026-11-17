@@ -6514,6 +6514,68 @@ fn child_unknown_usage_is_sticky_and_preserves_the_known_subtotal_for_root_mirro
 }
 
 #[test]
+fn child_accounting_keeps_latest_provider_route_and_ledger_prices_across_legacy_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = writable_manager(directory.path());
+    let (identity, _commands) = insert_test_record(
+        &manager,
+        DelegatedAgentStatus::Completed {
+            output: "done".into(),
+        },
+    );
+    let path = directory.path().join("child-prices.jsonl");
+    let mut session = Session::create(&path).unwrap();
+    for (model, price) in [("codex/gpt-6.1-sol", 7), ("codex/gpt-6-astra", 13)] {
+        session
+            .record_compaction_usage(
+                octet_ai::EndpointId("openai-codex".into()),
+                octet_ai::ModelId(model.into()),
+                Usage {
+                    input_tokens: 10,
+                    total_tokens: 10,
+                    ..Default::default()
+                },
+                Some(Cost {
+                    input: price,
+                    total: price,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+    }
+    {
+        let mut state = manager.state.lock().unwrap();
+        let record = state.records.get_mut(&identity.id).unwrap();
+        record.extension_principal = Some("fixture".into());
+        record.session_path = path;
+    }
+    // The current model's pricing is not authority over already settled calls.
+    manager.update_agent_session_accounting(&identity.id, &session, false);
+    let snapshots = manager.extension_usage_records(ROOT_AGENT_ID);
+    assert_eq!(snapshots[0].cost.unwrap().total, 20);
+    assert_eq!(snapshots[0].endpoint.as_ref().unwrap().0, "openai-codex");
+    assert_eq!(snapshots[0].model.as_ref().unwrap().0, "codex/gpt-6-astra");
+    let mut encoded = serde_json::to_value(durable_fleet_record(
+        &manager.state.lock().unwrap().records[&identity.id],
+    ))
+    .unwrap();
+    assert_eq!(encoded["usage_model"], "codex/gpt-6-astra");
+    // Older fleet files have no route labels; recover them from the child ledger.
+    let object = encoded.as_object_mut().unwrap();
+    object.remove("usage_endpoint");
+    object.remove("usage_model");
+    let durable: DurableFleetRecord = serde_json::from_value(encoded).unwrap();
+    let (tx, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+    let mut restored = fixture_record(durable, true, false, tx, Some(rx));
+    assert!(restored.usage_model.is_none());
+    DelegationManager::discard_session_delivered_inputs(&mut restored).unwrap();
+    assert_eq!(restored.usage_model, snapshots[0].model);
+    assert_eq!(restored.usage_endpoint, snapshots[0].endpoint);
+    assert_eq!(restored.cost, snapshots[0].cost);
+    assert_eq!(restored.usage, snapshots[0].usage);
+}
+
+#[test]
 fn reasoning_changes_update_new_workers_but_preserve_existing_worker_pins() {
     use octet_ai::{ReasoningConfig, ReasoningEffort};
     let directory = tempfile::tempdir().unwrap();

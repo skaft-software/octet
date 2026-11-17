@@ -138,8 +138,8 @@ pub(crate) struct DelegatedUsage {
     pub(crate) agent_id: String,
     pub(crate) turn_count: u64,
     pub(crate) tool_call_count: u64,
-    pub(crate) endpoint: EndpointId,
-    pub(crate) model: ModelId,
+    pub(crate) endpoint: Option<EndpointId>,
+    pub(crate) model: Option<ModelId>,
     pub(crate) usage: Usage,
     pub(crate) cost: Option<Cost>,
 }

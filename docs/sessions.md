@@ -264,7 +264,14 @@ A delegated record names the child, its
 turn and tool-call counts, token totals (counted separately), route and model,
 and exact cost. The child's JSONL stays the detailed transcript. A root mirror
 is written **once before the owning checkpoint**, so session cost, `/cost`,
-export, resume and cost limits all include child spend.
+export, resume and cost limits all include child spend. Each cumulative child
+snapshot carries the endpoint and model of its latest durable provider usage
+operation, never the parent's selection. If the child changes models (including
+auxiliary inference), costs remain the sum of the original priced operations;
+they are not recalculated at the latest model's rates. Incremental mirrors dedupe
+by child ID across model changes and resume, including older mirrors with missing
+or parent-model labels. Older fleet labels are recovered from the child ledger;
+unavailable legacy labels remain absent rather than borrowing the parent's model.
 
 Tool-owned inference records a `tool_inference_started` attempt with its parent
 tool call, endpoint and model. Matching `tool_inference` usage or an explicit

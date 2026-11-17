@@ -271,6 +271,8 @@ pub(super) fn record_delegated_usage_once(
 
     // The root's committed ledger, not a process-local or fleet-file watermark,
     // is authoritative across failed appends, repeated snapshots and restarts.
+    // Dedupe by child ID, never endpoint/model: legacy mirrors may carry the
+    // parent's labels or none, and a child can change its provider route.
     let mut mirrored_usage = Usage::default();
     let mut mirrored_cost = Cost::default();
     let mut mirrored_turns = 0;

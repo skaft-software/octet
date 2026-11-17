@@ -4,6 +4,8 @@ use base64::Engine as _;
 
 #[path = "builtin_override_replay_tests.rs"]
 mod builtin_override_replay;
+#[path = "delegated_accounting_tests.rs"]
+mod delegated_accounting_tests;
 #[path = "delegation_session_replacement_tests.rs"]
 mod delegation_session_replacement_tests;
 #[path = "effective_media_estimate_tests.rs"]
@@ -4420,8 +4422,8 @@ fn delegated_usage_is_accounting_not_parent_context_token_consumption() {
             agent_id: "agent-1".into(),
             turn_count: 2,
             tool_call_count: 1,
-            endpoint: octet_ai::EndpointId("test-endpoint".into()),
-            model: octet_ai::ModelId("test-model".into()),
+            endpoint: Some(octet_ai::EndpointId("test-endpoint".into())),
+            model: Some(octet_ai::ModelId("test-model".into())),
             usage: Usage {
                 input_tokens: 40_000,
                 output_tokens: 10_000,
@@ -4446,8 +4448,8 @@ fn delegated_snapshots_use_only_committed_root_usage_and_borrow_cost_remainders(
         agent_id: "child-1".into(),
         turn_count: 1,
         tool_call_count: 0,
-        endpoint: octet_ai::EndpointId("endpoint".into()),
-        model: octet_ai::ModelId("model".into()),
+        endpoint: Some(octet_ai::EndpointId("endpoint".into())),
+        model: Some(octet_ai::ModelId("model".into())),
         usage: Usage {
             input_tokens: 10,
             total_tokens: 10,
@@ -4529,8 +4531,8 @@ fn repeated_delegated_uncertainty_mirroring_is_idempotent_and_keeps_known_subtot
                 agent_id: "child-1".into(),
                 turn_count: 1,
                 tool_call_count: 0,
-                endpoint: model.endpoint.id.clone(),
-                model: model.spec.id.clone(),
+                endpoint: Some(model.endpoint.id.clone()),
+                model: Some(model.spec.id.clone()),
                 usage: Usage {
                     total_tokens: 10,
                     input_tokens: 10,

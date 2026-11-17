@@ -179,7 +179,10 @@ impl DelegationManager {
         priced: bool,
     ) {
         let mut usage = Usage::default();
-        let mut aggregate_cost = priced.then_some(Cost::default());
+        // The ledger's settled prices are authoritative even if the child's
+        // currently selected model has since become unpriced.
+        let mut aggregate_cost =
+            (priced || !session.usage_records().is_empty()).then_some(Cost::default());
         for record in session.usage_records() {
             add_delegated_usage(&mut usage, &record.usage);
             match (aggregate_cost.as_mut(), record.cost) {
@@ -198,6 +201,17 @@ impl DelegationManager {
         record.usage = usage;
         record.streamed_output_bytes = 0;
         record.cost = aggregate_cost;
+        // One cumulative snapshot per child: attribute it to the latest durable
+        // provider operation, while preserving costs from every original route.
+        if let Some(latest) = session
+            .usage_records()
+            .iter()
+            .rev()
+            .find(|usage| usage.endpoint.is_some() && usage.model.is_some())
+        {
+            record.usage_endpoint = latest.endpoint.clone();
+            record.usage_model = latest.model.clone();
+        }
         record.usage_uncertain = session.has_uncertain_usage();
         record.usage_exposure = record
             .usage_uncertain

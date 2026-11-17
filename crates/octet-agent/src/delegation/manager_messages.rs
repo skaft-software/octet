@@ -1068,6 +1068,8 @@ impl DelegationManager {
             })
             .map(|record| DelegatedUsageRecord {
                 agent_id: record.identity.id.clone(),
+                endpoint: record.usage_endpoint.clone(),
+                model: record.usage_model.clone(),
                 usage: record.usage,
                 usage_uncertain: record.usage_uncertain,
                 usage_exposure: record.usage_exposure,
