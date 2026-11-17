@@ -4,8 +4,18 @@ use std::io::{self, Write};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 
+#[cfg(test)]
+thread_local! {
+    /// Clipboard seam: unit journeys must never change the developer's clipboard.
+    pub(super) static TEST_COPY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_SOURCE_BYTES: usize = MAX_PAYLOAD_BYTES / 4 * 3;
+
+pub(super) fn is_truncated(text: &str) -> bool {
+    text.len() > MAX_SOURCE_BYTES
+}
 
 pub(super) fn write_osc52(out: &mut impl Write, text: &str) -> io::Result<()> {
     let mut end = text.len().min(MAX_SOURCE_BYTES);

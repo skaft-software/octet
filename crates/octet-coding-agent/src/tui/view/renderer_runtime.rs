@@ -203,6 +203,11 @@ impl SharedState {
             state.painted_geometry = Some(geometry);
         }
         super::InteractiveShell::resolve_deferred_pointer_press(&mut state);
+        let copy = state.resolve_scrolled_transcript_selection();
+        drop(state);
+        if let Some(copy) = copy {
+            super::InteractiveShell::set_clipboard(&copy);
+        }
     }
 
     pub(super) fn native(&self) -> &Arc<Mutex<super::tern_input::Mailbox>> {
@@ -728,11 +733,7 @@ impl InteractiveShell {
             }
             state.render_geometry = None;
             state.painted_geometry = None;
-            state.pending_selection_anchor = None;
-            state.selection_pointer_cell = None;
-            state.selection_dragging = false;
-            state.deferred_pointer_press = None;
-            state.pending_screen_press = None;
+            state.cancel_transcript_pointer();
             state.reset_transcript_navigation_pointer();
             previous_viewport
         };
@@ -909,7 +910,14 @@ pub(super) fn render_loop_with_terminal(
         // Sleep only to the next deadline, not for a fresh full interval after
         // every event/layout. Model, tool, input and Stop preempt the timeout.
         let now = Instant::now();
-        let scrollbar_deadline = state.borrow().transcript_scrollbar_deadline();
+        let scrollbar_deadline = {
+            let shell = state.borrow();
+            shell
+                .transcript_scrollbar_deadline()
+                .into_iter()
+                .chain(shell.transcript_pointer_deadline())
+                .min()
+        };
         let poll = resize_schedule.remaining(now).unwrap_or_else(|| {
             animations.remaining(now).min(
                 scrollbar_deadline
@@ -1017,6 +1025,7 @@ pub(super) fn render_loop_with_terminal(
             let now = Instant::now();
             animations.advance(&mut shell, now);
             shell.expire_transcript_scrollbar(now);
+            shell.advance_transcript_pointer(now);
         }
         {
             let shell = state.borrow();

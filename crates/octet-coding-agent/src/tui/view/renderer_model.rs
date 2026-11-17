@@ -462,6 +462,10 @@ impl RenderOwner {
         self.root = model.root;
         self.revision = model.revision;
         self.geometry_fence = Some(model.geometry_fence);
+        // Scroll-driven selection focus is laid out on the renderer, before
+        // highlight painting. The input owner accepts it only with a written
+        // viewport; stream-only paints leave semantic endpoints untouched.
+        let _ = state.resolve_scrolled_transcript_selection();
         if let Some(top) = state.pending_panel_document_top {
             let rows =
                 super::shell_chrome::shell_chrome(state, state.size.0, std::time::Instant::now())
@@ -548,6 +552,10 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         follow_tail,
         new_output_count,
         transcript_selection,
+        selection_scroll_pending,
+        selection_pointer_cell,
+        selection_dragging,
+        copy_notice,
         context_estimate,
         last_turn_usage,
         last_turn_tokens_per_second,

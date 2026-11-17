@@ -653,7 +653,9 @@ pub(super) fn render_shell_viewport_at(
             .map(|line| sexy_tui_rs::visible_width(line))
             .sum::<usize>();
     });
+    let transcript_rows = chrome.transcript_rows;
     append_viewport_chrome(&mut lines, chrome);
+    state.decorate_copy_notice(&mut lines, transcript_rows, width, now);
     lines
 }
 

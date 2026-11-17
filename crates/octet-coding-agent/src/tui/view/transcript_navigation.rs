@@ -906,11 +906,11 @@ impl InteractiveShell {
             event,
             Event::Resize(..) | Event::FocusLost | Event::FocusGained
         ) {
-            self.state
-                .borrow()
-                .transcript_navigation
-                .borrow_mut()
-                .reset_pointer();
+            let mut state = self.state.borrow_mut();
+            state.transcript_navigation.borrow_mut().reset_pointer();
+            // Pi compatibility: packages/tui/src/tui-alt-screen.ts:695-715
+            // cancels an active selection on focus loss, never on release.
+            state.cancel_transcript_pointer();
             return false;
         }
         let exclusive = {
@@ -921,6 +921,7 @@ impl InteractiveShell {
                 || state.tool_input_prompt.is_some()
         };
         if exclusive {
+            self.state.borrow_mut().cancel_transcript_pointer();
             self.close_transcript_navigation();
             return false;
         }

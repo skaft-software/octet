@@ -255,6 +255,8 @@ pub(super) struct RenderedGeometry {
     pub(super) completions: Vec<super::composer_pointer::CompletionHit>,
     pub(super) welcome_mark: Option<(u16, usize)>,
     pub(super) welcome_rows: usize,
+    /// The exact scroll-driven range highlighted in this written viewport.
+    pub(super) pointer_selection: Option<(super::TranscriptSelection, (u16, u16))>,
     pub(super) total_rows: usize,
     pub(super) visible_start: usize,
     pub(super) visible_lines: Vec<String>,
@@ -358,6 +360,10 @@ impl RenderedGeometry {
             welcome_mark: super::builtin_welcome_card::visible_mark_rect(state).and_then(
                 |(x, y)| (y >= start && y + 2 <= end).then_some((x, y.saturating_sub(start))),
             ),
+            pointer_selection: state
+                .transcript_selection
+                .clone()
+                .zip(state.selection_pointer_cell),
             total_rows,
             visible_start: start,
             visible_lines: cache.lines[start..end].to_vec(),

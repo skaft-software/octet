@@ -302,10 +302,15 @@ scrollbar keeps the pointer until you release it; wheel events still move the
 transcript over the track, scroll hint, and viewport edges during that press.
 Scrollbar hover, track clicks and dragging use the painted track and stay
 responsive during idle updates and streaming, without waiting for pending output.
-Repeated selection-drag
-events at the top or bottom edge keep scrolling without losing the selection
-between paints. Click-drag highlights transcript text without Shift. Release
-copies it, or use Ctrl+Shift+C to copy the current selection again. Reflow under
+Holding a selection drag at the top or bottom edge auto-scrolls, including
+between pointer-motion events. Wheel/trackpad scrolling during a drag extends
+the range at the pointer; scrolling after release extends the retained range
+and refreshes its clipboard copy. Click-drag highlights transcript text without
+Shift. Release immediately copies it and briefly shows **Copied selection**;
+Ctrl+Shift+C copies the current selection again. Streaming text, tool completion,
+working animations and worker updates preserve semantic endpoints outside their
+changes. Focus changes, resize and replacement surfaces cancel an active drag,
+so a late release cannot copy a previous range. Reflow under
 a stationary pointer does not expand the selected range on release; a displaced
 release still counts as movement when terminals coalesce drag events. Ctrl+C keeps
 its draft-clear/interrupt/exit meaning. Composer, footer and separator rows are not
@@ -341,7 +346,8 @@ Copy writes to an available local clipboard helper and emits OSC 52 to the
 terminal, so SSH/remote sessions can reach the client clipboard. The terminal must
 permit OSC 52; inside tmux enable `set -g set-clipboard on`. Remote transport sends
 a UTF-8-safe prefix of at most 49,152 source bytes (64 KiB base64 payload), using
-BEL termination. The retained selection and local clipboard copy are not truncated
+BEL termination. A brief **terminal copy truncated** message reports when that
+limit applies. The retained selection and local clipboard copy are not truncated
 by that transport limit. Capture explicitly requests cell coordinates (SGR 1006),
 clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
 (1007); octet does not infer cells from pixel reports.

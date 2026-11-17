@@ -5,7 +5,9 @@ mod desktop_notification_tests;
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
-use std::io::{IsTerminal, Write as IoWrite};
+#[cfg(not(test))]
+use std::io::IsTerminal;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -115,6 +117,8 @@ use self::viewport::{
 
 use crate::presentation::tool_display::is_subagent_tool;
 
+#[cfg(test)]
+mod copyselect_tests;
 #[cfg(test)]
 mod fullscreen_work_tests;
 
@@ -1953,6 +1957,11 @@ pub(crate) struct ShellState {
     /// A drag which began in the transcript remains transcript-owned even
     /// when its pointer crosses into the pinned composer/footer.
     selection_dragging: bool,
+    /// Resolve scroll-driven focus only against the next completed paint.
+    selection_scroll_pending: bool,
+    selection_autoscroll_at: Option<Instant>,
+    /// Brief copy feedback occupies existing chrome, never transcript rows.
+    pub(super) copy_notice: Option<(String, Instant)>,
     /// Escape-free fallback retained when no clipboard transport is available.
     copy_buffer: Option<String>,
     pub(crate) context_estimate: Option<(u64, u64)>,
@@ -2388,6 +2397,9 @@ impl ShellState {
             composer_selection: None,
             deferred_pointer_press: Default::default(),
             selection_dragging: Default::default(),
+            selection_scroll_pending: false,
+            selection_autoscroll_at: None,
+            copy_notice: None,
             copy_buffer: Default::default(),
             context_estimate: Default::default(),
             last_turn_usage: Default::default(),
@@ -7484,6 +7496,27 @@ impl InteractiveShell {
             }
         }
         retain_viewport_anchor(&state);
+        if let Some(anchor) = state.pending_selection_anchor.take() {
+            // Scrolling under a held press starts a new range; a retained
+            // selection from an earlier gesture must never own that wheel.
+            state.transcript_selection = Some(TranscriptSelection {
+                anchor,
+                focus: anchor,
+            });
+            state.selection_dragging = true;
+            state.pending_screen_press = None;
+        }
+        if state.transcript_selection.is_some()
+            && state.selection_pointer_cell.is_some()
+            && state.deferred_pointer_press.is_none()
+        {
+            state.selection_scroll_pending = true;
+        }
+        let copy = state.resolve_scrolled_transcript_selection();
+        drop(state);
+        if let Some(copy) = copy {
+            Self::set_clipboard(&copy);
+        }
     }
 
     /// Explicit End/jump-to-live action. It preserves the draft and composer
@@ -7624,6 +7657,7 @@ impl InteractiveShell {
     /// Shift+click extends an existing selection without activating links.
     pub fn begin_transcript_selection(&mut self, row: u16, col: u16, extend: bool) {
         self.reset_input_interaction();
+        self.state.borrow_mut().cancel_transcript_pointer();
         if self.begin_composer_pointer(row, col, extend) {
             return;
         }
@@ -7635,7 +7669,6 @@ impl InteractiveShell {
         state.welcome_text_selection = None;
         state.welcome_last_click = None;
         state.selection_pointer_cell = Some((row, col));
-        state.deferred_pointer_press = None;
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
             state.pending_selection_anchor = None;
             state.selection_dragging = false;
@@ -7692,14 +7725,33 @@ impl InteractiveShell {
         //
         // Promote only after observing real movement.
         let mut state = self.state.borrow_mut();
-        state.selection_pointer_cell = Some((row, col));
+        Self::extend_transcript_selection_state(&mut state, row, col);
+    }
+
+    fn extend_transcript_selection_state(state: &mut ShellState, row: u16, col: u16) {
         if let Some(press) = state.pending_screen_press.as_mut() {
             press.moved |= press.cell != (row, col);
         }
-        if Self::extend_composer_pointer(&mut state, row, col) {
+        // Composer and completion presses have their own painted geometry and
+        // fences; a transcript repaint must not revoke their mouse ownership.
+        if Self::extend_composer_pointer(state, row, col) {
             return;
         }
-        Self::resolve_deferred_pointer_press(&mut state);
+        if !state.selection_dragging
+            && state.pending_selection_anchor.is_none()
+            && state.deferred_pointer_press.is_none()
+        {
+            return;
+        }
+        if state.render_threaded
+            && state.gesture_render_geometry().is_none()
+            && state.deferred_pointer_press.is_none()
+        {
+            state.cancel_transcript_pointer();
+            return;
+        }
+        state.selection_pointer_cell = Some((row, col));
+        Self::resolve_deferred_pointer_press(state);
         if let Some(deferred) = state.deferred_pointer_press.as_mut() {
             deferred.motion = Some((row, col));
             return;
@@ -7709,7 +7761,7 @@ impl InteractiveShell {
                 Some(anchor) => anchor,
                 None => return,
             };
-            let current = Self::transcript_position_at_gesture_cell(&state, row, col);
+            let current = Self::transcript_position_at_gesture_cell(state, row, col);
             if current == Some(anchor) {
                 return;
             }
@@ -7722,13 +7774,14 @@ impl InteractiveShell {
             state.selection_dragging = true;
         }
 
-        let mut transcript_rows = transcript_gesture_viewport_capacity(&state);
+        let mut transcript_rows = transcript_gesture_viewport_capacity(state);
         if transcript_rows == 0 {
             return;
         }
+        let previous_scroll = state.scroll_from_bottom.get();
         if row == 0 {
             state.viewport_anchor.set(None);
-            let maximum = max_scroll_from_bottom(&state, state.size.0);
+            let maximum = max_scroll_from_bottom(state, state.size.0);
             let next = state
                 .scroll_from_bottom
                 .get()
@@ -7736,7 +7789,7 @@ impl InteractiveShell {
                 .min(maximum);
             state.scroll_from_bottom.set(next);
             state.follow_tail = next == 0;
-        } else if usize::from(row) >= transcript_rows {
+        } else if usize::from(row) >= transcript_rows.saturating_sub(1) {
             state.viewport_anchor.set(None);
             let next = state.scroll_from_bottom.get().saturating_sub(2);
             state.scroll_from_bottom.set(next);
@@ -7744,20 +7797,30 @@ impl InteractiveShell {
                 state.jump_to_tail();
             }
         }
-        retain_viewport_anchor(&state);
-        transcript_rows = transcript_gesture_viewport_capacity(&state);
+        if (row == 0 || usize::from(row) >= transcript_rows.saturating_sub(1))
+            && state.scroll_from_bottom.get() != previous_scroll
+        {
+            state.selection_scroll_pending = true;
+            state.selection_autoscroll_at =
+                Some(Instant::now() + transcript_pointer::AUTOSCROLL_INTERVAL);
+        } else {
+            state.selection_autoscroll_at = None;
+        }
+        retain_viewport_anchor(state);
+        transcript_rows = transcript_gesture_viewport_capacity(state);
         if transcript_rows == 0 {
             return;
         }
         let clamped = row.min(transcript_rows.saturating_sub(1) as u16);
-        if let Some(position) = Self::transcript_position_at_gesture_cell(&state, clamped, col) {
+        if let Some(position) = Self::transcript_position_at_gesture_cell(state, clamped, col) {
             if let Some(selection) = state.transcript_selection.as_mut() {
                 selection.focus = position;
             }
         }
     }
 
-    /// Finish a pointer gesture:
+    /// Finish a pointer gesture. Pi compatibility: packages/tui/src/
+    /// tui-alt-screen.ts:1340-1378 copies on release and keeps the range.
     /// - Drag that created a selection -> copy to clipboard, keep selection.
     /// - Stationary click (no drag)    -> activate its screen-level click target.
     pub fn end_transcript_selection(&mut self, row: u16, col: u16) {
@@ -7776,7 +7839,12 @@ impl InteractiveShell {
             return;
         }
         let pressed_link = state.pending_screen_press.take();
-        let last_cell = state.selection_pointer_cell.take();
+        let last_cell = state.selection_pointer_cell;
+        if state.render_threaded && state.gesture_render_geometry().is_none() {
+            state.cancel_transcript_pointer();
+        }
+        state.selection_autoscroll_at = None;
+        state.selection_scroll_pending = false;
         Self::resolve_deferred_pointer_press(&mut state);
         state.deferred_pointer_press = None;
         if !state.selection_dragging && state.pending_selection_anchor.is_none() {
@@ -7794,7 +7862,7 @@ impl InteractiveShell {
         // reflow would replace the semantic endpoint the reader highlighted.
         if last_cell != Some((row, col)) {
             self.extend_transcript_selection(row, col);
-            self.state.borrow_mut().selection_pointer_cell = None;
+            self.state.borrow_mut().selection_pointer_cell = Some((row, col));
         }
         let had_pending = self.state.borrow().pending_selection_anchor.is_some();
         if had_pending {
@@ -7825,7 +7893,10 @@ impl InteractiveShell {
         if self.state.borrow().transcript_selection.is_some() {
             let _ = self.copy_selected_plain_text();
         }
-        self.state.borrow_mut().selection_dragging = false;
+        let mut state = self.state.borrow_mut();
+        state.selection_dragging = false;
+        state.selection_scroll_pending = false;
+        state.selection_autoscroll_at = None;
     }
 
     /// Best-effort native helper plus OSC 52 clipboard transport. The semantic
@@ -7837,6 +7908,12 @@ impl InteractiveShell {
     /// detached thread. A detached thread (rather than `tokio::spawn`) keeps
     /// this method callable from the synchronous view API and its runtime-less
     /// unit tests. Errors stay ignored: `copy_buffer` remains authoritative.
+    #[cfg(test)]
+    fn set_clipboard(text: &str) {
+        clipboard_transport::TEST_COPY.with(|copy| *copy.borrow_mut() = Some(text.to_owned()));
+    }
+
+    #[cfg(not(test))]
     fn set_clipboard(text: &str) {
         let writers = native_clipboard_writers(|name| std::env::var_os(name).is_some());
         if !writers.is_empty() {
@@ -7940,7 +8017,7 @@ impl InteractiveShell {
     pub fn copy_selected_plain_text(&mut self) -> Option<String> {
         let copy = self.selected_plain_text()?;
         let mut state = self.state.borrow_mut();
-        state.copy_buffer = Some(copy.clone());
+        state.retain_transcript_copy(&copy, Instant::now());
         drop(state);
         Self::set_clipboard(&copy);
         Some(copy)
@@ -9920,6 +9997,7 @@ mod transcript_commit;
 mod transcript_document;
 mod transcript_history;
 mod transcript_hydration;
+mod transcript_pointer;
 mod transcript_render;
 mod transcript_selection;
 mod viewport {
