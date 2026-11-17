@@ -512,11 +512,15 @@ for these final facts. Custom message payloads pass through unchanged.
 
 Streaming observations copy mutable containers while sharing immutable strings, and
 account for new delta bytes without serializing the accumulated partial. Tool
-arguments materialize lazily when a callback consumes them; delta-only observers
-need not parse the whole argument prefix. Retained events remain isolated from
-later deltas and callback mutations. Full-message consumers still pay for the
-content they read. `test/stream-work.test.mjs` counts serializer/parser input at
-10, 100 and 1000 deltas; these counts are not RSS or wire-traffic measurements.
+arguments use Pi's incremental parser per call, exposing incomplete strings,
+containers and scalars. Large open-container previews can lag until their copy
+credit is sufficient, as in Pi. Arguments materialize lazily when a callback
+consumes them; one getter copies only its snapshot, not historical prefixes.
+Delta-only observers need not parse the whole argument prefix. Retained events
+remain isolated from later deltas and callback mutations. Full-message consumers
+still pay for the content they read. `test/stream-work.test.mjs` counts
+serializer/parser input at 10, 100 and 1000 deltas and checks 20,000 numeric chunks
+against the pinned Pi parser; these are not RSS or wire-traffic measurements.
 The native delta wire is unchanged, including native-sized tool-argument chunks
 that are larger than the text coalescer's 8 KiB batch. Child text/thinking
 observations use the same container-copy mechanism and incremental byte budgets;

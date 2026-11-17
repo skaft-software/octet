@@ -3,18 +3,10 @@
 import { bounded, facade, strict, unsupported } from './errors.mjs';
 import { messageEntry } from './model-turns.mjs';
 import { copyObservation as copy } from './observation-copy.mjs';
+import { StreamingJsonParser } from '../shims/pi-1.5.0/ai/streaming-json.mjs';
 
 const MAX_MESSAGES = 8192, MAX_BYTES = 4 * 1024 * 1024;
 export const runMessageMethods = new Set(['turn/started', 'turn/settled', 'message/started', 'message/updated', 'message/settled']);
-// Raw argument prefixes stay ropes until a full-arguments consumer requests one.
-// Retain completed-prefix candidates so invalid later input preserves the last
-// parseable value, just as the previous eager JSON.parse-on-every-delta did.
-function argumentsAt(prefix) {
-  for (let candidate = prefix; candidate; candidate = candidate.previous) {
-    try { return JSON.parse(candidate.text); } catch { }
-  }
-  return {};
-}
 function growPartial(run, bytes) {
   const next = run.partialBytes + bytes;
   check(run, next);
@@ -205,7 +197,7 @@ export async function handleRunMessage(runtime, method, payload, store) {
       const contentIndex = partial.content.length;
       const part = { type: 'toolCall', id, name, arguments: {} };
       growPartial(run, size(part) + (partial.content.length ? 1 : 0));
-      calls.set(index, { contentIndex, text: '', prefix: undefined });
+      calls.set(index, { contentIndex, parser: new StreamingJsonParser() });
       partial.content.push(part);
       await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_start', contentIndex, partial } });
     } else {
@@ -215,16 +207,17 @@ export async function handleRunMessage(runtime, method, payload, store) {
       if (phase === 'delta') {
         // Native tool-call chunks use the negotiated frame bound, not the text
         // coalescer's 8KiB bound (process_hooks.rs:551-574). The aggregate mirror
-        // quota still bounds retained raw prefixes, including incomplete JSON.
+        // quota still charges every streamed byte, including incomplete JSON.
         bounded(delta, 'tool argument delta', MAX_BYTES, { controls: true });
         growPartial(run, size(delta) - 2);
-        call.text += delta;
-        // Only object/array/string/number/literal endings can parse. Avoid
-        // keeping every interior string chunk as a fallback candidate.
-        if (/[}\]"0-9el]\s*$/.test(delta)) call.prefix = { text: call.text, previous: call.prefix };
-        const prefix = { text: call.text, previous: call.prefix };
+        // Pi packages/ai/src/utils/streaming-json.ts:452-467 keeps one
+        // incremental parser per call. Snapshot eagerly (amortized linear open-
+        // path work); copy its immutable value only when a consumer reads it.
+        call.parser.append(delta);
+        const snapshot = call.parser.snapshot();
+        const args = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : {};
         Object.defineProperty(partial.content[contentIndex], 'arguments', { enumerable: true, configurable: true,
-          get: () => argumentsAt(prefix) });
+          get: () => args });
         await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_delta', contentIndex, delta, partial } });
       } else {
         await emit(runtime, store, 'message_update', { message: partial, assistantMessageEvent: { type: 'toolcall_end', contentIndex, toolCall: partial.content[contentIndex], partial } });

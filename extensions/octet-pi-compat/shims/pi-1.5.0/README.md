@@ -29,4 +29,12 @@ What this release changed, and how the adapter follows it:
   specifiers Pi resolves (both scopes). The route map in the manifest mirrors
   `dist/core/extensions/virtual-modules.js`.
 
+`ai/streaming-json.mjs` adapts the pure `StreamingJsonParser` from reviewed
+`packages/ai/src/utils/streaming-json.ts:1-445,502-559` (source SHA256
+`eb237f041513bae5780b7a6f526c91028bb9eb1bf78b7dd5a5f7dc1b8f712210`).
+It supplies native run-message partial arguments without importing an installed
+provider runtime. Each call owns one parser; snapshot copy credit bounds total
+open-container work. The pinned 1.5.0 fixture parser is the offline test oracle.
+This does not change public shim helper routing or final native validation.
+
 These adapted sources are covered by [Pi's MIT license](../../LICENSE.pi).

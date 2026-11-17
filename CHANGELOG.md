@@ -55,6 +55,7 @@
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Pi streaming tool arguments use incremental parsing and bounded snapshot work while preserving partial-argument previews.
 - Pi context phases carry excluded dialog time forward so later context handlers retain their execution budget.
 - Pi tool-call result getters stay under bounded supervision, with throwing getters isolated and reported by extension and stage.
 - Video preparation follows the active branch and compaction window.
