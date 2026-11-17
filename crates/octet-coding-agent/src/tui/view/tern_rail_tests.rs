@@ -278,6 +278,7 @@ fn remote(
     shell.set_remote_ui(Projection {
         components: Arc::new(components),
         chrome: None,
+        chrome_closed: false,
         mounts: vec![MountView {
             surface_id: "test-surface".into(),
             id: "fixture.remote".into(),

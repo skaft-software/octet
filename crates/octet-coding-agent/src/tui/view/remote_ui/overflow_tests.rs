@@ -55,6 +55,7 @@ fn projection(size: (u16, u16), widget_rows: usize, footer_rows: usize) -> Proje
         components: Arc::new(components),
         mounts,
         chrome: None,
+        chrome_closed: false,
     }
 }
 

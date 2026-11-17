@@ -77,7 +77,9 @@ impl ExecutableExtensions {
             self.remote_ui.deliver_editor_text(&write, shell);
         }
         self.remote_ui.settle_held(shell);
-        let changed = shell.set_remote_ui(self.remote_ui.projection());
+        let mut projection = self.remote_ui.projection();
+        projection.chrome_closed |= self.start_failures.contains_key("octet-pi-compat");
+        let changed = shell.set_remote_ui(projection);
         if changed {
             shell.render();
         }

@@ -6792,7 +6792,17 @@ impl InteractiveShell {
 
     pub fn set_runtime_config(&mut self, config: Config) {
         let show_images = config.show_images;
-        let snapshot = crate::extensions::pi_chrome::load(&config);
+        let activation_continues = self
+            .runtime_config
+            .as_ref()
+            .is_some_and(crate::extensions::pi_chrome::enabled)
+            && crate::extensions::pi_chrome::enabled(&config);
+        // Config/preference publication cannot revive a retired startup cache.
+        let snapshot = if !activation_continues || self.state.borrow().pi_chrome.is_some() {
+            crate::extensions::pi_chrome::load(&config)
+        } else {
+            None
+        };
         let mut state = self.state.borrow_mut();
         state.pi_chrome = snapshot;
         state.safe_mode = config.effect_policy != octet_agent::EffectPolicy::UnsafeHost;
@@ -6841,8 +6851,9 @@ impl InteractiveShell {
     ) -> bool {
         use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
         let mut state = self.state.borrow_mut();
+        let retired = pi_chrome::retire(&mut state, &projection);
         if state.extension_ui.remote == projection {
-            return false;
+            return retired;
         }
         let had_fullscreen = state
             .extension_ui

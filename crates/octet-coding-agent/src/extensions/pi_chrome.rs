@@ -245,14 +245,17 @@ impl Snapshot {
     }
 }
 
-pub(crate) fn load(config: &Config) -> Option<Arc<Snapshot>> {
-    if !config
+pub(crate) fn enabled(config: &Config) -> bool {
+    config
         .enabled_extensions
         .iter()
         .any(|name| name == "octet-pi-compat")
-        || !config.start_extension_processes
-        || !config.sandbox.process_execution_allowed()
-    {
+        && config.start_extension_processes
+        && config.sandbox.process_execution_allowed()
+}
+
+pub(crate) fn load(config: &Config) -> Option<Arc<Snapshot>> {
+    if !enabled(config) {
         return None;
     }
     let resolver = ResourceResolver::new(config.workspace.clone(), config.workspace_trusted);
@@ -356,11 +359,110 @@ mod tests {
             super::super::tests::executable_extension_config(&root, &extensions, "octet-pi-compat");
         config.sandbox.allow_process = true;
         assert!(load(&config).is_some());
+        let has_cached_border =
+            |frame: Vec<String>| frame.iter().any(|line| line.contains("\x1b[35m─"));
+        // Exercise the same native projection updates as setFooter(undefined):
+        // keep geometry/model fixed, paint the live pair, then close the footer.
+        for empty_footer in [false, true] {
+            use crate::extensions::remote_ui::{MountView, Projection};
+            use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+            let mut shell = crate::tui::view::InteractiveShell::test_shell();
+            shell.set_size(80, 24);
+            shell.set_runtime_config(config.clone());
+            shell.render();
+            assert!(has_cached_border(
+                shell.dump_rendered_frame().await.unwrap()
+            ));
+            let mut remote = Projection::default();
+            for (placement, id, lines) in [
+                (Placement::Editor, "editor", vec!["live editor".into()]),
+                (
+                    Placement::Footer,
+                    "footer",
+                    if empty_footer {
+                        vec![]
+                    } else {
+                        vec!["live usage 42".into()]
+                    },
+                ),
+                (Placement::BelowEditor, "widget", vec!["live widget".into()]),
+            ] {
+                remote.mounts.push(MountView {
+                    id: id.into(),
+                    surface_id: id.into(),
+                    title: id.into(),
+                    placement,
+                    columns: 80,
+                    rows: 24,
+                    mouse_capture: false,
+                    native_editor: false,
+                });
+                let components = Arc::make_mut(&mut remote.components);
+                components.register_component(id).unwrap();
+                components.store_render(id, 80, lines).unwrap();
+            }
+            shell.set_remote_ui(remote.clone());
+            shell.render();
+            let live = shell.dump_rendered_frame().await.unwrap().join("\n");
+            assert!(
+                live.contains("live editor"),
+                "an empty frame is live: {live:?}"
+            );
+            assert!(live.contains("live widget"));
+            assert!(!live.contains("\x1b[35m─"));
+            assert_eq!(live.contains("live usage 42"), !empty_footer);
+            remote
+                .mounts
+                .retain(|mount| mount.placement != Placement::Footer);
+            Arc::make_mut(&mut remote.components).remove_component("footer");
+            shell.set_remote_ui(remote);
+            shell.render();
+            let cleared = shell.dump_rendered_frame().await.unwrap().join("\n");
+            assert!(
+                cleared.contains("live editor"),
+                "clearing the footer must not resurrect cached chrome: {cleared:?}"
+            );
+            assert!(cleared.contains("live widget"));
+            assert!(!cleared.contains("\x1b[35m─"));
+            // An ordinary preference/config refresh is not a new activation.
+            shell.set_runtime_config(config.clone());
+            shell.render();
+            assert!(!has_cached_border(
+                shell.dump_rendered_frame().await.unwrap()
+            ));
+            let mut disabled = config.clone();
+            disabled.enabled_extensions.clear();
+            shell.set_runtime_config(disabled);
+            shell.set_remote_ui(Default::default());
+            shell.set_runtime_config(config.clone());
+            shell.render();
+            assert!(has_cached_border(
+                shell.dump_rendered_frame().await.unwrap()
+            ));
+        }
+        let mut shell = crate::tui::view::InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.set_runtime_config(config.clone());
+        shell.render();
+        assert!(has_cached_border(
+            shell.dump_rendered_frame().await.unwrap()
+        ));
+        let mut failed = ExecutableExtensions::default();
+        failed
+            .start_failures
+            .insert("octet-pi-compat".into(), "fixture startup failure".into());
+        failed.sync_remote_ui(&mut shell);
+        assert!(!has_cached_border(
+            shell.dump_rendered_frame().await.unwrap()
+        ));
+        shell.set_runtime_config(config.clone());
+        shell.render();
+        assert!(!has_cached_border(
+            shell.dump_rendered_frame().await.unwrap()
+        ));
         let mut shell = crate::tui::view::InteractiveShell::test_shell();
         shell.set_size(80, 24);
         shell.extension_set_editor("retained draft".into());
-        let has_cached_border =
-            |frame: Vec<String>| frame.iter().any(|line| line.contains("\x1b[35m─"));
         shell.set_runtime_config(config.clone());
         shell.render();
         assert!(has_cached_border(

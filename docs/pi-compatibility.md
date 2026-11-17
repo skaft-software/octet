@@ -280,7 +280,12 @@ editor/footer render. On the next launch, or toggle-on, the admitted adapter's
 validated template is installed before native painting starts; Node and factory
 loading remain asynchronous. Editing stays native and submission waits for the
 same hook gates described below. Once both cached placements have live frames,
-the renderer reveals them together rather than clearing a slot when it opens.
+including an intentionally empty frame, the renderer reveals them together rather
+than clearing a slot when it opens. This permanently retires the template for that
+activation. Closing a live editor/footer or a failed adapter startup also retires
+it, even before the first frame. Clearing the footer restores the built-in footer;
+later renders and preference updates never restore the startup template. Turning
+Pi compatibility off and on starts a new activation.
 
 The private `chrome-*.json` cache sits beside the adapter's compile cache
 (`~/.cache/octet-pi-compat` by default). It retains structural editor borders,

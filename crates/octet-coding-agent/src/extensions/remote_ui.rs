@@ -24,6 +24,8 @@ pub(crate) struct Projection {
     pub(crate) components: Arc<ExtensionComponentSurface>,
     pub(crate) mounts: Vec<MountView>,
     pub(crate) chrome: Option<ChromeState>,
+    /// A persistent editor/footer lease ended, including while held offscreen.
+    pub(crate) chrome_closed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,14 +62,16 @@ impl Projection {
     }
 
     pub(crate) fn lines(&self, mount: &MountView, columns: u16, rows: u16) -> &[String] {
+        self.frame(mount, columns, rows).unwrap_or_default()
+    }
+
+    pub(crate) fn frame(&self, mount: &MountView, columns: u16, rows: u16) -> Option<&[String]> {
         // The renderer can observe a resize before the async input loop does.
         // Never draw a cached snapshot at the wrong geometry during that gap.
         if (mount.columns, mount.rows) != (columns.max(1), rows.max(1)) {
-            return &[];
+            return None;
         }
-        self.components
-            .slot_lines(Some(&mount.id))
-            .unwrap_or_default()
+        self.components.slot_lines(Some(&mount.id))
     }
 }
 
@@ -134,6 +138,7 @@ pub(super) struct RemoteUi {
     components: Arc<ExtensionComponentSurface>,
     next_id: u64,
     chrome: Option<ChromeLease>,
+    chrome_closed: bool,
     // Terminal input waiting for a completed editor checkpoint. These remain
     // events for the ordinary native dispatcher, never a second submit path.
     pending_input: VecDeque<(String, Event)>,
@@ -242,6 +247,7 @@ impl RemoteUi {
                 .map(|mount| mount.view.clone())
                 .collect(),
             chrome: self.chrome.as_ref().map(|lease| lease.state.clone()),
+            chrome_closed: self.chrome_closed,
         }
     }
 
@@ -563,6 +569,10 @@ impl RemoteUi {
 
     fn remove(&mut self, index: usize, reason: &str, notify: bool) -> Option<String> {
         let mount = self.mounts.remove(index);
+        self.chrome_closed |= matches!(
+            mount.view.placement,
+            ExtensionRemoteUiPlacement::Editor | ExtensionRemoteUiPlacement::Footer
+        );
         trace_remote_ui_lifecycle(
             "retire",
             &mount.owner,
@@ -939,11 +949,7 @@ impl RemoteUi {
                 mount.view.rows = rows;
                 // Invalidate geometry, but retain the accepted revision. A stale
                 // post-resize high revision must not poison the next good frame.
-                let _ = Arc::make_mut(&mut self.components).store_render(
-                    &mount.view.id,
-                    columns,
-                    Vec::new(),
-                );
+                Arc::make_mut(&mut self.components).clear_render(&mount.view.id);
                 if let Err(error) = mount
                     .process
                     .notify_remote_ui_resize(ExtensionRemoteUiResize {

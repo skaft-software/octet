@@ -3,6 +3,32 @@ use super::*;
 use crate::extensions::pi_chrome::{Field, Part};
 use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
 
+/// Retire once on the input owner, never as a reversible paint predicate.
+/// Pi restores the built-in footer on clear (packages/coding-agent/src/modes/
+/// interactive/interactive-mode.ts:2623-2644); empty renders contribute no rows
+/// (packages/tui/src/tui.ts:411-422). Neither restores a prior startup rendering.
+pub(super) fn retire(
+    state: &mut ShellState,
+    remote: &crate::extensions::remote_ui::Projection,
+) -> bool {
+    let Some(snapshot) = &state.pi_chrome else {
+        return false;
+    };
+    let ready = |placement| {
+        remote
+            .mount(placement)
+            .is_some_and(|mount| remote.frame(mount, state.size.0, state.size.1).is_some())
+    };
+    if remote.chrome_closed
+        || ((snapshot.editor.is_none() || ready(Placement::Editor))
+            && (snapshot.footer.is_none() || ready(Placement::Footer)))
+    {
+        state.pi_chrome = None;
+        return true;
+    }
+    false
+}
+
 pub(super) fn apply(
     state: &ShellState,
     width: u16,
@@ -29,19 +55,6 @@ pub(super) fn apply(
         return false;
     }
     let configured = |field: &str| snapshot.defaults.get(field).cloned().unwrap_or_default();
-    let remote = &state.extension_ui.remote;
-    let ready = |placement| {
-        remote
-            .mount(placement)
-            .is_some_and(|mount| !remote.lines(mount, width, state.size.1).is_empty())
-    };
-    // Reveal the live pair atomically. A mount without its first frame is not
-    // readiness; otherwise opening the editor would briefly erase the cache.
-    if (snapshot.editor.is_none() || ready(Placement::Editor))
-        && (snapshot.footer.is_none() || ready(Placement::Footer))
-    {
-        return false;
-    }
     let reserved = chrome.header.len()
         + chrome.error.len()
         + chrome.pending.len()
@@ -162,8 +175,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn cached_chrome_paints_first_frame_and_keeps_early_edits_in_native_draft() {
+    fn cached_state() -> ShellState {
         let snapshot = serde_json::from_value(json!({
             "schema":"octet.pi-chrome/v1", "agent":"/fixture", "workspace":"/fixture",
             "trusted":false, "columns":80, "rows":24, "identity":[],
@@ -171,13 +183,68 @@ mod tests {
                 "bottom":"────────────────────────────────────────────────────────────────────────────────", "padding":0, "text_width":79, "max_rows":7},
             "footer":[[{"field":"model"}, {"text":" · "}, {"field":"zero"}, {"text":" context"}]]
         })).unwrap();
-        let mut state = ShellState {
+        ShellState {
             size: (80, 24),
             startup_pending: true,
             model: "custom/custom/mock-1".into(),
             pi_chrome: Some(Arc::new(snapshot)),
             ..ShellState::default()
+        }
+    }
+
+    #[test]
+    fn cached_chrome_retires_on_close_before_live_frames() {
+        let mut shell = InteractiveShell::test_shell();
+        *shell.state.borrow_mut() = cached_state();
+        let closed = crate::extensions::remote_ui::Projection {
+            chrome_closed: true,
+            ..Default::default()
         };
+        assert!(shell.set_remote_ui(closed.clone()));
+        assert!(shell.state.borrow().pi_chrome.is_none());
+        assert!(!shell.set_remote_ui(closed));
+        shell.set_remote_ui(Default::default());
+        assert!(shell.state.borrow().pi_chrome.is_none());
+    }
+
+    #[test]
+    fn cached_chrome_yields_to_an_empty_live_footer_frame() {
+        let mut shell = InteractiveShell::test_shell();
+        *shell.state.borrow_mut() = cached_state();
+        shell.state.borrow_mut().startup_pending = false;
+        let mut remote = crate::extensions::remote_ui::Projection::default();
+        for (placement, id, lines) in [
+            (Placement::Editor, "editor", vec!["live editor".into()]),
+            (Placement::Footer, "footer", vec![]),
+        ] {
+            remote.mounts.push(crate::extensions::remote_ui::MountView {
+                id: id.into(),
+                surface_id: id.into(),
+                title: id.into(),
+                placement,
+                columns: 80,
+                rows: 24,
+                mouse_capture: false,
+                native_editor: false,
+            });
+            let components = Arc::make_mut(&mut remote.components);
+            components.register_component(id).unwrap();
+            components.store_render(id, 80, lines).unwrap();
+        }
+        shell.set_remote_ui(remote);
+        let state = shell.state.borrow();
+        let chrome = super::super::shell_chrome::shell_chrome(&state, 80, Instant::now());
+        assert_eq!(chrome.composer, vec!["live editor\x1b[0m"]);
+        assert!(chrome.extension_below.is_empty());
+        assert!(
+            state.pi_chrome.is_none(),
+            "live frames permanently retire the template"
+        );
+    }
+
+    #[test]
+    fn cached_chrome_paints_first_frame_and_keeps_early_edits_in_native_draft() {
+        let mut state = cached_state();
         let first = super::super::shell_chrome::render_startup_surface(&state, 80, true);
         assert!(first.iter().any(|line| line.contains("\x1b[35m─")));
         assert!(first.iter().any(|line| line.contains("mock-1 · 0 context")));
@@ -226,18 +293,27 @@ mod tests {
                 .unwrap();
         }
         let mut chrome = builtin_shell_chrome::shell_chrome(&state, 80, Instant::now());
+        let remote = state.extension_ui.remote.clone();
+        assert!(
+            !retire(&mut state, &remote),
+            "open mounts without frames keep the template"
+        );
         assert!(apply(&state, 80, &mut chrome));
         Arc::make_mut(&mut state.extension_ui.remote.components)
             .store_render("footer", 80, vec!["live footer".into()])
             .unwrap();
         assert!(apply(&state, 80, &mut chrome));
+        let remote = state.extension_ui.remote.clone();
+        assert!(!retire(&mut state, &remote));
         Arc::make_mut(&mut state.extension_ui.remote.components)
             .store_render("editor", 80, vec!["live editor".into()])
             .unwrap();
+        let remote = state.extension_ui.remote.clone();
         assert!(
-            !apply(&state, 80, &mut chrome),
+            retire(&mut state, &remote),
             "only the complete live pair retires the snapshot"
         );
+        assert!(!apply(&state, 80, &mut chrome));
         assert_eq!(state.editor.text(), "x".repeat(80));
         state.size = (81, 24);
         let mut chrome = super::super::shell_chrome::shell_chrome(&state, 81, Instant::now());

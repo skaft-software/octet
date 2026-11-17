@@ -754,13 +754,15 @@ async fn remote_ui_footer_survives_command_then_resize_and_session_fencing() {
     assert!(extensions.remote_ui.accept_frame(&process, valid));
     extensions.route_remote_ui_event(&mut frontend.shell, &Event::Resize(80, 24), false);
     // An old cache is blanked synchronously, before the remote resize reply.
-    assert!(extensions
-        .remote_ui
-        .projection()
-        .components
-        .slot_lines(Some(&extensions.remote_ui.mounts[0].view.id))
-        .unwrap()
-        .is_empty());
+    assert!(
+        extensions
+            .remote_ui
+            .projection()
+            .components
+            .slot_lines(Some(&extensions.remote_ui.mounts[0].view.id))
+            .is_none(),
+        "resize invalidates readiness, rather than receiving an empty frame"
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             extensions.drain_events_for_shell(&mut frontend.shell);
@@ -1156,6 +1158,47 @@ async fn native_theme_selection_cannot_mutate_a_ceded_terminal() {
     assert_eq!(frontend.shell.extension_theme_get(None).unwrap(), initial);
     assert!(extensions.remote_ui.is_empty());
     extensions.shutdown().await;
+}
+
+#[tokio::test]
+async fn held_chrome_close_and_owner_failure_publish_retirement_without_a_visible_mount() {
+    for failure in ["close", "owner", "process"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut extensions, _) = fixture(&temp).await;
+        let mut frontend = Frontend::new([]);
+        extensions.remote_ui.set_handoff_pending(true);
+        command(&mut extensions, &mut frontend, &["footer"]).await;
+        let projection = extensions.remote_ui.projection();
+        assert!(projection
+            .mount(ExtensionRemoteUiPlacement::Footer)
+            .is_none());
+        assert!(!projection.chrome_closed);
+        if failure != "close" {
+            if failure == "owner" {
+                extensions.resource_owner = Some("replacement-session".into());
+            } else {
+                assert!(extensions.processes[0].shutdown().await);
+            }
+            extensions.sync_remote_ui(&mut frontend.shell);
+        } else {
+            let mount = &extensions.remote_ui.mounts[0];
+            extensions
+                .remote_ui
+                .apply(
+                    mount.process.clone(),
+                    mount.owner.clone(),
+                    ExtensionRemoteUiOperation::Close {
+                        surface_id: mount.surface_id.clone(),
+                    },
+                    &mut frontend.shell,
+                    false,
+                )
+                .unwrap();
+        }
+        assert!(extensions.remote_ui.projection().chrome_closed);
+        assert!(extensions.remote_ui.is_empty());
+        extensions.shutdown().await;
+    }
 }
 
 #[tokio::test]

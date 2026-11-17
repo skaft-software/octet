@@ -416,7 +416,16 @@ impl ExtensionComponentSurface {
     /// (header/footer/editor), if the region has painted at least once.
     pub fn slot_lines(&self, id: Option<&str>) -> Option<&[String]> {
         let id = id?;
-        self.components.get(id).map(|region| &region.lines[..])
+        let region = self.components.get(id)?;
+        region.width?;
+        Some(&region.lines[..])
+    }
+
+    /// Drop a stale-geometry frame without recording a received empty frame.
+    pub(crate) fn clear_render(&mut self, id: &str) {
+        if let Some(region) = self.components.get_mut(id) {
+            *region = ComponentRegion::default();
+        }
     }
 
     /// Lines-form widgets above the editor, in stable key order.
@@ -640,6 +649,17 @@ mod tests {
 
     fn surface() -> ExtensionComponentSurface {
         ExtensionComponentSurface::default()
+    }
+
+    #[test]
+    fn received_empty_frame_is_distinct_from_open_or_invalidated_region() {
+        let mut surface = surface();
+        surface.register_component("footer").unwrap();
+        assert_eq!(surface.slot_lines(Some("footer")), None);
+        surface.store_render("footer", 80, vec![]).unwrap();
+        assert_eq!(surface.slot_lines(Some("footer")), Some(&[][..]));
+        surface.clear_render("footer");
+        assert_eq!(surface.slot_lines(Some("footer")), None);
     }
 
     #[test]
