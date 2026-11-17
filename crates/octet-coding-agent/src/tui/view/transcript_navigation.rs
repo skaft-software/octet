@@ -249,7 +249,6 @@ struct JumpToBottomButton {
 #[derive(Clone, Copy)]
 pub(super) struct NavigationFrame {
     size: (u16, u16),
-    generation: u64,
     scrollbar: Option<ScrollbarGeometry>,
     search_buttons_row: Option<usize>,
     jump_to_bottom: Option<JumpToBottomButton>,
@@ -713,7 +712,6 @@ impl ShellState {
         };
         nav.frame = Some(NavigationFrame {
             size: self.size,
-            generation: self.transcript_cache.borrow().generation,
             scrollbar,
             jump_to_bottom,
             search_buttons_row: (nav.search.is_some() && chrome.panel.len() > 1).then_some(
@@ -1054,24 +1052,22 @@ impl InteractiveShell {
         // Validate the retained frame before taking the mutable navigation
         // borrow. Threaded geometry validation reads the scrollbar mode via
         // `transcript_content_width`, which borrows this same RefCell.
-        let frame = state.transcript_navigation.borrow().frame;
-        // A captured drag owns the bar across the scrolls it causes; every
-        // other pointer press names one painted frame exactly.
+        // Native terminal ownership requires host-side hit testing. Pi uses
+        // painted layout for hover, presses and captured drags, not a matching
+        // transcript generation (packages/tui/src/tui-alt-screen.ts:1050-1144).
+        // Keep layout fences, and let a captured gesture own its scroll changes.
         let captured = state.transcript_navigation.borrow().drag_offset.is_some();
-        let frame = frame.filter(|frame| {
-            frame.size == state.size
-                && if state.render_threaded {
-                    let geometry = if captured {
-                        state.gesture_render_geometry()
-                    } else {
-                        state.retained_render_geometry()
-                    };
-                    geometry.is_some_and(|geometry| geometry.generation == frame.generation)
-                } else {
-                    let cache = state.transcript_cache.borrow();
-                    !cache.dirty && frame.generation == cache.generation
-                }
-        });
+        let frame = if state.render_threaded {
+            let geometry = if captured {
+                state.gesture_render_geometry()
+            } else {
+                state.pointer_render_geometry()
+            };
+            geometry.and_then(|geometry| geometry.navigation_frame)
+        } else {
+            state.transcript_navigation.borrow().frame
+        };
+        let frame = frame.filter(|frame| frame.size == state.size);
         let mut nav = state.transcript_navigation.borrow_mut();
         let Some(frame) = frame else {
             nav.reset_pointer();
@@ -1091,8 +1087,9 @@ impl InteractiveShell {
                 nav.jump_to_bottom_hover = bottom_hovered;
                 self.request_navigation_render();
             }
-            // Pi compatibility source: packages/tui/src/tui-alt-screen.ts:
-            // 1050-1056 activates only a left press within the painted rectangle.
+            // Terminal ownership keeps this in the host. Pi compatibility:
+            // packages/tui/src/tui-alt-screen.ts:1050-1056 uses the last painted
+            // rectangle, even when new transcript output is awaiting paint.
             if bottom_hovered
                 && mouse.modifiers.is_empty()
                 && mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -1242,6 +1239,362 @@ mod tests {
             shell_chrome(&state, state.size.0, Instant::now()).transcript_rows,
             true,
         ) as u16
+    }
+
+    fn paint_bottom_button(shell: &mut InteractiveShell) -> (u16, u16) {
+        shell.render_written_test_frame();
+        written_bottom_button(shell)
+    }
+
+    fn written_bottom_button(shell: &InteractiveShell) -> (u16, u16) {
+        shell
+            .tui
+            .as_ref()
+            .unwrap()
+            .rendered_frame()
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let plain = strip_terminal_sequences(line);
+                let start = plain.find("[ ↓ Jump to bottom")?;
+                Some((visible_width(&plain[..start]) as u16, row as u16))
+            })
+            .expect("button in the written terminal frame")
+    }
+
+    fn assert_bottom_button_click(shell: &mut InteractiveShell, column: u16, row: u16) {
+        assert!(!shell.state.borrow().follow_tail);
+        // Exercise the predispatch entry point used by both idle and active
+        // event loops, including motion before the press and release.
+        shell.intercept_transcript_input(&mouse(MouseEventKind::Moved, 0, row));
+        shell.intercept_transcript_input(&mouse(MouseEventKind::Moved, column, row));
+        let hovered = shell
+            .state
+            .borrow()
+            .transcript_navigation
+            .borrow()
+            .jump_to_bottom_hover;
+        assert!(
+            shell.intercept_transcript_input(&mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+            )),
+            "button click must use the written rectangle"
+        );
+        assert!(hovered, "hover must use the written button rectangle");
+        let active = shell.state.borrow().run.is_active();
+        shell.translate_input(
+            Some(mouse(MouseEventKind::Up(MouseButton::Left), column, row)),
+            active,
+        );
+        let state = shell.state.borrow();
+        assert!(state.follow_tail);
+        assert_eq!(state.scroll_from_bottom.get(), 0);
+        assert_eq!(state.new_output_count, 0);
+        assert!(state.pending_selection_anchor.is_none());
+        assert!(!state.selection_dragging);
+    }
+
+    #[test]
+    fn jump_to_bottom_click_through_idle_event_entry_point() {
+        for threaded in [false, true] {
+            for pending_notice in [false, true] {
+                let mut shell = bottom_button_shell(threaded, 2);
+                let (column, row) = paint_bottom_button(&mut shell);
+                if pending_notice {
+                    shell.notice("idle session update");
+                }
+                assert_bottom_button_click(&mut shell, column, row);
+            }
+        }
+    }
+
+    #[test]
+    fn jump_to_bottom_click_during_streaming_uses_written_rectangle() {
+        for threaded in [false, true] {
+            let mut shell = bottom_button_shell(threaded, 0);
+            shell.on_prompt_submitted("stream a response");
+            shell.scroll_lines(-1);
+            for _ in 0..3 {
+                shell.on_agent_event(&AgentEvent::OutputDelta {
+                    channel: OutputChannel::Text,
+                    text: "streamed text\n".into(),
+                });
+                paint_bottom_button(&mut shell);
+            }
+            let (column, row) = paint_bottom_button(&mut shell);
+            // A delta arrives after paint, before pointer input.
+            shell.on_agent_event(&AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "unpainted delta\n".into(),
+            });
+            assert_bottom_button_click(&mut shell, column, row);
+        }
+    }
+
+    #[test]
+    fn jump_to_bottom_click_with_visible_subagent_roster_uses_written_row() {
+        for threaded in [false, true] {
+            let mut shell = bottom_button_shell(threaded, 0);
+            shell.set_subagent_telemetry(
+                Some(&octet_agent::DelegationTelemetrySnapshot {
+                    revision: 1,
+                    captured_at_ms: 1,
+                    children: vec![octet_agent::DelegationTelemetryChild {
+                        child_id: "worker-1".into(),
+                        task_name: "Inspect tests".into(),
+                        profile: None,
+                        model: "fixture".into(),
+                        state: "running".into(),
+                        phase: "using_tool".into(),
+                        current_tool: Some("bash".into()),
+                        tool_use_count: 1,
+                        input_tokens: 100,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        estimated_output_tokens: None,
+                        output_tokens: 10,
+                        reasoning_tokens: 0,
+                        total_tokens: 110,
+                        cost: None,
+                        cost_microdollars: None,
+                        elapsed_ms: 500,
+                        failure_class: None,
+                        failure_reason: None,
+                        effective_tool_policy: octet_agent::SandboxConfig::new(".")
+                            .effective_tool_policy(octet_agent::EffectPolicy::Controlled),
+                        orchestration_provenance:
+                            octet_agent::DelegationOrchestrationProvenance::all(
+                                octet_agent::DelegationPolicySource::ParentInherited,
+                            ),
+                        session: None,
+                    }],
+                    total_cost_microdollars: None,
+                    failure_reason: None,
+                    failure_class: None,
+                }),
+                true,
+            );
+            shell.jump_to_tail();
+            shell.render_written_test_frame();
+            shell.scroll_lines(-1);
+            let (column, row) = paint_bottom_button(&mut shell);
+            let painted = shell
+                .tui
+                .as_ref()
+                .unwrap()
+                .rendered_frame()
+                .iter()
+                .map(|line| strip_terminal_sequences(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(painted.contains("Subagents"), "{painted}");
+            assert_bottom_button_click(&mut shell, column, row);
+        }
+    }
+
+    #[test]
+    fn jump_to_bottom_click_with_threaded_write_overtaken_by_streaming() {
+        let mut shell = bottom_button_shell(true, 1);
+        shell.on_prompt_submitted("stream a response");
+        shell.scroll_lines(-1);
+        // Prepare a frame, then advance semantic state before its write receipt.
+        shell.state.borrow_mut().new_output_count = 1000;
+        shell.tui.as_mut().unwrap().request_render();
+        shell.on_agent_event(&AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "delta during terminal write\n".into(),
+        });
+        shell.state.frame_written_at(None);
+        let (column, row) = written_bottom_button(&shell);
+        assert!(shell.state.borrow().painted_geometry.is_some());
+        assert_bottom_button_click(&mut shell, column, row);
+    }
+
+    fn navigation_controls_shell(threaded: bool, streaming: bool) -> InteractiveShell {
+        let mut shell = bottom_button_shell(threaded, 1);
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Always);
+        if streaming {
+            shell.on_agent_event(&AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "streaming response\n".into(),
+            });
+        }
+        // Exercise successive completed renderer generations, not just startup.
+        for _ in 0..3 {
+            shell.render_written_test_frame();
+        }
+        shell
+    }
+
+    fn pending_navigation_output(shell: &mut InteractiveShell, streaming: bool) {
+        if streaming {
+            shell.on_agent_event(&AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "pending streamed output\n".into(),
+            });
+        } else {
+            shell.notice("pending idle update");
+        }
+    }
+
+    fn painted_bar(shell: &InteractiveShell) -> ScrollbarGeometry {
+        let state = shell.state.borrow();
+        let bar = state
+            .transcript_navigation
+            .borrow()
+            .frame
+            .unwrap()
+            .scrollbar
+            .unwrap();
+        let row = &shell.tui.as_ref().unwrap().rendered_frame()[bar.thumb_top];
+        assert_eq!(
+            strip_terminal_sequences(&slice_by_column(row, usize::from(bar.column), 1, true)),
+            "┃",
+            "the hit target must be the written thumb"
+        );
+        bar
+    }
+
+    #[test]
+    fn navigation_controls_scrollbar_hover_uses_painted_track() {
+        for threaded in [false, true] {
+            for streaming in [false, true] {
+                let mut shell = navigation_controls_shell(threaded, streaming);
+                let bar = painted_bar(&shell);
+                pending_navigation_output(&mut shell, streaming);
+                shell.intercept_transcript_input(&mouse(
+                    MouseEventKind::Moved,
+                    bar.column,
+                    bar.thumb_top as u16,
+                ));
+                assert!(
+                    shell.state.borrow().transcript_navigation.borrow().hover,
+                    "hover ignored: threaded={threaded}, streaming={streaming}"
+                );
+                shell.render_written_test_frame();
+                assert!(shell
+                    .tui
+                    .as_ref()
+                    .unwrap()
+                    .rendered_frame()
+                    .iter()
+                    .any(|row| {
+                        strip_terminal_sequences(&slice_by_column(
+                            row,
+                            usize::from(bar.column),
+                            1,
+                            true,
+                        )) == "█"
+                    }));
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_controls_scrollbar_click_uses_painted_track() {
+        for threaded in [false, true] {
+            for streaming in [false, true] {
+                let mut shell = navigation_controls_shell(threaded, streaming);
+                let bar = painted_bar(&shell);
+                assert!(bar.thumb_top > 0);
+                pending_navigation_output(&mut shell, streaming);
+                assert!(
+                    shell.intercept_transcript_input(&mouse(
+                        MouseEventKind::Down(MouseButton::Left),
+                        bar.column,
+                        0,
+                    )),
+                    "click ignored: threaded={threaded}, streaming={streaming}"
+                );
+                let state = shell.state.borrow();
+                let painted_maximum = state
+                    .transcript_navigation
+                    .borrow()
+                    .frame
+                    .unwrap()
+                    .scrollbar
+                    .unwrap()
+                    .maximum;
+                assert_eq!(
+                    state.scroll_from_bottom.get(),
+                    painted_maximum,
+                    "top-of-track click: threaded={threaded}, streaming={streaming}, old maximum={}",
+                    bar.maximum,
+                );
+                assert!(shell
+                    .tui
+                    .as_ref()
+                    .unwrap()
+                    .rendered_frame()
+                    .iter()
+                    .any(|row| { strip_terminal_sequences(row).contains("button history 00") }));
+                assert!(state.pending_selection_anchor.is_none());
+                assert!(!state.selection_dragging);
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_controls_scrollbar_drag_survives_pending_output() {
+        for threaded in [false, true] {
+            for streaming in [false, true] {
+                for pending_press in [false, true] {
+                    let mut shell = navigation_controls_shell(threaded, streaming);
+                    let bar = painted_bar(&shell);
+                    if pending_press {
+                        pending_navigation_output(&mut shell, streaming);
+                    }
+                    assert!(shell.intercept_transcript_input(&mouse(
+                        MouseEventKind::Down(MouseButton::Left),
+                        bar.column,
+                        bar.thumb_top as u16,
+                    )));
+                    pending_navigation_output(&mut shell, streaming);
+                    assert!(
+                        shell.intercept_transcript_input(&mouse(
+                            MouseEventKind::Drag(MouseButton::Left),
+                            bar.column,
+                            0,
+                        )),
+                        "drag ignored: threaded={threaded}, streaming={streaming}"
+                    );
+                    assert!(shell.state.borrow().scroll_from_bottom.get() > 0);
+                    pending_navigation_output(&mut shell, streaming);
+                    assert!(shell.intercept_transcript_input(&mouse(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        bar.column,
+                        bar.rows as u16 + 2,
+                    )));
+                    assert!(shell.state.borrow().follow_tail);
+                    assert!(shell.intercept_transcript_input(&mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        bar.column,
+                        bar.rows as u16 + 2,
+                    )));
+                    assert!(shell
+                        .state
+                        .borrow()
+                        .transcript_navigation
+                        .borrow()
+                        .drag_offset
+                        .is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_controls_bottom_button_uses_painted_rectangle() {
+        for threaded in [false, true] {
+            for streaming in [false, true] {
+                let mut shell = navigation_controls_shell(threaded, streaming);
+                let (column, row) = written_bottom_button(&shell);
+                pending_navigation_output(&mut shell, streaming);
+                assert_bottom_button_click(&mut shell, column, row);
+            }
+        }
     }
 
     #[test]
@@ -2064,7 +2417,12 @@ mod tests {
                 .expect("the threaded renderer published current geometry");
             let nav = state.transcript_navigation.borrow();
             let frame = nav.frame.expect("the threaded renderer published a frame");
-            assert_eq!(geometry.generation, frame.generation);
+            assert!(std::ptr::eq(
+                state
+                    .pointer_render_geometry()
+                    .expect("painted pointer receipt"),
+                geometry,
+            ));
             frame
                 .scrollbar
                 .expect("always-visible scrollbar geometry")

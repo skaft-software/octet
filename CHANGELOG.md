@@ -68,6 +68,7 @@
 - ANSI tool command and output omissions use consistent hidden wording and Ctrl+O disclosure hints.
 - Working and Thinking timers and their terminal examples use the shared inline metadata separator.
 - Scrolled transcripts show a centered, clickable Jump to bottom button with optional new-output counts and pointer hover.
+- Transcript scrollbar hover, clicks and drags and Jump to bottom stay responsive while idle or streaming.
 - Transcript queue and omission counts use singular nouns for one row or byte.
 - Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.
 - Wheel events publish immediately during idle and active work, keeping continuous input independent of timer wakeups.

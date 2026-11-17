@@ -214,8 +214,12 @@ The control uses the theme's accented, bold `scroll_hint` role, with underline
 on reported hover; explicit role overrides remain authoritative. Brackets and
 Unicode/ASCII arrow/separator fallbacks keep it recognizable without color.
 Only the painted button cells (including brackets and inner padding) are clickable,
-using completed-frame hit geometry. Surrounding blank cells and transcript text
-retain ordinary selection behavior; a stale frame cannot activate the control.
+using the last completed frame's button rectangle for both hover and left press.
+The button, scrollbar and search controls share the painted pointer receipt.
+Transcript generations may advance before input or during a terminal write without
+invalidating their hit targets; genuine layout changes and exclusive input owners
+still revoke them. Surrounding blank cells and transcript text retain ordinary
+selection behavior.
 Transcript count nouns use singular at one (`1 queued row hidden`, `1 output row
 hidden`) and plural at zero or multiple.
 
@@ -235,11 +239,11 @@ size, disclosure, chrome and viewport intent, not visual-to-semantic anchor
 representation; anchor promotion without input feedback cannot invalidate the
 same painted cells. The scroll-delta fence is rebased only when semantic feedback
 is accepted, so unrelated input cannot discard a valid receipt after tail growth.
-Scrollbar and search-button hit targets travel with that completed-frame receipt,
-not the broader semantic render revision; an unrelated mutable borrow cannot
-lose a painted scrollbar. Search visibility also fences the layout. Search-result
-feedback retains the full input/render revision fence so newer query or navigation
-intent cannot flow backwards.
+Scrollbar, search-button and Jump to bottom hit targets travel with that
+completed-frame receipt, never a current transcript-cache generation. Pending
+output does not disable hover, presses or drag capture. Search visibility also
+fences the layout. Search-result feedback retains the full input/render revision
+fence so newer query or navigation intent cannot flow backwards.
 A captured scrollbar drag owns its own scrolling: it keeps
 the bar's captured geometry across frames that differ only in scroll offset, and
 releases it on the button release or on a genuine layout change (size, resize

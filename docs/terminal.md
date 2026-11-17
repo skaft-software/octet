@@ -298,6 +298,8 @@ coalesce, never the line deltas. Pixel mouse mode (1016) changes pointer
 coordinates, not wheel-delta precision, and stays disabled. Dragging the
 scrollbar keeps the pointer until you release it; wheel events still move the
 transcript over the track, scroll hint, and viewport edges during that press.
+Scrollbar hover, track clicks and dragging use the painted track and stay
+responsive during idle updates and streaming, without waiting for pending output.
 Repeated selection-drag
 events at the top or bottom edge keep scrolling without losing the selection
 between paints. Click-drag highlights transcript text without Shift. Release
@@ -345,7 +347,9 @@ clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
 In the semantic viewport, scrolling up pins the reader's position while output
 streams; at the live tail, the view follows new output. A centered **↓ Jump to
 bottom** button above the input returns to live output; it optionally shows
-`1 new` or `2 new`. Click any button cell, not the blank space around it.
+`1 new` or `2 new`. Click any painted button cell, not the blank space around it,
+while idle or streaming, including with worker activity visible. Pending output
+never disables the painted button or changes its hover target.
 Hover underlines the control when motion is reported; no-color/ASCII profiles
 retain a bracketed text button. PageDown and Ctrl+End keep their keyboard paths.
 Wheel history that octet doesn't capture stays with your terminal,
