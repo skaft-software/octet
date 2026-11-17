@@ -350,3 +350,26 @@ fn running_decoder_deadline_kills_and_reaps_the_child() {
         "decoder must be reaped before returning"
     );
 }
+
+#[tokio::test]
+async fn explicit_responses_input_does_not_prepare_excluded_canonical_video() {
+    let model = model(Protocol::OpenAiResponses);
+    let mut request = request();
+    request.responses = Some(crate::ResponsesOptions::full_replay(
+        crate::ResponsesInput::default(),
+    ));
+    prepare_request_frames(&model, &request).await;
+    let Message::User(user) = &request.messages[0] else {
+        unreachable!()
+    };
+    let UserPart::Media(Media::Video(video)) = &user.content[1] else {
+        unreachable!()
+    };
+    assert!(
+        video.prepared_frames().is_none(),
+        "canonical media outside the selected wire input must stay cold"
+    );
+    let encoded = crate::protocol::openai_responses::build_request(&model, &request).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&encoded.body).unwrap();
+    assert_eq!(body["input"], serde_json::json!([]));
+}

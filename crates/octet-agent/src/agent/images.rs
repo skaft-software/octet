@@ -18,6 +18,66 @@ pub(super) const MAX_IMAGES_PER_INPUT: usize = 8;
 
 pub(super) const MAX_IMAGE_INPUT_BYTES: usize = 20 * 1024 * 1024;
 
+/// Incremental position in the selected canonical context or Responses replay.
+#[derive(Clone, Copy)]
+pub(super) struct VideoPreparationCursor {
+    generation: u64,
+    replay: bool,
+    pub(super) messages: usize,
+}
+
+/// Copy only video handles from the active window's changed suffix. Never
+/// traverse raw entries: abandoned branches and summarized prefixes are durable
+/// history, not decoder input. Revisit the tail because tool results coalesce.
+pub(super) fn session_video_candidates(
+    session: &Session,
+    model: &Model,
+    previous: Option<VideoPreparationCursor>,
+) -> Result<(VideoPreparationCursor, Vec<Message>), AgentError> {
+    let replay = if model.spec.protocol == Protocol::OpenAiResponses {
+        session.responses_replay_snapshot(&model.endpoint.id, &model.spec.id)?
+    } else {
+        None
+    };
+    let generation = session.context_generation();
+    let start = previous
+        .filter(|cursor| cursor.generation == generation && cursor.replay == replay.is_some())
+        .map_or(0, |cursor| cursor.messages.saturating_sub(1));
+    let mut content = Vec::new();
+    let mut add = |user: &UserMessage| {
+        content.extend(
+            lowered_tool_result_media(user)
+                .filter(|media| matches!(media, Media::Video(_)))
+                .cloned()
+                .map(UserPart::Media),
+        );
+    };
+    let end = if let Some(replay) = &replay {
+        for item in &replay[start..] {
+            if let ResponsesReplayItem::User(user) = item {
+                add(user);
+            }
+        }
+        replay.len()
+    } else {
+        let context = session.context_ref()?;
+        for message in &context[start..] {
+            if let Message::User(user) = message {
+                add(user);
+            }
+        }
+        context.len()
+    };
+    Ok((
+        VideoPreparationCursor {
+            generation,
+            replay: replay.is_some(),
+            messages: end,
+        },
+        vec![Message::User(UserMessage { content })],
+    ))
+}
+
 /// Stop a detached blocking decoder at the next image when its async owner ends.
 pub(super) struct CancelBlockingImages(pub(super) Arc<AtomicBool>);
 

@@ -175,14 +175,20 @@ run without draining it preserves that completed result, including after restart
 A cold read records deferred frame delivery, not a preparation failure; the
 provider-input projection reports the current frame outcome. Preparation failures
 are cached for that source in the current process, so encoding and later turns do
-not retry the decoder; read or attach the clip again to retry. Switching to a text-only model also derives a placeholder
-without erasing video.
+not retry the decoder; read or attach the clip again to retry. Switching to a
+text-only model also derives a placeholder without erasing video.
 
 Rust embedders call `VideoMedia::prepare_frames().await` before synchronous
 lowering or encoding. `sampled_frames()` and `cached_frames()` consume local
 prepared state only, including while a decoder is running. `AiClient` prepares
 cold request videos asynchronously; the agent also prepares resumed session bytes
-before request/replay projection, inspecting only newly encountered entries.
+from the active canonical context or route-affine Responses replay window before
+projection. Videos on abandoned branches or before a local/native compaction
+boundary stay cold. Incremental preparation inspects only the changed active
+suffix (including coalesced tool results), and resets its cursor when checkout,
+compaction or model selection changes that window. An explicit Responses input
+already owns the wire content, so the client does not decode canonical media that
+it replaces.
 
 For Pi compatibility, the reference defines only `ImageContent` for binary visual
 input (`packages/ai/src/types.ts:438–442`), sniffs still images

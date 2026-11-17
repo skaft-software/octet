@@ -427,6 +427,20 @@ pub async fn prepare_message_frames(model: &crate::Model, messages: &[Message]) 
     changed
 }
 
+/// An explicit Responses window already owns the wire input. Canonical media
+/// excluded by that window is retained for history, not prepared for this call.
+pub(crate) async fn prepare_request_frames(model: &crate::Model, request: &Request) {
+    if model.spec.protocol == crate::Protocol::OpenAiResponses
+        && request
+            .responses
+            .as_ref()
+            .is_some_and(|options| options.input.is_some())
+    {
+        return;
+    }
+    prepare_message_frames(model, &request.messages).await;
+}
+
 /// Project owned host requests without cloning conversation history. Native
 /// codecs project borrowed user messages during their existing encoding walk.
 pub(crate) fn prepare_request_owned(

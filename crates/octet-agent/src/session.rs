@@ -1248,6 +1248,8 @@ pub struct Session {
     /// checkout and compaction invalidate it because they can change the
     /// active branch or summary boundary.
     context_cache: RefCell<Option<Vec<Message>>>,
+    /// Changes when a projection's prefix can be replaced rather than extended.
+    context_generation: u64,
     responses_replay_cache: RefCell<Option<ResponsesReplayCache>>,
     #[cfg(test)]
     responses_replay_work: std::cell::Cell<(usize, usize)>,

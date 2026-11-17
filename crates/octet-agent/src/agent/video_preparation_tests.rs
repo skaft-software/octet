@@ -226,10 +226,7 @@ async fn resumed_video_prepares_before_request_projection_without_reloading_the_
     drop(run);
     assert_eq!(video.cached_frames().unwrap().len(), 4);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        agent.prepared_video_entries,
-        agent.session().entries().len() - 1
-    );
+    assert_eq!(agent.prepared_video_context.unwrap().messages, 2);
 }
 
 // Isolate decoder PATH changes in a child so other tests retain real FFmpeg.
@@ -386,4 +383,214 @@ fn dropped_background_settlement_preserves_completed_video_bytes() {
                 .block_on(drop_completed_video_read(true));
         },
     );
+}
+
+enum ExcludedVideoWindow {
+    Branch,
+    LocalCompaction,
+    NativeCompaction,
+}
+
+async fn excluded_video_does_not_launch_decoder(window: ExcludedVideoWindow) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create(dir.path().join("inactive.jsonl")).unwrap();
+    let InputPart::Media(media) = video_input_fixture() else {
+        unreachable!()
+    };
+    let Media::Video(video) = media.clone() else {
+        unreachable!()
+    };
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Media(media)],
+        })))
+        .unwrap();
+    let native = matches!(window, ExcludedVideoWindow::NativeCompaction);
+    let model = tool_media_model(
+        if native {
+            Protocol::OpenAiResponses
+        } else {
+            Protocol::OpenAiChat
+        },
+        octet_ai::ModalitySet::none().with(Modality::Image),
+    );
+    if native {
+        let checkpoint = octet_ai::ResponsesItem::new(serde_json::json!({
+            "type": "compaction",
+            "id": "native-video-checkpoint",
+            "encrypted_content": "opaque",
+        }))
+        .unwrap();
+        session
+            .append_responses_compaction(
+                model.endpoint.id.clone(),
+                model.spec.id.clone(),
+                octet_ai::ResponsesOutput::new(vec![checkpoint]),
+            )
+            .unwrap();
+    } else if matches!(window, ExcludedVideoWindow::LocalCompaction) {
+        let first_kept = session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("current context".into())],
+            })))
+            .unwrap();
+        session
+            .compact("earlier video summarized", first_kept)
+            .unwrap();
+    } else {
+        session.checkout_root().unwrap();
+    }
+    if !native {
+        assert!(!session.context().unwrap().iter().any(|message| {
+            matches!(message, Message::User(user) if
+                user.content.iter().any(|part| matches!(part, UserPart::Media(Media::Video(_)))))
+        }));
+    }
+    let mut agent = active_tool_test_agent(dir.path(), session, ExtensionHost::new());
+    agent.model = model;
+    let transport = Arc::new(ToolBudgetTransport {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        expected_tools: vec![],
+    });
+    agent
+        .client
+        .register_host_stream_transport(agent.model.endpoint.id.clone(), transport.clone());
+    let mut run = agent
+        .prompt("question unrelated to inactive video")
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_millis(300), async {
+        while let Some(event) = run.next().await {
+            assert!(
+                !matches!(
+                    event,
+                    AgentEvent::RunFinished {
+                        reason: FinishReason::Failed(_),
+                        ..
+                    }
+                ),
+                "{event:?}"
+            );
+        }
+    })
+    .await;
+    let started = std::path::PathBuf::from(std::env::var_os("OCTET_VIDEO_PROBE_STARTED").unwrap());
+    assert!(
+        !started.exists(),
+        "decoder was launched for video excluded from current context"
+    );
+    result.expect("inactive video must not delay the unrelated turn");
+    drop(run);
+    assert!(video.cached_frames().is_none());
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn inactive_branch_video_does_not_launch_decoder() {
+    with_slow_decoder("inactive_branch_video_does_not_launch_decoder", || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(excluded_video_does_not_launch_decoder(
+                ExcludedVideoWindow::Branch,
+            ));
+    });
+}
+
+#[test]
+fn compacted_video_does_not_launch_decoder() {
+    with_slow_decoder("compacted_video_does_not_launch_decoder", || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(excluded_video_does_not_launch_decoder(
+                ExcludedVideoWindow::LocalCompaction,
+            ));
+    });
+}
+
+#[test]
+fn native_compacted_video_does_not_launch_decoder() {
+    with_slow_decoder("native_compacted_video_does_not_launch_decoder", || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(excluded_video_does_not_launch_decoder(
+                ExcludedVideoWindow::NativeCompaction,
+            ));
+    });
+}
+
+#[test]
+fn video_candidates_advance_incrementally_and_reset_with_the_active_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create(dir.path().join("candidates.jsonl")).unwrap();
+    let model = tool_media_model(
+        Protocol::OpenAiChat,
+        octet_ai::ModalitySet::none().with(Modality::Image),
+    );
+    let InputPart::Media(video) = video_input_fixture() else {
+        unreachable!()
+    };
+    let video_message = || {
+        EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Media(video.clone())],
+        }))
+    };
+    session.append(video_message()).unwrap();
+    for _ in 0..100 {
+        session
+            .append(EntryValue::Message(Message::User(UserMessage {
+                content: vec![UserPart::Text("settled text".repeat(100))],
+            })))
+            .unwrap();
+    }
+    let (cursor, initial) = session_video_candidates(&session, &model, None).unwrap();
+    assert_eq!(
+        lowered_tool_result_media(match &initial[0] {
+            Message::User(user) => user,
+            _ => unreachable!(),
+        })
+        .count(),
+        1
+    );
+    let (_, unchanged) = session_video_candidates(&session, &model, Some(cursor)).unwrap();
+    assert!(
+        matches!(&unchanged[0], Message::User(user) if user.content.is_empty()),
+        "settled prefix must not be scanned again"
+    );
+    session.append(video_message()).unwrap();
+    let (cursor, suffix) = session_video_candidates(&session, &model, Some(cursor)).unwrap();
+    assert!(matches!(&suffix[0], Message::User(user) if user.content.len() == 1));
+    // A coalesced result can add media without increasing context length.
+    let result_message = || {
+        EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(ToolResult {
+                tool_call_id: octet_ai::ToolCallId("read".into()),
+                content: vec![ToolResultPart::Media(video.clone())],
+                is_error: false,
+                added_tool_names: None,
+                tool_name: Some("read".into()),
+            })],
+        }))
+    };
+    session.append(result_message()).unwrap();
+    let (cursor, _) = session_video_candidates(&session, &model, Some(cursor)).unwrap();
+    session.append(result_message()).unwrap();
+    let (coalesced, suffix) = session_video_candidates(&session, &model, Some(cursor)).unwrap();
+    assert_eq!(cursor.messages, coalesced.messages);
+    assert!(matches!(&suffix[0], Message::User(user) if user.content.len() == 2));
+    let first_kept = session.append(video_message()).unwrap();
+    session
+        .compact("earlier videos summarized", first_kept)
+        .unwrap();
+    let (compacted, active) = session_video_candidates(&session, &model, Some(coalesced)).unwrap();
+    assert!(matches!(&active[0], Message::User(user) if user.content.len() == 1));
+    session.checkout_root().unwrap();
+    session.append(video_message()).unwrap();
+    let (_, active) = session_video_candidates(&session, &model, Some(compacted)).unwrap();
+    assert!(matches!(&active[0], Message::User(user) if user.content.len() == 1));
 }

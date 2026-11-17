@@ -323,7 +323,7 @@ impl Agent {
                 )
             })
             .collect::<Vec<_>>();
-        let prepared_video_entries = &mut self.prepared_video_entries;
+        let prepared_video_context = &mut self.prepared_video_context;
         let session = &mut self.session;
 
         let stream = async_stream::stream! {
@@ -456,23 +456,21 @@ impl Agent {
             let mut turn_attempt_succeeded = false;
 
             let mut reason: FinishReason = 'run: loop {
-                // Rebuild cold resumed frames once, from only newly encountered
-                // entries. Shared caches also serve Responses replay projections.
-                // Native/text-only routes defer this work until a frame-capable route.
+                // Prepare only the active canonical/replay suffix. A projection
+                // generation resets the cursor after checkout or compaction.
                 if model.spec.supports_video_input() && !model.spec.supports_native_video() {
-                    let end = session.entries().len();
-                    for entry in &session.entries()[*prepared_video_entries..end] {
-                        if let EntryValue::Message(message) = &entry.value {
-                            tokio::select! {
-                                biased;
-                                _ = abort.wait() => break 'run FinishReason::Aborted,
-                                changed = octet_ai::video::prepare_message_frames(&model, std::slice::from_ref(message)) => {
-                                    if changed { context_capacity.invalidate(); }
-                                }
-                            }
+                    let (cursor, candidates) = match session_video_candidates(session, &model, *prepared_video_context) {
+                        Ok(candidates) => candidates,
+                        Err(error) => break 'run FinishReason::Failed(error),
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = abort.wait() => break 'run FinishReason::Aborted,
+                        changed = octet_ai::video::prepare_message_frames(&model, &candidates) => {
+                            if changed { context_capacity.invalidate(); }
                         }
                     }
-                    *prepared_video_entries = end;
+                    *prepared_video_context = Some(cursor);
                 }
                 for event in committed_custom_message_events(session, &mut custom_message_cursor) {
                     notify_observers(&observers, &event); yield event;

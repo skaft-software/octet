@@ -52,6 +52,7 @@ impl Agent {
         })?;
         self.max_output_tokens = model.spec.limits.max_output_tokens;
         self.model = model;
+        self.prepared_video_context = None;
         self.reasoning = reasoning;
         if let Some(binding) = &self.delegation {
             // Only a new inherited worker reads the template; existing workers

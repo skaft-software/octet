@@ -465,6 +465,12 @@ impl Session {
             .unwrap_or(false))
     }
 
+    /// Projection prefix identity for incremental context/replay consumers.
+    /// Ordinary message appends retain it; checkout and compaction replace it.
+    pub(crate) fn context_generation(&self) -> u64 {
+        self.context_generation
+    }
+
     /// Borrows the cached model-visible context without deep-cloning message
     /// text, tool output, or media. The first call reconstructs the active
     /// branch; ordinary appends update that cache incrementally.

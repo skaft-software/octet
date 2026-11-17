@@ -264,17 +264,21 @@ impl Session {
                     append_context_message(messages, message);
                 }
             }
-            EntryValue::ResponsesReasoning { .. }
-            | EntryValue::ResponsesSteering { .. }
+            EntryValue::ResponsesReasoning { .. } | EntryValue::ResponsesCompaction { .. } => {
+                self.context_generation += 1;
+            }
+            EntryValue::ResponsesSteering { .. }
             | EntryValue::Config { .. }
             | EntryValue::PromptTemplateSelected { .. }
-            | EntryValue::ResponsesTurn { .. }
-            | EntryValue::ResponsesCompaction { .. } => {}
+            | EntryValue::ResponsesTurn { .. } => {}
             EntryValue::Compaction { .. }
             | EntryValue::BranchSummary { .. }
             | EntryValue::SkillActivated { .. }
             | EntryValue::SkillResourceRead { .. }
-            | EntryValue::SkillDeactivated { .. } => *cache = None,
+            | EntryValue::SkillDeactivated { .. } => {
+                *cache = None;
+                self.context_generation += 1;
+            }
         }
         Ok(id)
     }
@@ -354,6 +358,7 @@ impl Session {
         self.persist(&buf)?;
         self.head = Some(id);
         *self.context_cache.get_mut() = None;
+        self.context_generation += 1;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
@@ -372,6 +377,7 @@ impl Session {
         self.persist(&buf)?;
         self.head = None;
         *self.context_cache.get_mut() = None;
+        self.context_generation += 1;
         *self.responses_replay_cache.get_mut() = None;
         Ok(())
     }
@@ -431,6 +437,7 @@ impl Session {
         self.head = Some(id.clone());
         self.next_id = next_id;
         *self.context_cache.get_mut() = None;
+        self.context_generation += 1;
         *self.responses_replay_cache.get_mut() = None;
         Ok(id)
     }
