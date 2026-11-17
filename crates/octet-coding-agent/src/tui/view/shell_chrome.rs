@@ -262,8 +262,8 @@ fn shell_chrome_with_composer_rows(
     working.truncate(rows.saturating_sub(header.len() + composer.len() + 1));
     if state.transcript_search_active() {
         // The query, not a tall hidden draft/error, owns the only cursor.
-        composer.truncate(rows.saturating_sub(header.len() + 2));
-        error.truncate(rows.saturating_sub(header.len() + composer.len() + 2));
+        composer.truncate(rows.saturating_sub(header.len() + working.len() + 2));
+        error.truncate(rows.saturating_sub(header.len() + working.len() + composer.len() + 2));
     }
     let (mut extension_above, mut extension_below) = if state.panel.is_none() {
         render_extension_ui(state, width)
@@ -287,6 +287,7 @@ fn shell_chrome_with_composer_rows(
             composer
                 .len()
                 .saturating_add(header.len())
+                .saturating_add(working.len())
                 .saturating_add(1),
         );
         error.truncate(error_limit);

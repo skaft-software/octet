@@ -2090,6 +2090,31 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_error_preserves_live_search_with_working_chrome() {
+        for (width, height) in [(42, 16), (24, 12), (24, 8)] {
+            let mut shell = search_shell();
+            shell.set_size(width, height);
+            shell.begin_run("fixture");
+            shell.error("long wrapped error ".repeat(100));
+            open(&mut shell, "needle");
+            let state = shell.state.borrow();
+            let chrome = shell_chrome(&state, width, Instant::now());
+            assert!(!chrome.working.is_empty(), "{width}x{height}");
+            assert_eq!(
+                chrome.panel.len(),
+                2,
+                "{width}x{height}: query and controls"
+            );
+            assert!(chrome.panel[0].contains(CURSOR_MARKER));
+            assert!(strip_terminal_sequences(&chrome.panel[0]).contains("needle"));
+            let rows =
+                super::super::viewport::render_shell_viewport_at(&state, width, Instant::now());
+            assert!(rows.len() <= usize::from(height), "{width}x{height}");
+            assert_eq!(rows.join("\n").matches(CURSOR_MARKER).count(), 1);
+        }
+    }
+
+    #[test]
     fn product_transcript_search_dispatch_styles_clicks_escape_and_preserves_draft() {
         let mut shell = search_shell();
         let cursor = shell.state.borrow().editor.cursor();

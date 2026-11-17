@@ -96,6 +96,37 @@ fn read_only_document_home_reaches_top_with_wrapped_error_and_header_chrome() {
 }
 
 #[test]
+fn wrapped_error_preserves_live_panel_with_working_chrome() {
+    for (width, height) in [(42, 16), (24, 12), (80, 24)] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(width, height);
+        shell.begin_run("fixture");
+        shell.error("long wrapped error ".repeat(100));
+        shell.open_panel(Panel::ReadOnlyDocument {
+            title: "read-only report".into(),
+            text: "VISIBLE DOCUMENT".into(),
+            styled: false,
+            scroll_from_bottom: 0,
+        });
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, width, Instant::now());
+        assert!(!chrome.working.is_empty(), "{width}x{height}");
+        assert!(!chrome.error.is_empty(), "{width}x{height}");
+        assert!(
+            !chrome.panel.is_empty(),
+            "{width}x{height}: working={} composer={} error={} panel=0",
+            chrome.working.len(),
+            chrome.composer.len(),
+            chrome.error.len(),
+        );
+        assert!(strip_terminal_sequences(&chrome.panel.join("\n")).contains("read-only report"));
+        assert!(
+            render_shell_viewport_at(&state, width, Instant::now()).len() <= usize::from(height)
+        );
+    }
+}
+
+#[test]
 fn panel_border_layout_degrades_to_unframed_narrow_picker() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 20);

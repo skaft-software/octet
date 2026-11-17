@@ -436,6 +436,8 @@ Each run owns one independent status slot below the transcript and above the
 composer. `Working (<elapsed> · Esc to interrupt)` stays there while reasoning,
 text and tools grow above it, including between provider turns. A Pi extension's
 working component updates that same slot rather than replacing reasoning rows.
+Focused panels and transcript search keep a visible input-owning row alongside
+this slot, even when a long error wraps in a short terminal.
 Only run settlement removes it. Retry
 status keeps the interrupt hint but leaves out the run-elapsed counter, even
 after its backoff countdown reaches zero, so two clocks never compete on one
