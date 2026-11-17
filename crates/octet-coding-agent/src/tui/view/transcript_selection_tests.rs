@@ -334,6 +334,7 @@ fn bounded_copy_rows_match_full_receipt_at_scrolled_unicode_cells() {
 fn selection_decoration_preserves_plain_unicode_and_leaves_blank_rows_alone() {
     let row = CopyRow {
         text: "a界éz".into(),
+        fragments: Vec::new(),
         offset: 7,
         painted_cells: 2,
     };
@@ -343,6 +344,7 @@ fn selection_decoration_preserves_plain_unicode_and_leaves_blank_rows_alone() {
     assert!(line.contains("\x1b[0;7m界é\x1b[0m"));
     let empty = CopyRow {
         text: String::new(),
+        fragments: Vec::new(),
         offset: 7,
         painted_cells: 2,
     };
@@ -488,7 +490,8 @@ fn selection_cell(lines: &[String], needle: &str) -> (u16, u16) {
 fn decorated_duplicate_rows_copy_the_selected_occurrence() {
     use super::super::{AssistantBlock, InteractiveShell};
     let repeated = "repeat 界e\u{301}👩‍💻";
-    let expected = format!("{repeated}\n- target");
+    // Fully covered list items retain their original Markdown markers.
+    let expected = format!("- {repeated}\n- target");
     for threaded in [false, true] {
         for width in [48, 96] {
             let mut shell = InteractiveShell::test_shell();

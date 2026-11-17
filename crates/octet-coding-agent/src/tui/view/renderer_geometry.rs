@@ -84,6 +84,7 @@ pub(super) struct VisibleBlockGeometry {
     pub(super) rows: usize,
     pub(super) surface: SurfaceGeometry,
     pub(super) copy_rows: Option<super::transcript_selection::CopyRows>,
+    pub(super) source_map: Option<Arc<super::markdown_source::SourceMap>>,
 }
 
 /// Panel geometry has its own ownership fence. Background transcript output
@@ -311,6 +312,12 @@ impl RenderedGeometry {
                             )
                         })
                         .flatten(),
+                    source_map: match &state.transcript[index] {
+                        super::TranscriptBlock::Assistant(block) => {
+                            block.source_map.borrow().clone()
+                        }
+                        _ => None,
+                    },
                 })
             })
             .collect::<Vec<_>>();

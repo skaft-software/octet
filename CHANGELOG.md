@@ -5,7 +5,7 @@
 ### Added
 
 - Click the composer to place its cursor, with wrapped Unicode text, atomic attachment chips and drag-to-copy selection.
-
+- Copying formatted assistant output copies its Markdown source.
 - Scroll traces expose per-frame work and duration to help diagnose long-session stalls.
 
 - Verify independent tool and extension hosting with an offline consumer and compile-time orchestration boundary checks.

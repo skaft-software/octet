@@ -329,6 +329,25 @@ select their own occurrence, not matching text elsewhere in the transcript.
 Shift+drag remains your terminal's native selection override
 where the terminal supports it.
 
+### Markdown selection copy
+
+Assistant selections copy the corresponding retained original Markdown source,
+never Markdown regenerated from plain text. Fully selected headings, emphasis,
+links, list items, fenced code blocks (including language), and table rows keep
+their original syntax. Selected list markers keep their original spelling even
+for a partially selected wrapped item. Partial selections copy the source
+characters behind the selected rendered characters: inline emphasis, code-span and link delimiters are
+included only when their entire rendered content is selected. Partial code-block
+selections copy raw code without fences. Partial table selections copy selected
+cell source text, separated by tabs within a row and newlines between rows;
+only whole rows retain their original `|` separators. Narrow table labels are
+presentation, not cell source. Repeated text maps to the selected occurrence.
+Streaming and reflow preserve source endpoints, or explicitly clear the selection
+when that mapping changes. Other blocks keep their existing text copy, and mixed
+selections keep transcript order.
+Source provenance is prepared with layout, not reparsed or cloned in full on
+pointer movement.
+
 Literal whitespace-delimited HTTP(S) URLs in shell output retain their complete
 targets across wrapping, without interpreting output as Markdown. Encoded targets
 over 2 KiB stay plain; decoration also has a 64 KiB wrapped OSC-payload budget per

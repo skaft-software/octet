@@ -121,6 +121,8 @@ use crate::presentation::tool_display::is_subagent_tool;
 mod copyselect_tests;
 #[cfg(test)]
 mod fullscreen_work_tests;
+#[cfg(test)]
+mod markdown_copy_tests;
 
 mod pi_chrome;
 
@@ -1942,6 +1944,8 @@ pub(crate) struct ShellState {
     /// Application-owned transcript selection; composer selection remains
     /// entirely separate in the editor widget.
     transcript_selection: Option<TranscriptSelection>,
+    /// Only pointer endpoint blocks retain source maps after leaving the viewport.
+    markdown_selection_maps: RefCell<HashMap<u64, Arc<markdown_source::SourceMap>>>,
     /// Mouse-down position that has not yet begun a drag. A click without
     /// movement clears any prior selection; the first drag event promotes
     /// this anchor into `transcript_selection`.
@@ -2391,6 +2395,7 @@ impl ShellState {
             follow_tail: Default::default(),
             new_output_count: Default::default(),
             transcript_selection: Default::default(),
+            markdown_selection_maps: RefCell::new(HashMap::new()),
             pending_selection_anchor: Default::default(),
             selection_pointer_cell: Default::default(),
             pending_screen_press: Default::default(),
@@ -9993,6 +9998,7 @@ mod transcript_navigation;
 
 #[path = "view/viewport.rs"]
 mod builtin_viewport;
+mod markdown_source;
 mod transcript_commit;
 mod transcript_document;
 mod transcript_history;

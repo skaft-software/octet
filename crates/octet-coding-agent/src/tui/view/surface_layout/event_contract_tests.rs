@@ -1101,7 +1101,12 @@ fn subagent_spacing_blank_rows_have_no_copy_or_selection_highlight_hits() {
         let roster = subagents_with_worker();
         let expected = format!(
             "{}\n\n{}",
-            block_copy_text(&prose),
+            // Assistant copy uses retained source, including its own newline
+            // spelling, rather than the layout's semantic-text projection.
+            match &prose {
+                TranscriptBlock::Assistant(block) => block.text.clone(),
+                _ => unreachable!(),
+            },
             block_copy_text(&roster)
         );
         shell.state.borrow_mut().push_block(prose);

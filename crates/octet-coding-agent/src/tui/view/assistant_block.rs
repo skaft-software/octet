@@ -140,6 +140,8 @@ pub(super) struct AssistantBlock {
     pub(super) layout: RefCell<StreamingRenderCache>,
     /// Canonical copy projection, computed only when selection requests it.
     copy_text: RefCell<Option<String>>,
+    /// Original Markdown provenance is renderer-owned and Arc-shared in receipts.
+    pub(super) source_map: RefCell<Option<Arc<super::markdown_source::SourceMap>>>,
     /// Model that generated this block, for stable accent colour across
     /// model switches mid-session.
     pub(super) model_lab: Option<crate::tui::theme::ModelLab>,
@@ -234,6 +236,7 @@ impl AssistantBlock {
         self.markdown = rendered.markdown;
         self.layout = rendered.layout;
         self.copy_text = rendered.copy_text;
+        self.source_map = rendered.source_map;
         self.render_source = source.clone();
     }
 
@@ -250,6 +253,7 @@ impl AssistantBlock {
             markdown,
             layout: RefCell::new(StreamingRenderCache::default()),
             copy_text: RefCell::new(None),
+            source_map: RefCell::new(None),
             model_lab: None,
             finished: false,
             preserve_reasoning_summary: false,
@@ -356,15 +360,30 @@ impl AssistantBlock {
             && self.reasoning_heading.as_deref() == Some("Working")
     }
 
+    fn with_copy_text<T>(&self, read: impl FnOnce(&str) -> T) -> T {
+        let mut text = self.copy_text.borrow_mut();
+        read(text.get_or_insert_with(|| {
+            if self.markdown.is_finished() {
+                self.markdown.committed().plain_text()
+            } else {
+                parse_markdown(self.markdown.raw_text()).plain_text()
+            }
+        }))
+    }
+
     pub(super) fn copy_text(&self) -> String {
-        self.copy_text
+        self.with_copy_text(str::to_owned)
+    }
+
+    pub(super) fn copy_text_len(&self) -> usize {
+        self.with_copy_text(str::len)
+    }
+
+    pub(super) fn prepare_source_map(&self, plain: &str) -> Arc<super::markdown_source::SourceMap> {
+        self.source_map
             .borrow_mut()
             .get_or_insert_with(|| {
-                if self.markdown.is_finished() {
-                    self.markdown.committed().plain_text()
-                } else {
-                    parse_markdown(self.markdown.raw_text()).plain_text()
-                }
+                Arc::new(super::markdown_source::SourceMap::build(&self.text, plain))
             })
             .clone()
     }
@@ -374,6 +393,7 @@ impl AssistantBlock {
             self.render_source.push(Arc::from(text));
         }
         *self.copy_text.get_mut() = None;
+        *self.source_map.get_mut() = None;
         self.text.push_str(text);
         self.markdown.push_str(text);
     }
@@ -451,6 +471,7 @@ impl AssistantBlock {
     }
 
     pub(super) fn finish(&mut self) {
+        *self.source_map.get_mut() = None;
         self.markdown.finish();
         self.finished = true;
     }

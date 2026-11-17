@@ -202,6 +202,7 @@ impl SharedState {
         } else {
             state.painted_geometry = Some(geometry);
         }
+        state.accept_markdown_source_maps();
         super::InteractiveShell::resolve_deferred_pointer_press(&mut state);
         let copy = state.resolve_scrolled_transcript_selection();
         drop(state);

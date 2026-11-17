@@ -321,7 +321,34 @@ pub(super) fn semantic_selected_text(state: &ShellState) -> Option<String> {
     };
     let mut blocks = Vec::new();
     for index in start.block..=end.block {
-        state.transcript.get(index)?;
+        let block = state.transcript.get(index)?;
+        if let TranscriptBlock::Assistant(block) = block {
+            let map = state.markdown_source_map(index);
+            let len = map
+                .as_ref()
+                .map_or_else(|| block.copy_text_len(), |map| map.plain_len);
+            if len == 0 {
+                continue;
+            }
+            let from = if index == start.block {
+                start.offset.min(len)
+            } else {
+                0
+            };
+            let to = if index == end.block {
+                end.offset.min(len)
+            } else {
+                len
+            };
+            blocks.push(match map {
+                // A painted whole block can be older than the live message:
+                // never include an unpainted append on release.
+                Some(map) => map.copy(from.min(to), to)?,
+                None if from == 0 && to == len => block.text.clone(),
+                None => return None,
+            });
+            continue;
+        }
         let text = presented_block_copy_text(state, index);
         if text.is_empty() {
             continue;
@@ -359,6 +386,7 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
             if strip_terminal_sequences(line) == word.line {
                 CopyRow {
                     text: word.line.clone(),
+                    fragments: Vec::new(),
                     offset: 0,
                     painted_cells: 0,
                 }
@@ -425,31 +453,75 @@ pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start
     }
 }
 
+#[derive(Clone, Debug)]
+struct CopyFragment {
+    text: String,
+    offset: usize,
+    painted_cells: u16,
+}
+
 impl CopyRow {
-    fn decorate(&self, line: &mut String, from: usize, to: usize) {
-        let left = from.saturating_sub(self.offset).min(self.text.len());
-        let right = to.saturating_sub(self.offset).min(self.text.len());
-        if left >= right {
-            return;
+    fn offset_at(&self, absolute: usize) -> usize {
+        if !self.fragments.is_empty() {
+            let i = self
+                .fragments
+                .partition_point(|part| usize::from(part.painted_cells) <= absolute)
+                .saturating_sub(1);
+            let part = &self.fragments[i];
+            return part.offset
+                + visual_col_to_offset(
+                    &part.text,
+                    absolute.saturating_sub(usize::from(part.painted_cells)),
+                );
         }
-        let left = clamp_copy_offset(&self.text, left);
-        let right = clamp_copy_offset(&self.text, right);
-        let column = usize::from(self.painted_cells) + visible_width(&self.text[..left]);
-        let cells = visible_width(&self.text[left..right]);
-        let selected = strip_terminal_sequences(&slice_by_column(line, column, cells, true));
-        *line = format!(
-            "{}\x1b[0;7m{selected}\x1b[0m{}",
-            slice_by_column(line, 0, column, true),
-            slice_by_column(
-                line,
-                column + cells,
-                visible_width(line).saturating_sub(column + cells),
-                true
+        self.offset
+            + visual_col_to_offset(
+                &self.text,
+                absolute.saturating_sub(usize::from(self.painted_cells)),
             )
-        );
-        if line.contains("\x1b]8;") {
-            line.push_str("\x1b]8;;\x1b\\");
+    }
+
+    fn decorate(&self, line: &mut String, from: usize, to: usize) {
+        if self.fragments.is_empty() {
+            decorate_fragment(line, &self.text, self.offset, self.painted_cells, from, to);
+        } else {
+            for part in &self.fragments {
+                decorate_fragment(line, &part.text, part.offset, part.painted_cells, from, to);
+            }
         }
+    }
+}
+
+fn decorate_fragment(
+    line: &mut String,
+    text: &str,
+    offset: usize,
+    painted_cells: u16,
+    from: usize,
+    to: usize,
+) {
+    let left = from.saturating_sub(offset).min(text.len());
+    let right = to.saturating_sub(offset).min(text.len());
+    if left >= right {
+        return;
+    }
+    let left = clamp_copy_offset(text, left);
+    let right = clamp_copy_offset(text, right);
+    let column = usize::from(painted_cells) + visible_width(&text[..left]);
+    let cells = visible_width(&text[left..right]);
+    let selected = strip_terminal_sequences(&slice_by_column(line, column, cells, true));
+    *line = format!(
+        "{}\x1b[0;7m{selected}\x1b[0m{}",
+        slice_by_column(line, 0, column, true),
+        slice_by_column(
+            line,
+            column + cells,
+            visible_width(line).saturating_sub(column + cells),
+            true
+        )
+    );
+    if line.contains("\x1b]8;") {
+        line.push_str("\x1b]8;;\x1b\\");
     }
 }
 
@@ -609,6 +681,10 @@ pub(super) struct BlockCopyMemo {
     /// A tool's bounded presented projection. Tools never align painted rows,
     /// so their whole mapping is this projection.
     tool: Option<CopyRows>,
+    source_map: Option<std::sync::Arc<super::markdown_source::SourceMap>>,
+    /// Table cells wrap independently; row-first offsets are not sufficient
+    /// for reverse lookup. Prepared once with layout, never searched by text.
+    fragment_rows: std::collections::BTreeMap<usize, (usize, usize)>,
 }
 
 /// One block's projections, as read by an alignment pass.
@@ -701,6 +777,22 @@ impl BlockCopyMemo {
         self.tool = None;
         self.content_rows = content.len();
         self.rows.truncate(reusable);
+        let table_rows = self
+            .source_map
+            .as_ref()
+            .map(|map| align_table_rows(content, copy_text, map, geometry))
+            .unwrap_or_default();
+        self.fragment_rows = table_rows
+            .iter()
+            .flat_map(|(row, copy)| {
+                copy.fragments.iter().map(move |fragment| {
+                    (
+                        fragment.offset,
+                        (fragment.offset + fragment.text.len(), *row),
+                    )
+                })
+            })
+            .collect();
         if self.copy_text != copy_text {
             copy_text.clone_into(&mut self.copy_text);
         }
@@ -735,6 +827,11 @@ impl BlockCopyMemo {
             );
             if metadata {
                 line.clone_into(&mut aligned.painted);
+            }
+            if let Some(table) = table_rows.get(&row) {
+                aligned.row = table.clone();
+                aligned.cursor_after = table.offset + table.text.len();
+                aligned.examined_end = aligned.cursor_after;
             }
             if output_start.is_some() && row == 0 {
                 aligned.to_text_end = false;
@@ -800,13 +897,20 @@ impl CopyMapping for BlockCopyMemo {
         }
         let row = &self.rows.get(content_row)?.row;
         let absolute = usize::from(col).saturating_add(usize::from(self.content_left?));
-        let within = absolute.saturating_sub(usize::from(row.painted_cells));
-        Some(row.offset + visual_col_to_offset(&row.text, within))
+        Some(row.offset_at(absolute))
     }
 
     fn row_for_offset(&self, offset: usize, trailing: bool) -> Option<usize> {
         if let Some(tool) = &self.tool {
             return tool.row_for_offset(offset, trailing);
+        }
+        let fragment = if trailing {
+            self.fragment_rows.range(..offset).next_back()
+        } else {
+            self.fragment_rows.range(..=offset).next_back()
+        };
+        if let Some((_, (_, row))) = fragment.filter(|(_, (end, _))| offset <= *end) {
+            return Some(*row);
         }
         if self.rows.is_empty() {
             return None;
@@ -888,6 +992,10 @@ impl CopyRowsMemo {
             return true;
         }
         let copy_text = presented_block_copy_text(state, index);
+        entry.source_map = match &state.transcript[index] {
+            TranscriptBlock::Assistant(block) => Some(block.prepare_source_map(&copy_text)),
+            _ => None,
+        };
         let output_start = shell_output_copy_start(&state.transcript[index]);
         let cache = state.transcript_cache.borrow();
         let Some(painted) = cache.lines.get(start..start.saturating_add(length)) else {
@@ -938,6 +1046,7 @@ fn align_copy_row(
             text: String::new(),
             offset: cursor,
             painted_cells: content_left,
+            fragments: Vec::new(),
         },
         cursor_before: cursor,
         cursor_after: cursor,
@@ -983,6 +1092,7 @@ fn align_copy_row(
             text: copy_text[start..end].to_owned(),
             offset: start,
             painted_cells,
+            fragments: Vec::new(),
         };
     }
     aligned
@@ -1029,6 +1139,7 @@ impl CopyMapping for CopyRows {
 /// One painted content row aligned with the block's semantic copy text.
 #[derive(Clone, Debug)]
 struct CopyRow {
+    fragments: Vec<CopyFragment>,
     /// Copy-text segment this row shows, used for the cell-to-offset mapping.
     text: String,
     /// Byte offset in the copy text where `text` starts.
@@ -1114,12 +1225,14 @@ impl CopyRows {
                         text: projected.text[source.source.clone()].to_owned(),
                         offset: source.source.start,
                         painted_cells: geometry.content_left.saturating_add(source.left),
+                        fragments: Vec::new(),
                     }
                 } else {
                     CopyRow {
                         text: String::new(),
                         offset: cursor,
                         painted_cells: geometry.content_left,
+                        fragments: Vec::new(),
                     }
                 };
                 (index >= from).then_some(row)
@@ -1141,12 +1254,30 @@ impl CopyRows {
     fn offset_for(&self, content_row: usize, col: u16) -> Option<usize> {
         let row = self.rows.get(content_row.checked_sub(self.first_row)?)?;
         let absolute = usize::from(col).saturating_add(usize::from(self.content_left));
-        let within = absolute.saturating_sub(usize::from(row.painted_cells));
-        Some(row.offset + visual_col_to_offset(&row.text, within))
+        Some(row.offset_at(absolute))
     }
 
     /// Painted content row holding one copy offset.
     fn row_for_offset(&self, offset: usize, trailing: bool) -> Option<usize> {
+        // Receipts contain only the viewport's bounded rows. Prefer an exact
+        // fragment start, then the fragment ending here, over a later rail.
+        let fragment = (!trailing)
+            .then(|| {
+                self.rows
+                    .iter()
+                    .position(|row| row.fragments.iter().any(|part| part.offset == offset))
+            })
+            .flatten()
+            .or_else(|| {
+                self.rows.iter().position(|row| {
+                    row.fragments
+                        .iter()
+                        .any(|part| part.offset < offset && offset <= part.offset + part.text.len())
+                })
+            });
+        if let Some(row) = fragment {
+            return Some(self.first_row + row);
+        }
         if self.rows.is_empty() {
             return None;
         }
@@ -1357,10 +1488,15 @@ pub(super) fn visible_block_copy_rows(
         }
     }
     let copy_text = presented_block_copy_text(state, index);
+    let source_map = match &state.transcript[index] {
+        TranscriptBlock::Assistant(block) => Some(block.prepare_source_map(&copy_text)),
+        _ => None,
+    };
     let identity = CopyMemoIdentity::capture(state, index, geometry);
     let output_start = shell_output_copy_start(&state.transcript[index]);
     let mut index_rows = state.copy_rows.borrow_mut();
     let memo = index_rows.block(index);
+    memo.source_map = source_map;
     let rows = CopyRows::build_visible_with(
         CopySurface {
             painted,
@@ -1592,6 +1728,7 @@ pub(super) fn selection_position_for_visual_cell(
             clamp_copy_offset(&text, offset)
         }
     };
+    state.retain_markdown_source_map(block);
     Some(TranscriptPosition {
         block,
         offset,
@@ -1692,3 +1829,187 @@ impl ShellState {
 #[cfg(test)]
 #[path = "transcript_selection_tests.rs"]
 mod tests;
+
+/// The narrow labeled-list table presentation repeats headers as chrome.
+/// Only value fragments acquire the original cell's semantic coordinates.
+fn align_narrow_tables(
+    content: &[String],
+    plain: &str,
+    source: &super::markdown_source::SourceMap,
+    geometry: SurfaceGeometry,
+) -> std::collections::HashMap<usize, CopyRow> {
+    let mut output = std::collections::HashMap::new();
+    let mut painted_row = 0;
+    for table in &source.tables {
+        let header = &source.table_rows[table.start];
+        // Match rich_text/render/blocks.rs:399-403: rails/padding plus at
+        // least three cells of text per column, otherwise a labeled list.
+        if usize::from(geometry.content_width) > header.len() * 6 {
+            continue;
+        }
+        let body_start = table.start + usize::from(table.len() > 1);
+        for cells in &source.table_rows[body_start..table.end] {
+            for (column, span) in cells.iter().enumerate() {
+                let label = if table.len() > 1 {
+                    format!("{}: ", &plain[header[column].clone()])
+                } else {
+                    String::new()
+                };
+                let value_start = label.len();
+                let combined = label + &plain[span.clone()];
+                let mut cursor = 0;
+                while painted_row < content.len() && cursor < combined.len() {
+                    let row = painted_row;
+                    painted_row += 1;
+                    let line = strip_terminal_sequences(&content[row]);
+                    let inset = visual_col_to_offset(&line, usize::from(geometry.content_left));
+                    let tail = &line[inset..];
+                    let text = tail.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let Some(relative) = combined[cursor..].find(text) else {
+                        continue;
+                    };
+                    let start = cursor + relative;
+                    cursor = start + text.len();
+                    let from = start.max(value_start);
+                    let end = cursor.max(value_start);
+                    let offset = span.start + from - value_start;
+                    let painted_cells = (visible_width(&line[..inset])
+                        + visible_width(&tail[..tail.len() - tail.trim_start().len()])
+                        + visible_width(&combined[start..from]))
+                        as u16;
+                    let text = combined[from..end].to_owned();
+                    output.insert(
+                        row,
+                        CopyRow {
+                            fragments: if text.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![CopyFragment {
+                                    text: text.clone(),
+                                    offset,
+                                    painted_cells,
+                                }]
+                            },
+                            text,
+                            offset,
+                            painted_cells,
+                        },
+                    );
+                    if combined[cursor..].trim().is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
+/// Tables lay out cells independently. A row therefore carries one provenance
+/// fragment per cell rather than pretending its rails/padding are source text.
+fn align_table_rows(
+    content: &[String],
+    plain: &str,
+    source: &super::markdown_source::SourceMap,
+    geometry: SurfaceGeometry,
+) -> std::collections::HashMap<usize, CopyRow> {
+    let content_left = geometry.content_left;
+    let mut output = align_narrow_tables(content, plain, source, geometry);
+    if source.table_rows.is_empty() {
+        return output;
+    }
+    let mut row_index = 0;
+    let mut consumed = Vec::new();
+    for (row, line) in content.iter().enumerate() {
+        if output.contains_key(&row) {
+            continue;
+        }
+        let line = strip_terminal_sequences(line);
+        let inset = visual_col_to_offset(&line, usize::from(content_left));
+        let rail = if line[inset..].contains('│') {
+            '│'
+        } else {
+            '|'
+        };
+        let bars = line[inset..]
+            .char_indices()
+            .filter(|(_, c)| *c == rail)
+            .map(|(i, c)| (inset + i, c.len_utf8()))
+            .collect::<Vec<_>>();
+        if bars.len() < 2 {
+            continue;
+        }
+        let cells = bars
+            .windows(2)
+            .map(|pair| {
+                let start = pair[0].0 + pair[0].1;
+                let value = &line[start..pair[1].0];
+                let left = value.len() - value.trim_start().len();
+                (value.trim(), visible_width(&line[..start + left]) as u16)
+            })
+            .collect::<Vec<_>>();
+        let mut found = None;
+        for candidate in row_index..source.table_rows.len() {
+            let spans = &source.table_rows[candidate];
+            if spans.len() != cells.len() {
+                continue;
+            }
+            let starts = if candidate == row_index && consumed.len() == spans.len() {
+                consumed.clone()
+            } else {
+                spans.iter().map(|span| span.start).collect()
+            };
+            let mut next = starts.clone();
+            let mut fragments = Vec::new();
+            let mut valid = true;
+            for (column, ((text, left), span)) in cells.iter().zip(spans).enumerate() {
+                if text.is_empty() {
+                    continue;
+                }
+                let Some(relative) = plain[starts[column]..span.end].find(text) else {
+                    valid = false;
+                    break;
+                };
+                let offset = starts[column] + relative;
+                next[column] = offset + text.len();
+                fragments.push(CopyFragment {
+                    text: (*text).to_owned(),
+                    offset,
+                    painted_cells: *left,
+                });
+            }
+            if valid && !fragments.is_empty() {
+                found = Some((candidate, next, fragments));
+                break;
+            }
+        }
+        let Some((candidate, next, fragments)) = found else {
+            continue;
+        };
+        row_index = candidate;
+        consumed = next;
+        let offset = fragments.first().unwrap().offset;
+        let end = fragments.last().unwrap().offset + fragments.last().unwrap().text.len();
+        output.insert(
+            row,
+            CopyRow {
+                text: plain[offset..end].to_owned(),
+                offset,
+                painted_cells: fragments[0].painted_cells,
+                fragments,
+            },
+        );
+        if consumed
+            .iter()
+            .zip(&source.table_rows[row_index])
+            .all(|(end, span)| *end >= span.end)
+        {
+            row_index += 1;
+            consumed.clear();
+        }
+    }
+    output
+}
