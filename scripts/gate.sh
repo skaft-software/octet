@@ -198,6 +198,7 @@ main() {
         ci_checks quality 'Test binary release tooling'
         # Includes changelog policy and current release-note synchronization.
         ci_checks quality 'Test measurement and repository-tooling contracts (no live clients)'
+        ci_checks quality 'Check independent tools and extension-host embedding'
         step package cargo +1.90.0 package --workspace --exclude octet-coding-agent --locked --no-verify
         step no-default cargo check --workspace --all-targets --no-default-features --locked
     fi
