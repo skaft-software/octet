@@ -2741,6 +2741,10 @@ impl ShellState {
     }
 
     fn push_block(&mut self, mut block: TranscriptBlock) -> usize {
+        let old_renderer_window = self
+            .transcript
+            .len()
+            .saturating_sub(transcript_extensions::MAX_TRANSCRIPT_FRAMES);
         if let TranscriptBlock::Reasoning(reasoning) = &mut block {
             reasoning.extension_working = self.extension_ui.working.clone();
             reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
@@ -2800,6 +2804,36 @@ impl ShellState {
         }
         if !self.follow_tail {
             self.new_output_count = self.new_output_count.saturating_add(1);
+        }
+        // A completion snapshot can bridge only a schedulable final render.
+        // Retire a stale snapshot as it leaves that bounded candidate window,
+        // invalidating its cached rows in the same publication as this append.
+        let renderer_window = self
+            .transcript
+            .len()
+            .saturating_sub(transcript_extensions::MAX_TRANSCRIPT_FRAMES);
+        for expired in old_renderer_window..renderer_window {
+            let id = self.transcript_commit_ids[expired];
+            let stale = matches!(&self.transcript[expired], TranscriptBlock::Tool(panel)
+                if panel.finished && crate::presentation::tool_display::is_shell_tool(&panel.name))
+                && self
+                    .extension_transcript
+                    .frames
+                    .get(&id)
+                    .is_some_and(|frame| {
+                        frame.response.registered
+                            && frame.key.revision
+                                != self
+                                    .extension_transcript
+                                    .source_revisions
+                                    .get(&id)
+                                    .copied()
+                                    .unwrap_or(0)
+                    });
+            if stale {
+                self.extension_transcript.frames.remove(&id);
+                self.touch_presentation_block(expired);
+            }
         }
         self.invalidate_transcript();
         index

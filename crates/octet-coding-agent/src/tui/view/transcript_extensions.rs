@@ -200,8 +200,33 @@ impl ShellState {
             .extension_transcript
             .sources
             .get(&self.transcript_commit_ids[index]);
-        let frame = self.matching_frame(index);
         let block = &self.transcript[index];
+        let frame = self.matching_frame(index).or_else(|| {
+            if !matches!(block, TranscriptBlock::Tool(panel)
+                if panel.finished && crate::presentation::tool_display::is_shell_tool(&panel.name))
+                || self.transcript.len() - index > MAX_TRANSCRIPT_FRAMES
+                || matches!(source.map(Arc::as_ref), Some(Source::ToolResult(None)))
+            {
+                return None;
+            }
+            let frame = self
+                .extension_transcript
+                .frames
+                .get(&self.transcript_commit_ids[index])?;
+            // Pi compatibility: packages/coding-agent/src/modes/interactive/
+            // interactive-mode.ts:3703-3709 updates the existing tool component
+            // before requesting a paint. Native terminal ownership crosses an
+            // asynchronous process boundary: retain its last approved snapshot
+            // until the final reply (including explicit fallback) replaces it,
+            // rather than painting a differently sized native card in between.
+            // Candidate scheduling/acceptance still requires the exact revision.
+            let mut key = self.transcript_key(index);
+            key.revision = frame.key.revision;
+            (frame.key == key
+                && frame.response.registered
+                && self.extension_transcript.owners.contains(&frame.owner))
+            .then_some(frame.as_ref())
+        });
         let previous = index.checked_sub(1).and_then(|i| self.transcript.get(i));
         let plan =
             super::surface_layout::compile_surface_plan(previous, block, &self.theme, outer_width);

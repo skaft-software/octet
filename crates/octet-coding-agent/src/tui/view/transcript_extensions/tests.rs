@@ -285,6 +285,83 @@ fn full_tool_partial_and_final_details_survive_without_animation_rpcs() {
 }
 
 #[test]
+fn shell_completion_snapshot_retention_obeys_fences_and_explicit_fallback() {
+    for boundary in [
+        "width",
+        "theme",
+        "disclosure",
+        "owner",
+        "invalidate",
+        "fallback",
+        "unrenderable",
+        "window",
+    ] {
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_size(80, 24);
+        shell.set_transcript_render_owners(vec![owner(1)]);
+        let id = octet_ai::ToolCallId("bash".into());
+        shell.on_agent_event(&AgentEvent::ToolStarted {
+            id: id.clone(),
+            name: "bash".into(),
+            args: json!({"command":"fixture"}),
+        });
+        let partial = shell.transcript_render_candidates().pop().unwrap();
+        assert!(shell.accept_transcript_render(&partial, owner(1), rows("CACHED PARTIAL")));
+        shell.on_agent_event(&AgentEvent::ToolFinished {
+            id: id.clone(),
+            result: Ok(ToolOutput::new(
+                "exit=0 duration=10ms\nstdout: 1 lines\nFINAL OUTPUT\ncomplete_stdout=true",
+            )),
+            duration: std::time::Duration::from_millis(10),
+        });
+        assert!(rendered(&shell).contains("CACHED PARTIAL"));
+        assert!(!shell.accept_transcript_render(&partial, owner(1), rows("LATE PARTIAL")));
+        let final_frame = shell.transcript_render_candidates().pop().unwrap();
+        assert!(matches!(
+            final_frame.render,
+            TranscriptRenderContent::Tool {
+                is_partial: false,
+                ..
+            }
+        ));
+        match boundary {
+            "width" => shell.set_size(64, 24),
+            "theme" => shell.set_theme(crate::tui::theme::test_theme_from_source(
+                "[metadata]\nprofile = \"pi\"\n",
+            )),
+            "disclosure" => shell.set_verbose_tools(true),
+            "owner" => shell.set_transcript_render_owners(vec![owner(2)]),
+            "invalidate" => {
+                shell.invalidate_transcript_renderer(&owner(1), Some(&partial.source_id))
+            }
+            "fallback" => {
+                assert!(shell.accept_transcript_render(
+                    &final_frame,
+                    owner(1),
+                    TranscriptRenderResponse {
+                        registered: false,
+                        lines: None,
+                        markdown: None,
+                        render_shell: None,
+                    }
+                ));
+                assert!(shell.transcript_render_candidates().is_empty());
+            }
+            "unrenderable" => shell.state.borrow_mut().retain_tool_presentation(&id, None),
+            "window" => {
+                for _ in 0..MAX_TRANSCRIPT_FRAMES {
+                    shell.notice("later output");
+                }
+            }
+            _ => unreachable!(),
+        }
+        let painted = rendered(&shell);
+        assert!(!painted.contains("CACHED PARTIAL"), "{boundary}: {painted}");
+        assert!(painted.contains("FINAL OUTPUT"), "{boundary}: {painted}");
+    }
+}
+
+#[test]
 fn transformed_markdown_is_only_presentation_and_negative_receipts_do_not_spin() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_transcript_render_owners(vec![owner(1)]);

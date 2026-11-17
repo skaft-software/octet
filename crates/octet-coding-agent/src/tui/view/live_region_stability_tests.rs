@@ -89,6 +89,202 @@ fn history_positions(rows: &[String]) -> Vec<(usize, String)> {
 }
 
 #[test]
+fn bash_completion_paints_final_geometry_atomically() {
+    // Pi compatibility: packages/coding-agent/src/modes/interactive/
+    // interactive-mode.ts:3689-3709 updates the existing tool component's
+    // partial/final result before requesting a render, without removing it.
+    for isolated in [false, true] {
+        for (width, height) in [(24, 24), (80, 24), (120, 32)] {
+            for (output_rows, exit) in [(0, 0), (1, 0), (20, 0), (1, 7), (20, 7)] {
+                for continuation in ["text", "reasoning", "tool"] {
+                    let (mut shell, component) = fixture(width, height, isolated);
+                    let id = ToolCallId("bash-fixture".into());
+                    shell.on_agent_event(&AgentEvent::ToolStarted {
+                        id: id.clone(),
+                        name: "bash".into(),
+                        args: serde_json::json!({"command":"fixture"}),
+                    });
+                    frame(&component, width);
+                    let output = (0..output_rows)
+                        .map(|index| format!("OUTPUT-{index:02}\n"))
+                        .collect::<String>();
+                    for line in output.split_inclusive('\n') {
+                        shell.on_agent_event(&AgentEvent::ToolProgress {
+                            id: id.clone(),
+                            progress: ToolProgress::Output {
+                                stream: octet_agent::OutputStream::Stdout,
+                                bytes: bytes::Bytes::copy_from_slice(line.as_bytes()),
+                            },
+                        });
+                        frame(&component, width);
+                    }
+                    let before = frame(&component, width);
+                    let anchor_row = |rows: &[String]| {
+                        rows.iter()
+                            .position(|row| row.contains("HISTORY-39"))
+                            .unwrap()
+                    };
+                    let before_row = anchor_row(&before);
+                    shell.on_agent_event(&AgentEvent::ToolFinished {
+                        id: id.clone(),
+                        result: Ok(octet_agent::ToolOutput::new(format!(
+                            "exit={exit} duration=10ms\nstdout: {output_rows} lines\n{output}complete_stdout=true"
+                        ))),
+                        duration: Duration::from_millis(10),
+                    });
+                    let finished = frame(&component, width);
+                    let finished_row = anchor_row(&finished);
+                    if output_rows == 20 {
+                        for marker in ["OUTPUT-00", "OUTPUT-01", "OUTPUT-18", "OUTPUT-19"] {
+                            assert!(
+                                finished.iter().any(|row| row.contains(marker)),
+                                "{finished:?}"
+                            );
+                        }
+                        assert!(!finished.iter().any(|row| row.contains("OUTPUT-02")));
+                    }
+                    shell.state.borrow_mut().advance_status_timer();
+                    assert_eq!(
+                        frame(&component, width),
+                        finished,
+                        "timer tick changed completed geometry"
+                    );
+                    let cold =
+                        renderer_runtime::ShellComponent::isolated(shell.state.clone(), true);
+                    assert_eq!(
+                        frame(&cold, width),
+                        finished,
+                        "first completion paint differs from canonical geometry"
+                    );
+                    assert!(
+                        finished_row <= before_row,
+                        "{isolated}/{width}/{output_rows}/{exit}: {before:?} -> {finished:?}"
+                    );
+                    for _ in 0..3 {
+                        assert_eq!(frame(&component, width), finished);
+                    }
+                    shell.on_agent_event(&AgentEvent::TurnStarted);
+                    assert_eq!(frame(&component, width), finished);
+                    if continuation == "tool" {
+                        shell.on_agent_event(&AgentEvent::ToolStarted {
+                            id: ToolCallId("next-bash".into()),
+                            name: "bash".into(),
+                            args: serde_json::json!({"command":"next"}),
+                        });
+                    } else {
+                        shell.on_agent_event(&AgentEvent::OutputDelta {
+                            channel: if continuation == "text" {
+                                OutputChannel::Text
+                            } else {
+                                OutputChannel::Reasoning
+                            },
+                            text: "NEXT-ASSISTANT".into(),
+                        });
+                    }
+                    let after = frame(&component, width);
+                    assert!(
+                        anchor_row(&after) <= finished_row,
+                        "{isolated}/{width}/{output_rows}/{exit}: {finished:?} -> {after:?}"
+                    );
+                    assert_eq!(frame(&component, width), after);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bash_completion_keeps_cached_renderer_geometry_until_the_final_frame_arrives() {
+    use octet_agent::extension_process::{ExtensionResourceOwner, TranscriptRenderResponse};
+
+    // A Pi renderer updates its existing component in place. An asynchronous
+    // host renderer must not insert a differently sized native fallback between
+    // that component's partial and final snapshots.
+    for isolated in [false, true] {
+        for (width, height) in [(24, 24), (80, 24), (120, 32)] {
+            for (output_rows, exit) in [(0, 0), (1, 0), (20, 0), (1, 7), (20, 7)] {
+                let (mut shell, component) = fixture(width, height, isolated);
+                let owner = ExtensionResourceOwner {
+                    session_id: "fixture".into(),
+                    extension_instance_id: "bash-renderer".into(),
+                    process_generation: 1,
+                };
+                shell.set_transcript_render_owners(vec![owner.clone()]);
+                let id = ToolCallId("rendered-bash".into());
+                shell.on_agent_event(&AgentEvent::ToolStarted {
+                    id: id.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command":"fixture"}),
+                });
+                let accept = |shell: &mut InteractiveShell, label: &str| {
+                    let candidate = shell.transcript_render_candidates().into_iter().find(|candidate| {
+                        matches!(&candidate.render, octet_agent::extension_process::TranscriptRenderContent::Tool { tool_call_id, .. } if tool_call_id == &id.0)
+                    }).expect("updated bash render candidate");
+                    assert!(shell.accept_transcript_render(
+                        &candidate,
+                        owner.clone(),
+                        TranscriptRenderResponse {
+                            registered: true,
+                            lines: Some(vec!["Bash fixture".into(), label.into()]),
+                            markdown: None,
+                            render_shell: None,
+                        }
+                    ));
+                };
+                accept(&mut shell, "starting");
+                frame(&component, width);
+                let output = (0..output_rows)
+                    .map(|index| format!("OUTPUT-{index:02}\n"))
+                    .collect::<String>();
+                shell.on_agent_event(&AgentEvent::ToolProgress {
+                    id: id.clone(),
+                    progress: ToolProgress::Output {
+                        stream: octet_agent::OutputStream::Stdout,
+                        bytes: bytes::Bytes::copy_from_slice(output.as_bytes()),
+                    },
+                });
+                accept(&mut shell, "streaming output");
+                let before = history_positions(&frame(&component, width));
+                assert!(!before.is_empty());
+                shell.on_agent_event(&AgentEvent::ToolFinished {
+                    id: id.clone(),
+                    result: Ok(octet_agent::ToolOutput::new(format!("exit={exit} duration=10ms\nstdout: {output_rows} lines\n{output}complete_stdout=true"))),
+                    duration: Duration::from_millis(10),
+                });
+                for _ in 0..3 {
+                    let rows = frame(&component, width);
+                    assert_eq!(
+                        history_positions(&rows),
+                        before,
+                        "{isolated}/{width}/{output_rows}/{exit}: {rows:?}"
+                    );
+                }
+                // Completion may be followed immediately by more model/tool
+                // events while the final renderer reply is still in flight.
+                shell.on_agent_event(&AgentEvent::OutputDelta {
+                    channel: OutputChannel::Text,
+                    text: "NEXT-ASSISTANT".into(),
+                });
+                let after_delta = history_positions(&frame(&component, width));
+                shell.on_agent_event(&AgentEvent::ToolStarted {
+                    id: ToolCallId("next-bash".into()),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command":"next"}),
+                });
+                let after_start = history_positions(&frame(&component, width));
+                assert!(after_delta.last().unwrap().0 <= before.last().unwrap().0);
+                assert!(after_start.last().unwrap().0 <= after_delta.last().unwrap().0);
+                accept(&mut shell, "finished output");
+                let final_rows = frame(&component, width);
+                assert!(final_rows.iter().any(|row| row.contains("finished output")));
+                assert_eq!(history_positions(&final_rows), after_start);
+                assert_eq!(frame(&component, width), final_rows);
+            }
+        }
+    }
+}
+
+#[test]
 fn live_roster_settlement_reserves_rows_until_the_wave_settles() {
     for isolated in [false, true] {
         for (width, height) in [(24, 16), (80, 24), (120, 32)] {

@@ -480,7 +480,11 @@ credentials removed.
 Tool results the model needs are saved and sent to the provider. Live progress
 is neither. Replaceable tool-progress annotations use one clipped row, so phase
 labels of different lengths keep the transcript still; captured output retains
-its normal wrapping and disclosure.
+its normal wrapping and disclosure. When a Pi-compatible shell renderer finishes,
+its last approved snapshot stays visible until the final renderer reply replaces
+it in one paint, including when the assistant or another tool continues meanwhile.
+Resize, theme, disclosure and renderer-owner changes still invalidate that snapshot;
+a failed or unavailable renderer uses the native result card.
 [Tool presentation](design/octet-tui.md#tool-presentation).
 
 While workers are active, a bounded, tool-like **Subagents** block in the
