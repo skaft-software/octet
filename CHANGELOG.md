@@ -57,6 +57,7 @@
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
 - Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
+- Timed image reads retain inline previews while scrolling and cropping.
 - Empty and ellipsis-only running shell cards show an explicit interruptible state while live progress keeps its available rows.
 - Completed tool cards share one final duration row with a documented tool_duration theme setting.
 - Shell and Codemode output previews keep deliberate head and tail windows with exact omitted-middle counts.

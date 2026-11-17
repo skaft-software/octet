@@ -291,9 +291,10 @@ fn polish_result_connector_belongs_to_first_visible_output_row() {
         true,
     );
     let rows = transcript_render::render_tool(&panel, &theme, &renderer, 100, true, "tool_output");
+    // Visually blank rows retain their source bytes without taking the connector.
     assert_eq!(
         screen_dump(&rows.lines, 100),
-        "Codemode  return 1\n\n└ result"
+        "Codemode  return 1\n   \n└ result"
     );
     let panel = tool_panel(
         "bash",

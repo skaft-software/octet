@@ -212,6 +212,33 @@ fn kitty_graphics_native_idle_scroll_and_fast_wheel_bursts() {
 }
 
 #[test]
+fn kitty_graphics_native_timed_image_read_scroll_and_crop() {
+    let mut shell = InteractiveShell::test_shell();
+    let mut probe = attach(&mut shell);
+    seed(&mut shell);
+    for block in &mut shell.state.borrow_mut().transcript {
+        if let TranscriptBlock::Tool(panel) = block {
+            panel.duration = Some(Duration::from_millis(1250));
+        }
+    }
+    probe.render(&mut shell);
+    let frame = shell.tui.as_ref().unwrap().rendered_frame();
+    assert!(
+        frame
+            .iter()
+            .any(|row| { sexy_tui_rs::strip_terminal_sequences(row).contains("└ Took 1.25s") }),
+        "the completed read must show its normal duration and result connector"
+    );
+    assert!(
+        frame
+            .iter()
+            .any(|row| !ImageAnchor::parse_all(row).is_empty()),
+        "the duration row must not erase the image reservation's anchor"
+    );
+    exercise(&mut shell, &mut probe, false);
+}
+
+#[test]
 fn kitty_graphics_native_streaming_scroll_and_status_ticks() {
     let mut shell = InteractiveShell::test_shell();
     let mut probe = attach(&mut shell);

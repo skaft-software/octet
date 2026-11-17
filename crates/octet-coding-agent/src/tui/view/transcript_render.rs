@@ -63,13 +63,15 @@ fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<St
     let mut first_content_row = true;
     rows.into_iter()
         .map(|row| {
-            // Styled whitespace is still a blank row. Keep its geometry, but
-            // attach the result connector to actual output, not empty chrome.
+            // Blankness selects the connector, not which row bytes to retain:
+            // private image anchors are invisible but still name a placement.
+            // Pi compatibility source: packages/tui/src/components/image.ts:131-139
+            // retains the graphics-bearing row plus blank height reservations.
             if sexy_tui_rs::strip_terminal_sequences(&row)
                 .trim()
                 .is_empty()
             {
-                return String::new();
+                return row;
             }
             let prefix = if first_content_row && indent > 0 {
                 first_content_row = false;

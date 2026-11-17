@@ -437,6 +437,7 @@ text. It never loads a URL or path, copied, plain and print output never contain
 image data, and it doesn't upload anything or replace [attachment
 consent](media.md#attach-explicitly). The model must still support the format.
 
+Completed image reads keep their inline preview above the final duration row.
 Fullscreen image crops keep the original tool gutter when their first row scrolls
 above the viewport. Only the visible image rows are placed, leaving the composer
 and footer outside the placement. One fullscreen placement tracker handles native
