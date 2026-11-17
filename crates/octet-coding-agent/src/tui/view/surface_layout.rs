@@ -199,7 +199,8 @@ fn natural_surface_width(block: &TranscriptBlock, theme: &OctetTheme, preferred_
 fn has_event_spacing(block: &TranscriptBlock) -> bool {
     match block {
         TranscriptBlock::Reasoning(reasoning) => {
-            !reasoning.finished && !reasoning.reasoning_expanded
+            (!reasoning.finished || reasoning.preserve_reasoning_summary)
+                && !reasoning.reasoning_expanded
         }
         TranscriptBlock::Subagents(_)
         | TranscriptBlock::Outcome(_)
@@ -249,7 +250,8 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     let presentation = PresentationLayout::new(theme, outer_width);
     let kind = transcript_surface_kind(block);
     let surface_kind = if matches!(block, TranscriptBlock::Reasoning(reasoning)
-        if !reasoning.finished && !reasoning.reasoning_expanded)
+        if (!reasoning.finished || reasoning.preserve_reasoning_summary)
+            && !reasoning.reasoning_expanded)
     {
         "activity"
     } else {

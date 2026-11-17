@@ -583,6 +583,13 @@ fn application_viewport_stays_anchored_while_one_markdown_block_streams() {
     assert!(!before.is_empty());
 
     let run_id = shell.begin_run("openai");
+    let after_status = anchor_rows(&shell);
+    assert_eq!(
+        after_status.first(),
+        before.first(),
+        "opening status preserves the reading anchor"
+    );
+    let before = after_status;
     for number in 0..24 {
         shell.on_run_event(
             run_id,

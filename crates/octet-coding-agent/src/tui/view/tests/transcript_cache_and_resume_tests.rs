@@ -444,7 +444,7 @@ fn deferred_history_identity_failure_is_transactional() {
             state.next_transcript_commit_id.0,
         )
     };
-    assert_eq!(before_tools.get(&tool_id).copied(), Some(before_len - 3));
+    assert_eq!(before_tools.get(&tool_id).copied(), Some(before_len - 2));
 
     let error = shell.materialize_deferred_history().unwrap_err();
     assert!(

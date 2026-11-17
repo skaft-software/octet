@@ -739,15 +739,13 @@ fn provider_retry_removes_closed_reasoning_and_text_without_removing_independent
         }
         shell.on_run_event(id, &retry_event(2));
         let state = shell.state.borrow();
-        assert_eq!(
-            state
-                .transcript
-                .iter()
-                .filter(|block| matches!(block,
-            TranscriptBlock::Reasoning(reasoning) if reasoning.retry_activity.is_some()))
-                .count(),
-            1
-        );
+        assert!(state
+            .working_status
+            .as_ref()
+            .unwrap()
+            .retry_activity
+            .is_some());
+        assert!(state.transcript.iter().all(|block| !matches!(block, TranscriptBlock::Reasoning(block) if block.retry_activity.is_some())));
         assert_eq!(state.transcript.len(), state.transcript_commit_ids.len());
         assert_eq!(state.transcript.len(), state.block_revisions.len());
     }

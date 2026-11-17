@@ -56,6 +56,7 @@ pub(super) fn apply(
     }
     let configured = |field: &str| snapshot.defaults.get(field).cloned().unwrap_or_default();
     let reserved = chrome.header.len()
+        + chrome.working.len()
         + chrome.error.len()
         + chrome.pending.len()
         + chrome.subagents.len()

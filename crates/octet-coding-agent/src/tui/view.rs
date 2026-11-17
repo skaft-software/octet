@@ -1915,6 +1915,10 @@ pub(crate) struct ShellState {
     /// Stable block identities owned by the unfinished inference attempt.
     provisional_blocks: Vec<u64>,
     active_reasoning: Option<usize>,
+    /// Run liveness is composer-adjacent chrome, never streamed reasoning.
+    working_status: Option<Box<AssistantBlock>>,
+    /// Stable identity boundary, so settlement visits only this run's blocks.
+    run_transcript_start: u64,
     /// Once keyboard navigation requests a semantic viewport, rendering stays
     /// application-owned for the rest of this shell. Mouse capture remains an
     /// independent terminal-input policy.
@@ -2370,6 +2374,8 @@ impl ShellState {
             active_text: Default::default(),
             provisional_blocks: Default::default(),
             active_reasoning: Default::default(),
+            working_status: Default::default(),
+            run_transcript_start: 0,
             application_viewport_requested: Default::default(),
             scroll_from_bottom: Default::default(),
             viewport_anchor: Default::default(),
@@ -2746,7 +2752,6 @@ impl ShellState {
             .len()
             .saturating_sub(transcript_extensions::MAX_TRANSCRIPT_FRAMES);
         if let TranscriptBlock::Reasoning(reasoning) = &mut block {
-            reasoning.extension_working = self.extension_ui.working.clone();
             reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
         }
         if let TranscriptBlock::Tool(panel) = &mut block {
@@ -3374,79 +3379,49 @@ impl ShellState {
     /// readiness label. It remains presentation-only and is removed when real
     /// model output or a terminal run outcome arrives.
     fn set_provider_lifecycle_status(&mut self, label: String) {
-        if let Some(index) = self.active_reasoning {
-            if let Some(TranscriptBlock::Reasoning(reasoning)) = self.transcript.get_mut(index) {
-                let replaceable = reasoning.text.is_empty()
-                    && !reasoning.show_reasoning_hint
-                    && reasoning
-                        .reasoning_heading
-                        .as_deref()
-                        .is_some_and(|heading| {
-                            heading == "Working" || is_provider_lifecycle_status(heading)
-                        });
-                if replaceable {
-                    reasoning.reasoning_heading = Some(label);
-                    self.touch_block(index);
-                }
-            }
-            return;
+        self.open_working_status();
+        if let Some(status) = &mut self.working_status {
+            status.reasoning_heading = Some(label);
         }
-        self.open_activity_status(Some(&label), false);
     }
 
     fn open_activity_status(&mut self, label: Option<&str>, show_reasoning_hint: bool) {
-        if self.active_reasoning.is_some() {
+        if self.working_status.is_some() {
             return;
         }
-        if let Some(previous) = self
-            .transcript
-            .iter()
-            .rposition(|block| matches!(block, TranscriptBlock::Reasoning(_)))
-        {
-            if let Some(TranscriptBlock::Reasoning(reasoning)) = self.transcript.get_mut(previous) {
-                reasoning.show_reasoning_hint = false;
-            }
-            self.touch_block(previous);
-        }
-        let model_lab = self.executing_model_lab();
-        let activity_started_at = self
-            .run
-            .current()
-            .map(|run| run.started_at())
-            .or_else(|| (label == Some("Compacting context")).then(Instant::now));
+        let mut status = AssistantBlock::streaming_reasoning("")
+            .with_model_lab(self.executing_model_lab())
+            .with_activity_started_at(
+                self.run
+                    .current()
+                    .map(|run| run.started_at())
+                    .or_else(|| (label == Some("Compacting context")).then(Instant::now)),
+            );
         self.event_dot_visible = true;
         self.event_spinner_frame = 0;
         self.status_shimmer_frame = 0;
-        let mut status = AssistantBlock::streaming_reasoning("")
-            .with_model_lab(model_lab)
-            .with_activity_started_at(activity_started_at);
         status.reasoning_heading = label.map(str::to_owned);
         status.show_reasoning_hint = show_reasoning_hint;
-        let index = self.push_block(TranscriptBlock::Reasoning(Box::new(status)));
-        self.active_reasoning = Some(index);
-        self.register_active_event(index);
+        status.extension_working = self.extension_ui.working.clone();
+        // Pi compatibility: packages/coding-agent/src/modes/interactive/
+        // interactive-mode.ts:2413-2423,3490-3503,3714-3726
+        // keeps the status container outside chat until agent_end. Rust owns
+        // that terminal slot; model deltas never replace or remove it.
+        self.working_status = Some(Box::new(status));
     }
 
     fn close_activity_status(&mut self, label: &str) {
-        let Some(index) = self.active_reasoning else {
-            return;
-        };
-        let matches = matches!(
-            self.transcript.get(index),
-            Some(TranscriptBlock::Reasoning(reasoning))
-                if reasoning.text.is_empty()
-                    && !reasoning.show_reasoning_hint
-                    && reasoning.reasoning_heading.as_deref() == Some(label)
-        );
-        if matches {
-            self.remove_transient_activity_block(index);
+        if self
+            .working_status
+            .as_ref()
+            .is_some_and(|status| status.reasoning_heading.as_deref() == Some(label))
+        {
+            self.working_status = None;
         }
     }
 
     fn append_text_block(&mut self, channel: OutputChannel, text: &str) {
-        // The first public response delta ends the reasoning phase. Move the
-        // transient row behind the response rather than dropping liveness: a
-        // provider can continue generating invisible tokens after visible text.
+        // Public text closes reasoning, not the independent run-status slot.
         if channel == OutputChannel::Text && self.active_text.is_none() {
             if let Some(index) = self.active_reasoning {
                 let transient = matches!(
@@ -3473,7 +3448,6 @@ impl ShellState {
             OutputChannel::Reasoning => self.active_reasoning,
         };
         if let Some(index) = active_index {
-            let expand_thinking = self.thinking_expanded();
             let updated = match self.transcript.get_mut(index) {
                 Some(TranscriptBlock::Assistant(existing)) if channel == OutputChannel::Text => {
                     existing.append(text);
@@ -3482,22 +3456,6 @@ impl ShellState {
                 Some(TranscriptBlock::Reasoning(existing))
                     if channel == OutputChannel::Reasoning =>
                 {
-                    if existing.text.is_empty()
-                        && !existing.show_reasoning_hint
-                        && existing
-                            .reasoning_heading
-                            .as_deref()
-                            .is_some_and(|heading| {
-                                heading == "Working" || is_provider_lifecycle_status(heading)
-                            })
-                    {
-                        // A generic or lifecycle request placeholder becomes
-                        // `Thinking` only when the provider actually emits
-                        // reasoning content.
-                        existing.reasoning_heading = None;
-                        existing.show_reasoning_hint = true;
-                        existing.reasoning_expanded = expand_thinking;
-                    }
                     existing.append_reasoning(text);
                     true
                 }
@@ -3523,36 +3481,24 @@ impl ShellState {
             }
         }
 
-        if channel == OutputChannel::Reasoning {
-            if let Some(previous) = self
-                .transcript
-                .iter()
-                .rposition(|block| matches!(block, TranscriptBlock::Reasoning(_)))
-            {
-                if let Some(TranscriptBlock::Reasoning(reasoning)) =
-                    self.transcript.get_mut(previous)
-                {
-                    reasoning.show_reasoning_hint = false;
-                }
-                self.touch_block(previous);
-            }
-        }
-
         let model_lab = self.executing_model_lab();
-        let activity_started_at = self.run.current().map(|run| run.started_at());
         self.event_dot_visible = true;
         self.event_spinner_frame = 0;
-        self.status_shimmer_frame = 0;
         let index = self.push_block(match channel {
             OutputChannel::Text => TranscriptBlock::Assistant(Box::new(
                 AssistantBlock::streaming(text).with_model_lab(model_lab),
             )),
-            OutputChannel::Reasoning => TranscriptBlock::Reasoning(Box::new(
-                AssistantBlock::streaming_reasoning(text)
+            OutputChannel::Reasoning => {
+                let mut reasoning = AssistantBlock::streaming_reasoning(text)
                     .with_reasoning_expanded(self.thinking_expanded())
-                    .with_model_lab(model_lab)
-                    .with_activity_started_at(activity_started_at),
-            )),
+                    .with_model_lab(model_lab);
+                // Thinking owns its phase clock; Working owns the root-run clock.
+                reasoning.activity_started_at =
+                    self.run.current().and(reasoning.reasoning_started_at);
+                reasoning.preserve_reasoning_summary = self.run.is_active();
+                reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
+                TranscriptBlock::Reasoning(Box::new(reasoning))
+            }
         });
         self.provisional_blocks
             .push(self.transcript_commit_ids[index]);
@@ -3620,51 +3566,14 @@ impl ShellState {
     }
 
     /// Settle one provider turn without implying that the owning run is done.
-    /// Public text keeps one trailing `Working` row while the provider remains
-    /// active, so this boundary only finalizes the text and repairs a missing
-    /// status. Only an authoritative run outcome removes that transient row.
+    /// The independent `Working` slot survives text, reasoning and tools;
+    /// only an authoritative run outcome removes it.
     fn finish_turn_streaming_blocks(&mut self) {
         self.provisional_blocks.clear();
-        if let Some(index) = self.active_text.take() {
-            self.unregister_active_event(index);
-            if let Some(TranscriptBlock::Assistant(assistant)) = self.transcript.get_mut(index) {
-                assistant.finish();
-                self.touch_block(index);
-            }
-        }
-
-        let working = self.active_reasoning.is_some_and(|index| {
-            matches!(
-                self.transcript.get(index),
-                Some(TranscriptBlock::Reasoning(reasoning))
-                    if reasoning.text.is_empty()
-                        && !reasoning.show_reasoning_hint
-                        && reasoning.reasoning_heading.as_deref().is_some_and(|heading| {
-                            heading == "Working" || is_provider_lifecycle_status(heading)
-                        })
-            )
-        });
-        if working {
-            if let Some(index) = self.active_reasoning {
-                if let Some(TranscriptBlock::Reasoning(reasoning)) = self.transcript.get_mut(index)
-                {
-                    // Lifecycle labels are ephemeral; turn completion resumes
-                    // the ordinary generic liveness row rather than retaining
-                    // endpoint telemetry in the transcript.
-                    reasoning.reasoning_heading = Some("Working".into());
-                    self.touch_block(index);
-                }
-            }
-        } else {
-            if let Some(index) = self.active_reasoning.take() {
-                self.unregister_active_event(index);
-                if let Some(TranscriptBlock::Reasoning(reasoning)) = self.transcript.get_mut(index)
-                {
-                    reasoning.finish_reasoning();
-                    self.touch_block(index);
-                }
-            }
-            self.open_working_status();
+        self.close_streaming_blocks();
+        self.open_working_status();
+        if let Some(status) = &mut self.working_status {
+            status.reasoning_heading = Some("Working".into());
         }
     }
 
@@ -3770,16 +3679,20 @@ impl ShellState {
     }
 
     pub(crate) fn has_active_status_shimmer(&self) -> bool {
-        self.active_event_blocks
-            .iter()
-            .filter(|index| self.animation_block_is_addressable(**index))
-            .any(|index| {
-                matches!(
-                    self.transcript.get(*index),
-                    Some(TranscriptBlock::Reasoning(reasoning))
-                        if self.status_shimmer_active(reasoning)
-                )
-            })
+        self.working_status
+            .as_ref()
+            .is_some_and(|status| self.status_shimmer_active(status))
+            || self
+                .active_event_blocks
+                .iter()
+                .filter(|index| self.animation_block_is_addressable(**index))
+                .any(|index| {
+                    matches!(
+                        self.transcript.get(*index),
+                        Some(TranscriptBlock::Reasoning(reasoning))
+                            if self.status_shimmer_active(reasoning)
+                    )
+                })
     }
 
     #[cfg(test)]
@@ -3811,7 +3724,10 @@ impl ShellState {
     }
 
     pub(crate) fn has_active_status_timer(&self) -> bool {
-        self.active_event_blocks
+        let working_timer = self.working_status.as_ref().is_some_and(|status| {
+            status.activity_started_at.is_some() || status.retry_activity.is_some()
+        });
+        working_timer || self.active_event_blocks
             .iter()
             .filter(|index| self.animation_block_is_addressable(**index))
             .any(|index| {
@@ -3853,8 +3769,14 @@ impl ShellState {
             .theme
             .resolve::<bool>("thinking_spinner")
             .unwrap_or(false);
+        let working_spinner = self.working_status.as_ref().is_some_and(|status| {
+            status
+                .extension_working
+                .as_ref()
+                .is_none_or(|working| working.component_line.is_none())
+        });
         thinking_spinner
-            && self
+            && (working_spinner || self
                 .active_event_blocks
                 .iter()
                 .filter(|index| self.animation_block_is_addressable(**index))
@@ -3865,7 +3787,7 @@ impl ShellState {
                             if !reasoning.finished && !reasoning.reasoning_expanded
                                 && reasoning.extension_working.as_ref().is_none_or(|working| working.component_line.is_none())
                     )
-                })
+                }))
     }
 
     /// Advance only the braille thinking spinner. Unlike the shared event-dot
@@ -5014,6 +4936,7 @@ impl InteractiveShell {
             .run
             .begin_route(&provider_status, provider, model)
             .expect("a new prompt is accepted only after the previous run terminates");
+        state.run_transcript_start = state.next_transcript_commit_id.0;
         state.open_working_status();
         id
     }
@@ -5035,12 +4958,8 @@ impl InteractiveShell {
         if state.run.current_id() != Some(id) {
             return;
         }
-        if let Some(index) = state.active_reasoning {
-            if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index) {
-                if block.retry_activity.take().is_some() {
-                    state.touch_block(index);
-                }
-            }
+        if let Some(status) = &mut state.working_status {
+            status.retry_activity = None;
         }
         state.run.set_preparing(id, summary);
     }
@@ -5082,6 +5001,7 @@ impl InteractiveShell {
     }
 
     fn append_outcome(state: &mut ShellState, outcome: RunOutcome) {
+        state.working_status = None;
         state.provisional_blocks.clear();
         if let Some(run) = state.run.current() {
             state.session_work_elapsed = state
@@ -5089,6 +5009,17 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
+        let start = state
+            .transcript_commit_ids
+            .partition_point(|id| *id < state.run_transcript_start);
+        for index in start..state.transcript.len() {
+            if let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[index] {
+                if reasoning.preserve_reasoning_summary {
+                    reasoning.preserve_reasoning_summary = false;
+                    state.touch_block(index);
+                }
+            }
+        }
         if state.turn_requested_at.is_some() && !state.turn_generation_settled {
             // An unfinished generation attempt has no matching terminal count
             // and duration. Earlier responses cannot masquerade as complete.
@@ -5209,11 +5140,14 @@ impl InteractiveShell {
                 | AgentEvent::TurnFinished { .. }
                 | AgentEvent::RunFinished { .. }
         ) {
-            if let Some(index) = state.active_reasoning {
-                if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index) {
-                    if block.retry_activity.take().is_some() {
-                        state.touch_block(index);
-                    }
+            if let Some(status) = &mut state.working_status {
+                status.retry_activity = None;
+                if status
+                    .reasoning_heading
+                    .as_deref()
+                    .is_some_and(is_provider_lifecycle_status)
+                {
+                    status.reasoning_heading = Some("Working".into());
                 }
             }
         }
@@ -5304,19 +5238,14 @@ impl InteractiveShell {
                     ..
                 } = event
                 {
-                    if let Some(index) = state.active_reasoning {
-                        if let Some(TranscriptBlock::Reasoning(block)) =
-                            state.transcript.get_mut(index)
-                        {
-                            block.retry_activity = Some(assistant_block::RetryActivity {
-                                operation: None,
-                                attempt: *attempt,
-                                max_attempts: Some(*max_attempts),
-                                delay: *delay,
-                                observed_at: Instant::now(),
-                            });
-                            state.touch_block(index);
-                        }
+                    if let Some(block) = &mut state.working_status {
+                        block.retry_activity = Some(assistant_block::RetryActivity {
+                            operation: None,
+                            attempt: *attempt,
+                            max_attempts: Some(*max_attempts),
+                            delay: *delay,
+                            observed_at: Instant::now(),
+                        });
                     }
                 }
                 state.turn_generation_started_at = None;
@@ -5332,37 +5261,29 @@ impl InteractiveShell {
                 // Auxiliary recovery updates only its mutable activity. It must
                 // never discard or re-finalize the main answer's blocks.
                 state.open_working_status();
-                if let Some(index) = state.active_reasoning {
-                    if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index)
-                    {
-                        block.retry_activity = Some(assistant_block::RetryActivity {
-                            operation: Some(*operation),
-                            attempt: *attempt,
-                            max_attempts: *max_attempts,
-                            delay: *delay,
-                            observed_at: Instant::now(),
-                        });
-                        state.touch_block(index);
-                    }
+                if let Some(block) = &mut state.working_status {
+                    block.retry_activity = Some(assistant_block::RetryActivity {
+                        operation: Some(*operation),
+                        attempt: *attempt,
+                        max_attempts: *max_attempts,
+                        delay: *delay,
+                        observed_at: Instant::now(),
+                    });
                 }
             }
             AgentEvent::ProviderWaitingForNetwork { attempt, delay, .. } => {
                 // A definitely pre-send failure owns no provisional answer.
                 // In particular, do not invalidate unrelated/auxiliary output.
                 state.open_working_status();
-                if let Some(index) = state.active_reasoning {
-                    if let Some(TranscriptBlock::Reasoning(block)) = state.transcript.get_mut(index)
-                    {
-                        block.reasoning_heading = Some("Working".into());
-                        block.retry_activity = Some(assistant_block::RetryActivity {
-                            operation: None,
-                            attempt: *attempt,
-                            max_attempts: None,
-                            delay: *delay,
-                            observed_at: Instant::now(),
-                        });
-                        state.touch_block(index);
-                    }
+                if let Some(block) = &mut state.working_status {
+                    block.reasoning_heading = Some("Working".into());
+                    block.retry_activity = Some(assistant_block::RetryActivity {
+                        operation: None,
+                        attempt: *attempt,
+                        max_attempts: None,
+                        delay: *delay,
+                        observed_at: Instant::now(),
+                    });
                 }
             }
             AgentEvent::SteeringDelivered { messages } => {
@@ -5407,6 +5328,7 @@ impl InteractiveShell {
                 // beside the replacement compacted context.
                 state.discard_streaming_blocks();
                 state.run_label = "compacting".into();
+                state.working_status = None;
                 state.open_activity_status(Some("Compacting context"), false);
                 state.turn_generation_started_at = None;
                 state.turn_streamed_output_bytes = 0;
@@ -5902,11 +5824,8 @@ impl InteractiveShell {
             prompt_color,
             persisted: false,
         });
-        // Closing the streaming blocks removed the turn's transient status row,
-        // and the prompt was appended after it. Reopen the liveness row below
-        // the prompt the reader just submitted: an active run must show its
-        // `Working`/`Thinking` status immediately, not only from the provider's
-        // first event onward.
+        // Submission preserves the composer-adjacent run status, independently
+        // of the prompt and any previous streaming blocks.
         if state.run.is_active() {
             state.open_working_status();
         }
@@ -9713,6 +9632,7 @@ impl InteractiveShell {
         state.hidden_hydrated_subagent_calls.clear();
         state.hydrated_pending_subagent_calls.clear();
         state.refresh_subagent_committed_costs(session);
+        state.working_status = None;
         state.close_streaming_blocks();
         state.jump_to_tail();
         state.last_turn_usage = checkpoint_usage;

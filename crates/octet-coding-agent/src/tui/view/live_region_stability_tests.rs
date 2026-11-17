@@ -59,6 +59,13 @@ fn fixture(
         shell.notice(format!("HISTORY-{index}"));
     }
     shell.begin_run("fixture");
+    shell
+        .state
+        .borrow_mut()
+        .working_status
+        .as_mut()
+        .unwrap()
+        .activity_started_at = Some(Instant::now() + Duration::from_secs(3600));
     for block in &mut shell.state.borrow_mut().transcript {
         if let TranscriptBlock::Reasoning(reasoning) = block {
             reasoning.activity_started_at = Some(Instant::now() + Duration::from_secs(3600));
@@ -86,6 +93,235 @@ fn history_positions(rows: &[String]) -> Vec<(usize, String)> {
         .filter(|(_, row)| row.contains("HISTORY-"))
         .map(|(index, row)| (index, row.clone()))
         .collect()
+}
+
+#[test]
+fn working_slot_stays_below_reasoning_and_tools_for_the_entire_run() {
+    // Pi compatibility: packages/coding-agent/src/modes/interactive/
+    // interactive-mode.ts:2413-2423,3490-3503,3714-3726
+    // owns status separately from chat, retaining it through thinking/tools.
+    for isolated in [false, true] {
+        for component_line in [true, false] {
+            for expanded in [true, false] {
+                let (width, height) = (80, 32);
+                let (mut shell, component) = fixture(width, height, isolated);
+                shell.set_thinking_expanded(expanded);
+                if component_line {
+                    shell.set_extension_ui(ShellExtensionUi {
+                        working: Some(ShellExtensionWorking {
+                            component_line: Some("◟ Thoda time lagega boss...".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                }
+                let mut previous = frame(&component, width);
+                let working_label = if component_line {
+                    "Thoda time"
+                } else {
+                    "Working"
+                };
+                let working_row = previous
+                    .iter()
+                    .position(|row| row.contains(working_label))
+                    .unwrap();
+                let mut paint = |shell: &mut InteractiveShell| {
+                    {
+                        let mut state = shell.state.borrow_mut();
+                        if let Some(index) = state.active_reasoning {
+                            if let TranscriptBlock::Reasoning(reasoning) =
+                                &mut state.transcript[index]
+                            {
+                                let future = Instant::now() + Duration::from_secs(3600);
+                                reasoning.activity_started_at = Some(future);
+                                reasoning.reasoning_started_at = Some(future);
+                            }
+                        }
+                    }
+                    let rows = frame(&component, width);
+                    assert_eq!(
+                        rows.iter()
+                            .filter(|row| row.contains(working_label))
+                            .count(),
+                        1,
+                        "{isolated}/{component_line}/{expanded}: {rows:?}"
+                    );
+                    assert_eq!(
+                        rows.iter().position(|row| row.contains(working_label)),
+                        Some(working_row),
+                        "working slot moved: {previous:?} -> {rows:?}"
+                    );
+                    for (old_row, text) in history_positions(&previous) {
+                        if let Some(row) = rows.iter().position(|current| current == &text) {
+                            assert!(
+                                row <= old_row,
+                                "history moved down: {previous:?} -> {rows:?}"
+                            );
+                        }
+                    }
+                    previous = rows;
+                    shell.state.borrow_mut().advance_status_timer();
+                    assert_eq!(frame(&component, width), previous);
+                };
+                for cycle in 0..2 {
+                    shell.on_agent_event(&AgentEvent::OutputDelta {
+                        channel: OutputChannel::Reasoning,
+                        text: "# Tracing loading reset paths\n\n".into(),
+                    });
+                    paint(&mut shell);
+                    shell.on_agent_event(&AgentEvent::OutputDelta {
+                        channel: OutputChannel::Reasoning,
+                        text: "# Checking stale cache behavior\n\n".into(),
+                    });
+                    paint(&mut shell);
+                    if component_line {
+                        shell.set_extension_ui(ShellExtensionUi {
+                            working: Some(ShellExtensionWorking {
+                                component_line: Some(format!(
+                                    "◞ Thoda time lagega boss... {cycle}"
+                                )),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        });
+                        paint(&mut shell);
+                    }
+                    for text in ["Continuing investigation.", " Checking next tool."] {
+                        shell.on_agent_event(&AgentEvent::OutputDelta {
+                            channel: OutputChannel::Text,
+                            text: text.into(),
+                        });
+                        paint(&mut shell);
+                    }
+                    // The durable assistant boundary closes model output
+                    // before the independently delivered tool-start event.
+                    shell.on_agent_event(&AgentEvent::TurnFinished {
+                        message: octet_ai::AssistantMessage {
+                            content: vec![octet_ai::AssistantPart::Text(
+                                "Continuing investigation. Checking next tool.".into(),
+                            )],
+                            model: octet_ai::ModelId("fixture".into()),
+                            protocol: octet_ai::Protocol::OpenAiResponses,
+                        },
+                        stop_reason: octet_ai::StopReason::ToolUse,
+                        turn_cost: None,
+                        usage: Default::default(),
+                        turn_usage: Default::default(),
+                        session_cost_microdollars: None,
+                        run_cost_microdollars: 0,
+                    });
+                    paint(&mut shell);
+                    let id = ToolCallId(format!("cycle-{cycle}"));
+                    shell.on_agent_event(&AgentEvent::ToolStarted {
+                        id: id.clone(),
+                        name: "bash".into(),
+                        args: serde_json::json!({"command":"true"}),
+                    });
+                    paint(&mut shell);
+                    shell.on_agent_event(&AgentEvent::ToolFinished {
+                        id,
+                        result: Ok(octet_agent::ToolOutput::new(
+                            "exit=0 duration=10ms\n(no output)",
+                        )),
+                        duration: Duration::from_millis(10),
+                    });
+                    paint(&mut shell);
+                    shell.on_agent_event(&AgentEvent::TurnStarted);
+                    paint(&mut shell);
+                }
+                shell.on_agent_event(&AgentEvent::RunFinished {
+                    reason: octet_agent::FinishReason::Completed,
+                    head: octet_agent::EntryId("fixture".into()),
+                });
+                assert!(!frame(&component, width)
+                    .iter()
+                    .any(|row| row.contains(working_label)));
+            }
+        }
+    }
+}
+
+#[test]
+fn working_slot_keeps_composer_and_completion_hits_on_painted_rows() {
+    let cell = |rows: &[String], text: &str| {
+        rows.iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.find(text)
+                    .map(|column| (row as u16, visible_width(&line[..column]) as u16))
+            })
+            .unwrap_or_else(|| panic!("missing {text:?}: {rows:?}"))
+    };
+    for threaded in [false, true] {
+        for component_line in [false, true] {
+            let (mut shell, component) = fixture(40, 24, true);
+            shell.state.borrow_mut().render_threaded = threaded;
+            shell.state.borrow_mut().editor.set_text("editable draft");
+            if component_line {
+                shell.set_extension_ui(ShellExtensionUi {
+                    working: Some(ShellExtensionWorking {
+                        component_line: Some("◟ Working fixture".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+            let rows = frame(&component, 40);
+            shell.state.frame_written_at(None);
+            let working = cell(&rows, "Working").0;
+            let (row, column) = cell(&rows, "editable");
+            assert_eq!(
+                shell
+                    .state
+                    .borrow()
+                    .composer_pointer_geometry()
+                    .unwrap()
+                    .composer
+                    .offset(row, column, true),
+                Some(0)
+            );
+            assert!(shell.begin_composer_pointer(row, column, false));
+            shell.on_agent_event(&AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "Streaming above the working slot".into(),
+            });
+            let rows = frame(&component, 40);
+            shell.state.frame_written_at(None);
+            assert_eq!(cell(&rows, "Working").0, working);
+            assert_eq!(cell(&rows, "editable"), (row, column));
+            shell.end_composer_pointer(row, column);
+            assert_eq!(shell.state.borrow().editor.cursor(), 0);
+
+            shell.state.borrow_mut().extension_commands =
+                vec![("fixture-command".into(), "Fixture".into())].into();
+            shell.state.borrow_mut().editor.set_text("/fixture-");
+            let rows = frame(&component, 40);
+            shell.state.frame_written_at(None);
+            let (row, column) = cell(&rows, "fixture-command");
+            assert!(shell.begin_composer_pointer(row, column, false));
+            shell.end_composer_pointer(row, column);
+            assert_eq!(shell.pending(), "/fixture-command ");
+        }
+    }
+}
+
+#[test]
+fn collapsed_reasoning_completion_preserves_rows_at_inline_hint_widths() {
+    for width in [32, 40, 48, 64, 80] {
+        let (mut shell, component) = fixture(width, 24, true);
+        shell.on_agent_event(&AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "A private trace without a summary heading".into(),
+        });
+        let before = frame(&component, width);
+        shell.state.borrow_mut().finish_turn_streaming_blocks();
+        let after = frame(&component, width);
+        assert_eq!(
+            history_positions(&after),
+            history_positions(&before),
+            "completion changed row geometry at width {width}: {before:?} -> {after:?}"
+        );
+    }
 }
 
 #[test]

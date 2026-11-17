@@ -23,16 +23,7 @@ fn pending_tool_tail(
     chrome: &ShellChrome,
     width: u16,
 ) -> Option<(usize, Vec<String>)> {
-    let last = state.transcript.len().checked_sub(1)?;
-    // The live run status trails an ordinary pending call. It is chrome-like
-    // mutable content, not an unrelated answer that disqualifies that call.
-    let index = if matches!(&state.transcript[last], TranscriptBlock::Reasoning(reasoning)
-        if !reasoning.finished && reasoning.activity_started_at.is_some())
-    {
-        last.checked_sub(1)?
-    } else {
-        last
-    };
+    let index = state.transcript.len().checked_sub(1)?;
     let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
         return None;
     };

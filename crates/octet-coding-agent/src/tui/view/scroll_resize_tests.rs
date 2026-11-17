@@ -198,12 +198,15 @@ fn threaded_working_clocks_remain_live_after_width_reflow() {
         "visible Working must keep its elapsed clock after reflow"
     );
     let phase = state.status_shimmer_frame;
-    let index = state.active_reasoning.unwrap();
-    let revision = state.block_revisions[index];
+    let revisions = state.block_revisions.clone();
+    assert!(state.working_status.is_some());
     state.advance_status_shimmer_by(2);
     state.advance_status_timer();
     assert_eq!(state.status_shimmer_frame, phase + 2);
-    assert_eq!(state.block_revisions[index], revision + 2);
+    assert_eq!(
+        state.block_revisions, revisions,
+        "status chrome does not dirty history"
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ use super::{fit_line, semantic_separator, wrap_hanging, ShellState};
 #[derive(Clone)]
 pub(super) struct ShellChrome {
     pub(super) header: Vec<String>,
+    pub(super) working: Vec<String>,
     pub(super) extension_above: Vec<String>,
     pub(super) composer: Vec<String>,
     pub(super) extension_below: Vec<String>,
@@ -237,6 +238,7 @@ fn shell_chrome_with_composer_rows(
         return (
             ShellChrome {
                 header,
+                working: Vec::new(),
                 error,
                 composer,
                 transcript_rows: remaining.saturating_sub(panel.len()),
@@ -256,6 +258,8 @@ fn shell_chrome_with_composer_rows(
     let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width);
     let mut composer = render_chrome_composer(state, width, now);
     let composer_rows = composer.len();
+    let mut working = render_working_status(state, width);
+    working.truncate(rows.saturating_sub(header.len() + composer.len() + 1));
     if state.transcript_search_active() {
         // The query, not a tall hidden draft/error, owns the only cursor.
         composer.truncate(rows.saturating_sub(header.len() + 2));
@@ -271,6 +275,7 @@ fn shell_chrome_with_composer_rows(
             .len()
             .saturating_add(error.len())
             .saturating_add(composer.len())
+            .saturating_add(working.len())
             .saturating_add(1),
     );
     extension_above.truncate(extension_limit);
@@ -292,7 +297,8 @@ fn shell_chrome_with_composer_rows(
             .saturating_add(error.len())
             .saturating_add(extension_above.len())
             .saturating_add(composer.len())
-            .saturating_add(extension_below.len()),
+            .saturating_add(extension_below.len())
+            .saturating_add(working.len()),
     );
 
     // A short native transcript stays above the picker rather than becoming
@@ -346,6 +352,7 @@ fn shell_chrome_with_composer_rows(
     (
         ShellChrome {
             header,
+            working,
             extension_above,
             composer,
             extension_below,
@@ -358,6 +365,53 @@ fn shell_chrome_with_composer_rows(
         },
         composer_rows,
     )
+}
+
+/// Reuse the existing activity presenter, but place liveness in chrome rather
+/// than promoting its empty source into a thinking/assistant transcript block.
+fn render_working_status(state: &ShellState, width: u16) -> Vec<String> {
+    let Some(status) = &state.working_status else {
+        return Vec::new();
+    };
+    let block = super::TranscriptBlock::Reasoning(status.clone());
+    let mut rich = state.rich_renderer.borrow_mut();
+    let rich = rich.get_or_insert_with(|| state.theme.rich_renderer());
+    let mut reasoning = state.reasoning_renderer.borrow_mut();
+    let reasoning = reasoning.get_or_insert_with(|| state.theme.reasoning_renderer());
+    let mut rows = super::transcript_render::render_block_planned_with_rainbow(
+        None,
+        &block,
+        &state.theme,
+        rich,
+        reasoning,
+        width,
+        false,
+        state.event_spinner_frame,
+        state.status_shimmer_frame,
+        state.status_rainbow_strength(),
+        false,
+    )
+    .lines;
+    // The viewport/native transcript seam supplies the leading breathing row.
+    let leading = rows
+        .iter()
+        .position(|row| !sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
+        .unwrap_or(rows.len());
+    rows.drain(
+        ..if state.transcript.is_empty() {
+            leading.saturating_sub(1)
+        } else {
+            leading
+        },
+    );
+    if !rows.is_empty()
+        && rows
+            .last()
+            .is_some_and(|row| !sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
+    {
+        rows.push(String::new());
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -469,6 +523,7 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     lines.extend(chrome.panel);
     lines.extend(chrome.extension_above);
     lines.extend(chrome.subagents);
+    lines.extend(chrome.working);
     lines.extend(chrome.composer);
     lines.extend(chrome.suggestions);
     lines.extend(chrome.extension_below);
@@ -489,6 +544,7 @@ pub(super) fn append_chrome(lines: &mut Vec<String>, chrome: ShellChrome, separa
     lines.extend(chrome.panel);
     lines.extend(chrome.extension_above);
     lines.extend(chrome.subagents);
+    lines.extend(chrome.working);
     lines.extend(chrome.composer);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
     // well as in the application-owned viewport above.
@@ -500,6 +556,7 @@ pub(super) fn shell_chrome_rows(chrome: &ShellChrome) -> usize {
     chrome
         .header
         .len()
+        .saturating_add(chrome.working.len())
         .saturating_add(chrome.extension_above.len())
         .saturating_add(chrome.error.len())
         .saturating_add(chrome.pending.len())

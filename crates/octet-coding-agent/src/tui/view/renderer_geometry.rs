@@ -333,6 +333,7 @@ impl RenderedGeometry {
                     + chrome.panel.len()
                     + chrome.extension_above.len()
                     + chrome.subagents.len()
+                    + chrome.working.len()
                     + chrome.composer.len(),
                 chrome.suggestions.len(),
                 fence.input,
@@ -346,7 +347,8 @@ impl RenderedGeometry {
                     + chrome.pending.len()
                     + chrome.panel.len()
                     + chrome.extension_above.len()
-                    + chrome.subagents.len(),
+                    + chrome.subagents.len()
+                    + chrome.working.len(),
                 chrome.composer.len(),
             )),
             panel: PanelRenderReceipt::capture(state, &chrome.panel),

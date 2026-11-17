@@ -65,6 +65,8 @@
 - Pi editors render from bounded local native observations while Rust retains editing and history authority.
 - Splash clicks keep the byte mark fully painted and text selection confined to the clicked word.
 - Small upward scrolls keep the chosen transcript position through repaints, streaming and live-row height changes.
+- Composer clicks and completion selection use the painted rows beneath the independent working indicator during streaming.
+- Working indicators keep one independent slot below reasoning, text and tools until the run settles.
 - Shell cards keep their cached Pi renderer geometry until the final result frame is ready.
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.

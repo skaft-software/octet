@@ -64,6 +64,7 @@ pub(super) fn shell_chrome(
     {
         return builtin_shell_chrome::ShellChrome {
             header: Vec::new(),
+            working: Vec::new(),
             extension_above: Vec::new(),
             composer: Vec::new(),
             extension_below: Vec::new(),
@@ -125,6 +126,7 @@ pub(super) fn shell_chrome(
         }
     }
     let fixed = chrome.header.len()
+        + chrome.working.len()
         + chrome.composer.len()
         + chrome.error.len()
         + chrome.panel.len()
@@ -236,24 +238,19 @@ impl super::InteractiveShell {
 
 impl ShellState {
     pub(super) fn sync_extension_reasoning(&mut self, labels_changed: bool) {
-        // Animated component snapshots must not walk settled session history.
-        // Only an explicit hidden-label change restyles completed reasoning.
-        let indices: Vec<_> = if labels_changed {
-            (0..self.transcript.len()).collect()
-        } else {
-            self.active_event_blocks.clone()
-        };
+        if let Some(status) = &mut self.working_status {
+            status.extension_working = self.extension_ui.working.clone();
+        }
+        // Loader frames only replace local chrome. Only a hidden-label change
+        // may restyle actual transcript reasoning, never an animation tick.
+        if !labels_changed {
+            return;
+        }
         let mut changed = Vec::new();
-        for index in indices {
-            if let super::TranscriptBlock::Reasoning(reasoning) = &mut self.transcript[index] {
-                if reasoning.extension_working != self.extension_ui.working
-                    || reasoning.hidden_thinking_label != self.extension_ui.hidden_thinking_label
-                {
-                    reasoning.extension_working = self.extension_ui.working.clone();
-                    reasoning.hidden_thinking_label =
-                        self.extension_ui.hidden_thinking_label.clone();
-                    changed.push(index);
-                }
+        for (index, block) in self.transcript.iter_mut().enumerate() {
+            if let super::TranscriptBlock::Reasoning(reasoning) = block {
+                reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
+                changed.push(index);
             }
         }
         for index in changed {

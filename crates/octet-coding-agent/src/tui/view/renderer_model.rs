@@ -541,6 +541,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         overlay,
         active_text,
         active_reasoning,
+        working_status,
         application_viewport_requested,
         scroll_from_bottom,
         viewport_anchor,

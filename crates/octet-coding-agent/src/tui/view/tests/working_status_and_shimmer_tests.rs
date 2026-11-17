@@ -8,10 +8,7 @@ fn active_run_starts_with_working_until_reasoning_is_observed() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
     shell.begin_run("codex");
-    let rendered = shell
-        .state
-        .borrow()
-        .rendered_transcript(80)
+    let rendered = rendered_with_working(&shell.state.borrow(), 80)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
@@ -22,7 +19,7 @@ fn active_run_starts_with_working_until_reasoning_is_observed() {
 }
 
 #[test]
-fn working_clock_addressability_starts_at_the_label_not_its_breathing_row() {
+fn working_chrome_clocks_stay_addressable_independently_of_saved_history() {
     for source in [
         None,
         Some("[surfaces.reasoning]\nchrome = \"card\"\npadding = 1"),
@@ -32,34 +29,26 @@ fn working_clock_addressability_starts_at_the_label_not_its_breathing_row() {
             crate::tui::theme::test_theme_from_source,
         );
         let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.notice("history");
         shell.begin_run("openai");
         let mut state = shell.state.borrow_mut();
-        let _ = state.rendered_transcript(80);
-        let index = state.active_reasoning.unwrap();
-        let label = {
-            let cache = state.transcript_cache.borrow();
-            let geometry = cache.block_geometries[index];
-            cache.block_starts[index] + geometry.transition_rows + geometry.leading_rows
-        };
+        let revisions = state.block_revisions.clone();
         for threaded in [false, true] {
-            if threaded {
-                state.render_geometry =
-                    Some(Arc::new(renderer_geometry::RenderedGeometry::capture(
-                        &state,
-                        renderer_geometry::GeometryFence::capture(&state),
-                    )));
-                let id = state.transcript_commit_ids[index];
-                // The block-start receipt excludes the saved breathing row.
-                // Its visible label still owns the status clock in both lanes.
-                state.rendered_animation_addressability.insert(id, false);
-                state.render_threaded = true;
-            }
-            state.native_animation_viewport_top.set(Some(label));
-            assert!(state.animation_block_is_addressable(index));
+            state.render_threaded = threaded;
+            state.native_animation_viewport_top.set(Some(usize::MAX));
+            assert!(state.active_reasoning.is_none());
             assert!(state.has_active_status_shimmer());
-            state.native_animation_viewport_top.set(Some(label + 1));
-            assert!(!state.animation_block_is_addressable(index));
-            assert!(!state.has_active_status_shimmer());
+            assert!(state.has_active_status_timer());
+            state.advance_status_shimmer();
+            state.advance_status_timer();
+            assert_eq!(
+                state.block_revisions, revisions,
+                "chrome must not dirty history"
+            );
+            assert!(shell_chrome(&state, 80, Instant::now())
+                .working
+                .iter()
+                .any(|row| strip_terminal_sequences(row).contains("Working")));
         }
     }
 }
@@ -118,10 +107,7 @@ fn collapsed_thinking_shimmers_on_the_shared_working_phase() {
     let run_id = shell.begin_run("codex");
 
     let row = |shell: &InteractiveShell, label: &str| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
+        rendered_with_working(&shell.state.borrow(), 80)
             .iter()
             .find(|line| strip_terminal_sequences(line).contains(label))
             .cloned()
@@ -145,8 +131,7 @@ fn collapsed_thinking_shimmers_on_the_shared_working_phase() {
     }
     let working = row(&shell, "Working");
 
-    // The first reasoning delta turns the same row into `Thinking`. The clock
-    // must keep running, and the label must move.
+    // Thinking grows above the independent Working slot; both keep the clock.
     shell.on_run_event(
         run_id,
         &AgentEvent::OutputDelta {
@@ -234,10 +219,7 @@ fn working_activity_shimmer_crosses_its_margin_dot() {
     shell.begin_run("codex");
 
     let raw = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
+        rendered_with_working(&shell.state.borrow(), 80)
             .iter()
             .find(|line| strip_terminal_sequences(line).contains("Working"))
             .cloned()

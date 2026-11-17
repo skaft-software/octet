@@ -1305,19 +1305,25 @@ mod scheduler_tests {
         let mut schedule = AnimationSchedule::new();
         let mut state = shell.state.borrow_mut();
         schedule.observe(&state, start);
-        let revision = state.block_revisions[0];
+        let revisions = state.block_revisions.clone();
         // Sixteen paints in 2050 ms are valid: phase follows all 25 elapsed
         // ticks, while each late wake invalidates the status only once.
-        for (index, ms) in (1..=15).map(|step| step * 128).chain([2050]).enumerate() {
+        for ms in (1..=15).map(|step| step * 128).chain([2050]) {
             let now = start + Duration::from_millis(ms);
             schedule.advance(&mut state, now);
             assert_eq!(state.status_shimmer_frame as u64, ms / 80);
-            assert_eq!(state.block_revisions[0], revision + index as u64 + 1);
+            assert_eq!(
+                state.block_revisions, revisions,
+                "status chrome does not dirty transcript rows"
+            );
             schedule.advance(&mut state, now);
-            assert_eq!(state.block_revisions[0], revision + index as u64 + 1);
+            assert_eq!(
+                state.block_revisions, revisions,
+                "status chrome does not dirty transcript rows"
+            );
         }
         assert_eq!(state.status_shimmer_frame, 25);
-        assert_eq!(state.block_revisions[0], revision + 16);
+        assert_eq!(state.block_revisions, revisions);
         assert_eq!(
             schedule.remaining(start + Duration::from_millis(2050)),
             Duration::from_millis(30)
@@ -1341,9 +1347,11 @@ mod scheduler_tests {
         schedule.advance(&mut state, start + Duration::from_secs(300));
         assert_eq!(state.status_shimmer_frame, 0);
         assert_eq!(state.block_revisions[0], revisions[0]);
-        assert_eq!(state.block_revisions[1], revisions[1] + 1);
+        assert_eq!(state.block_revisions, revisions);
+        assert!(state.has_active_status_timer());
         schedule.advance(&mut state, start + Duration::from_secs(300));
-        assert_eq!(state.block_revisions[1], revisions[1] + 1);
+        assert_eq!(state.block_revisions, revisions);
+        assert!(state.has_active_status_timer());
         assert_eq!(
             schedule.remaining(start + Duration::from_secs(300)),
             RESIZE_POLL_INTERVAL
@@ -1494,7 +1502,8 @@ mod scheduler_tests {
         let revisions = state.block_revisions.clone();
         schedule.advance(&mut state, start + Duration::from_millis(3050));
         assert_eq!(state.status_shimmer_frame, 0);
-        assert_eq!(state.block_revisions[0], revisions[0] + 1);
+        assert_eq!(state.block_revisions, revisions);
+        assert!(state.has_active_status_timer());
         assert_eq!(
             schedule
                 .timer

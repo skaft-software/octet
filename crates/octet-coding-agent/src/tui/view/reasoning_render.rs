@@ -1155,6 +1155,17 @@ fn activity_status_line(
     if reasoning.retry_activity.is_some() {
         return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
     }
+    if reasoning.finished {
+        // The owning run remains interruptible. Keep the same metadata shape
+        // so completion cannot pull a separate disclosure hint inline.
+        let elapsed =
+            format_activity_duration(reasoning.reasoning_elapsed.unwrap_or_default().as_secs());
+        let separator = super::semantic_separator(theme);
+        return format!(
+            "{label} {}",
+            subdued_text(theme, &format!("({elapsed}{separator}Esc to interrupt)"))
+        );
+    }
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
@@ -1191,7 +1202,7 @@ pub(super) fn collapsed_reasoning_lines_sized(
     rainbow_strength: u16,
     width: u16,
 ) -> Vec<String> {
-    if reasoning.finished {
+    if reasoning.finished && !reasoning.preserve_reasoning_summary {
         return reasoning
             .hidden_thinking_label
             .as_ref()

@@ -844,7 +844,8 @@ fn streaming_response_dot_stays_solid_light_and_settles_solid() {
         let mut state = shell.state.borrow_mut();
         // The assistant keeps its solid provenance dot while the separate
         // Working row carries continuing run liveness.
-        assert_eq!(state.active_event_blocks, vec![0, 1]);
+        assert_eq!(state.active_event_blocks, vec![0]);
+        assert!(state.working_status.is_some());
         assert!(!event_dot_animating(&state));
         state.advance_event_dot_animation();
     }
@@ -935,16 +936,16 @@ fn reasoning_to_working_to_tool_reuses_the_cached_tail_in_long_sessions() {
     let (working_start, history_lines, generation) = {
         let state = shell.state.borrow();
         assert!(matches!(
-            state.transcript.last(),
-            Some(TranscriptBlock::Reasoning(reasoning)) if reasoning.is_working_activity()
+            state.working_status.as_deref(),
+            Some(reasoning) if reasoning.is_working_activity()
         ));
         assert!(matches!(
-            state.transcript.get(state.transcript.len() - 2),
+            state.transcript.last(),
             Some(TranscriptBlock::Reasoning(reasoning)) if reasoning.finished
         ));
         let lines = state.rendered_transcript(80);
         let cache = state.transcript_cache.borrow();
-        let working_start = *cache.block_starts.last().expect("Working block start");
+        let working_start = lines.len();
         (
             working_start,
             lines[..working_start].to_vec(),
@@ -969,7 +970,7 @@ fn reasoning_to_working_to_tool_reuses_the_cached_tail_in_long_sessions() {
             "tool admission must not force reflow"
         );
         assert_eq!(cache.lines, history_lines);
-        assert_eq!(cache.block_revisions.len() + 2, state.transcript.len());
+        assert_eq!(cache.block_revisions.len() + 1, state.transcript.len());
     }
 
     shell.apply_edit(EditAction::Char('x'));
@@ -1030,7 +1031,7 @@ fn unrendered_working_handoff_preserves_the_long_session_cache() {
         let cache = state.transcript_cache.borrow();
         assert_eq!(cache.width, Some(80), "the cache width must be retained");
         assert_eq!(cache.block_revisions.len(), cached_blocks);
-        assert_eq!(cache.block_revisions.len() + 2, state.transcript.len());
+        assert_eq!(cache.block_revisions.len() + 1, state.transcript.len());
     }
 
     shell.apply_edit(EditAction::Char('x'));

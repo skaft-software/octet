@@ -31,6 +31,21 @@ use crate::tui::theme::{TerminalBackground, ThemeSurfaceHeading};
 
 use sexy_tui_rs::CURSOR_MARKER;
 
+/// Native rows above the composer: transcript plus the independently owned
+/// working slot, joined with the same breathing seam as the shell painter.
+fn rendered_with_working(state: &ShellState, width: u16) -> Vec<String> {
+    let mut rows = state.rendered_transcript(width).clone();
+    let working = shell_chrome(state, width, Instant::now()).working;
+    if !working.is_empty() {
+        rows.extend(std::iter::repeat_n(
+            String::new(),
+            builtin_shell_chrome::ShellChrome::separator_rows(rows.last()),
+        ));
+        rows.extend(working);
+    }
+    rows
+}
+
 mod composer_geometry_and_steering_tests;
 mod document_panel_and_image_tests;
 mod footer_and_cost_tests;

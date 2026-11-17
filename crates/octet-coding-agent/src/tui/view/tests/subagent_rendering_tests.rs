@@ -129,10 +129,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
         octet_agent::AgentEvent::DelegationUpdated { snapshot }
     };
     let transcripts = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(120)
+        rendered_with_working(&shell.state.borrow(), 120)
             .iter()
             .map(|line| strip_terminal_sequences(line))
             .collect::<Vec<_>>()
@@ -187,8 +184,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
             .is_empty(),
         "the settled session roster never reappears in chrome"
     );
-    let replayed = state
-        .rendered_transcript(120)
+    let replayed = rendered_with_working(&state, 120)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
@@ -210,8 +206,7 @@ fn a_settled_subagent_roster_never_replays_under_a_later_prompt() {
     );
     // Nothing below the new prompt belongs to the settled team: the correction
     // was that EVERY further prompt replayed a completed session roster.
-    let rows = state
-        .rendered_transcript(120)
+    let rows = rendered_with_working(&state, 120)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
@@ -362,10 +357,7 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
         session: Some("agent-session:opaque".into()),
     };
     let transcript = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(120)
+        rendered_with_working(&shell.state.borrow(), 120)
             .iter()
             .map(|line| strip_terminal_sequences(line))
             .collect::<Vec<_>>()
@@ -420,8 +412,7 @@ fn an_all_completed_roster_never_opens_a_block_under_a_later_prompt() {
             .is_empty(),
         "an all-completed roster must not open a transcript block"
     );
-    let rendered = state
-        .rendered_transcript(120)
+    let rendered = rendered_with_working(&state, 120)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
@@ -554,27 +545,14 @@ fn a_new_prompt_shows_the_working_indicator_immediately() {
             |block| matches!(block, TranscriptBlock::User { text, .. } if text == "new question"),
         )
         .expect("the prompt is in the transcript");
-    let status = state
-        .transcript
-        .iter()
-        .position(|block| {
-            matches!(
-                block,
-                TranscriptBlock::Reasoning(reasoning)
-                    if reasoning.reasoning_heading.as_deref() == Some("Working")
-            )
-        })
-        .expect("the liveness row is open");
     assert_eq!(
-        status,
         prompt + 1,
-        "the working indicator must sit directly below the submitted prompt"
+        state.transcript.len(),
+        "status is not a transcript block"
     );
+    assert!(state.working_status.as_ref().unwrap().is_working_activity());
     drop(state);
-    let rows = shell
-        .state
-        .borrow()
-        .rendered_transcript(120)
+    let rows = rendered_with_working(&shell.state.borrow(), 120)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();

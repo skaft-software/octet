@@ -16,10 +16,7 @@ fn provider_retry_countdown_is_typed_and_stops_at_attempt_start_and_cancellation
     );
     {
         let state = shell.state.borrow();
-        let TranscriptBlock::Reasoning(block) = &state.transcript[state.active_reasoning.unwrap()]
-        else {
-            panic!()
-        };
+        let block = state.working_status.as_ref().expect("retry status");
         let retry = block.retry_activity.as_ref().unwrap();
         assert_eq!(retry.label_at(retry.observed_at), "Retrying 1/3 in 5s");
         assert_eq!(
@@ -123,8 +120,12 @@ fn provider_retry_activity_clears_on_output_and_compaction_and_survives_resize()
             );
         }
         let state = shell.state.borrow();
-        assert!(state.transcript.iter().all(|block| !matches!(block,
-            TranscriptBlock::Reasoning(block) if block.retry_activity.is_some())));
+        assert!(state
+            .working_status
+            .as_ref()
+            .unwrap()
+            .retry_activity
+            .is_none());
     }
 }
 
@@ -202,15 +203,13 @@ fn provider_retry_network_wait_replaces_one_activity_without_rollback() {
         assert!(frame.contains("independent network notice"));
         assert!(frame.contains("accepted answer"));
         assert!(state.provisional_blocks.is_empty());
-        assert_eq!(
-            state
-                .transcript
-                .iter()
-                .filter(|block| matches!(block,
-            TranscriptBlock::Reasoning(block) if block.retry_activity.is_some()))
-                .count(),
-            1
-        );
+        assert!(state
+            .working_status
+            .as_ref()
+            .unwrap()
+            .retry_activity
+            .is_some());
+        assert!(state.transcript.iter().all(|block| !matches!(block, TranscriptBlock::Reasoning(block) if block.retry_activity.is_some())));
     }
     shell.on_run_event(id, &AgentEvent::TurnStarted);
     assert!(
@@ -242,10 +241,7 @@ fn provider_retry_auxiliary_activity_preserves_answer_and_compaction_phase() {
             let owned = shell.state.borrow().provisional_blocks.clone();
             if operation != ProviderOperation::TerminalGate {
                 let mut state = shell.state.borrow_mut();
-                let index = state.active_reasoning.unwrap();
-                let TranscriptBlock::Reasoning(block) = &mut state.transcript[index] else {
-                    panic!()
-                };
+                let block = state.working_status.as_mut().expect("compaction status");
                 block.reasoning_heading = Some("Compacting context".into());
                 state.run_label = "compacting".into();
             }

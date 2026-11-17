@@ -190,7 +190,9 @@ a new undo boundary instead of keeping an unbounded copy.
 
 With mouse capture on, a left click in the native composer places the cursor at
 that visible character, including wrapped or scrolled multiline drafts and while
-an answer streams. Wide characters and combining marks stay intact. Attachment
+an answer streams. Composer and completion hit boxes include the working slot
+above them and keep the pressed geometry through streaming repaints. Wide
+characters and combining marks stay intact. Attachment
 and large-paste chips snap to their nearest boundary. Clicking beyond a wrapped
 segment stops at its last character; beyond a logical line it goes to line end.
 Dragging over composer text selects it without moving the edit cursor; release
@@ -405,8 +407,11 @@ for every trace in the transcript and for new ones. It is separate from
 Ctrl+O, which owns tool and shell output. In native Tern, each key also resets
 only its own mode's section clicks, preserving the other mode's disclosure.
 
-Each run shows a shimmering `Working` row, and a trailing
-`Working (<elapsed> · Esc to interrupt)` stays until the run settles. Retry
+Each run owns one independent status slot below the transcript and above the
+composer. `Working (<elapsed> · Esc to interrupt)` stays there while reasoning,
+text and tools grow above it, including between provider turns. A Pi extension's
+working component updates that same slot rather than replacing reasoning rows.
+Only run settlement removes it. Retry
 status keeps the interrupt hint but leaves out the run-elapsed counter, even
 after its backoff countdown reaches zero, so two clocks never compete on one
 row. While the model reasons, the bold `Thinking` label shimmers more quietly
@@ -435,8 +440,9 @@ glint, on known dark and light TrueColor and ANSI256 terminals. Activity shimmer
 is foreground-only and parks briefly after crossing the whole label. Set
 `OCTET_SHIMMER=classic` for the old stepped field. ANSI16, unknown-background,
 reduced-motion and no-color paths keep the compatibility or static behavior.
-Expanded reasoning keeps its indent, with no margin dot or extra first bullet,
-and completed reasoning disappears again once collapsed.
+Expanded reasoning keeps its indent, with no margin dot or extra first bullet.
+Collapsed summaries keep their rows through provider-turn and tool handoffs;
+completed reasoning disappears when the run settles unless expanded.
 
 </details>
 

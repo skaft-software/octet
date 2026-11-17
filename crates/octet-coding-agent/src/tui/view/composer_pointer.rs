@@ -98,7 +98,8 @@ impl InteractiveShell {
                         + chrome.pending.len()
                         + chrome.panel.len()
                         + chrome.extension_above.len()
-                        + chrome.subagents.len(),
+                        + chrome.subagents.len()
+                        + chrome.working.len(),
                     chrome.composer.len(),
                 ),
             ))

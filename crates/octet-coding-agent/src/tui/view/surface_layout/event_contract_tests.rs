@@ -1002,7 +1002,7 @@ fn subagent_spacing_live_band_disclosure_and_metrics_keep_canonical_frame_rows()
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
                 }
             }
-            let roster = shell.state.borrow_mut().push_block(subagents_with_worker());
+            shell.state.borrow_mut().push_block(subagents_with_worker());
             let check_frame = |shell: &mut InteractiveShell| {
                 shell.render_written_test_frame();
                 let frame = shell.tui.as_ref().unwrap().rendered_frame().to_vec();
@@ -1066,6 +1066,11 @@ fn subagent_spacing_live_band_disclosure_and_metrics_keep_canonical_frame_rows()
                 let geometry = check_frame(&mut shell);
                 for tokens in [999, 1_000, 10_000] {
                     let mut state = shell.state.borrow_mut();
+                    let roster = state
+                        .transcript
+                        .iter()
+                        .position(|block| matches!(block, TranscriptBlock::Subagents(_)))
+                        .unwrap();
                     let TranscriptBlock::Subagents(summary) = &mut state.transcript[roster] else {
                         unreachable!()
                     };

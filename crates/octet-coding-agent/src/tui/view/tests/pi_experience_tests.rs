@@ -179,7 +179,7 @@ fn pi_working_spinner_advances_without_label_shimmer_and_stops_on_settlement() {
         let mut state = shell.state.borrow_mut();
         assert!(state.has_active_thinking_spinner());
         assert!(!state.has_active_status_shimmer());
-        let raw = state.rendered_transcript(80).join("\n");
+        let raw = rendered_with_working(&state, 80).join("\n");
         let plain = strip_terminal_sequences(&raw);
         assert!(
             plain.lines().any(|row| row.starts_with(" ⠋ Working")),
@@ -187,7 +187,7 @@ fn pi_working_spinner_advances_without_label_shimmer_and_stops_on_settlement() {
         );
         let label = raw.split_once("Working").unwrap().1.to_owned();
         state.advance_thinking_spinner(1);
-        let next = state.rendered_transcript(80).join("\n");
+        let next = rendered_with_working(&state, 80).join("\n");
         assert!(
             strip_terminal_sequences(&next).contains("⠙ Working"),
             "{next:?}"
@@ -225,7 +225,7 @@ fn pi_extension_working_frames_honor_disabled_host_animation() {
             ..Default::default()
         });
         let rows =
-            strip_terminal_sequences(&shell.state.borrow_mut().rendered_transcript(80).join("\n"));
+            strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"));
         assert!(rows.contains("Working"), "{rows}");
         assert_eq!(rows.contains("X Working"), animation, "{rows}");
     }

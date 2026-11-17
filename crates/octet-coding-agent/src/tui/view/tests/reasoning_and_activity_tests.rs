@@ -40,7 +40,7 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
 }
 
 #[test]
-fn still_working_to_thinking_keeps_the_transcript_height_stable() {
+fn still_thinking_grows_above_the_independent_working_slot() {
     let theme = crate::tui::theme::test_theme_from_source(include_str!(
         "../../../../../../examples/themes/Still.toml"
     ));
@@ -48,10 +48,7 @@ fn still_working_to_thinking_keeps_the_transcript_height_stable() {
     shell.set_size(160, 24);
     let run_id = shell.begin_run("openai");
     let rows = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(160)
+        rendered_with_working(&shell.state.borrow(), 160)
             .iter()
             .map(|row| strip_terminal_sequences(row).to_owned())
             .collect::<Vec<_>>()
@@ -71,19 +68,16 @@ fn still_working_to_thinking_keeps_the_transcript_height_stable() {
         },
     );
     let thinking = rows(&shell);
-    assert_eq!(
-        thinking.len(),
-        working.len(),
-        "status promotion shifted the composer"
+    assert!(
+        thinking.len() > working.len(),
+        "reasoning must grow above Working"
     );
     assert!(
-        thinking[thinking.len() - 2].contains("Thinking"),
+        thinking[thinking.len() - 2].contains("Working"),
         "{thinking:?}"
     );
     assert!(
-        thinking
-            .last()
-            .is_some_and(|row| row.contains("Ctrl+T to expand")),
+        thinking.iter().any(|row| row.contains("Ctrl+T to expand")),
         "{thinking:?}"
     );
 
@@ -176,10 +170,7 @@ fn working_status_persists_below_running_tools_in_default_and_still() {
         let first = ToolCallId("long-bash".into());
         let second = ToolCallId("overlapping-read".into());
         let rows = |shell: &InteractiveShell| {
-            shell
-                .state
-                .borrow()
-                .rendered_transcript(100)
+            rendered_with_working(&shell.state.borrow(), 100)
                 .iter()
                 .map(|row| strip_terminal_sequences(row).to_owned())
                 .collect::<Vec<_>>()
@@ -274,10 +265,7 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_identity("codex", "gpt-5.3-codex-spark", "off");
     let run_id = shell.begin_run("codex");
-    let rendered = shell
-        .state
-        .borrow()
-        .rendered_transcript(80)
+    let rendered = rendered_with_working(&shell.state.borrow(), 80)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
@@ -294,22 +282,21 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
             text: "provider-private detail".into(),
         },
     );
-    let promoted = shell
-        .state
-        .borrow()
-        .rendered_transcript(80)
+    let promoted = rendered_with_working(&shell.state.borrow(), 80)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert_eq!(
-        promoted.len(),
-        rendered.len(),
-        "promotion moved the composer"
+    assert!(
+        promoted.len() > rendered.len(),
+        "thinking grows above the status"
     );
     assert!(promoted[0].is_empty(), "{promoted:?}");
     assert!(promoted[1].contains("Thinking"), "{promoted:?}");
     assert!(promoted[1].contains("Ctrl+T to expand"), "{promoted:?}");
-    assert!(promoted[2].is_empty(), "{promoted:?}");
+    assert!(
+        promoted.iter().any(|row| row.contains("Working")),
+        "{promoted:?}"
+    );
     assert!(!promoted.join("\n").contains("provider-private detail"));
 }
 
@@ -353,12 +340,12 @@ fn public_text_stream_keeps_exactly_one_working_row_while_the_run_is_active() {
         state.transcript.first(),
         Some(TranscriptBlock::Assistant(_))
     ));
-    assert_eq!(state.transcript.len(), 2);
+    assert_eq!(state.transcript.len(), 1);
     assert!(state.active_text.is_some());
-    assert!(state.active_reasoning.is_some());
+    assert!(state.active_reasoning.is_none());
+    assert!(state.working_status.is_some());
     assert!(state.has_active_status_shimmer());
-    let rendered = state
-        .rendered_transcript(80)
+    let rendered = rendered_with_working(&state, 80)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
@@ -390,10 +377,7 @@ fn activity_lifecycle_is_working_thinking_streaming_working_then_settled() {
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
     let rendered = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
+        rendered_with_working(&shell.state.borrow(), 80)
             .iter()
             .map(|line| strip_terminal_sequences(line))
             .collect::<Vec<_>>()
@@ -411,7 +395,7 @@ fn activity_lifecycle_is_working_thinking_streaming_working_then_settled() {
     );
     let thinking = rendered(&shell);
     assert!(thinking.iter().any(|line| line.contains("Thinking")));
-    assert!(!thinking.iter().any(|line| line.starts_with("• Working (")));
+    assert!(thinking.iter().any(|line| line.starts_with("• Working (")));
 
     shell.on_run_event(
         run_id,
@@ -492,10 +476,7 @@ fn provider_lifecycle_status_is_transient_and_cannot_regress_output() {
         },
     };
     let rendered = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
+        rendered_with_working(&shell.state.borrow(), 80)
             .iter()
             .map(|line| strip_terminal_sequences(line))
             .collect::<Vec<_>>()
@@ -592,8 +573,8 @@ fn reasoning_status_reopens_after_tools_for_the_next_model_turn() {
         },
     );
     assert!(matches!(
-        shell.state.borrow().transcript.last(),
-        Some(TranscriptBlock::Reasoning(reasoning)) if reasoning.is_working_activity()
+        shell.state.borrow().working_status.as_deref(),
+        Some(reasoning) if reasoning.is_working_activity()
     ));
     shell.on_run_event(
         run_id,
@@ -604,10 +585,11 @@ fn reasoning_status_reopens_after_tools_for_the_next_model_turn() {
         },
     );
     let state = shell.state.borrow();
-    let index = state.active_reasoning.expect("next-turn reasoning status");
-    let TranscriptBlock::Reasoning(reasoning) = &state.transcript[index] else {
-        panic!("reasoning status expected")
-    };
+    let reasoning = state
+        .working_status
+        .as_ref()
+        .expect("continuous run status");
+    assert!(state.active_reasoning.is_none());
     assert!(reasoning.text.is_empty());
     assert!(!reasoning.finished);
     assert_eq!(state.run_context_estimate, Some((14_008, 128_000)));
@@ -687,7 +669,7 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
 }
 
 #[test]
-fn a_new_reasoning_event_retires_the_previous_ctrl_t_hint() {
+fn a_new_reasoning_event_preserves_the_previous_summary_geometry() {
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
     shell.on_run_event(
@@ -721,7 +703,7 @@ fn a_new_reasoning_event_retires_the_previous_ctrl_t_hint() {
         .join("\n");
     assert_eq!(
         rendered.matches("Ctrl+T to expand").count(),
-        1,
+        2,
         "{rendered}"
     );
     shell.toggle_thinking();

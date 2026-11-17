@@ -144,6 +144,8 @@ pub(super) struct AssistantBlock {
     /// model switches mid-session.
     pub(super) model_lab: Option<crate::tui::theme::ModelLab>,
     pub(super) finished: bool,
+    /// Keep a closed provider turn's collapsed summary stable until its run ends.
+    pub(super) preserve_reasoning_summary: bool,
     /// Reasoning is retained verbatim but stays out of the mutable native
     /// scrollback tail until the user explicitly asks to inspect it.
     pub(super) reasoning_expanded: bool,
@@ -153,15 +155,14 @@ pub(super) struct AssistantBlock {
     /// Frozen reasoning duration after the block closes.
     pub(super) reasoning_elapsed: Option<Duration>,
     pub(super) retry_activity: Option<RetryActivity>,
-    /// Start of the owning root run. Unlike reasoning timing, this survives
-    /// steering, provider turns, and status-row replacement.
+    /// Start of the presented activity: the root run for Working, or the
+    /// current reasoning phase for Thinking.
     pub(super) activity_started_at: Option<Instant>,
     /// Latest explicit ATX or standalone-bold heading emitted by the model.
     pub(super) reasoning_heading: Option<String>,
     /// Committed semantic blocks already inspected for reasoning headings.
     pub(super) reasoning_heading_committed_blocks: usize,
-    /// Only the newest reasoning block advertises the global disclosure key.
-    /// Older repeated hints become noise once a newer thinking event exists.
+    /// Whether the collapsed summary advertises the global disclosure key.
     pub(super) show_reasoning_hint: bool,
     pub(super) extension_working: Option<super::ShellExtensionWorking>,
     pub(super) hidden_thinking_label: Option<String>,
@@ -174,6 +175,7 @@ impl AssistantBlock {
         let mut metadata = Self::streaming("");
         metadata.model_lab = self.model_lab;
         metadata.finished = self.finished;
+        metadata.preserve_reasoning_summary = self.preserve_reasoning_summary;
         metadata.reasoning_expanded = self.reasoning_expanded;
         metadata.reasoning_started_at = self.reasoning_started_at;
         metadata.reasoning_elapsed = self.reasoning_elapsed;
@@ -250,6 +252,7 @@ impl AssistantBlock {
             copy_text: RefCell::new(None),
             model_lab: None,
             finished: false,
+            preserve_reasoning_summary: false,
             reasoning_expanded: false,
             reasoning_started_at: None,
             reasoning_elapsed: None,

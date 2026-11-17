@@ -1287,7 +1287,10 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             Some(TranscriptBlock::Reasoning(block)) if !block.finished => Some(block),
             _ => None,
         });
-    let retry = activity.and_then(|block| block.retry_activity.as_ref());
+    let retry = shell
+        .working_status
+        .as_ref()
+        .and_then(|block| block.retry_activity.as_ref());
     let label = if let Some(retry) = retry {
         retry.label_at(now)
     } else {

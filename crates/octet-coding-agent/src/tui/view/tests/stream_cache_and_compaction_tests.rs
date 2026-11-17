@@ -260,7 +260,7 @@ fn hidden_reasoning_stream_does_not_grow_native_scrollback() {
     terminal.set_scrollback(0);
     let visible = terminal.screen().contents();
     assert!(visible.contains("Thinking"), "{visible:?}");
-    assert!(!visible.contains("Working"), "{visible:?}");
+    assert!(visible.contains("Working"), "{visible:?}");
     assert!(visible.contains("Ctrl+T to expand"), "{visible:?}");
     assert!(!visible.contains("private sentinel"), "{visible:?}");
     let state = shell.state.borrow();
@@ -396,7 +396,7 @@ fn ctrl_o_expands_and_collapses_the_inline_compaction_summary() {
         "# Grounded summary\n\n- kept decision\n- **summary sentinel**",
     );
     let plain = |shell: &InteractiveShell| {
-        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"))
+        strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"))
     };
 
     let collapsed = plain(&shell);
@@ -448,7 +448,7 @@ fn autonomous_compaction_events_show_work_success_and_failure_inline() {
     assert!(!footer.contains("Working"), "{footer}");
     assert!(!footer.contains("compacting"), "{footer}");
     let compacting =
-        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+        strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"));
     assert!(compacting.contains("• Compacting context"), "{compacting}");
     assert!(!compacting.contains("Ctrl+O"), "{compacting}");
 
@@ -467,7 +467,7 @@ fn autonomous_compaction_events_show_work_success_and_failure_inline() {
         },
     );
     let collapsed =
-        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+        strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"));
     assert!(
         collapsed.contains("Context compacted automatically"),
         "{collapsed}"
@@ -476,7 +476,7 @@ fn autonomous_compaction_events_show_work_success_and_failure_inline() {
     assert!(!collapsed.contains("auto-summary sentinel"), "{collapsed}");
     shell.toggle_disclosure();
     let expanded =
-        strip_terminal_sequences(&shell.state.borrow().rendered_transcript(80).join("\n"));
+        strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"));
     assert!(expanded.contains("auto-summary sentinel"), "{expanded}");
 
     let mut native_shell = InteractiveShell::test_shell();
