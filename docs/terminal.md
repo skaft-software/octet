@@ -349,6 +349,11 @@ Resize bursts settle after 75 ms of quiet (150 ms maximum); width changes reflow
 the transcript, while height-only changes reuse its wrapping. Away-and-back
 resizes also rebuild native history. The hardware composer cursor stays visible
 inside synchronized frames through panels, resizing, and renderer resumes.
+Fullscreen paints address only visible terminal rows, without scrolling newlines
+or row insertion. Offline virtual-terminal checks cover every paint through
+working-message rotation (including wide glyphs and full-width rows), spinner
+ticks, reasoning and tool start/finish, and footer status changes. These checks
+verify emitted rows, not Ghostty's physical frame presentation.
 [Rendering details](design/octet-tui.md#terminal-guarantees).
 
 For a physical Ghostty scroll check, use a long resumed session with images and

@@ -143,6 +143,7 @@
 - Subagent spawn and continuation reach inference with resource-contributing extensions while parent authority refusals identify the guard.
 - Enabled octet-subagents tools retain their names alongside Pi packages, with package-attributed collision warnings and working unrelated commands.
 - Codemode keeps idle runners ready for later scripts and reports actionable runner-stage errors.
+- Fullscreen live updates keep transcript, composer and footer rows aligned across working, reasoning, tool and status changes.
 
 ## [0.10.4] - 2026-11-12
 

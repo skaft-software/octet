@@ -232,6 +232,183 @@ fn pi_extension_working_frames_honor_disabled_host_animation() {
 }
 
 #[test]
+fn fullscreen_live_frames_stay_inside_the_terminal() {
+    use super::support::EmulatedTerminal;
+    use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+
+    // Pi compatibility: packages/tui/src/components/loader.ts:44-45,59-62
+    // updates the same Loader; tui-alt-screen.ts:1694-1715,1780-1793 bounds
+    // the screen and addresses each changed row inside one synchronized frame.
+    let cursor_address = regex::Regex::new(r"\x1b\[([0-9]+);([0-9]+)H").unwrap();
+    let scroll_or_insert = regex::Regex::new(r"\x1b(?:\[[0-9;]*[STLM]|[MDE])").unwrap();
+    for (width, height) in [(24, 12), (80, 24), (120, 32)] {
+        let mut shell = InteractiveShell::test_shell_with_theme(themes().remove(0));
+        shell.set_size(width, height);
+        shell.tui.take();
+        shell.state.borrow_mut().application_viewport_requested = true;
+        for index in 0..40 {
+            shell.notice(format!("HISTORY-{index}"));
+        }
+        let run = shell.begin_run("fixture");
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut tui = TUI::new(Box::new(EmulatedTerminal {
+            size: shell.size.clone(),
+            bytes: bytes.clone(),
+            synchronized_output: true,
+            status_frames: None,
+        }));
+        tui.set_alternate_screen(true);
+        tui.set_show_hardware_cursor(true);
+        tui.add_child(Box::new(ShellComponent::isolated(
+            shell.state.clone(),
+            true,
+        )));
+
+        let mut components = crate::tui::extension_components::ExtensionComponentSurface::default();
+        components.register_component("footer").unwrap();
+        let footer =
+            |components: &mut crate::tui::extension_components::ExtensionComponentSurface,
+             text: String| {
+                components
+                    .store_render("footer", width, vec![text])
+                    .unwrap();
+                crate::extensions::remote_ui::Projection {
+                    components: Arc::new(components.clone()),
+                    mounts: vec![crate::extensions::remote_ui::MountView {
+                        id: "footer".into(),
+                        surface_id: "footer".into(),
+                        title: "Footer".into(),
+                        placement: Placement::Footer,
+                        columns: width,
+                        rows: height,
+                        mouse_capture: false,
+                        native_editor: false,
+                    }],
+                    chrome: None,
+                }
+            };
+        shell.set_remote_ui(footer(&mut components, "FOOTER cwd model $0".into()));
+        tui.start();
+        let mut terminal = vt100::Parser::new(height, width, 0);
+        let mut check = |tui: &TUI<'_>, stage: &str| {
+            let output = std::mem::take(&mut *bytes.lock().unwrap());
+            let output_text = std::str::from_utf8(&output).unwrap();
+            assert!(
+                !output_text.contains('\n') && !scroll_or_insert.is_match(output_text),
+                "{stage}: scrolling in fullscreen paint"
+            );
+            assert_eq!(output_text.matches("\x1b[?2026h").count(), 1, "{stage}");
+            assert_eq!(output_text.matches("\x1b[?2026l").count(), 1, "{stage}");
+            for address in cursor_address.captures_iter(output_text) {
+                let row = address[1].parse::<u16>().unwrap();
+                let column = address[2].parse::<u16>().unwrap();
+                assert!((1..=height).contains(&row), "{stage}: offscreen row {row}");
+                assert!(
+                    (1..=width).contains(&column),
+                    "{stage}: offscreen column {column}"
+                );
+            }
+            assert!(
+                tui.rendered_frame().len() <= usize::from(height),
+                "{stage}: oversized frame"
+            );
+            terminal.process(&output);
+            let screen = terminal.screen();
+            assert!(screen.alternate_screen());
+            let rows: Vec<_> = screen
+                .rows(0, width)
+                .map(|row| row.trim_end().to_owned())
+                .collect();
+            assert!(
+                rows.last().unwrap().starts_with("FOOTER"),
+                "{stage}: {rows:?}"
+            );
+            if stage == "initial" || stage == "working tick" {
+                assert!(
+                    rows.iter().any(|row| row.contains("HISTORY-")),
+                    "{stage}: {rows:?}"
+                );
+            }
+            // Compare every physical row, not just the final state after a second paint.
+            let expected: Vec<_> = tui
+                .rendered_frame()
+                .iter()
+                .map(|row| strip_terminal_sequences(row).trim_end().to_owned())
+                .collect();
+            assert_eq!(rows, expected, "{stage}");
+            rows.into_iter()
+                .enumerate()
+                .filter(|(_, row)| row.contains("HISTORY-"))
+                .collect::<Vec<_>>()
+        };
+        let history = check(&tui, "initial");
+        // Exercise actual native spinner ticks before an effective component
+        // snapshot takes over animation from the native spinner.
+        for _ in 0..10 {
+            shell.state.borrow_mut().advance_thinking_spinner(1);
+            tui.request_render();
+            assert_eq!(check(&tui, "working tick"), history);
+        }
+        for message in [
+            "Working".to_owned(),
+            "界✨ checking".into(),
+            "x".repeat(usize::from(width) - 3),
+            "Working".into(),
+        ] {
+            for spinner in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] {
+                shell.set_extension_ui(ShellExtensionUi {
+                    working: Some(ShellExtensionWorking {
+                        component_line: Some(format!("\x1b[32m{spinner}\x1b[0m {message}")),
+                        message: Some(message.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                shell.state.borrow_mut().advance_thinking_spinner(1);
+                tui.request_render();
+                assert_eq!(check(&tui, "working tick"), history);
+            }
+        }
+        shell.set_extension_ui(ShellExtensionUi {
+            hidden_thinking_label: Some("Hidden thinking".into()),
+            ..Default::default()
+        });
+        for event in [
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Reasoning,
+                text: "# Summary\nChecking the frame".into(),
+            },
+            AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: "Answer".into(),
+            },
+            AgentEvent::ToolStarted {
+                id: ToolCallId("frame-tool".into()),
+                name: "read".into(),
+                args: serde_json::json!({"path":"README.md"}),
+            },
+            AgentEvent::ToolFinished {
+                id: ToolCallId("frame-tool".into()),
+                result: Ok(octet_agent::ToolOutput::new("done")),
+                duration: Duration::from_millis(10),
+            },
+        ] {
+            shell.on_run_event(run, &event);
+            tui.request_render();
+            check(&tui, "lifecycle");
+            tui.request_render();
+            check(&tui, "unchanged lifecycle");
+        }
+        shell.set_remote_ui(footer(
+            &mut components,
+            format!("FOOTER {}界", "x".repeat(usize::from(width) - 9)),
+        ));
+        tui.request_render();
+        check(&tui, "footer status");
+    }
+}
+
+#[test]
 fn pi_palette_keeps_exact_accent_and_explicit_default_backgrounds_after_model_changes() {
     for mut theme in themes() {
         let accent = theme.role_rgb("model_accent");
