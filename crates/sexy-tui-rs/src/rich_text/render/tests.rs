@@ -28,6 +28,82 @@ fn renderer(color: ColorDepth, unicode: bool) -> RichRenderer {
 }
 
 #[test]
+fn lossy_markdown_rows_respect_visible_cell_bounds() {
+    let inputs: &[&[u8]] = &[
+        b"# ReSCafe\xcc\x81** \xe7\x95\x8c \xf0\x9f\x91\xa9\xe2tps://ex* \xe7\x95\x8c** \xe7\x95\x8c \xf0eSCaf\xcce\x81** \xe7\x95\x8c \xf0\x9f\x87\xa9\xe2tps://ex* \xe7\x95\x8c** \xe7\x95\x8c \n",
+        b"# Resul?t\n\xf6\xd5\xd7\xbc\x96\x99c\xc3\x81** \xe7\x95\x8c \xf0\x9f\x87\xa9\xf0\x9fample[ Res] task\x07\xe8\n",
+    ];
+    let mut overflows = Vec::new();
+    for (input, bytes) in inputs.iter().enumerate() {
+        let document = markdown::parse(&String::from_utf8_lossy(bytes));
+        for capabilities in [
+            TerminalCapabilities::plain(),
+            TerminalCapabilities::interactive(ColorDepth::TrueColor, true),
+        ] {
+            for overflow in [CodeOverflow::Clip, CodeOverflow::Wrap] {
+                let renderer = RichRenderer::new(
+                    Theme::with_capabilities(capabilities),
+                    capabilities,
+                    RenderOptions {
+                        code_overflow: overflow,
+                        ..RenderOptions::default()
+                    },
+                );
+                for width in [0, 1, 2, 3, 7, 16, 40, 80] {
+                    for row in renderer.render(&document, width).lines {
+                        for text in [&row.plain, &row.styled] {
+                            let cells = crate::utils::visible_width(text);
+                            if cells > usize::from(width) {
+                                overflows.push(format!(
+                                    "input={input} plain={} overflow={overflow:?} width={width} cells={cells} row={text:?}",
+                                    capabilities.plain,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(overflows.is_empty(), "{}", overflows.join("\n"));
+}
+
+#[test]
+fn regional_indicator_layout_preserves_fitting_graphemes_and_styles() {
+    for renderer in [RichRenderer::plain(), renderer(ColorDepth::TrueColor, true)] {
+        let style = renderer.theme.style(TextRole::Strong);
+        let runs = [RichRun::new("🇩".into(), style, None)];
+        for width in [0, 1, 2, 3, 7, 40] {
+            for lines in [
+                renderer.wrap_runs(&runs, width),
+                renderer.hard_wrap_runs(&runs, width),
+            ] {
+                assert_eq!(lines.len(), 1);
+                let row = renderer.encode_line(lines.into_iter().next().unwrap(), width);
+                let expected = match width {
+                    0 => "",
+                    1 => "?",
+                    _ => "🇩",
+                };
+                assert_eq!(row.plain, expected);
+                if width == 0 {
+                    assert!(row.styled.is_empty());
+                } else {
+                    assert_eq!(row.styled, renderer.theme.apply_style(style, expected));
+                }
+            }
+            let row = renderer.encode_line(renderer.clip_runs(&runs, width), width);
+            assert!(crate::utils::visible_width(&row.styled) <= width);
+            assert!(crate::utils::visible_width(&row.plain) <= width);
+            if width >= 2 {
+                assert_eq!(row.plain, "🇩");
+                assert_eq!(row.styled, renderer.theme.apply_style(style, "🇩"));
+            }
+        }
+    }
+}
+
+#[test]
 fn whitespace_and_blank_suffixes_keep_only_append_local_layout_work() {
     let renderer = RichRenderer::plain();
     for chunk in [" ", "\n", "abcdefgh"] {

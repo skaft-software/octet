@@ -42,6 +42,16 @@ impl WidthPolicy {
         if grapheme == "\n" || grapheme == "\r" {
             return 0;
         }
+        // Pi compatibility: packages/tui/src/utils.ts:211-215 reserves two
+        // cells for regional indicators, including isolated streaming letters.
+        // unicode-width counts an isolated indicator as only one cell.
+        if grapheme
+            .chars()
+            .next()
+            .is_some_and(|character| ('\u{1f1e6}'..='\u{1f1ff}').contains(&character))
+        {
+            return 2;
+        }
         match self.ambiguous {
             AmbiguousWidth::Narrow => UnicodeWidthStr::width(grapheme),
             AmbiguousWidth::Wide => UnicodeWidthStr::width_cjk(grapheme),

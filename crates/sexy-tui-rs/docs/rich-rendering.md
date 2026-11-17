@@ -151,7 +151,9 @@ deterministic reflow. Callers should keep one cache per live surface.
 
 - extended grapheme clusters are indivisible;
 - combining sequences have their terminal width;
-- CJK and emoji use Unicode display width;
+- CJK and emoji use Unicode display width; regional indicators reserve two cells
+  even when a flag letter is isolated, so wrapping and clipping share the terminal's
+  conservative measurement;
 - East Asian Ambiguous width is configurable;
 - tabs advance to configured stops from the current cell;
 - wrapping prefers whitespace and hard-breaks long identifiers by grapheme;

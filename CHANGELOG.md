@@ -55,6 +55,7 @@
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
 
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Markdown rows keep isolated flag letters within the requested terminal width, including one-cell viewports.
 - Terminal mouse and cursor reports with a zero coordinate are ignored as malformed instead of crashing the input decoder.
 - Pi session replacement, compaction and tree hooks isolate callback-owned error codes while preserving native refusals and explicit vetoes.
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.

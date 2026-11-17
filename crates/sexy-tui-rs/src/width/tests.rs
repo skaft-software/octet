@@ -62,6 +62,28 @@ fn unicode_combining_and_wide_widths_are_cell_correct() {
 }
 
 #[test]
+fn regional_indicators_reserve_two_cells_alone_or_paired() {
+    for ambiguous in [AmbiguousWidth::Narrow, AmbiguousWidth::Wide] {
+        let policy = WidthPolicy {
+            ambiguous,
+            ..WidthPolicy::default()
+        };
+        for letter in '\u{1f1e6}'..='\u{1f1ff}' {
+            for grapheme in [
+                letter.to_string(),
+                format!("{letter}\u{301}"),
+                format!("{letter}🇩"),
+            ] {
+                assert_eq!(policy.grapheme_width(&grapheme, 0), 2);
+                assert_eq!(policy.line_width(&grapheme), 2);
+                assert_eq!(policy.prefix(&grapheme, 1), ("", 0));
+                assert_eq!(policy.prefix(&grapheme, 2), (grapheme.as_str(), 2));
+            }
+        }
+    }
+}
+
+#[test]
 fn tabs_follow_current_column() {
     let policy = WidthPolicy::default();
     assert_eq!(policy.line_width("\t"), 4);
