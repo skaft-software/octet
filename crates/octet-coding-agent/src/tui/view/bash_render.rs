@@ -333,6 +333,9 @@ pub(super) fn render_compact_bash_output(
     project_compact_bash_output(panel, theme, width, expanded, output_indent).lines
 }
 
+// The caller styles the label with the shared tool_header role on its surface.
+// Pi: packages/coding-agent/src/core/tools/renderers/bash.ts:25 and read.ts:34
+// use the same bold toolTitle token. Native paint owns these locally cached roles.
 pub(super) fn project_bash_row(
     command: &str,
     action: &str,
@@ -342,11 +345,7 @@ pub(super) fn project_bash_row(
     expanded: bool,
 ) -> ToolRows {
     let action_gap = tool_value_indent_width(action).saturating_sub(visible_width(action));
-    let prefix = format!(
-        "{}{}",
-        theme.bold(&theme.fg("foreground", action)),
-        " ".repeat(action_gap)
-    );
+    let prefix = format!("{action}{}", " ".repeat(action_gap));
     let continuation = " ".repeat(bash_content_gutter(action));
     let content_width = width
         .saturating_sub(u16::try_from(visible_width(&prefix)).unwrap_or(u16::MAX))
@@ -392,7 +391,15 @@ fn render_bash_row(
     width: u16,
     expanded: bool,
 ) -> Vec<String> {
-    project_bash_row(command, action, renderer, theme, width, expanded).lines
+    project_bash_row(
+        command,
+        &theme.apply_transcript_role_on_surface("tool_header", "surface.tool", action),
+        renderer,
+        theme,
+        width,
+        expanded,
+    )
+    .lines
 }
 
 #[cfg(test)]

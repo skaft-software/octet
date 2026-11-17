@@ -151,7 +151,11 @@ pub(super) fn render_tool(
     } else if let Some(command) = panel.display.shell_command.as_deref() {
         project_bash_row(
             command,
-            shell_row_label(&panel.name),
+            &theme.apply_transcript_role_on_surface(
+                "tool_header",
+                content_role,
+                shell_row_label(&panel.name),
+            ),
             rich_renderer,
             theme,
             width,

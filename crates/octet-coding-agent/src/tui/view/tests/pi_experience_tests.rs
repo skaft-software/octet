@@ -681,12 +681,34 @@ fn inherited_style_fixture(foreground_role: &str) -> String {
 }
 
 fn rendered_read_header(theme: &OctetTheme) -> String {
-    let args = serde_json::json!({"path":"file.txt"});
+    rendered_tool_header(
+        theme,
+        "read",
+        serde_json::json!({"path":"file.txt"}),
+        "Read",
+    )
+}
+
+fn rendered_bash_header(theme: &OctetTheme) -> String {
+    rendered_tool_header(
+        theme,
+        "bash",
+        serde_json::json!({"command":"printf result"}),
+        "Bash",
+    )
+}
+
+fn rendered_tool_header(
+    theme: &OctetTheme,
+    name: &str,
+    args: serde_json::Value,
+    label: &str,
+) -> String {
     let tool = TranscriptBlock::Tool(Box::new(ToolPanel::new(
-        ToolCallId("style-read".into()),
-        "read".into(),
+        ToolCallId(format!("style-{name}")),
+        name.into(),
         args.to_string(),
-        summarize_tool("read", &args),
+        summarize_tool(name, &args),
         "result".into(),
         true,
         false,
@@ -702,7 +724,7 @@ fn rendered_read_header(theme: &OctetTheme) -> String {
         80,
         true,
     );
-    row_containing(&rows, "Read").to_owned()
+    row_containing(&rows, label).to_owned()
 }
 
 fn rendered_scroll_hint(theme: &OctetTheme) -> String {
@@ -728,11 +750,13 @@ fn assert_rendered_style(
     let prefix = plain.split_once(needle).expect("styled text is present").0;
     let column = sexy_tui_rs::visible_width(prefix) as u16;
     let parser = surface_frame::emulate_row_for_test(row, 100);
-    let cell = parser.screen().cell(0, column).unwrap();
-    assert_eq!(cell.fgcolor(), foreground, "{row:?}");
-    assert_eq!(cell.bgcolor(), background, "{row:?}");
-    assert_eq!(cell.bold(), bold, "{row:?}");
-    assert_eq!(cell.italic(), italic, "{row:?}");
+    for column in column..column + sexy_tui_rs::visible_width(needle) as u16 {
+        let cell = parser.screen().cell(0, column).unwrap();
+        assert_eq!(cell.fgcolor(), foreground, "{row:?}");
+        assert_eq!(cell.bgcolor(), background, "{row:?}");
+        assert_eq!(cell.bold(), bold, "{row:?}");
+        assert_eq!(cell.italic(), italic, "{row:?}");
+    }
 }
 
 fn assert_row_does_not_bleed(row: &str) {
@@ -846,31 +870,78 @@ fn pi_tool_title_inheritance_and_explicit_header_overrides_preserve_attributes()
     for profile in ["", "[metadata]\nprofile = 'pi'\n"] {
         let source = format!("{profile}{base}");
         let theme = test_theme_from_source(&source);
-        let header = rendered_read_header(&theme);
-        assert_rendered_style(
-            &header,
-            "Read",
-            vt100::Color::Rgb(0x78, 0x9a, 0xbc),
-            vt100::Color::Rgb(0x45, 0x67, 0x89),
-            true,
-            true,
-        );
-        assert_row_does_not_bleed(&header);
+        for (label, header) in [
+            ("Read", rendered_read_header(&theme)),
+            ("Bash", rendered_bash_header(&theme)),
+        ] {
+            assert_rendered_style(
+                &header,
+                label,
+                vt100::Color::Rgb(0x78, 0x9a, 0xbc),
+                vt100::Color::Rgb(0x45, 0x67, 0x89),
+                true,
+                true,
+            );
+            assert_row_does_not_bleed(&header);
+        }
 
         let source =
             format!("{source}\n[roles.tool_header]\nforeground = '#cba987'\nbold = false\n");
         let theme = test_theme_from_source(&source);
-        let header = rendered_read_header(&theme);
+        for (label, header) in [
+            ("Read", rendered_read_header(&theme)),
+            ("Bash", rendered_bash_header(&theme)),
+        ] {
+            assert_rendered_style(
+                &header,
+                label,
+                vt100::Color::Rgb(0xcb, 0xa9, 0x87),
+                vt100::Color::Rgb(0x45, 0x67, 0x89),
+                false,
+                true,
+            );
+            assert_row_does_not_bleed(&header);
+        }
+    }
+}
+
+#[test]
+fn imported_pi_tool_title_colors_read_and_bash_card_labels() {
+    let mut document = pi_theme::fixture("Pi tool titles", "#00aaff");
+    document["colors"]["toolTitle"] = serde_json::json!("#789abc");
+    document["colors"]["toolSuccessBg"] = serde_json::json!("#183828");
+    let source =
+        pi_theme::native_source(std::path::Path::new("titles.json"), &document.to_string())
+            .unwrap()
+            .into_owned();
+    let theme = test_theme_from_source(&source);
+    for (label, header) in [
+        ("Read", rendered_read_header(&theme)),
+        ("Bash", rendered_bash_header(&theme)),
+    ] {
         assert_rendered_style(
             &header,
-            "Read",
-            vt100::Color::Rgb(0xcb, 0xa9, 0x87),
-            vt100::Color::Rgb(0x45, 0x67, 0x89),
-            false,
+            label,
+            vt100::Color::Rgb(0x78, 0x9a, 0xbc),
+            vt100::Color::Rgb(0x18, 0x38, 0x28),
             true,
+            false,
         );
         assert_row_does_not_bleed(&header);
     }
+}
+
+#[test]
+fn native_bash_card_label_keeps_default_foreground_and_bold() {
+    let theme = test_theme_from_source("[colors]\nforeground = '#123456'\n");
+    assert_rendered_style(
+        &rendered_bash_header(&theme),
+        "Bash",
+        vt100::Color::Rgb(0x12, 0x34, 0x56),
+        vt100::Color::Default,
+        true,
+        false,
+    );
 }
 
 #[test]

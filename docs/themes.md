@@ -536,7 +536,9 @@ so on) resolve to the same underlying role.
 ### Transcript roles
 
 In addition to the text-role vocabulary above, `thinking`, `tool_header` and
-`scroll_hint` accept the same style fields. `scroll_hint` styles the centered
+`scroll_hint` accept the same style fields. `tool_header` styles native tool
+labels, including Bash; Pi palettes inherit their bold `toolTitle` styling unless
+an explicit `tool_header` override is set. `scroll_hint` styles the centered
 Jump to bottom control, defaulting to bold theme-accent text; reported hover
 adds underline without changing geometry. Explicit foreground, background and
 attribute overrides still apply. Surface roles use
