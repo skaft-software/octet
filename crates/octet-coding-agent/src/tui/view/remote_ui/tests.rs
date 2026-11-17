@@ -19,7 +19,11 @@ fn projection(size: (u16, u16), entries: &[(Placement, &str)]) -> Projection {
             title: "x".repeat(256),
             placement: *placement,
             columns: size.0,
-            rows: size.1,
+            rows: if *placement == Placement::Editor {
+                1
+            } else {
+                size.1
+            },
             mouse_capture: false,
             native_editor: false,
         });
@@ -111,6 +115,36 @@ fn tall_remote_editor_reserves_working_slot() {
                     &editor_id,
                     width,
                     (0..64).map(|row| format!("EDITOR-{row}")).collect(),
+                )
+                .unwrap();
+            let editor_rows = shell.extension_editor_row_budget(&remote);
+            remote
+                .mounts
+                .iter_mut()
+                .find(|mount| mount.id == editor_id)
+                .unwrap()
+                .rows = height;
+            shell.set_remote_ui(remote.clone());
+            assert!(
+                !shell_chrome(&shell.state.borrow(), width, Instant::now())
+                    .composer
+                    .iter()
+                    .any(|row| row.contains("EDITOR-0")),
+                "an old full-height snapshot must not be top-sliced into the slot"
+            );
+            remote
+                .mounts
+                .iter_mut()
+                .find(|mount| mount.id == editor_id)
+                .unwrap()
+                .rows = editor_rows;
+            Arc::make_mut(&mut remote.components)
+                .store_render(
+                    &editor_id,
+                    width,
+                    (0..editor_rows)
+                        .map(|row| format!("EDITOR-{row}"))
+                        .collect(),
                 )
                 .unwrap();
             shell.set_remote_ui(remote);
@@ -417,4 +451,83 @@ async fn remote_ui_fullscreen_keeps_host_picker_priority_and_restores_draft() {
     shell.render();
     assert!(!shell.has_overlay());
     assert_eq!(shell.extension_editor_snapshot().text, "saved draft");
+}
+
+#[test]
+fn mounted_editor_height_preserves_all_fitting_footer_rows() {
+    use crate::tui::view::InteractiveShell;
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 10);
+    shell.prefill_editor("one\ntwo\nthree\nfour\nfive".into());
+    shell.notice("existing transcript");
+    shell.begin_run("fixture");
+    let mut remote = projection(
+        (80, 10),
+        &[(Placement::Editor, ""), (Placement::Footer, "")],
+    );
+    for (placement, prefix) in [(Placement::Editor, "EDITOR"), (Placement::Footer, "FOOTER")] {
+        let id = remote.mount(placement).unwrap().id.clone();
+        Arc::make_mut(&mut remote.components)
+            .store_render(
+                &id,
+                80,
+                (0..3).map(|row| format!("{prefix}-{row}")).collect(),
+            )
+            .unwrap();
+    }
+    remote
+        .mounts
+        .iter_mut()
+        .find(|mount| mount.placement == Placement::Editor)
+        .unwrap()
+        .rows = 3;
+    shell.set_remote_ui(remote);
+    let state = shell.state.borrow();
+    let chrome = shell_chrome(&state, 80, Instant::now());
+    assert_eq!(chrome.working.len(), 2);
+    assert_eq!(chrome.composer.len(), 3);
+    assert_eq!(
+        chrome.extension_below.len(),
+        3,
+        "{:?}",
+        chrome.extension_below
+    );
+    assert!(chrome.transcript_rows >= 1);
+}
+
+#[test]
+fn short_editor_composes_the_allocated_cursor_window_without_slicing() {
+    use crate::tui::view::{render_shell_viewport_at, InteractiveShell};
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 8);
+    shell.notice("existing transcript");
+    shell.begin_run("fixture");
+    let mut remote = projection((80, 8), &[(Placement::Editor, "")]);
+    let editor = &mut remote.mounts[0];
+    editor.rows = 4;
+    Arc::make_mut(&mut remote.components)
+        .store_render(
+            &editor.id,
+            80,
+            vec![
+                "↑ 3 more".into(),
+                "four".into(),
+                "five\x1b[7m \x1b[0m".into(),
+                "editor bottom".into(),
+            ],
+        )
+        .unwrap();
+    shell.set_remote_ui(remote);
+    let state = shell.state.borrow();
+    let chrome = shell_chrome(&state, 80, Instant::now());
+    assert_eq!(chrome.working.len(), 2);
+    assert_eq!(
+        chrome.composer.len(),
+        5,
+        "four editor rows and the native footer"
+    );
+    let frame = render_shell_viewport_at(&state, 80, Instant::now());
+    assert!(frame.len() <= 8);
+    assert!(frame.iter().any(|row| row.contains("five\x1b[7m ")));
+    assert!(frame.iter().any(|row| row.contains("editor bottom")));
 }

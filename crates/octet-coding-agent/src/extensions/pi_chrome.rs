@@ -393,7 +393,11 @@ mod tests {
                     title: id.into(),
                     placement,
                     columns: 80,
-                    rows: 24,
+                    rows: if placement == Placement::Editor {
+                        1
+                    } else {
+                        24
+                    },
                     mouse_capture: false,
                     native_editor: false,
                 });

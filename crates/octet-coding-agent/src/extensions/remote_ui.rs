@@ -69,8 +69,14 @@ impl Projection {
 
     pub(crate) fn frame(&self, mount: &MountView, columns: u16, rows: u16) -> Option<&[String]> {
         // The renderer can observe a resize before the async input loop does.
-        // Never draw a cached snapshot at the wrong geometry during that gap.
-        if (mount.columns, mount.rows) != (columns.max(1), rows.max(1)) {
+        // Width changes invalidate a frame. An editor's smaller rectangle can
+        // remain visible during growth, but never clip a taller cursor window.
+        let height_fits = if mount.placement == ExtensionRemoteUiPlacement::Editor {
+            mount.rows <= rows.max(1)
+        } else {
+            mount.rows == rows.max(1)
+        };
+        if mount.columns != columns.max(1) || !height_fits {
             return None;
         }
         self.components.slot_lines(Some(&mount.id))
@@ -514,6 +520,11 @@ impl RemoteUi {
                         }),
                     editor,
                 });
+                if placement == ExtensionRemoteUiPlacement::Editor {
+                    let rows = shell.extension_editor_row_budget(&self.projection());
+                    self.mounts.last_mut().expect("just opened").view.rows = rows;
+                    result["rows"] = rows.into();
+                }
                 Ok(result)
             }
             ExtensionRemoteUiOperation::Close { surface_id } => {
@@ -918,7 +929,17 @@ impl RemoteUi {
         Ok(())
     }
 
-    pub(super) fn reconcile(&mut self, foreground: Option<&str>, size: (u16, u16)) -> Vec<String> {
+    pub(super) fn reconcile(
+        &mut self,
+        foreground: Option<&str>,
+        shell: &InteractiveShell,
+    ) -> Vec<String> {
+        let size = shell.terminal_dimensions();
+        let editor_rows = if self.mounts.iter().any(|mount| mount.editor.is_some()) {
+            shell.extension_editor_row_budget(&self.projection())
+        } else {
+            size.1.max(1)
+        };
         if self.chrome.as_ref().is_some_and(|lease| {
             foreground != Some(lease.owner.session_id.as_str())
                 || !lease.process.is_running()
@@ -932,6 +953,11 @@ impl RemoteUi {
         let mut index = 0;
         while index < self.mounts.len() {
             let mount = &mut self.mounts[index];
+            let rows = if mount.view.placement == ExtensionRemoteUiPlacement::Editor {
+                editor_rows
+            } else {
+                rows
+            };
             if foreground != Some(mount.owner.session_id.as_str())
                 || !mount.process.is_running()
                 || mount.process.extension_instance_id() != mount.owner.extension_instance_id

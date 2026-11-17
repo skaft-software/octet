@@ -87,6 +87,7 @@
 - Small upward scrolls keep the chosen transcript position through repaints, streaming and live-row height changes.
 - Composer clicks and completion selection use the painted rows beneath the independent working indicator during streaming.
 - Custom editors reserve space for working indicators and host chrome, keeping tall snapshots inside short terminal windows.
+- Pi editors keep their caret visible in short composer slots, and custom footers use the mounted editor's actual height.
 - Focused panels and transcript search stay visible beside working indicators and long wrapped errors in short terminals.
 - Custom working indicators retain activity-card borders, padding and fill while clipping styled content to the frame.
 - Pi working indicators preserve complete wide graphemes across the native spinner gutter.

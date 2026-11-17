@@ -137,3 +137,36 @@ test('local frame layout matches bounded native projections across geometry, Uni
   const { scroll: _scroll, ...local } = editorFrame(call({ op: 'read', field: 'paint' }).value, 16, 24, 0);
   assert.deepEqual(local, native);
 });
+
+test('allocated editor rows keep the last-line caret visible in short composer slots', t => {
+  const peer = nativeEditorHost(t);
+  const surface = { id: 'short-editor', mountId: 'mount', placement: 'editor', opened: true,
+    columns: 80, rows: 4, requestRender() {}, store: { id: 1, live: true,
+      controller: new AbortController(), state: { alive: true, owner: {} } }, runtime: {
+      require() {}, assertOwner() {}, transport: { requestSync: (method, params) => peer.call(method, params) },
+    } };
+  peer.call('ui/open', { surface_id: surface.id });
+  const identity = text => text;
+  const editor = new Editor(new RemoteTUI(surface).facade, { borderColor: identity });
+  editor.focused = true;
+  editor.setText('one\ntwo\nthree\nfour\nfive');
+  for (const rows of [4, 1, 2, 3, 8, 4]) {
+    surface.rows = rows;
+    const lines = editor.render(80);
+    assert.ok(lines.length <= rows, `${lines.length} editor lines in ${rows} allocated rows`);
+    assert.match(lines.join('\n'), /five\x1b_pi:c\x07\x1b\[7m /);
+    editor.handleInput('\x1b[A');
+    assert.deepEqual(editor.getCursor(), { line: 3, col: 4 });
+    editor.handleInput('\x1b[B');
+  }
+});
+
+test('custom render wrappers retain the cursor window in their allocated rows', () => {
+  const surface = { placement: 'editor', columns: 80, rows: 4, requestRender() {} };
+  const tui = new RemoteTUI(surface);
+  tui.children.push({ render: () => ['top', 'one', 'two', 'three', 'four', 'five\x1b_pi:c\x07\x1b[7m \x1b[0m', 'bottom'] });
+  const lines = tui.render(80);
+  assert.equal(lines.length, 4);
+  assert.match(plain(lines), /four\nfive \nbottom/);
+  assert.ok(lines.some(line => line.includes('five\x1b[7m ')));
+});

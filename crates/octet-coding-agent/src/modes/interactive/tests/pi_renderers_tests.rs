@@ -55,6 +55,13 @@ async fn pi_kitty_graphics_case(streaming: bool) {
     probe.render(&mut shell);
     seed(&mut shell);
     exercise(&mut shell, &mut probe, streaming);
+    // Starting Working changes the editor's allocation even without a terminal
+    // resize. The synchronous image exercise does not pump the adapter; settle
+    // its genuine new-rectangle frame before asserting persistent Pi chrome.
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("GRAPHICS-PI-EDITOR") && frame.contains("GRAPHICS-PI-FOOTER")
+    })
+    .await;
     let frame = shell.dump_rendered_frame().await.unwrap().join("\n");
     assert!(frame.contains("GRAPHICS-PI-EDITOR"), "{frame}");
     assert!(frame.contains("GRAPHICS-PI-FOOTER"), "{frame}");
@@ -661,6 +668,45 @@ async fn native_pi_renderers_real_app_presentation_persistence_invalidation_resi
         captured.lock().unwrap().len(),
         2,
         "rendering must never trigger inference"
+    );
+    app.executable_extensions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn short_terminal_custom_editor_keeps_last_line_caret_beside_working() {
+    let (_directory, mut app, mut shell) = super::pi_contract_support::pi_ui_app(
+        r#"
+import { CustomEditor } from '@earendil-works/pi-coding-agent';
+export default pi => pi.on('session_start', (_, ctx) => {
+  ctx.ui.setEditorComponent((tui, theme, keys) => new CustomEditor(tui, theme, keys));
+});
+"#,
+    );
+    shell.set_size(80, 8);
+    shell.prefill_editor("one\ntwo\nthree\nfour\nfive".into());
+    let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+    let problems = tokio::time::timeout(
+        Duration::from_secs(8),
+        resource_paths::refresh_resource_paths_reporting(&mut app, &mut shell, &mut input),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    shell.finish_startup();
+    shell.notice("existing transcript");
+    shell.begin_run("fixture");
+    shell.scroll_lines(-1); // Enter the fullscreen transcript viewport.
+    shell.scroll_lines(1);
+    let frame = pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("five") && frame.contains("Working")
+    })
+    .await;
+    assert!(frame.lines().count() <= 8, "{frame:?}");
+    assert!(frame.contains("five\x1b[7m "), "{frame:?}");
+    assert_eq!(
+        shell.extension_editor_snapshot().text,
+        "one\ntwo\nthree\nfour\nfive"
     );
     app.executable_extensions.shutdown().await;
 }

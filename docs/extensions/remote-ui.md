@@ -53,8 +53,15 @@ Success returns `{"columns":80,"rows":24}` after the host admits the mount.
 `above_editor`, `below_editor`, and `editor`. Header/footer/editor replace their
 corresponding host surface; widgets compose around the composer. Editor snapshots
 fit the rows left after reserving the working indicator, header, errors, queued
-input, suggestions and footer, including in short terminal windows. Restoring a
-mount restores the ordinary host surface, not an extension-owned terminal.
+input, suggestions and footer, including in short terminal windows. Footer space
+is measured against the mounted editor, not its hidden native recovery draft.
+Editor `ui/open` and `ui/resize` geometry reports this allocated rectangle;
+chrome changes can resize it even when the terminal dimensions stay unchanged.
+Render a fitting cursor window for that height: the host does not top-slice an
+old terminal-height editor frame. The Pi adapter keeps the caret visible within
+the allocation, yielding borders before the caret in one- or two-row slots.
+Restoring a mount restores the ordinary host surface, not an extension-owned
+terminal.
 Surface IDs are scoped to extension instance, generation, and foreground owner.
 There are at most 16 live mounts. Focus conflicts, occupied exclusive placements,
 host panels, or a ceded terminal are refusals, not successful opens.
@@ -367,7 +374,8 @@ the native slash popup remains available around their projected rows.
   `none`. Coordinates are zero-based terminal cells. Positive wheel delta is
   down. Only the focused capture lease receives these gestures.
 - `ui/resize`: `{surface_id, columns, rows}`. Render future snapshots for these
-  dimensions. Initial geometry comes from `ui/open`.
+  dimensions. Initial geometry comes from `ui/open`. For `editor`, `rows` is its
+  allocated slot height; other placements retain terminal geometry.
 - `ui/closed`: `{surface_id, reason}`. Stop timers and release held input. A dead
   process cannot receive this observation; host restoration does not wait for it.
 - `context/updated`: `{resource_owner, host}`. For negotiated remote UI only, this

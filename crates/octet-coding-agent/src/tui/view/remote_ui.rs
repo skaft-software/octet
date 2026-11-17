@@ -92,35 +92,23 @@ pub(super) fn shell_chrome(
     }
     let footer = remote.mount(Placement::Footer);
     let editor = remote.mount(Placement::Editor);
-    let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width)
-        && chrome.suggestions.is_empty();
-    let builtin_footer = if footer_visible {
-        chrome.composer.pop()
-    } else {
-        None
-    };
-    let mut footer_rows = footer.map_or_else(Vec::new, |footer| {
-        rows(remote, footer, width, height, budget)
-    });
+    let (builtin_footer, mut footer_rows, editor_limit) =
+        composer_allocation(state, remote, width, &mut chrome);
     if let Some(editor) = editor {
-        // The host owns the terminal rectangle. A custom editor receives only
-        // the rows left after status, focused chrome and footer reservations.
-        let reserved = chrome.header.len()
-            + chrome.working.len()
-            + chrome.error.len()
-            + chrome.pending.len()
-            + chrome.subagents.len()
-            + chrome.suggestions.len();
-        // Bound oversized footers using the native editor's existing allowance
-        // before sharing the remaining space with a potentially tall editor.
-        footer_rows.truncate(budget.saturating_sub(reserved + chrome.composer.len() + 1));
-        let footer_height = if footer.is_none() {
-            usize::from(builtin_footer.is_some())
+        // Only paint a frame rendered for a fitting rectangle. In particular,
+        // never top-slice an old terminal-height frame while resize is pending.
+        let frame = remote.lines(editor, width, editor_limit.max(1) as u16);
+        chrome.composer = if frame.len() <= editor_limit {
+            rows(
+                remote,
+                editor,
+                width,
+                editor_limit.max(1) as u16,
+                usize::MAX,
+            )
         } else {
-            footer_rows.len()
+            Vec::new()
         };
-        let editor_limit = budget.saturating_sub(reserved + footer_height + 1);
-        chrome.composer = rows(remote, editor, width, height, editor_limit);
     }
     if footer.is_none() {
         if let Some(footer) = builtin_footer {
@@ -180,6 +168,52 @@ pub(super) fn shell_chrome(
     chrome
 }
 
+// Rust owns this rectangle across the process boundary. Match Pi
+// packages/tui/src/layout.ts:170-176 by measuring the mounted components, not
+// the hidden recovery composer. Keep a cursor row and borders when possible;
+// an oversized footer may use the rest before optional widgets.
+fn composer_allocation(
+    state: &ShellState,
+    remote: &Projection,
+    width: u16,
+    chrome: &mut builtin_shell_chrome::ShellChrome,
+) -> (Option<String>, Vec<String>, usize) {
+    let height = state.size.1.max(1);
+    let footer = remote.mount(Placement::Footer);
+    let builtin_footer = (crate::tui::composer_surface::status_footer_visible(state, width)
+        && chrome.suggestions.is_empty())
+    .then(|| chrome.composer.pop())
+    .flatten();
+    let mut footer_rows = footer.map_or_else(Vec::new, |mount| {
+        rows(remote, mount, width, height, usize::from(height))
+    });
+    let reserved = chrome.header.len()
+        + chrome.working.len()
+        + chrome.error.len()
+        + chrome.pending.len()
+        + chrome.subagents.len()
+        + chrome.suggestions.len()
+        + 1; // Retain a transcript row.
+    let available = usize::from(height).saturating_sub(reserved);
+    if let Some(editor) = remote.mount(Placement::Editor) {
+        let editor_height = remote
+            .components
+            .slot_lines(Some(&editor.id))
+            .map_or(3, <[_]>::len);
+        footer_rows.truncate(available.saturating_sub(editor_height.min(3)));
+    }
+    let footer_height = if footer.is_some() {
+        footer_rows.len()
+    } else {
+        usize::from(builtin_footer.is_some())
+    };
+    (
+        builtin_footer,
+        footer_rows,
+        available.saturating_sub(footer_height),
+    )
+}
+
 pub(super) fn render_welcome_card(
     state: &ShellState,
     width: u16,
@@ -229,6 +263,22 @@ pub(super) fn window_title(state: &ShellState) -> String {
 }
 
 impl super::InteractiveShell {
+    pub(crate) fn extension_editor_row_budget(&self, remote: &Projection) -> u16 {
+        let state = self.state.borrow();
+        if state.startup_pending || state.panel.is_some() || state.tool_input_prompt.is_some() {
+            return remote
+                .mount(Placement::Editor)
+                .map_or(state.size.1.max(1), |mount| mount.rows);
+        }
+        let mut chrome = builtin_shell_chrome::shell_chrome(&state, state.size.0, Instant::now());
+        if remote.mount(Placement::Header).is_some() {
+            chrome.header.clear();
+        }
+        composer_allocation(&state, remote, state.size.0, &mut chrome)
+            .2
+            .max(1) as u16
+    }
+
     /// Host-owned wake binding for this live native UI consumer, not a claim
     /// based on the extension's metadata or the test runner's stdout.
     pub(crate) fn extension_remote_ui_binding(

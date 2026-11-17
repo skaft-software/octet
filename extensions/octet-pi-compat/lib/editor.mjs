@@ -210,11 +210,14 @@ export class Editor {
       const right = cells > frame.content_width ? pad.slice(1) : pad;
       return truncateToWidth(pad + text + ' '.repeat(Math.max(0, frame.content_width - cells)) + right, width, '');
     });
-    const result = [this.renderTopBorder(width, frame.hidden_above), ...lines, this.renderBottomBorder(width, frame.hidden_below)];
-    if (frame.autocomplete) {
-      const list = new SelectList(frame.autocomplete.items, frame.autocomplete.max_visible, this.#theme.selectList);
+    // In one/two-row slots, retain the caret before decorative borders.
+    const result = rows === 1 ? lines : [this.renderTopBorder(width, frame.hidden_above), ...lines];
+    if (rows >= 3) result.push(this.renderBottomBorder(width, frame.hidden_below));
+    const menuRows = rows - result.length;
+    if (frame.autocomplete && menuRows > 0) {
+      const list = new SelectList(frame.autocomplete.items, Math.min(frame.autocomplete.max_visible, Math.max(1, menuRows - 1)), this.#theme.selectList);
       list.setSelectedIndex(frame.autocomplete.selected);
-      result.push(...list.render(frame.content_width).map(line => pad + line + ' '.repeat(Math.max(0, frame.content_width - visibleWidth(line))) + pad));
+      result.push(...list.render(frame.content_width).slice(0, menuRows).map(line => pad + line + ' '.repeat(Math.max(0, frame.content_width - visibleWidth(line))) + pad));
     }
     return result;
   }

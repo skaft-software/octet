@@ -60,16 +60,18 @@ impl ExecutableExtensions {
     }
 
     pub(super) fn sync_remote_ui(&mut self, shell: &mut InteractiveShell) -> bool {
-        for error in self
-            .remote_ui
-            .reconcile(self.resource_owner.as_deref(), shell.terminal_dimensions())
-        {
-            shell.error(error);
-        }
         for process in &self.processes {
             for frame in process.take_remote_ui_frames() {
                 self.remote_ui.accept_frame(process, frame);
             }
+        }
+        // Include newly mounted footer heights before assigning the editor's
+        // rectangle. Resize notifications remain outside the paint path.
+        for error in self
+            .remote_ui
+            .reconcile(self.resource_owner.as_deref(), shell)
+        {
+            shell.error(error);
         }
         // One slot, one latest host decision: completion, clear or a restored
         // draft reaches the mounted component on the same drain as its frames.

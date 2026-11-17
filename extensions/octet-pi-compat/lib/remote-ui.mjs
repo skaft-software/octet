@@ -280,7 +280,20 @@ export class RemoteTUI {
     this.requestRender();
   }
   render(width) {
-    let lines = this.children.flatMap(c => fitLines(c.render(width)));
+    let lines = this.children.flatMap(c => {
+      const rendered = c.render(width);
+      if (!Array.isArray(rendered)) invalid('component render must return string[]');
+      return rendered;
+    });
+    if (this.surface.placement === 'editor' && lines.length > this.surface.rows) {
+      // Pi packages/tui/src/components/editor.ts:548-561 keeps the caret in its
+      // window. Render overrides may add rows around the bounded native editor;
+      // window those rows before validation consumes the cursor metadata.
+      const cursor = lines.findIndex(line => typeof line === 'string' && line.includes(CURSOR_MARKER));
+      const start = cursor < 0 ? 0 : Math.min(cursor, lines.length - this.surface.rows);
+      lines = lines.slice(start, start + this.surface.rows);
+    }
+    lines = fitLines(lines);
     for (const e of this.overlays) {
       if (e.hidden || e.options.visible && !e.options.visible(width, this.surface.rows)) continue;
       const o = e.options, margin = typeof o.margin === 'number' ? { top: o.margin, right: o.margin, bottom: o.margin, left: o.margin } : (o.margin || {});

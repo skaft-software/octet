@@ -830,8 +830,13 @@ impl Editor {
             .saturating_sub(usize::from(padding == 0))
             .max(1);
         let projection = self.projection();
-        let limit =
-            (usize::from(rows) * 3 / 10).clamp(5, if self.menu.is_some() { 233 } else { 254 });
+        // Match the adapter's read-only frame window: Pi
+        // packages/tui/src/components/editor.ts:541-561 keeps the caret visible,
+        // but this process boundary supplies an allocated rectangle, not the
+        // whole terminal. Borders yield to the caret in one/two-row slots.
+        let limit = (usize::from(rows) * 3 / 10)
+            .clamp(5, if self.menu.is_some() { 233 } else { 254 })
+            .min(usize::from(rows.saturating_sub(2).max(1)));
         let cursor = projection.cursor_row();
         if cursor < self.scroll {
             self.scroll = cursor;

@@ -16,11 +16,15 @@ fn projection(size: (u16, u16), widget_rows: usize, footer_rows: usize) -> Proje
         (
             "editor",
             Placement::Editor,
-            vec![
-                "editor top".into(),
-                "editor draft".into(),
-                "editor bottom".into(),
-            ],
+            match size.1.saturating_sub(1) {
+                0 | 1 => vec!["editor draft".into()],
+                2 => vec!["editor top".into(), "editor draft".into()],
+                _ => vec![
+                    "editor top".into(),
+                    "editor draft".into(),
+                    "editor bottom".into(),
+                ],
+            },
         ),
         (
             "footer",
@@ -46,7 +50,11 @@ fn projection(size: (u16, u16), widget_rows: usize, footer_rows: usize) -> Proje
             title: id.into(),
             placement,
             columns: size.0,
-            rows: size.1,
+            rows: if placement == Placement::Editor {
+                size.1.saturating_sub(1).clamp(1, 3)
+            } else {
+                size.1
+            },
             mouse_capture: false,
             native_editor: false,
         });

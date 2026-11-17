@@ -1537,3 +1537,40 @@ fn theme_catalog_bounds_refuse_complete_oversize_catalogs_without_truncation() {
 
 #[path = "editor_tests.rs"]
 mod editor_tests;
+
+#[tokio::test]
+async fn remote_editor_geometry_tracks_working_rows_without_terminal_resize() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    frontend.shell.set_size(80, 8);
+    frontend
+        .shell
+        .prefill_editor("one\ntwo\nthree\nfour\nfive".into());
+    command(&mut extensions, &mut frontend, &["editor"]).await;
+    frontend.shell.notice("existing transcript");
+    frontend.shell.begin_run("fixture");
+    extensions.sync_remote_ui(&mut frontend.shell);
+    let editor = extensions
+        .remote_ui
+        .projection()
+        .mount(ExtensionRemoteUiPlacement::Editor)
+        .unwrap()
+        .clone();
+    assert_eq!((editor.columns, editor.rows), (80, 4));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            extensions.sync_remote_ui(&mut frontend.shell);
+            if wire(&log)
+                .iter()
+                .any(|m| m["method"] == "ui/resize" && m["params"]["rows"] == 4)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    extensions.shutdown().await;
+}

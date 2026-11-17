@@ -58,7 +58,10 @@ export function editorFrame(snapshot, width, rows, scroll) {
   }
   const cursor = snapshot.cursor_offset;
   const cursorRow = Math.max(0, layout.findLastIndex(line => line.start <= cursor));
-  const limit = Math.max(5, Math.min(snapshot.autocomplete ? 233 : 254, Math.floor(rows * 0.3)));
+  // Pi packages/tui/src/components/editor.ts:541-561 keeps the cursor in its
+  // window. Here rows is the host-allocated rectangle, so borders also fit:
+  // the five-line preference cannot override a short composer slot.
+  const limit = Math.min(Math.max(1, rows - 2), Math.max(5, Math.min(snapshot.autocomplete ? 233 : 254, Math.floor(rows * 0.3))));
   if (cursorRow < scroll) scroll = cursorRow;
   if (cursorRow >= scroll + limit) scroll = cursorRow + 1 - limit;
   scroll = Math.min(scroll, Math.max(0, layout.length - limit));
