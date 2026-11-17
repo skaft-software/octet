@@ -1029,7 +1029,12 @@ pub(super) async fn read_protocol_stdout<R>(
             Err(error) => break 'stream Err(error.to_string()),
         };
         for byte in &read_buffer[..count] {
-            if *byte == b'\n' {
+            let complete =
+                match framing::push_protocol_byte(&mut line, *byte, state.max_message_bytes()) {
+                    Ok(complete) => complete,
+                    Err(error) => break 'stream Err(error),
+                };
+            if complete {
                 let is_api_v03 =
                     read_std_lock(&state.protocol).version == EXTENSION_API_VERSION_0_3;
                 if line.last() == Some(&b'\r') {
@@ -1068,14 +1073,6 @@ pub(super) async fn read_protocol_stdout<R>(
                         }
                     }
                     bus_attached = true;
-                }
-            } else {
-                line.push(*byte);
-                if line.len() >= state.max_message_bytes() {
-                    break 'stream Err(format!(
-                        "stdout message exceeded {} bytes",
-                        state.max_message_bytes()
-                    ));
                 }
             }
         }

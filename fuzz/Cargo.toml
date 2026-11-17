@@ -11,10 +11,41 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 octet-agent = { path = "../crates/octet-agent" }
+sexy-tui-rs = { path = "../crates/sexy-tui-rs" }
+crossterm = "0.29"
+unicode-segmentation = "=1.13.3"
 
 [[bin]]
 name = "session_record"
 path = "fuzz_targets/session_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal_input"
+path = "fuzz_targets/terminal_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_utils"
+path = "fuzz_targets/text_utils.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extension_wire"
+path = "fuzz_targets/extension_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown_render"
+path = "fuzz_targets/markdown_render.rs"
 test = false
 doc = false
 bench = false

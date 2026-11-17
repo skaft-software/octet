@@ -249,7 +249,7 @@ impl ApcFilter {
     /// unrecognized reply would otherwise time out the hello and be typed into
     /// the composer.
     const OSC_PREFIX: &'static str = "\x1b]877;tsp;";
-    const MAX_BYTES: usize = 1 << 20;
+    const MAX_BYTES: usize = codec::MAX_SEQUENCE_BYTES;
 
     fn is_prefix(text: &str) -> bool {
         Self::PREFIX.starts_with(text) || Self::OSC_PREFIX.starts_with(text)

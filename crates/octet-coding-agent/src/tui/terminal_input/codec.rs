@@ -1,6 +1,9 @@
 //! Byte provenance for Unix input and a console-event encoding on Windows.
-use super::*;
-use crossterm::event::KeyboardEnhancementFlags;
+use std::io;
+
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags};
+
+pub(super) const MAX_SEQUENCE_BYTES: usize = 1 << 20;
 
 #[path = "parse.rs"]
 mod parse;
@@ -89,7 +92,7 @@ impl Decoder {
         self.buffer.push(byte);
         // The wire interception bound is much smaller. This is the existing
         // native protocol-frame ceiling; oversized incomplete sequences fail.
-        if self.buffer.len() > ApcFilter::MAX_BYTES {
+        if self.buffered_bytes() > MAX_SEQUENCE_BYTES {
             self.buffer.clear();
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -110,6 +113,10 @@ impl Decoder {
                 Err(error)
             }
         }
+    }
+
+    pub(super) fn buffered_bytes(&self) -> usize {
+        self.buffer.len()
     }
 
     pub(super) fn has_pending_escape(&self) -> bool {

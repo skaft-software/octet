@@ -143,6 +143,7 @@ mod provider_pipeline;
 mod provider_stream;
 mod python_runtime;
 pub use python_runtime::{provision_python_runtime, PythonRuntimeConfig, PythonRuntimeSetup};
+mod framing;
 mod reader;
 mod resource_paths;
 mod session_control;
