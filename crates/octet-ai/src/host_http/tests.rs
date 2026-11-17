@@ -426,7 +426,7 @@ impl crate::HeaderTransform for RedactionMarker {
 }
 
 #[tokio::test]
-async fn custom_http_preserves_bounded_error_body_and_credential_redaction() {
+async fn custom_http_keeps_free_form_error_bodies_private() {
     let tracked = client().track_request_dispatch();
     let requests = Arc::default();
     let body = format!("extension-secret {}", "x".repeat(8192));
@@ -453,9 +453,8 @@ async fn custom_http_preserves_bounded_error_body_and_credential_redaction() {
         panic!("expected HTTP error")
     };
     assert_eq!(error.status, http::StatusCode::TOO_MANY_REQUESTS);
-    let snippet = error.body_snippet.unwrap();
-    assert!(snippet.len() <= 4096);
-    assert!(!snippet.contains("extension-secret"));
+    assert!(error.body_snippet.is_none());
+    assert!(!format!("{error:?}").contains("extension-secret"));
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
