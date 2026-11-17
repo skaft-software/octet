@@ -144,6 +144,9 @@ fn kitty_graphics_backend_preserves_cropped_and_repeated_ids_across_frames() {
     model.assert_placements(&[]);
 }
 
+// Unix-only: the locked Pi reference fixture is installed by the Linux and macOS
+// CI lanes; the Windows lane runs native terminal tests without it.
+#[cfg(unix)]
 #[test]
 fn kitty_graphics_pi_reference_raw_rows_share_fullscreen_lifecycle() {
     use sexy_tui_rs::{AltScreenOptions, AlternateScreen};
