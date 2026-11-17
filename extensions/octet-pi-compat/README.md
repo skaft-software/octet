@@ -685,8 +685,8 @@ appends translate only the new suffix and update transport ID indexes without
 scanning old entries. Unchanged observations perform constant cache bookkeeping;
 full-history getters still copy the requested history. Caches are weakly held by
 the native view array and bounded by namespace/limit identity. Bootstrap, branch
-changes and replacement views rebuild ancestry; retained invocation views keep
-their original revision. Copied observations gain no authority to replay opaque
+changes and replacement views rebuild ancestry; invocation receipt cursors remain
+independent of shared history publication. Copied observations gain no authority to replay opaque
 native continuations. The matched 16/160/1600-entry work-count fixtures live in
 `test/session-mirror-large.test.mjs` and `test/session-transport.test.mjs`.
 
@@ -714,6 +714,13 @@ native timestamp. Busy commands and live keyboard shortcuts use the owning nativ
 Run's bounded append lane with the same parent, owner and generation checks,
 not an idle-only queue. Counted receipts chain intervening native entries into the
 command's pinned view with namespace, revision, ancestry and quota checks intact.
+Busy command admission first refreshes history through that same writer. A live
+command retains append access after response settlement on the same native handle
+and descendant branch. More than sixteen intervening entries use a counted
+`snapshot` descriptor in the receipt instead of an oversized inline `gap`; the
+adapter synchronously reads its bounded chunks, verifies the original cursor and
+unchanged prefix, then applies the durable entry without retrying the append.
+Owner, generation, branch divergence, digest and quota checks remain fail-closed.
 A waiting response hook may append afterwards only across the exact head-and-byte
 chain of command commits witnessed by that same writer; unrelated source changes
 still refuse. Dropping the Run refuses unclaimed queued appends without idle replay.

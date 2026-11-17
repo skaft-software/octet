@@ -217,6 +217,7 @@ fn test_run_control(byte_limit: usize) -> (RunControl, mpsc::Receiver<Control>) 
     let (tx, rx) = mpsc::channel(8);
     (
         RunControl {
+            session_history: (extension_appends::RunAppends::new(0, 0), String::new()),
             cache_warming_mode: crate::cache_warmer::CacheWarmer::default().mode_control(),
             cache_warming_status: crate::cache_warmer::CacheWarmer::default().diagnostics(),
             reasoning_model: None,

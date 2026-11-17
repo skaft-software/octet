@@ -141,21 +141,44 @@ impl ExtensionProcess {
         if pin.owner != *owner || pin.preparation.is_some() {
             return Err(refused());
         }
-        // Chain only host config writes or the owning Run's known suffix.
-        // Branch divergence, foreign writes and older source changes refuse.
-        // Pi commits commands during streaming synchronously rather than at idle:
-        // packages/coding-agent/src/core/agent-session.ts:2120-2129,3487-3492.
+        // The native handle is the sole writer, including after Run settlement.
+        // Pi reads and appends at the current branch (packages/coding-agent/src/
+        // core/session-manager.ts:1301-1311,1480-1490). A reopened handle or a
+        // branch no longer descending from this parent's pin still refuses.
+        let same_writer = matches!(
+            parent.method.as_str(),
+            methods::COMMAND_EXECUTE | methods::SHORTCUT_EXECUTE
+        ) && pin
+            .source
+            .is_some_and(|source| source.same_handle(session.view_identity()));
         let gap = append_gap(
             session,
             pin.head.as_deref(),
             session_head.as_deref(),
-            run_start,
+            same_writer,
         )
         .ok_or_else(refused)?;
         let previous_head = pin.head.clone();
         let entry_parent = session_head.clone();
         let previous_revision = pin.revision;
         let namespace = &self.descriptor().manifest.name;
+        // Oversized inline gaps resynchronize via the existing counted chunk
+        // transport, reserved before persistence. This is not append replay.
+        let snapshot = if gap.is_none() {
+            let profile = connection.session_profile().map_err(|_| bounds())?;
+            let revision = store.next_revision().map_err(|_| bounds())?;
+            let view = store
+                .history(session, namespace, owner.clone(), &profile, None, revision)
+                .map_err(|_| bounds())?;
+            Some(
+                store
+                    .transfer(parent_id, view, &profile)
+                    .map_err(|_| bounds())?,
+            )
+        } else {
+            None
+        };
+        let gap = gap.unwrap_or_default();
         let candidate = Entry {
             id: EntryId("9".repeat(20)),
             parent: entry_parent.clone().map(EntryId),
@@ -196,6 +219,10 @@ impl ExtensionProcess {
             previous_head: previous_head.clone(),
             gap: visible_gap(&gap, namespace, session),
         };
+        let mut candidate_receipt = serde_json::to_value(candidate_receipt).expect("receipt JSON");
+        if let Some(snapshot) = &snapshot {
+            candidate_receipt["snapshot"] = json!(snapshot);
+        }
         let max_bytes = connection.max_message_bytes();
         if validate_session_snapshot_size(
             &json!({"jsonrpc":"2.0","id":request_id,"result":candidate_receipt}),
@@ -203,6 +230,9 @@ impl ExtensionProcess {
         )
         .is_err()
         {
+            if let Some(snapshot) = &snapshot {
+                store.transfers.remove(&snapshot.transfer_id);
+            }
             return Err(bounds());
         }
         let view_revision = store.next_revision().map_err(|_| bounds())?;
@@ -213,7 +243,7 @@ impl ExtensionProcess {
                 invalid(format!("the extension session entry was refused: {error}"))
             })?;
         let entry = session.entry(&entry_id).expect("committed session entry");
-        let result = serde_json::to_value(receipt::Receipt {
+        let mut result = serde_json::to_value(receipt::Receipt {
             result: SessionLeafAppendResult {
                 entry_id: entry_id.0.clone(),
                 head: entry_id.0.clone(),
@@ -230,6 +260,9 @@ impl ExtensionProcess {
             gap: visible_gap(&gap_entries, namespace, session),
         })
         .expect("session entry receipt is JSON");
+        if let Some(snapshot) = snapshot {
+            result["snapshot"] = json!(snapshot);
+        }
         let mut line =
             serde_json::to_vec(&json!({"jsonrpc":"2.0","id":request_id,"result":result}))
                 .expect("session entry response is JSON");
@@ -273,21 +306,22 @@ impl ExtensionProcess {
     }
 }
 
-/// Maximum known native entries a parent receipt may chain past its pin.
+/// Maximum native entries carried inline in a parent append receipt.
 const MAX_APPEND_GAP: usize = 16;
 
-/// Entries strictly after `pinned` up to `head`, oldest first, when that span
-/// is a bounded linear chain of host config or active-Run writes.
+/// A bounded inline chain, or a counted resync after proving ancestry. Only
+/// the live native handle can authorize message writes across settlement.
 fn append_gap<'s>(
     session: &'s Session,
     pinned: Option<&str>,
     head: Option<&str>,
-    run_start: Option<usize>,
-) -> Option<Vec<&'s Entry>> {
+    same_writer: bool,
+) -> Option<Option<Vec<&'s Entry>>> {
     let mut gap = Vec::new();
     let mut cursor = head;
+    let mut count = 0;
     while cursor != pinned {
-        if gap.len() >= MAX_APPEND_GAP {
+        if count >= session.entries().len() {
             return None;
         }
         let entry = session.entry(&EntryId(cursor?.to_owned()))?;
@@ -296,23 +330,20 @@ fn append_gap<'s>(
                 .metadata
                 .as_ref()
                 .is_none_or(|metadata| metadata.extension_metadata.is_empty());
-        // The Run owns every write since admission. Permit only its known
-        // linear suffix, never an older divergence, checkout or foreign writer.
-        let run_owned = run_start.is_some_and(|start| {
-            session.entries()[start..]
-                .iter()
-                .rev()
-                .take(MAX_APPEND_GAP)
-                .any(|known| known.id == entry.id)
-        });
-        if !host_config && !run_owned {
+        if !host_config && !same_writer {
             return None;
         }
-        gap.push(entry);
+        count += 1;
+        if count <= MAX_APPEND_GAP {
+            gap.push(entry);
+        }
         cursor = entry.parent.as_ref().map(|id| id.0.as_str());
     }
+    if count > MAX_APPEND_GAP {
+        return Some(None);
+    }
     gap.reverse();
-    Some(gap)
+    Some(Some(gap))
 }
 
 fn visible_gap<'a>(
@@ -325,7 +356,7 @@ fn visible_gap<'a>(
             entry: entry.borrow(),
             namespace,
             usage: if matches!(entry.borrow().value, EntryValue::Message(octet_ai::Message::Assistant(_))) {
-                session.usage_records()[session.run_appends.as_ref().expect("only Run entries can contain assistant gaps").usage_start..].iter().rev().find(|record| matches!(&record.kind, crate::session::UsageRecordKind::AssistantTurn { assistant } if assistant == &entry.borrow().id))
+                session.usage_records()[session.run_appends.as_ref().map_or(0, |lane| lane.usage_start)..].iter().rev().find(|record| matches!(&record.kind, crate::session::UsageRecordKind::AssistantTurn { assistant } if assistant == &entry.borrow().id))
             } else { None },
         })
         .collect()

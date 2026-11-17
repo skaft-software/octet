@@ -151,6 +151,7 @@ pub(in crate::extension_process) fn attach(
         store.parents.insert(
             id,
             ParentView {
+                source: view.source,
                 owner: owner.clone(),
                 preparation,
                 revision: view.descriptor.view_revision,

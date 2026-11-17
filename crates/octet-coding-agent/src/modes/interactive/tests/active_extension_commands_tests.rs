@@ -7,6 +7,8 @@ use super::*;
 const FACTORY: &str = r#"export default function(pi) {
   pi.on('turn_end', () => {});
   pi.registerCommand('append-command', { handler: async (_args, ctx) => {
+    if (!ctx.sessionManager.getBranch().some(entry => entry.type === 'message' && entry.message.role === 'user' && entry.message.content.some(part => part.text === 'original response')))
+      throw new Error('command admission history is stale');
     for (let index = 0; index < 2; index++) {
       pi.appendEntry('busy-command', { index });
       const entry = ctx.sessionManager.getEntries().at(-1);
@@ -40,7 +42,7 @@ async fn composer_command_during_response(command: &str, expected: &str) {
     resource_paths::refresh_resource_paths(&mut app, &mut shell, &mut startup)
         .await
         .unwrap();
-    let inspection = ActiveRunInspection::capture(&app);
+    let mut inspection = ActiveRunInspection::capture(&app);
     let run_id = shell.begin_run("test");
     let mut run = app.agent.prompt("original response").await.unwrap();
     shell.set_awaiting_provider(run_id);
@@ -69,6 +71,7 @@ async fn composer_command_during_response(command: &str, expected: &str) {
     let mut input = futures_util::stream::iter(events).chain(futures_util::stream::pending());
     let mut pending = VecDeque::new();
     let control = run.control();
+    inspection.cache_warming_control = Some(control.clone());
     let mut quit = false;
     let mut made_tool_call = false;
     let mut deadline = None;

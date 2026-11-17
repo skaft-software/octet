@@ -513,3 +513,51 @@ test('two commands append durably against one prepared view while a response is 
   assert.equal(peer.child.exitCode, null);
   await peer.close();
 });
+
+test('a delayed command synchronously resyncs a counted large gap without replaying either append', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'resync-append-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const peer = launch(t, [fixture(directory, `export default pi => {
+    pi.registerCommand('append', { handler: (_args, ctx) => {
+      pi.appendEntry('saved', { index: 0 });
+      if (ctx.sessionManager.getEntries().length !== 18) throw new Error('resync missing history');
+      pi.appendEntry('saved', { index: 1 });
+      if (ctx.sessionManager.getEntries().length !== 19) throw new Error('receipt cursor missing');
+    }});
+    pi.registerCommand('observe', { handler: (_args, ctx) => {
+      if (ctx.sessionManager.getEntries().length !== 19) throw new Error('stale published resync');
+    }});
+  }`)], { cwd: directory, hold: ['session/append_entry', 'session/snapshot/read', 'session/snapshot/release'] });
+  assert.ok((await peer.request('initialize', { api_version: '0.4', workspace: directory, host: peer.context().host,
+    extension: { name: 'octet-pi-compat' }, contributes: { tools: [], commands: peer.metadata.commands.map(command => command.name), hooks: peer.metadata.hooks },
+    protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'],
+      optional_features: [...features, 'session_append_receipts_v1'], ...offer } }).response).result);
+  const initial = descriptors([], 1).snapshot; initial.descriptor.preparation = null;
+  const prepared = peer.request('session/snapshot/prepare', { resource_owner: owner, snapshot: initial.descriptor, host: peer.context().host });
+  await serve(peer, new Map([[initial.descriptor.transfer_id, initial.bytes]]), initial.descriptor.transfer_id);
+  assert.ok((await prepared.response).result); await peer.start();
+  const command = peer.request('command/execute', { name: 'append', arguments: [], context: peer.context(),
+    session_snapshot: { ...initial.descriptor, transfer_id: hash('resync-parent') } });
+  const released = await peer.wait(f => f.method === 'session/snapshot/release');
+  peer.send({ jsonrpc: '2.0', id: released.id, result: { released: true } });
+  const entries = Array.from({ length: 17 }, (_, i) => message(`e${i}`, i ? `e${i - 1}` : null, `message ${i}`));
+  const snapshot = descriptors(entries, 2).snapshot; snapshot.descriptor.preparation = null;
+  let parent = 'e16';
+  for (let index = 0; index < 2; index++) {
+    const append = await peer.wait(f => f.method === 'session/append_entry');
+    const id = `saved-${index}`, entry = { id, parent, timestamp_unix_ms: 1,
+      value: { type: 'config', model: null, reasoning: null, reasoning_mode: null },
+      metadata: { extension_metadata: { 'octet-pi-compat': { public: false,
+        provenance: { extension: 'octet-pi-compat', process_generation: owner.process_generation },
+        value: { entry_type: append.params.entry_type, data: append.params.data } } } } };
+    peer.send({ jsonrpc: '2.0', id: append.id, result: { entry_id: id, head: id, successor: null, entry,
+      previous_revision: index ? 3 : 1, previous_head: index ? parent : null, view_revision: index + 3,
+      ...(index ? {} : { snapshot: snapshot.descriptor }) } });
+    if (!index) await serve(peer, new Map([[snapshot.descriptor.transfer_id, snapshot.bytes]]), snapshot.descriptor.transfer_id);
+    parent = id;
+  }
+  const reply = await command.response; assert.ok(reply.result, JSON.stringify(reply) + peer.stderr());
+  assert.equal(peer.seen.filter(f => f.method === 'session/append_entry').length, 2);
+  const observed = await peer.command('observe').response; assert.ok(observed.result, JSON.stringify(observed));
+  await peer.close();
+});

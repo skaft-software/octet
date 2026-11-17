@@ -234,6 +234,7 @@ pub(super) fn control_input_bytes(input: &UserInput) -> usize {
 /// bypasses this queue entirely.
 #[derive(Clone)]
 pub struct RunControl {
+    pub(super) session_history: (extension_appends::RunAppends, String),
     pub(super) cache_warming_mode: tokio::sync::watch::Sender<crate::cache_warmer::CacheWarmPolicy>,
     pub(super) cache_warming_status: tokio::sync::watch::Receiver<crate::CacheWarmingStatus>,
     pub(super) reasoning_model: Option<Model>,

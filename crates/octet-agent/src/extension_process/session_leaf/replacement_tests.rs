@@ -65,10 +65,11 @@ fn pin_counted(state: &ProtocolReadState, parent: u64, descriptor: &transport::D
         .unwrap();
     let mut store = lock_std_mutex(&state.session_leaf.transport);
     let view = Arc::clone(store.current[&descriptor.owner].as_ref().unwrap());
-    store.transfer(parent, view, &profile).unwrap();
+    store.transfer(parent, Arc::clone(&view), &profile).unwrap();
     store.parents.insert(
         parent,
         transport::ParentView {
+            source: view.source,
             owner: descriptor.owner.clone(),
             preparation: None,
             revision: descriptor.view_revision,

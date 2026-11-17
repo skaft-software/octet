@@ -57,7 +57,7 @@ export function appendReply(result, grant, owner, routed = false) {
     if (Object.keys(result).some(key => key !== 'entry_id')) invalid('unbound session append reply');
     return { entryId: result.entry_id };
   }
-  if (Object.keys(result).some(key => !['entry_id', 'head', 'successor', ...(routed ? ['entry', 'previous_revision', 'view_revision', 'previous_head', 'gap'] : [])].includes(key))) invalid('session append reply fields');
+  if (Object.keys(result).some(key => !['entry_id', 'head', 'successor', ...(routed ? ['entry', 'previous_revision', 'view_revision', 'previous_head', 'gap', 'snapshot'] : [])].includes(key))) invalid('session append reply fields');
   bounded(result.head, 'committed head', 256);
   if (result.head !== result.entry_id) invalid('session append committed head');
   if (!grant && result.successor !== null) invalid('unbound session append successor');
@@ -71,6 +71,6 @@ export function appendReply(result, grant, owner, routed = false) {
 // the retired owner and are settled by the original store. The new owner's
 // appends route through its own published view and a fresh native receipt.
 export function replacementStore(store, extra = {}) {
-  const { leaf, receiptCursor, appendError, sessionView, sessionPayload, activation, preparationBarrier, preparationOwner, ...rest } = store;
+  const { leaf, receiptCursor, sessionView, sessionPayload, activation, preparationBarrier, preparationOwner, ...rest } = store;
   return { ...rest, ...extra };
 }

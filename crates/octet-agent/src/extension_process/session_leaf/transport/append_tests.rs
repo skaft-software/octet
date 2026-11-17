@@ -144,8 +144,8 @@ commands = ["append"]
             ));
             drop(permits);
             assert_eq!(std::fs::read(session.path()).unwrap(), before);
-            // A host write other than a config selection is a real divergence
-            // from the parent's pinned view: refuse without writing.
+            // A reopened writer cannot borrow the original native handle's
+            // append authority, even with the same path and owner.
             session
                 .append(EntryValue::Message(octet_ai::Message::User(
                     octet_ai::UserMessage {
@@ -154,11 +154,12 @@ commands = ["append"]
                 )))
                 .unwrap();
             let changed = std::fs::read(session.path()).unwrap();
+            let mut reopened = Session::open(session.path()).unwrap();
             assert!(process
                 .append_session_entry_request(
                     &id,
                     generation,
-                    &mut session,
+                    &mut reopened,
                     &entry_type,
                     data.clone()
                 )
@@ -529,5 +530,247 @@ async fn pending_messages_retained_real_pi_context_updates_without_a_ui_mount() 
             .await
             .unwrap();
     }
+    assert!(process.shutdown().await);
+}
+
+fn append_response_progress(session: &mut Session, index: usize) {
+    if index == 0 {
+        for _ in 0..17 {
+            session
+                .append(EntryValue::Message(octet_ai::Message::User(
+                    octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Text("native writer progress".into())],
+                    },
+                )))
+                .unwrap();
+        }
+    } else {
+        let model = octet_ai::ModelId("fixture/model".into());
+        let assistant = session
+            .append(EntryValue::Message(octet_ai::Message::Assistant(
+                octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::Text("settled answer".into())],
+                    model: model.clone(),
+                    protocol: octet_ai::Protocol::AnthropicMessages,
+                },
+            )))
+            .unwrap();
+        session
+            .record_assistant_usage(
+                assistant,
+                octet_ai::EndpointId("fixture".into()),
+                model,
+                octet_ai::Usage::default(),
+                None,
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn delayed_command_appends_resync_large_gap_and_continue_after_settlement() {
+    let temp = tempfile::tempdir().unwrap();
+    write_executable_script(&temp.path().join("extension.py"), SCRIPT);
+    let manifest = ExtensionManifest::parse(
+        r#"name = "append-process"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "extension.py"
+[contributes]
+commands = ["append"]
+"#,
+    )
+    .unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    let process = ExtensionProcess::start(trusted_descriptor(temp.path(), manifest), config)
+        .await
+        .unwrap();
+    let mut session = Session::create(temp.path().join("session.jsonl")).unwrap();
+    process
+        .set_host_state_with_session(ExtensionHostState::default(), &session)
+        .unwrap();
+    let context = process.current_context_for_resource_owner(session.resource_owner_key());
+    process
+        .wait_for_session_snapshot_prepared(
+            context.resource_owner.as_ref().unwrap(),
+            Duration::from_secs(5),
+            &CancellationToken::default(),
+        )
+        .await
+        .unwrap();
+    let mut events = process.subscribe();
+    let command = tokio::spawn({
+        let process = process.clone();
+        async move { process.execute_command("append", vec![], context).await }
+    });
+    for index in 0..2 {
+        let (id, generation, entry_type, data) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let ExtensionEvent::SessionEntryRequested {
+                        request_id,
+                        generation,
+                        operation: ExtensionSessionEntryOperation::Append { entry_type, data },
+                        ..
+                    } = events.recv().await.unwrap()
+                    {
+                        break (request_id, generation, entry_type, data);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        append_response_progress(&mut session, index);
+        if index == 1 {
+            let head = session.head().unwrap();
+            session.checkout_root().unwrap();
+            let before = std::fs::read(session.path()).unwrap();
+            assert!(matches!(
+                process.append_session_entry_request(
+                    &id,
+                    generation,
+                    &mut session,
+                    &entry_type,
+                    data.clone()
+                ),
+                Err((ExtensionRequestFailure::NotForegroundOwner, _))
+            ));
+            assert_eq!(std::fs::read(session.path()).unwrap(), before);
+            session.checkout(head).unwrap();
+        }
+        let receipt = if index == 0 {
+            process.append_run_session_entry_request(
+                &id,
+                generation,
+                &mut session,
+                &entry_type,
+                data,
+                0,
+            )
+        } else {
+            process.append_session_entry_request(&id, generation, &mut session, &entry_type, data)
+        }
+        .expect("same live command retains the sole writer across progress and settlement");
+        if index == 0 {
+            let snapshot = &receipt["snapshot"];
+            assert_eq!(snapshot["entry_count"], 17);
+            assert!(receipt.get("gap").is_none());
+        } else {
+            assert_eq!(receipt["gap"].as_array().unwrap().len(), 1);
+        }
+    }
+    assert!(command.await.unwrap().is_ok());
+    assert_eq!(
+        Session::open_read_only(session.path())
+            .unwrap()
+            .entries()
+            .len(),
+        20
+    );
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn real_adapter_command_resyncs_large_gap_and_appends_again_after_settlement() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp.path().join("delayed.mjs");
+    std::fs::write(
+        &factory,
+        r#"export default pi => {
+      pi.registerCommand('append', { handler: (_args, ctx) => {
+        for (let index = 0; index < 2; index++) {
+          pi.appendEntry('delayed', { index });
+          if (ctx.sessionManager.getEntries().length !== 18 + index * 2)
+            throw new Error('stale history after native resync');
+        }
+      }});
+    };"#,
+    )
+    .unwrap();
+    let manifest_path =
+        crate::extension_process::pi_fixture::capture(temp.path(), &[factory]).await;
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    config.host_state.has_ui = Some(false);
+    let process = ExtensionProcess::start(
+        trusted_descriptor(manifest_path.parent().unwrap(), manifest),
+        config,
+    )
+    .await
+    .unwrap();
+    let mut session = Session::create(temp.path().join("session.jsonl")).unwrap();
+    process
+        .set_host_state_with_session(process.current_context().host, &session)
+        .unwrap();
+    let context = process.current_context_for_resource_owner(session.resource_owner_key());
+    process
+        .wait_for_session_snapshot_prepared(
+            context.resource_owner.as_ref().unwrap(),
+            Duration::from_secs(5),
+            &CancellationToken::default(),
+        )
+        .await
+        .unwrap();
+    process
+        .start_session_hook_binding(session.resource_owner_key())
+        .await
+        .unwrap();
+    let mut events = process.subscribe();
+    let command = tokio::spawn({
+        let process = process.clone();
+        async move { process.execute_command("append", vec![], context).await }
+    });
+    for index in 0..2 {
+        let (id, generation, entry_type, data) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let ExtensionEvent::SessionEntryRequested {
+                        request_id,
+                        generation,
+                        operation: ExtensionSessionEntryOperation::Append { entry_type, data },
+                        ..
+                    } = events.recv().await.unwrap()
+                    {
+                        break (request_id, generation, entry_type, data);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        append_response_progress(&mut session, index);
+        if index == 0 {
+            process.append_run_session_entry_request(
+                &id,
+                generation,
+                &mut session,
+                &entry_type,
+                data,
+                0,
+            )
+        } else {
+            process.append_session_entry_request(&id, generation, &mut session, &entry_type, data)
+        }
+        .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), command)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let reopened = Session::open_read_only(session.path()).unwrap();
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| reopened
+                .extension_entry(&entry.id, "octet-pi-compat")
+                .is_some())
+            .count(),
+        2
+    );
+    assert!(process.is_running());
     assert!(process.shutdown().await);
 }

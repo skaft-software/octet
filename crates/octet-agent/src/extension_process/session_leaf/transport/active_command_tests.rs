@@ -11,6 +11,8 @@ export default pi => {
   const trace = value => fs.appendFileSync('trace.txt', value + '\n');
   pi.registerCommand('append', { handler: async (_args, ctx) => {
     trace('append-start');
+    if (fs.existsSync('expect-current') && !ctx.sessionManager.getBranch().some(entry => entry.type === 'message' && entry.message.role === 'user'))
+      throw new Error('command admission history is stale');
     for (let index = 0; index < 2; index++) {
       pi.appendEntry('busy-command', { index });
       const entry = ctx.sessionManager.getEntries().at(-1);
@@ -305,5 +307,44 @@ async fn dropping_run_refuses_queued_command_append_without_idle_replay() {
     assert!(!reopened.entries().iter().any(|entry| reopened
         .extension_entry(&entry.id, "octet-pi-compat")
         .is_some()));
+    assert!(process.shutdown().await);
+}
+
+#[tokio::test]
+async fn command_admission_refreshes_current_history_through_held_response_writer() {
+    let (temp, process, mut agent) = fixture().await;
+    std::fs::write(temp.path().join("command-barrier"), "").unwrap();
+    std::fs::write(temp.path().join("expect-current"), "").unwrap();
+    let context = process.current_context_for_resource_owner(agent.session().resource_owner_key());
+    let mut events = process.subscribe();
+    let mut run = agent.prompt("prompt").await.unwrap();
+    while !matches!(run.next().await, Some(AgentEvent::OutputDelta { .. })) {}
+    let control = run.control();
+    let command = tokio::spawn({
+        let process = process.clone();
+        async move {
+            control
+                .refresh_extension_history(process.clone())
+                .await
+                .unwrap();
+            process.execute_command("append", vec![], context).await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                event = events.recv() => {
+                    if let ExtensionEvent::SessionEntryRequested { request_id, generation,
+                        operation: ExtensionSessionEntryOperation::Append { entry_type, data }, .. } = event.unwrap() {
+                        run.queue_extension_append(process.clone(), request_id, generation, entry_type, data).unwrap();
+                    }
+                }
+                event = run.next() => if event.is_none() { break; }
+            }
+        }
+        command.await.unwrap().unwrap();
+    }).await.unwrap();
+    drop(run);
+    assert!(process.is_running());
     assert!(process.shutdown().await);
 }

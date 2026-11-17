@@ -315,7 +315,7 @@ export class Transport {
     });
   }
   requestSync(method, params, { parent, signal, onCancel, onUiClosed, timeout = 30000 } = {}) {
-    if (!['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(method)) unsupportedAPI(`synchronous request ${method}`, 'only a reviewed synchronous host contract may block the factory thread');
+    if (!['session/append_entry', 'session/snapshot/read', 'session/snapshot/release', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(method)) unsupportedAPI(`synchronous request ${method}`, 'only a reviewed synchronous host contract may block the factory thread');
     if (!this.worker || this.closed) throw rpcError(-32002, 'synchronous transport is unavailable');
     if (this.children.size >= 128) throw rpcError(-32012, 'bounds_exceeded host request catalog');
     signal?.throwIfAborted();

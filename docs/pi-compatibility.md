@@ -158,7 +158,11 @@ times out; a warning names the extension and command. `pi.appendEntry()` commits
 through the running response's original session writer before returning, including
 while parallel tools, background settlement, video preparation, retries or response
 hooks await. Durable receipts make the appended entries available
-to the command's immediate session getters. Adapter retirement skips pending
+to the command's immediate session getters. Busy commands start with current
+same-owner history and retain append access after the response settles. Large
+intervening gaps resynchronize through bounded snapshots without replaying writes.
+Concurrent commands keep independent receipt cursors; a malformed receipt warns
+and fails only its invocation. Adapter retirement skips pending
 response observations with a warning; committed entries and handlers are not
 replayed. A handler requesting a session replacement still waits for the current
 response to settle before the native host lends it the session writer.

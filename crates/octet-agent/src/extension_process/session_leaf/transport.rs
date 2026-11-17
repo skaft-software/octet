@@ -103,6 +103,7 @@ struct Projection {
     _reservation: Reservation,
 }
 pub(super) struct ParentView {
+    pub(super) source: Option<crate::session::SessionViewIdentity>,
     pub(super) owner: ExtensionResourceOwner,
     pub(super) preparation: Option<Preparation>,
     pub(super) revision: u64,
@@ -260,6 +261,7 @@ impl Store {
         self.parents.insert(
             parent_id,
             ParentView {
+                source: view.source,
                 owner: mirror.owner.clone(),
                 preparation: None,
                 revision: descriptor.view_revision,

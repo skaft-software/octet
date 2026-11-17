@@ -69,6 +69,7 @@
 - Delegated usage records retain the child's endpoint and model while counting settled spend exactly once across resume and model changes.
 - Codex GPT-6.1 Sol sessions and subagents retain reviewed token prices and long-context tiers in cost accounting.
 - Video frames reuse model-limit-specific prepared images across turns and replay, keeping decoding and resizing in cancellable async preparation.
+- Busy Pi commands read current history and retain append access across long responses and response settlement.
 - Pi keyboard shortcuts append through the active response writer with live owner and generation checks.
 - Concurrent Pi command appends keep independent receipt cursors and isolate malformed replies to the affected invocation.
 - Video preparation follows the active branch and compaction window.

@@ -47,6 +47,7 @@ fn reload_history_rebind_charges_new_generation_without_copying_authority() {
     previous.parents.insert(
         7,
         ParentView {
+            source: view.source,
             owner: owner.clone(),
             preparation: view.descriptor.preparation.clone(),
             revision,

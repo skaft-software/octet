@@ -239,7 +239,12 @@ impl Agent {
         let (control_tx, mut control_rx) = mpsc::channel::<Control>(8);
         let abort = Arc::new(AbortFlag::default());
         let control_admission = Arc::new(std::sync::Mutex::new(true));
+        let appends = extension_appends::RunAppends::new(
+            custom_message_cursor,
+            self.session.usage_records().len(),
+        );
         let control = RunControl {
+            session_history: (appends.clone(), self.resource_owner.clone()),
             cache_warming_mode: self.cache_warmer.mode_control(),
             cache_warming_status: self.cache_warmer.diagnostics(),
             reasoning_model: self
@@ -348,10 +353,6 @@ impl Agent {
             })
             .collect::<Vec<_>>();
         let prepared_video_context = &mut self.prepared_video_context;
-        let appends = extension_appends::RunAppends::new(
-            custom_message_cursor,
-            self.session.usage_records().len(),
-        );
         self.session.run_appends = Some(appends.clone());
         let append_owner = self.resource_owner.clone();
         let session = &mut self.session;

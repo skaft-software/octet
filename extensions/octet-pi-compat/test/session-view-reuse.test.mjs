@@ -57,7 +57,7 @@ function harness() {
   };
   const hook = d => ({ context: { resource_owner: owner }, session_snapshot: d });
   const fresh = () => ({ ...store, sessionView: undefined });
-  return { transport, store, reads, releases, describe, publish, hook, fresh };
+  return { transport, store, buffers, reads, releases, describe, publish, hook, fresh };
 }
 
 test('a hook naming the prepared revision reuses its parsed view without reading', async () => {
@@ -123,4 +123,31 @@ test('concurrent invocations validate receipts against independent native cursor
     entry_id: 'third', head: 'third', gap: [first, second], entry: message('third', 'second', 'third') }, null, null), /receipt/);
   h.transport.settle(stores[0]); h.transport.settle(stores[1]); h.transport.retire(h.store.state);
   assert.deepEqual([h.transport.bytes, h.transport.records, h.transport.views], [0, 0, 0]);
+});
+
+
+test('counted append resync rejects rewritten history, divergence and stale descriptors without mutating its pin', async () => {
+  for (const mode of ['rewrite', 'diverge', 'stale', 'owner', 'digest']) {
+    const h = harness(), old = history(['seed']);
+    const view = await h.publish(h.transport.invalidate(owner, 1), h.describe(1, old));
+    const store = h.fresh(); await h.transport.hydrate(h.hook(h.describe(1, old)), store);
+    const fresh = history(['seed', 'new']);
+    if (mode === 'rewrite') fresh.entries[0].value.User.content[0].Text = 'rewritten';
+    if (mode === 'diverge') { fresh.branch_ids = []; fresh.head = null; }
+    const snapshot = h.describe(mode === 'stale' ? 1 : 2, fresh);
+    if (mode === 'owner') snapshot.owner = { ...owner, session_id: 'foreign' };
+    if (mode === 'digest') snapshot.sha256 = '0'.repeat(64);
+    h.transport.runtime.transport.requestSync = (method, params) => {
+      if (method === 'session/snapshot/release') return { released: true };
+      const bytes = h.buffers.get(params.transfer_id), end = Math.min(bytes.length, params.offset + params.max_bytes);
+      return { transfer_id: params.transfer_id, offset: params.offset,
+        data: bytes.subarray(params.offset, end).toString('base64'), next_offset: end, eof: end === bytes.length };
+    };
+    const before = h.transport.bytes;
+    assert.throws(() => h.transport.append(store, { previous_revision: 1, previous_head: 'e0', view_revision: 3,
+      entry_id: 'saved', head: 'saved', entry: message('saved', fresh.head, 'saved'), snapshot }, null, null));
+    assert.deepEqual(view.document.entries, old.entries);
+    assert.equal(store.receiptCursor.revision, 1);
+    assert.equal(h.transport.bytes, before);
+  }
 });

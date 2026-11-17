@@ -809,6 +809,16 @@ pub(crate) enum OwnedCommandEvent {
 }
 
 impl OwnedExtensionCommand {
+    pub(crate) fn with_run_history(mut self, control: octet_agent::RunControl) -> Self {
+        let execution = std::mem::replace(&mut self.execution, Box::pin(std::future::pending()));
+        let refreshed = control.refresh_extension_history(self.process.clone());
+        self.execution = Box::pin(async move {
+            refreshed.await?;
+            execution.await
+        });
+        self
+    }
+
     pub(crate) async fn advance<H>(
         &mut self,
         extensions: &mut ExecutableExtensions,

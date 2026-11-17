@@ -71,7 +71,7 @@ function complete(value, status) {
 // learn, so a host that drops it gets terminal cancellation and the factory
 // thread is woken instead of waiting out the watchdog. The host also drops the
 // request silently, so its reply may never arrive.
-const READ_ONLY_SYNC = new Set(['tools/snapshot', 'commands/snapshot', 'composition/context', 'context/system_prompt', 'pi/settings/read']);
+const READ_ONLY_SYNC = new Set(['session/snapshot/read', 'session/snapshot/release', 'tools/snapshot', 'commands/snapshot', 'composition/context', 'context/system_prompt', 'pi/settings/read']);
 function cancelSync() {
   if (!sync || sync.cancelled) return;
   sync.cancelled = true; Atomics.store(header, 2, 1);
@@ -122,7 +122,7 @@ parentPort.on('message', packet => {
       forwarded.delete(packet.token); pendingClosed.delete(packet.token); bytes -= size; return;
     }
     if (packet.kind === 'sync') {
-      if (sync || !['session/append_entry', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
+      if (sync || !['session/append_entry', 'session/snapshot/read', 'session/snapshot/release', 'session/setup', 'tools/register', 'commands/register', 'shortcut/register', 'tools/snapshot', 'commands/snapshot', 'tools/set_active', 'ui/chrome', 'model/select', 'composition/context', 'context/system_prompt', 'pi/settings/read'].includes(packet.message.method)) throw rpcError(-32600, 'invalid synchronous request');
       sync = { id: packet.message.id, parent: packet.parent, method: packet.message.method,
         readOnly: READ_ONLY_SYNC.has(packet.message.method) ||
           (packet.message.method === 'ui/chrome' && packet.message.params?.chrome?.kind === 'get') };

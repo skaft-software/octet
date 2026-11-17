@@ -81,6 +81,63 @@ export class SessionTransport {
     } catch (error) { bytes = undefined; release(); throw error; }
     finally { this.transfers--; }
   }
+  // appendEntry is synchronous: the existing transport worker serves bounded
+  // snapshot chunks while the factory thread waits for the durable receipt.
+  readSync(d, store) {
+    if (this.transfers >= this.profile.transfers) throw unavailable();
+    const release = this.reserve(d); this.transfers++;
+    const call = (method, params) => this.runtime.transport.requestSync(method,
+      { parent_request_id: store.id, ...params }, { parent: store.id, signal: store.controller.signal });
+    try {
+      const bytes = Buffer.allocUnsafe(d.bytes);
+      let offset = 0;
+      while (offset < d.bytes) {
+        const chunk = call('session/snapshot/read', { transfer_id: d.transfer_id, offset, max_bytes: this.profile.chunk_bytes });
+        exact(chunk, ['transfer_id', 'offset', 'data', 'next_offset', 'eof'], 'session chunk');
+        if (chunk.transfer_id !== d.transfer_id || chunk.offset !== offset || typeof chunk.data !== 'string'
+            || chunk.data.length > Math.ceil(this.profile.chunk_bytes / 3) * 4) invalid('session chunk identity');
+        const data = Buffer.from(chunk.data, 'base64');
+        if (!data.length || data.length > this.profile.chunk_bytes || data.toString('base64') !== chunk.data
+            || chunk.next_offset !== offset + data.length || chunk.next_offset > d.bytes || chunk.eof !== (chunk.next_offset === d.bytes)) invalid('session chunk encoding or length');
+        data.copy(bytes, offset); offset = chunk.next_offset;
+      }
+      if (hash(bytes) !== d.sha256) invalid('session document digest');
+      const document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      const result = call('session/snapshot/release', { transfer_id: d.transfer_id });
+      exact(result, ['released'], 'session release'); if (result.released !== true) invalid('session release');
+      return this.history({ descriptor: d, document, release, refs: 1 });
+    } catch (error) { release(); throw error; }
+    finally { this.transfers--; }
+  }
+  resyncAppend(store, receipt, grant, successor) {
+    const previous = this.publishedView(store), cursor = store.receiptCursor ??
+      { revision: previous?.descriptor.view_revision, head: previous?.descriptor.head };
+    const d = descriptor(receipt.snapshot, store.state.owner, 'history');
+    if (grant || store.activation || d.preparation !== null || receipt.gap !== undefined
+        || receipt.previous_revision !== cursor.revision || receipt.previous_head !== cursor.head
+        || d.view_revision <= cursor.revision || d.view_revision >= receipt.view_revision
+        || d.head !== receipt.entry?.parent) invalid('session append resync receipt');
+    const view = this.readSync(d, store);
+    try {
+      // Resync is exceptional bounded work, not a per-prompt history clone.
+      // The old branch must remain an exact prefix, and every observed record
+      // must still agree. A checkout, rewritten prefix or duplicate refuses.
+      if (previous.document.branch_ids.some((id, index) => view.document.branch_ids[index] !== id)
+          || previous.document.entries.some(entry => !isDeepStrictEqual(entry, view.byId.get(entry.id)))) invalid('session append resync ancestry');
+      const next = { ...store, sessionView: view, receiptCursor: { revision: d.view_revision, head: d.head } };
+      const { snapshot, ...inline } = receipt;
+      this.append(next, { ...inline, previous_revision: d.view_revision, previous_head: d.head }, grant, successor);
+      this.drop(cursor.view ?? store.sessionView);
+      Object.assign(cursor, next.receiptCursor, { view });
+      store.receiptCursor = cursor;
+      const current = this.current.get(store.state.key);
+      if (!current || current.revision <= receipt.view_revision) {
+        const barrier = this.invalidate(d.owner, receipt.view_revision);
+        this.drop(barrier.view); barrier.view = this.retain(view);
+        barrier.resolve?.(); barrier.promise = undefined;
+      }
+    } catch (error) { this.drop(view); throw error; }
+  }
   retain(view) { view.refs++; return view; }
   drop(view) {
     if (view && --view.refs === 0) {
@@ -175,7 +232,7 @@ export class SessionTransport {
     const reused = await this.reuse(d, store);
     const view = reused ?? await this.read(d, store);
     store.sessionView = view;
-    store.receiptCursor = { revision: d.view_revision, head: d.head };
+    store.receiptCursor = { revision: d.view_revision, head: d.head, view };
     if (!reused) this.history(view);
     if (params.session_payload !== undefined) {
       if (Object.hasOwn(params, 'payload')) invalid('inline and transferred invocation payload');
@@ -207,7 +264,7 @@ export class SessionTransport {
   // An invocation view belongs to the owner it was hydrated for; a replacement
   // store must never inherit the previous session's facts from its parent.
   ownView(store) {
-    const view = store.activation?.view ?? store.sessionView;
+    const view = store.activation?.view ?? store.receiptCursor?.view ?? store.sessionView;
     // Child contexts retain the object, not a transport lease. Once the last
     // lease settles, retained UI callbacks must use the published owner view.
     return view?.document !== undefined && ownerKey(view.descriptor.owner) === store.state.key ? view : undefined;
@@ -249,10 +306,13 @@ export class SessionTransport {
       this.drop(store.preparationBarrier.view); store.preparationBarrier.view = undefined;
     }
     if (store.activation && --store.activation.users === 0) { this.activations.delete(store.activation.key); this.drop(store.activation.view); }
-    this.drop(store.sessionView); this.drop(store.sessionPayload); store.sessionView = undefined; store.sessionPayload = undefined;
+    this.drop(store.receiptCursor?.view ?? store.sessionView);
+    if (store.receiptCursor) store.receiptCursor.view = undefined;
+    this.drop(store.sessionPayload); store.sessionView = undefined; store.sessionPayload = undefined;
   }
   retire(state) { const current = this.current.get(state.key); this.current.delete(state.key); current?.resolve?.(); this.drop(current?.view); }
   append(store, receipt, grant, successor) {
+    if (receipt.snapshot !== undefined) return this.resyncAppend(store, receipt, grant, successor);
     // Validate against the view this owner actually reads (its own pinned view,
     // else its current publication), never a retired owner's lease.
     const view = this.publishedView(store), d = view?.descriptor;
@@ -316,7 +376,7 @@ export class SessionTransport {
     h.head = receipt.head; view.host.session_leaf_id = receipt.head;
     view.descriptor = { ...d, bytes: d.bytes + delta, entry_count: d.entry_count + added.length, branch_count: d.branch_count + added.length, head: receipt.head, view_revision: receipt.view_revision };
     // Parent and child linked by the native driver share this receipt chain.
-    store.receiptCursor = { revision: receipt.view_revision, head: receipt.head };
+    Object.assign(store.receiptCursor ??= {}, { revision: receipt.view_revision, head: receipt.head });
     if (store.activation) store.activation.leaf.grant = successor;
   }
   async projection(result, store) {

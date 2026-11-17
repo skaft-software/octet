@@ -1302,6 +1302,10 @@ pub struct SessionViewIdentity {
 }
 
 impl SessionViewIdentity {
+    pub(crate) fn same_handle(self, other: Self) -> bool {
+        self.instance == other.instance
+    }
+
     fn fresh() -> Self {
         static NEXT_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {

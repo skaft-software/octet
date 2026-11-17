@@ -3480,6 +3480,14 @@ where
                             false,
                             0,
                         ) {
+                            // Pi getters follow the current branch, not the last
+                            // idle publication (core/session-manager.ts:1480-1490).
+                            // Only the active Run can obtain that history safely.
+                            let command = if let Some(control) = &inspection.cache_warming_control {
+                                command.with_run_history(control.clone())
+                            } else {
+                                command
+                            };
                             extensions.active_commands.push((name.to_owned(), command));
                         } else {
                             shell.notice_error(format!("extension {owner} command /{name} unavailable; check /extensions status"));

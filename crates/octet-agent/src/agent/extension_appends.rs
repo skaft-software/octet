@@ -5,6 +5,13 @@ use crate::extension_process::{
 };
 use std::future::Future;
 
+struct Refresh {
+    process: ExtensionProcess,
+    owner: String,
+    result:
+        tokio::sync::oneshot::Sender<Result<(), crate::extension_process::ExtensionRuntimeError>>,
+}
+
 struct Request {
     process: ExtensionProcess,
     id: ExtensionRequestId,
@@ -24,6 +31,7 @@ pub(crate) struct RunAppends {
 struct State {
     open: bool,
     requests: VecDeque<Request>,
+    refreshes: VecDeque<Refresh>,
     // A bounded proof of writes made by this lane, not an authority inferred
     // from session length/head alone. Active callbacks may chain past these
     // exact receipts without weakening their original writer/source fence.
@@ -49,6 +57,7 @@ impl RunAppends {
             shared: Arc::new(Mutex::new(State {
                 open: true,
                 requests: VecDeque::new(),
+                refreshes: VecDeque::new(),
                 committed: VecDeque::new(),
             })),
             ready: Arc::new(tokio::sync::Notify::new()),
@@ -64,7 +73,11 @@ impl RunAppends {
                 let notified = lane.ready.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if !lane.shared.lock().unwrap().requests.is_empty() {
+                let ready = {
+                    let state = lane.shared.lock().unwrap();
+                    !state.requests.is_empty() || !state.refreshes.is_empty()
+                };
+                if ready {
                     return;
                 }
                 notified.await;
@@ -73,6 +86,20 @@ impl RunAppends {
     }
 
     pub(crate) fn service(&self, session: &mut Session) -> bool {
+        let refresh = self.shared.lock().unwrap().refreshes.pop_front();
+        if let Some(refresh) = refresh {
+            let result = if session.resource_owner_key() == refresh.owner {
+                refresh
+                    .process
+                    .set_host_state_with_session(refresh.process.current_context().host, session)
+            } else {
+                Err(crate::extension_process::ExtensionRuntimeError::Protocol(
+                    "response history owner changed".into(),
+                ))
+            };
+            let _ = refresh.result.send(result);
+            return true;
+        }
         let request = self.shared.lock().unwrap().requests.pop_front();
         let Some(request) = request else { return false };
         let before = source(session);
@@ -144,6 +171,7 @@ impl RunAppends {
         let requests = {
             let mut state = self.shared.lock().unwrap();
             state.open = false;
+            state.refreshes.clear();
             std::mem::take(&mut state.requests)
         };
         for request in requests {
@@ -196,7 +224,7 @@ impl Run<'_> {
         })?;
         process.validate_run_session_append(&id, generation, &self.append_owner)?;
         let mut state = self.appends.shared.lock().unwrap();
-        if !state.open || state.requests.len() >= 64 {
+        if !state.open || state.requests.len() + state.refreshes.len() >= 64 {
             return Err((
                 ExtensionRequestFailure::BoundsExceeded,
                 "response append lane unavailable or full".into(),
@@ -237,5 +265,44 @@ impl Session {
         self.run_appends
             .clone()
             .is_some_and(|lane| lane.service(self))
+    }
+}
+
+impl RunControl {
+    /// Refresh one extension's read-only history at admission through the Run's
+    /// sole session writer. Keep polling the Run while awaiting this receipt.
+    pub fn refresh_extension_history(
+        &self,
+        process: ExtensionProcess,
+    ) -> impl Future<Output = Result<(), crate::extension_process::ExtensionRuntimeError>> + Send + 'static
+    {
+        let unavailable = || {
+            crate::extension_process::ExtensionRuntimeError::Protocol(
+                "response history writer unavailable".into(),
+            )
+        };
+        let (result, received) = tokio::sync::oneshot::channel();
+        let (lane, owner) = &self.session_history;
+        let admitted = {
+            let mut state = lane.shared.lock().unwrap();
+            if !state.open || state.requests.len() + state.refreshes.len() >= 64 {
+                Err(unavailable())
+            } else {
+                state.refreshes.push_back(Refresh {
+                    process,
+                    owner: owner.clone(),
+                    result,
+                });
+                lane.ready.notify_one();
+                Ok(())
+            }
+        };
+        async move {
+            admitted?;
+            tokio::time::timeout(Duration::from_secs(30), received)
+                .await
+                .map_err(|_| unavailable())?
+                .map_err(|_| unavailable())?
+        }
     }
 }
