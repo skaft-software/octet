@@ -52,9 +52,9 @@ test('split-turn compaction shares tool identities across the summary and retain
   await peer.close();
 });
 
-for (const hook of ['session_before_compact', 'session_compact', 'session_before_tree', 'session_tree']) test(`${hook} isolates a throwing callback and still applies a later explicit veto`, async t => {
+for (const hook of ['session_before_compact', 'session_compact', 'session_before_tree', 'session_tree']) for (const code of [undefined, -32800, -32002]) test(`${hook} isolates a throwing callback (code ${code}) and still applies a later explicit veto`, async t => {
   const peer = await fixture(t, `export default pi => {
-    pi.on('${hook}', () => { throw new Error('PRIVATE-CALLBACK-TEXT'); });
+    pi.on('${hook}', () => { throw Object.assign(new Error('PRIVATE-CALLBACK-TEXT'), {code: ${code}}); });
     pi.on('${hook}', () => ${hook.startsWith('session_before_') ? '({ cancel: true })' : 'undefined'});
   };`);
   const payload = hook === 'session_before_compact' ? before()
@@ -66,6 +66,20 @@ for (const hook of ['session_before_compact', 'session_compact', 'session_before
   assert.equal(reply.result.session_operation.action, hook.startsWith('session_before_') ? 'cancel' : 'continue');
   const warning = peer.seen.find(frame => frame.method === 'notification');
   assert.match(warning?.params.message, new RegExp(hook + ' hook failed and was skipped'));
+  assert.ok(!JSON.stringify(peer.seen).includes('PRIVATE-CALLBACK-TEXT'));
+  await peer.close();
+});
+
+for (const hook of ['session_before_switch', 'session_before_fork']) for (const code of [-32800, -32002]) test(`${hook} isolates a callback-owned code ${code} before a later veto`, async t => {
+  const peer = await fixture(t, `export default pi => {
+    pi.on('${hook}', () => { throw Object.assign(new Error('PRIVATE-CALLBACK-TEXT'), {code: ${code}}); });
+    pi.on('${hook}', () => ({cancel:true}));
+  };`);
+  const payload = hook === 'session_before_switch' ? {reason:'new'} : {entryId:'kept',position:'at'};
+  const reply = await request(peer, hook, payload).response;
+  assert.ok(reply.result, JSON.stringify(reply));
+  assert.equal(reply.result.disposition.action, 'deny');
+  assert.match(peer.seen.find(frame => frame.method === 'notification')?.params.message, new RegExp(hook));
   assert.ok(!JSON.stringify(peer.seen).includes('PRIVATE-CALLBACK-TEXT'));
   await peer.close();
 });

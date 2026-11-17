@@ -1,7 +1,7 @@
 // Awaited native Session operations, never advisory lifecycle notifications.
 // Pi packages/coding-agent/src/core/extensions/runner.ts:1093-1122 catches
 // individual session handlers; only a valid cancellation result vetoes.
-import { bounded, facade, fields, invalid, ownerKey, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, isHostError, ownerKey, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { canonicalToPi, cancellable } from './provider-context.mjs';
 import { translateSessionEntries } from './session-mirror.mjs';
@@ -41,7 +41,7 @@ export async function sessionReplacement(runtime, params, store) {
         if (result.cancel) { disposition = { action: 'deny', reason: 'Session replacement cancelled' }; break; }
       } catch (error) {
         signal.throwIfAborted(); runtime.assertSessionOwner(store);
-        if (error?.code === -32800 || error?.code === -32002 || store.errors?.includes(error)) throw error;
+        if (isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors?.includes(error)) throw error;
         runtime.reportCallbackError(hook, entry.factory, error, store.state);
       }
     }
@@ -118,7 +118,7 @@ export async function sessionOperation(runtime, params, store) {
         // Pi 1.5.0 dist/core/extensions/runner.js:813-839 reports throwing
         // session handlers and continues. Explicit vetoes still apply below;
         // cancellation, owner refusals and failed native writes stay fatal.
-        if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+        if (isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
         runtime.reportCallbackError(hook, entry.factory, error, store.state);
         continue;
       }

@@ -813,8 +813,10 @@ Compaction preparation is observational: foreign opaque signatures may be omitte
 while tool-call identities span the summary/prefix boundary. Provider replay stays
 strict. Like Pi's session-event runner, a throwing compaction/tree handler is
 reported by extension and stage and skipped, including unavailable-field reads.
-Explicit cancellation/veto, owner refusals and failed native writes still stop the
-operation; malformed native history is not accepted.
+Callback-owned numeric cancellation/owner codes are also isolated in session
+replacement, compaction and tree hooks. Only tagged native refusals, actual
+cancellation, explicit vetoes and failed native writes stop the operation;
+malformed native history is not accepted.
 `ctx.waitForIdle` requires a live command and negotiated `session_control_v1`, then
 awaits the actual same-session idle receipt. No hook can wait for its own run to end.
 
@@ -1152,9 +1154,9 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1667 tests: 1634 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
-and the pinned Pi provider fixture, including startup-chrome and subagent-collision
-regressions.
+**1685 tests: 1652 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+and the pinned Pi provider fixture, including startup-chrome, subagent-collision
+and session callback-code isolation regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing
