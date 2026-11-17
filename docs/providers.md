@@ -214,7 +214,8 @@ owner-private ADC file. Otherwise octet checks the owner-private default ADC
 file. `authorized_user` and PKCS#8 `service_account` files work. Access tokens
 refresh in memory, and octet neither runs `gcloud` nor stores credential values.
 Gemini presets support tools, structured JSON output, images and inline audio
-input. See [audio formats and limits](media.md#formats-and-limits).
+input. Large Gemini recordings pass local request and strict tool-schema validation
+before credential resolution or Files uploads. See [audio formats and limits](media.md#formats-and-limits).
 
 </details>
 

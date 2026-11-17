@@ -33,17 +33,7 @@ pub(crate) fn build_request(
 ) -> Result<HttpRequestParts, AiError> {
     crate::recorded_audio::check_media_budget(model, req)?;
     let req = normalize_request_reasoning(req, &model.spec.capabilities);
-    let diagnostics = crate::protocol::route_validation(
-        model,
-        validate_request(
-            &req,
-            &model.spec.capabilities,
-            &model.spec.limits,
-            Protocol::GoogleGenerativeAi,
-            &model.spec.id,
-            req.compatibility,
-        ),
-    )?;
+    let (diagnostics, tools, use_strict_mode) = validate_for_dispatch(model, &req)?;
 
     let mut root = Map::new();
     if let Some(system) = &req.system {
@@ -56,7 +46,6 @@ pub(crate) fn build_request(
     let contents = google_contents(model, &req)?;
     root.insert("contents".to_owned(), Value::Array(contents));
 
-    let (tools, use_strict_mode) = google_tools(model, &req)?;
     if let Some(tools) = tools {
         root.insert("tools".to_owned(), tools);
         if let Some(tool_config) = google_tool_config(&req.tool_choice, use_strict_mode) {
@@ -97,6 +86,31 @@ pub(crate) fn build_request(
         streaming: true,
         diagnostics,
     })
+}
+
+/// Side-effect-free request and tool-codec preflight, shared with Files admission.
+/// Pi compatibility: packages/ai/src/api/google-generative-ai.ts:95-100 and
+/// google-shared.ts:448-449 resolve strict sampling while building params,
+/// before dispatch (constrained-sampling.ts:271-278).
+pub(crate) fn validate_for_dispatch(
+    model: &crate::catalog::Model,
+    req: &Request,
+) -> Result<(Vec<crate::error::Diagnostic>, Option<Value>, bool), AiError> {
+    crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
+    let req = normalize_request_reasoning(req, &model.spec.capabilities);
+    let diagnostics = crate::protocol::route_validation(
+        model,
+        validate_request(
+            &req,
+            &model.spec.capabilities,
+            &model.spec.limits,
+            Protocol::GoogleGenerativeAi,
+            &model.spec.id,
+            req.compatibility,
+        ),
+    )?;
+    let (tools, strict) = google_tools(model, &req)?;
+    Ok((diagnostics, tools, strict))
 }
 
 fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<Value>, AiError> {

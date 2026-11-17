@@ -1045,6 +1045,7 @@ impl AiClient {
                 model.endpoint.id.0, model.spec.api_name
             ))
         })?;
+        crate::protocol::google::validate_for_dispatch(model, request)?;
         let mut headers = model.endpoint.default_headers.clone();
         merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
         let resolved = crate::auth::resolve_headers_with_api_key(

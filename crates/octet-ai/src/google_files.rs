@@ -64,21 +64,7 @@ pub(crate) async fn prepare(
     }
     // File preparation is a provider side effect: reject locally invalid
     // requests before sending recording bytes, not only at generateContent.
-    crate::json_repair::validate_tool_definitions(&request.tools).map_err(AiError::Decode)?;
-    let normalized =
-        crate::validate::normalize_request_reasoning(request, &model.spec.capabilities);
-    crate::protocol::route_validation(
-        model,
-        crate::validate::validate_request(
-            &normalized,
-            &model.spec.capabilities,
-            &model.spec.limits,
-            Protocol::GoogleGenerativeAi,
-            &model.spec.id,
-            request.compatibility,
-        ),
-    )?;
-    drop(normalized);
+    crate::protocol::google::validate_for_dispatch(model, request)?;
     let mut digest = Sha256::new();
     digest.update(upload.as_str());
     for (name, value) in &headers {

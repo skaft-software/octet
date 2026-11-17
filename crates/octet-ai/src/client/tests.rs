@@ -419,6 +419,83 @@ fn structured_http_error_sanitization_is_bounded_valid_json() {
     assert!(!body.contains('\x1b'));
 }
 
+async fn assert_google_files_validation_precedes_credentials(strict_schema: bool) {
+    let server = wiremock::MockServer::start().await;
+    let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
+    let mut model = crate::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&crate::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
+    Arc::make_mut(&mut model.spec).capabilities.input_modalities =
+        crate::ModalitySet::none().with(crate::Modality::Audio);
+    let mut request = crate::test_fixtures::base_request();
+    request.messages = vec![crate::Message::User(crate::UserMessage {
+        content: vec![crate::UserPart::Media(crate::Media::audio_bytes(
+            bytes::Bytes::from(vec![0; 12_000_000]),
+            crate::AudioFormat::Wav,
+        ))],
+    })];
+    if strict_schema {
+        request.tools = vec![crate::ToolDef {
+            name: "choice".into(),
+            description: String::new(),
+            async_execution: false,
+            parameters: serde_json::json!({"type": "object", "properties": {
+                "value": {"oneOf": [{"type": "string"}, {"type": "number"}]}
+            }}),
+            constrained_sampling: Some(crate::ConstrainedSampling::JsonSchema {
+                strict: crate::ConstrainedSamplingStrict::Require,
+            }),
+        }];
+    } else {
+        request.temperature = Some(f32::NAN);
+    }
+    for api_key in [None, Some(crate::Secret::from("fake-key"))] {
+        let error = client
+            .prepare_google_files(
+                &model,
+                &mut request,
+                &url::Url::parse(&server.uri()).unwrap(),
+                &Default::default(),
+                &HostRequestOptions {
+                    api_key,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        if strict_schema {
+            assert!(
+                matches!(
+                    error,
+                    AiError::Unsupported(crate::UnsupportedError::ConstrainedSampling(_))
+                ),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    AiError::Validation(crate::ValidationError::InvalidTemperature)
+                ),
+                "{error:?}"
+            );
+        }
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn google_files_invalid_temperature_precedes_credentials() {
+    assert_google_files_validation_precedes_credentials(false).await;
+}
+
+#[tokio::test]
+async fn google_files_strict_schema_precedes_credentials() {
+    assert_google_files_validation_precedes_credentials(true).await;
+}
+
 #[tokio::test]
 async fn google_files_proxy_preflight_precedes_credentials_and_upload() {
     let direct = wiremock::MockServer::start().await;
