@@ -145,6 +145,7 @@
 - Codemode keeps idle runners ready for later scripts and reports actionable runner-stage errors.
 - Fullscreen live updates keep transcript, composer and footer rows aligned across working, reasoning, tool and status changes.
 - Subagent rosters coalesce unchanged settled waves, share compact spacing, and reserve only used live detail rows until settlement.
+- Pi context hooks isolate callback-owned error codes while preserving native ownership and cancellation checks.
 
 ## [0.10.4] - 2026-11-12
 

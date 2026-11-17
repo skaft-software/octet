@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { canonicalToPi, piToCanonical, projectContext } from '../lib/provider-context.mjs';
 import { Runtime } from '../lib/runtime.mjs';
+import { rpcError } from '../lib/errors.mjs';
 import { ExtensionIssues } from '../lib/issues.mjs';
 import { launch, owner, root } from './helper.mjs';
 const fixture = join(root, 'test/fixtures/provider-context.ts');
@@ -60,20 +61,20 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   assert.deepEqual(reports, [[event, 0, failure]]);
   assert.equal(kept, 1);
   const expectedReports = [[event, 0, failure]];
-  for (const code of [-32601, -32602]) {
+  for (const code of [-32601, -32602, -32002, -32800]) {
     const failure = Object.assign(new Error('callback failure'), { code });
     handlers[0].handler = () => { throw failure; };
     assert.ok(await projectContext(runtime, params, store));
     expectedReports.push([event, 0, failure]);
   }
-  const hostRefusal = Object.assign(new Error('owner refused'), { code: -32002 });
+  const hostRefusal = rpcError(-32002, 'owner refused');
   handlers[0].handler = () => { throw hostRefusal; };
   await assert.rejects(projectContext(runtime, params, store), error => error === hostRefusal);
   const tracked = new Error('tracked host failure'); store.errors.push(tracked);
   handlers[0].handler = () => { throw tracked; };
   await assert.rejects(projectContext(runtime, params, store), error => error === tracked);
   store.errors.length = 0;
-  const refusal = Object.assign(new Error('cancelled'), { code: -32800 });
+  const refusal = rpcError(-32800, 'cancelled');
   handlers[0].handler = () => { throw refusal; };
   await assert.rejects(projectContext(runtime, params, store), error => error === refusal);
   const cancelled = Object.assign(new Error('cancelled'), { code: -32800 });
@@ -85,11 +86,11 @@ for (const event of ['context', 'context_with_system']) test(`${event} callback 
   // That diagnostic is not a successful projection or permission to run a later handler.
   expectedReports.push([event, 0, failure]);
   assert.deepEqual(reports, expectedReports);
-  assert.equal(reports.length, 4); assert.equal(kept, 3);
+  assert.equal(reports.length, 6); assert.equal(kept, 5);
   assert.equal(store.controller.signal.reason, cancelled);
 });
 
-test('coded callback failures retain the last good projection and run remaining callbacks', async () => {
+for (const event of ['context', 'context_with_system']) for (const code of [-32602, -32002, -32800]) test(`${event} callback code ${code} retains the last good projection and later callbacks`, async () => {
   const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
   runtime.uninstallChildren(); runtime.features.add('session_entries');
   const reports = []; runtime.reportCallbackError = (...args) => reports.push(args.slice(0, 3));
@@ -97,16 +98,16 @@ test('coded callback failures retain the last good projection and run remaining 
   const store = { id: 1, method: 'hook/run', controller: new AbortController(), pending: new Set(), errors: [], live: true };
   const params = contextParams({ context: host => ({ workspace: root, resource_owner: owner, host }) });
   params.payload.request.tools = [];
-  const coded = Object.assign(new Error('private callback details'), { code: -32602 });
+  const coded = Object.assign(new Error('private callback details'), { code });
   let later = 0;
-  runtime.events.set('context', [
-    { factory: 0, handler: () => ({ messages: [{ role: 'user', content: 'last good' }] }) },
+  runtime.events.set(event, [
+    { factory: 0, handler(e) { e.messages.find(message => message.role === 'user').content = 'last good'; } },
     { factory: 0, handler() { throw coded; } },
     { factory: 0, handler(event) { later++; event.messages.push({ role: 'user', content: 'later ran' }); } },
   ]);
   const result = await projectContext(runtime, params, store);
   assert.deepEqual(result.provider_context.messages, [user('last good'), user('later ran')]);
-  assert.equal(later, 1); assert.deepEqual(reports, [['context', 0, coded]]);
+  assert.equal(later, 1); assert.deepEqual(reports, [[event, 0, coded]]);
 });
 
 for (const event of ['context', 'context_with_system']) test(`${event} failed nested mutations do not leak to later handlers`, async () => {

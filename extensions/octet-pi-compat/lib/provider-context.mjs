@@ -2,7 +2,7 @@ import { contextBytes, contextItems } from './context-limits.mjs';
 // Pi context ordering/custom-message conversion follows pinned Pi 1.0
 // cd32f7725fdbddbaecdff5b1e68491563394e0ca (runner.ts/messages.ts), MIT LICENSE.pi.
 // Canonical request projection only: never mutate tools, routing or the Session.
-import { bounded, facade, fields, invalid, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
+import { bounded, facade, fields, invalid, isHostError, ownerKey, plainJSON, strict, unsupported } from './errors.mjs';
 import { createContext } from './api.mjs';
 import { prepareToolLoadout } from './tools.mjs';
 import { HookBudget } from './handler-budget.mjs';
@@ -351,7 +351,9 @@ export async function projectContext(runtime, params, store) {
         result = run.value;
       }
       catch (error) {
-        live(); if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+        // Pi packages/coding-agent/src/core/extensions/runner.ts:1311-1332
+        // isolates callback exceptions; a numeric code alone is not native authority.
+        live(); if (isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
         runtime.reportCallbackError('context', entry.factory, error, store.state);
         continue;
       }
@@ -396,7 +398,9 @@ export async function projectContext(runtime, params, store) {
           result = run.value;
         }
         catch (error) {
-          live(); if (error?.code === -32800 || error?.code === -32002 || store.errors.includes(error)) throw error;
+          // Pi packages/coding-agent/src/core/extensions/runner.ts:1338-1360
+          // also isolates the full-context phase without trusting callback codes.
+          live(); if (isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
           runtime.reportCallbackError('context_with_system', entry.factory, error, store.state);
           continue;
         }

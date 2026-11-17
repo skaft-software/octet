@@ -605,7 +605,10 @@ qualification remain separate from this adapter contract.
 `context` maps to the real API 0.4 `provider_context` preparation hook and requires
 `session_entries`, a matching native owner/preparation and actual top-level
 `session_leaf` grant. Ordered awaited callbacks can replace messages or mutate the
-list/content in place. The native system stays separate. Only canonical messages
+list/content in place. Callback-owned numeric error codes are reported by factory
+and context stage and skipped; only provenance-tagged native refusals, actual
+cancellation and tracked host failures stop preparation. The native system stays
+separate. Only canonical messages
 and system are returned, never replacement tools, credentials, route or Session.
 Text, tool calls/results and Pi custom messages have explicit translations.
 Context callbacks can retain unchanged, provenance-bound OpenAI encrypted reasoning
@@ -1144,7 +1147,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1657 tests: 1624 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1662 tests: 1629 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture, including startup-chrome and subagent-collision
 regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
