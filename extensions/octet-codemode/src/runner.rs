@@ -5,6 +5,7 @@
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::cell::Cell;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -16,6 +17,18 @@ use crate::{guest, native, wasi, IPC_BYTES};
 /// handler stops JavaScript at the script deadline, and this grace exists for a
 /// host import or engine bug that never returns to an interrupt check.
 pub(super) const HARD_STOP_GRACE_MS: u64 = 5_000;
+
+thread_local! {
+    // Both engines emit on the runner thread. Observe only the trusted bridge's
+    // terminal frame; output text containing a nested `type: done` is not one.
+    static SCRIPT_DONE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[derive(Deserialize)]
+struct EmittedEvent<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -105,6 +118,10 @@ pub(super) fn emit(value: &str) -> Result<()> {
     if value.len() > IPC_BYTES {
         bail!("runner output exceeds 20 MiB IPC bound");
     }
+    let event: EmittedEvent<'_> = serde_json::from_str(value)?;
+    if event.kind == "done" {
+        SCRIPT_DONE.set(true);
+    }
     let mut out = io::stdout().lock();
     out.write_all(value.as_bytes())?;
     out.write_all(b"\n")?;
@@ -177,6 +194,7 @@ pub(super) fn serve(engine: &str) -> Result<()> {
                 {
                     bail!("invalid runner limits");
                 }
+                SCRIPT_DONE.set(false);
                 timeout_ms = requested;
                 deadline = Instant::now() + Duration::from_millis(timeout_ms);
                 hard_stop_ms.store(
@@ -219,6 +237,16 @@ pub(super) fn serve(engine: &str) -> Result<()> {
                     } else {
                         crash(&hard_stop_ms, error);
                     }
+                }
+                if SCRIPT_DONE.get() {
+                    // Pi clears each execution's timer on every terminal outcome:
+                    // packages/codemode/src/runtime/execution.ts:410-419. Our
+                    // process stays warm, but its completed VM/deadline must not.
+                    // Keep the watchdog armed until driving and disposal return,
+                    // so a pending job that wedges after `done` is still bounded.
+                    session = None;
+                    current = None;
+                    hard_stop_ms.store(0, Ordering::Relaxed);
                 }
             }
         }

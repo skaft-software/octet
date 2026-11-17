@@ -326,6 +326,65 @@ class EngineCases:
         self.assertFalse(fourth["is_error"], text(fourth))
         self.assertEqual(await self.assert_runner(b), runner)
 
+    async def test_review_batch_after_idle_keeps_the_runner_warm(self):
+        b = await self.broker()
+        b.context["tools"].append({**TOOLS[0], "name": "subagent_spawn"})
+        # The reported shape: options, a review-slice array and nested spawns.
+        # Multi-kilobyte input stays well below the runner IPC bound.
+        code = "\n".join([
+            '// @options: {"timeout_ms":30000,"max_output_tokens":4000}',
+            'const slices = [',
+            *[dumps([f"review-{i}", f"{i}. Wheel and trackpad input. fe0100bf0. "
+                     + "Review the implementation and tests. " * 5]) + "," for i in range(70)],
+            '];',
+            'const results = await Promise.allSettled(',
+            '  slices.map(([name, task]) => tools.subagent_spawn({name, task}))',
+            ');',
+            'text(results.map(result => result.status));',
+            'return results.length;',
+        ])
+        self.assertEqual(len(code.splitlines()), 78)
+        self.assertGreater(len(code.encode()), 16384)
+        for ending in ('return "warm";', 'throw Error("expected");', 'while(true){}'):
+            with self.subTest(ending=ending):
+                seed = await b.run('// @options: {"timeout_ms":1200}\n' + ending)
+                self.assertEqual(seed["is_error"], not ending.startswith("return"), text(seed))
+                child = await self.assert_runner(b)
+                # Exceed the previous script's deadline plus the 5 s hard-stop grace.
+                await asyncio.sleep(6.5)
+                prior = len(b.calls)
+                result = await b.run(code)
+                self.assertFalse(result["is_error"], text(result))
+                self.assertTrue(text(result).endswith("\n70"), text(result))
+                self.assertEqual(len(b.calls) - prior, 70)
+                self.assertEqual(await self.assert_runner(b), child)
+
+    async def test_exited_idle_runner_is_replaced_before_script_admission(self):
+        b = await self.broker()
+        self.assertFalse((await b.run('return "warm";'))["is_error"])
+        child = await self.assert_runner(b)
+        os.kill(child, signal.SIGKILL)
+        await asyncio.sleep(0.1)
+        result = await b.run('return await tools.first({});')
+        self.assertFalse(result["is_error"], text(result))
+        self.assertEqual(len(b.calls), 1)
+        self.assertNotEqual(await self.assert_runner(b), child)
+
+    async def test_runner_lost_during_execution_names_stage_without_replay(self):
+        b = await self.broker(lambda m: HOLD if m["method"] == "composition/call" else None)
+        id_ = await b.start_code('store("bad",1);await tools.first({});')
+        await b.wait(lambda m: m.get("method") == "composition/call")
+        child = await self.assert_runner(b)
+        os.kill(child, signal.SIGKILL)
+        result = (await b.wait(lambda m: m.get("id") == id_))["result"]
+        self.assertTrue(result["is_error"], text(result))
+        self.assertIn("octet-codemode runner execution transport failed", text(result))
+        self.assertIn("inspect completed tool calls before retrying", text(result))
+        self.assertEqual(len(b.calls), 1)
+        self.assertFalse(b.commits)
+        b.handler = None
+        self.assertFalse((await b.run('return "recovered";'))["is_error"])
+
     async def test_rejected_host_effects_and_invalid_guest_arguments(self):
         b = await self.broker(lambda m: HOLD if m["method"] == "composition/call" else None)
         id_ = await b.start_code('return (await Promise.allSettled([tools.first({}),tools.second({})])).map(x=>x.status);')

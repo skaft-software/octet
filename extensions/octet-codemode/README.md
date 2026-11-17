@@ -75,8 +75,15 @@ activation toggles are read-only; change the Pi preference instead.
   asserted by `tests/test_runner.py` and `tests/test_adapter.py`.
 - Scripts are bounded by the engine interrupt at the script deadline. A wedged
   VM that never reaches an interrupt check is killed by the runner watchdog as
-  the fallback; cancellation kills and reaps the runner, and the next script
-  gets a new one.
+  the fallback. Every terminal outcome (success, script error or timeout)
+  disposes the VM and disarms its watchdog; the idle warm runner has no script
+  deadline. Cancellation kills and reaps the runner, and the next script gets
+  a new one.
+- An idle runner that has exited is replaced before admitting the next script.
+  Runner failures name the launch, engine preparation, script submission, VM
+  setup, script start or execution transport stage and give recovery guidance.
+  An interrupted execution is never replayed automatically: inspect completed
+  tool calls before retrying.
 
 ## JavaScript contract
 
@@ -199,8 +206,8 @@ wire frame: flat random basenames, regular no-follow files, exact size at most
 ## Verification and provenance
 
 ```sh
-cargo test --locked                      # 16 Rust unit tests
-python3 -m unittest discover -s tests    # 59 real-process tests, both engines
+cargo test --locked                     # 18 Rust unit tests
+python3 -m unittest discover -s tests    # 67 real-process tests, both engines
 python3 vendor/regenerate.py --check     # offline vendored-bytes check
 python3 bench/benchmark.py --samples 30  # the table above
 # Native host transport (from the repository root):
@@ -209,9 +216,11 @@ python3 bench/benchmark.py --samples 30  # the table above
 
 `tests/test_runner.py` drives the warm runner protocol directly (prelude
 parity, async settlement, discovery/BM25, heap/stack limits, timeouts, warm
-reuse and per-script isolation). `tests/test_adapter.py` speaks the real API
-`0.4` stdio wire with `PATH` empty (tool composition, sidecars, artifacts,
-store commits, cancellation, output limits, warm-runner lifecycle).
+reuse, per-script isolation and the active-script watchdog).
+`tests/test_adapter.py` speaks the real API `0.4` stdio wire with `PATH` empty
+(tool composition, sidecars, artifacts,
+store commits, cancellation, output limits, idle reuse after terminal outcomes,
+78-line review batches, runner loss and stage-specific recovery diagnostics).
 `tests/test_bundle.py` packages the release archive twice and verifies the
 extracted bundle starts with no Node or Python.
 

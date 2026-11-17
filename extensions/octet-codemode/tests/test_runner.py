@@ -222,6 +222,26 @@ class WarmRunnerIsolation(unittest.TestCase):
 
 
 class RunnerProtocol(unittest.TestCase):
+    def test_watchdog_stays_armed_until_a_terminal_outcome(self):
+        for engine in ("native", "wasi"):
+            with self.subTest(engine=engine):
+                runner = WarmRunner(engine)
+                try:
+                    runner.send({"type": "script", "script": 1, "context": CONTEXT,
+                                 "code": 'text({type:"done"});await tools.my_tool({});',
+                                 "timeout_ms": 500, "heap_bytes": VM_HEAP_BYTES})
+                    self.assertEqual(runner.read(), {"type": "ready"})
+                    runner.send({"type": "message", "script": 1, "payload": dumps({"type": "start"})})
+                    self.assertEqual(runner.read()["type"], "output")
+                    self.assertEqual(runner.read()["type"], "call")
+                    # No settlement or VM interrupt arrives: the process watchdog
+                    # still owns this active script, unlike a completed idle one.
+                    self.assertEqual(runner.process.wait(timeout=8), 124)
+                finally:
+                    if runner.process.poll() is None:
+                        runner.process.kill()
+                    runner.close()
+
     def test_runner_rejects_oversized_ipc_and_unknown_commands(self):
         process = subprocess.Popen(
             [str(RUNNER), "wasi"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,

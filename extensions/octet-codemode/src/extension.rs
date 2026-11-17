@@ -142,15 +142,16 @@ impl RunnerHandle {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
-            .spawn()?;
+            .spawn()
+            .context("octet-codemode runner launch failed; check executable permissions and process limits, then reload octet-codemode")?;
         let input = Rc::new(Mutex::new(child.stdin.take().unwrap()));
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let warm = read_runner(&mut output)
             .await
-            .context("Runner exited before preparing its engine")?;
+            .context("octet-codemode runner engine preparation failed; check process/memory limits, then reload octet-codemode")?;
         ensure!(
             warm == br#"{"type":"warm"}"#,
-            "Runner did not prepare an engine"
+            "octet-codemode runner engine preparation failed; reload octet-codemode with a matching bundle"
         );
         Ok(Self {
             child,
@@ -168,13 +169,14 @@ impl RunnerHandle {
             &json!({"type":"script","script":self.script,"context":context,"code":code,
                 "timeout_ms":timeout_ms,"heap_bytes":VM_HEAP_BYTES}),
         )
-        .await?;
+        .await
+        .context("octet-codemode runner script submission failed; check process/memory limits, then rerun the script")?;
         let ready = read_runner(&mut self.output)
             .await
-            .context("Runner exited before acknowledging setup")?;
+            .context("octet-codemode runner VM setup failed; check script and memory limits, then rerun the script")?;
         ensure!(
             ready == br#"{"type":"ready"}"#,
-            "Runner did not acknowledge setup"
+            "octet-codemode runner VM setup failed; check script and memory limits, then rerun the script"
         );
         // The VM exists before the script body starts: a stale epoch from the
         // previous script is dropped by the runner, never executed here.
@@ -183,7 +185,8 @@ impl RunnerHandle {
             &json!({"type":"message","script":self.script,
                 "payload":json!({"type":"start"}).to_string()}),
         )
-        .await?;
+        .await
+        .context("octet-codemode runner script start failed; inspect completed tool calls before retrying")?;
         Ok(())
     }
     async fn kill(mut self) -> Result<std::process::ExitStatus> {
@@ -759,7 +762,19 @@ impl Runtime {
         // A warm runner is spawned on first use and otherwise reused. A script
         // that ends without a clean `done` kills and reaps its runner here, so
         // no VM, pipe or process can outlive it.
-        let warm = self.runner.borrow_mut().take();
+        let mut warm = self.runner.borrow_mut().take();
+        if let Some(runner) = &mut warm {
+            if runner
+                .child
+                .try_wait()
+                .context("octet-codemode runner reuse check failed; reload octet-codemode")?
+                .is_some()
+            {
+                // Only the previous script ran here and it reported `done`.
+                // Replacing an exited idle runner cannot replay tool effects.
+                warm = None;
+            }
+        }
         let mut runner = match warm {
             Some(runner) => runner,
             None => {
@@ -837,7 +852,14 @@ impl ScriptRun<'_> {
         code: &str,
         timeout_ms: u64,
     ) -> Result<Value> {
-        runner.start(context, code, timeout_ms).await?;
+        // An interrupted submission may leave a partial frame, but the caller
+        // kills this runner on error rather than reusing a corrupted pipe.
+        bounded(
+            &self.outer,
+            self.deadline,
+            runner.start(context, code, timeout_ms),
+        )
+        .await?;
         let script = runner.script;
         let input = runner.input.clone();
         let mut seen = HashSet::new();
@@ -854,7 +876,9 @@ impl ScriptRun<'_> {
                 biased;
                 _ = self.outer.cancelled() => return Err(Cancelled.into()),
                 _ = tokio::time::sleep_until(hard_deadline) => return Err(TimedOut.into()),
-                event = read_runner(&mut runner.output) => event?,
+                event = read_runner(&mut runner.output) => event.context(
+                    "octet-codemode runner execution transport failed; inspect completed tool calls before retrying"
+                )?,
             })?;
             ensure!(event.is_object(), "Invalid runner event");
             match event["type"]
@@ -1388,6 +1412,46 @@ mod tests {
             assert!(runtime.pending.borrow().is_empty());
             assert!(gate.drain().is_empty());
         }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_failures_name_stage_and_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let error = RunnerHandle::spawn(&root.path().join("missing"), "wasi")
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("octet-codemode runner launch"), "{error}");
+        assert!(error.contains("reload"), "{error}");
+
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let input = Rc::new(Mutex::new(child.stdin.take().unwrap()));
+        let output = BufReader::new(child.stdout.take().unwrap());
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+        let mut runner = RunnerHandle {
+            child,
+            input,
+            output,
+            script: 0,
+        };
+        let error = runner
+            .start(&json!({}), "return 1;", 1000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("octet-codemode runner script submission"),
+            "{error}"
+        );
+        assert!(error.contains("rerun"), "{error}");
+        assert!(!error.contains("Broken pipe"), "{error}");
     }
 
     #[tokio::test(flavor = "current_thread")]
