@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from octet_release_identity import CANONICAL_REPOSITORY, LEGACY_RELEASE_COMMIT, release_repository
 
@@ -406,8 +407,41 @@ class ReleaseDocumentationTests(unittest.TestCase):
             self.assertNotIn("source candidate, not a published release", text)
             self.assertIn("`octet-pi-compat`", text)
         self.assertIn("does not change independent API and schema versions", " ".join(text.split()))
-        self.assertIn(f"published npm channel is `@skaft/octet@{version}` (launcher plus four signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
-        self.assertIn(f"**{version} is published to npm.**", text)
+        self.assertIn(f"published npm channel is `@skaft/octet@{install_version}` (launcher plus four signed platform packages, with provenance). Homebrew, crates.io and SDK registries remain separate, unpublished channels.", " ".join(text.split()))
+        self.assertIn(f"**{install_version} is published to npm.**", text)
+
+
+class DistributionDocumentationStateTests(unittest.TestCase):
+    def check_distribution(self, install_version="1.2.3", npm_version="1.2.3"):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docs").mkdir()
+            (root / "docs/distribution.md").write_text(
+                f"/releases/tag/v{install_version}\n"
+                "The distribution target is **1.2.4**, a source candidate, not a published release.\n"
+                "The distribution version does not change independent API and schema versions.\n"
+                "`octet-pi-compat`\n"
+                f"The published npm channel is `@skaft/octet@{npm_version}` (launcher plus four signed platform packages, with provenance). "
+                "Homebrew, crates.io and SDK registries remain separate, unpublished channels.\n"
+                f"**{npm_version} is published to npm.**\n"
+            )
+            if install_version == "1.2.4":
+                path = root / "docs/distribution.md"
+                path.write_text(path.read_text().replace(", a source candidate, not a published release", ""))
+            with mock.patch(__name__ + ".SCRIPTS", root / "scripts"), mock.patch(
+                __name__ + ".documented_versions", return_value=("1.2.4", False, install_version)
+            ):
+                ReleaseDocumentationTests().test_distribution_notes_keep_candidate_and_publication_distinct()
+
+    def test_dated_source_keeps_previous_published_npm_version(self):
+        self.check_distribution()
+
+    def test_post_ship_docs_promote_both_channels(self):
+        self.check_distribution(install_version="1.2.4", npm_version="1.2.4")
+
+    def test_candidate_npm_publication_claim_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            self.check_distribution(npm_version="1.2.4")
 
 
 if __name__ == "__main__":

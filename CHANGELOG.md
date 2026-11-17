@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-11-17
+
 ### Added
 
 - Click the composer to place the cursor, and drag to select and copy, as in a real text box.

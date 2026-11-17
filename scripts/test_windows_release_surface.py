@@ -7,12 +7,12 @@ import importlib.util
 import json
 import pathlib
 import tempfile
-import tomllib
 import unittest
 import zipfile
 
+from test_repository_identity import documented_versions
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 TARGET = "x86_64-pc-windows-msvc"
 PACKAGER_PATH = ROOT / "scripts/package-octet-windows-zip.py"
 SPEC = importlib.util.spec_from_file_location("windows_zip_packager", PACKAGER_PATH)
@@ -109,14 +109,15 @@ class WindowsReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("--include-windows-msvc", workflow)
 
     def test_windows_install_instructions_are_honest_and_present(self):
+        _, _, install_version = documented_versions(ROOT)
         docs = (ROOT / "docs/installation.md").read_text()
         self.assertIn("install-octet.ps1", docs)
         self.assertIn("Windows x86-64", docs)
-        self.assertIn(f"v{VERSION} is published to npm", docs)
-        self.assertIn(f"npm install -g @skaft/octet@{VERSION}", docs)
-        self.assertNotIn("not yet published to npm", docs)
+        self.assertIn(f"v{install_version} is published to npm", docs)
+        self.assertIn(f"npm install -g @skaft/octet@{install_version}", docs)
+        self.assertNotIn(f"v{install_version} is not yet published to npm", docs)
         windows = (ROOT / "docs/windows.md").read_text()
-        self.assertIn(f"/releases/tag/v{VERSION}", windows)
+        self.assertIn(f"/releases/tag/v{install_version}", windows)
         self.assertIn("these do not qualify the\nMSVC release archive", windows)
 
 

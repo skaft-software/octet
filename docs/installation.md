@@ -6,6 +6,10 @@
 
 ## octet 0.10.4
 
+The source tree is the octet **0.10.5 release candidate**, an unreleased source
+candidate. The commands below install the published 0.10.4 release; 0.10.5 is not
+yet published to native or npm channels.
+
 Install the native agent below, then
 [enable the optional Pi adapter](pi-compatibility.md). The
 [release notes](releases/v0.10.4.md) describe changes and known boundaries.
@@ -112,8 +116,8 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.10.4. Check `octet --version`, and use matching
-source extension manifests from this checkout. A source build isn't a signed
+This checkout targets the octet 0.10.5 release candidate. Check `octet --version`,
+and use matching source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
 On macOS or GNU/Linux, install Rust 1.89+.
@@ -172,8 +176,8 @@ reference](cli.md#packages).
 | `octet-subagents` | [Bounded workers](../extensions/octet-subagents/README.md). Enabling is explicit, and full-access trust follows host policy. |
 | `octet-pi-compat` | [Pi 1.0.2 compatibility adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
 
-The six executable-bundle manifests declare API `0.4`, distribution
-version `0.10.4`, and require octet `=0.10.4`. Older bundles stay pinned to their host.
+The six source executable-bundle manifests declare API `0.4`, distribution
+version `0.10.5`, and require octet `=0.10.5`. Older bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.

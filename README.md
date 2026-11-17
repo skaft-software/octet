@@ -10,6 +10,7 @@ Rust core · any-language extensions · hears audio, uses your computer</p>
 <div align="center">
 
 [![Release: 0.10.4](https://img.shields.io/badge/release-0.10.4-536dfe?style=flat-square)](docs/releases/v0.10.4.md)
+[![Candidate: 0.10.5](https://img.shields.io/badge/candidate-0.10.5-8a8fa3?style=flat-square)](docs/releases/v0.10.5.md)
 [![MIT license](https://img.shields.io/badge/license-MIT-1baf7a?style=flat-square)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-skaft.org%2Foctet-536dfe?style=flat-square)](https://skaft.org/octet/)
 ![macOS arm64](https://img.shields.io/badge/macOS-arm64-000000?style=flat-square&logo=apple&logoColor=white)
@@ -33,7 +34,8 @@ and **drive your computer** in the same conversation, which is why it exists.
 ## Install
 
 macOS Apple silicon/Intel and GNU/Linux x86-64, no Node.js required. This pins the exact
-0.10.4 release — recommended for CI and scripted installs:
+0.10.4 release — recommended for CI and scripted installs. The source is the v0.10.5 release candidate;
+these commands install the published 0.10.4:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf \

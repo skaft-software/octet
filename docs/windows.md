@@ -2,8 +2,8 @@
 
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
-> **Preview platform in v0.10.4.** Native MSVC artifact availability and automated
-> release qualification are recorded on the release page. Attended desktop use
+> **Preview platform in v0.10.5** (release candidate). Public downloads remain on
+> v0.10.4. Native MSVC artifact availability and automated release qualification are recorded on the release page. Attended desktop use
 > remains unqualified, and known
 > issues such as [#572](https://github.com/skaft-software/octet/issues/572)
 > remain open.
