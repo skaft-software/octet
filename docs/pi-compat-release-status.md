@@ -104,7 +104,7 @@ Octet runs Pi extensions in a Node subprocess through `octet-pi-compat`:
 | `pi_helper_import_tests` | 3 | public helper imports, matrix key/package helpers, absent optional properties |
 | `pi_messages_tests` | 11 | text/images, public message events, persistence/resume, delivery, tool pairing, repeated compaction/restart and hook-fault/wire qualification |
 | `pi_model_provider_tests` | 9 | model facts, scoped views, cold interactive startup/reload facts, model/thinking selection, custom and inherited providers, request hooks and custom HTTP delegation |
-| `pi_session_replacement_tests` | 11 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch, before-hook cancellation and setup-time resource refresh |
+| `pi_session_replacement_tests` | 13 | replacement, busy-turn deferral, setup/parentSession, withSession, delegation-enabled new/switch, before-hook cancellation, setup-time resource refresh and reload/resource rebuild after a pending request |
 | `pi_tool_hooks_tests` | 15 | tool call/result hooks, ordering, cancellation and images |
 | `pi_tools_surface_tests` | 7 | authoritative tool catalogs/selection and native-admitted command/prompt/available-skill catalogs with provenance, reload, withdrawal and retained callbacks; late registration with startup/resource-hook ACKs, startup ordering, headless exactly-once startup and failed-worker admission refusal |
 | `pi_ui_contract_tests` | 15 | dialogs, the tool-guard confirmation dialog, overlays, editor identity, notification admission, the pre-native input lane (including a slow listener) and editor calls during prompt hooks |
