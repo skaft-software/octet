@@ -898,9 +898,28 @@ impl InteractiveShell {
                     | MouseEventKind::Moved
             )
         ) {
-            // Revoke clicks before search, chrome or an exclusive input owner
-            // can consume intervening wheel/focus/key/new-press events.
-            self.state.borrow_mut().pending_screen_press = None;
+            // Revoke stale click targets before other input owners consume the
+            // event, but keep an active composer selection through wheel input.
+            // Native terminal gesture ownership cannot live in the adapter.
+            // Pi compatibility: packages/tui/src/tui-alt-screen.ts:719-733,
+            // 1335-1378 routes wheels without retiring selection ownership.
+            let mut state = self.state.borrow_mut();
+            let composer_drag = matches!(
+                event,
+                Event::Mouse(mouse) if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                )
+            ) && state.pending_screen_press.as_ref().is_some_and(|press| {
+                press.moved
+                    && matches!(press.target, super::ScreenPressTarget::Composer(_))
+                    && press.fence.composer_current(&state)
+                    && super::tern::editor_focused(&state)
+            });
+            if !composer_drag {
+                state.pending_screen_press = None;
+            }
         }
         if matches!(
             event,

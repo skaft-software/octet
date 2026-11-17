@@ -196,7 +196,9 @@ characters and combining marks stay intact. Attachment
 and large-paste chips snap to their nearest boundary. Clicking beyond a wrapped
 segment stops at its last character; beyond a logical line it goes to line end.
 Dragging over composer text selects it without moving the edit cursor; release
-copies the displayed text, not a chip's hidden payload. Completion-list clicks
+copies the displayed text, not a chip's hidden payload. Wheel or trackpad scrolling
+keeps an active composer drag and its copy-on-release gesture, while cancelling
+pending clicks that have not become a drag. Completion-list clicks
 accept the clicked suggestion instead of moving the cursor. Borders and blank
 composer rows leave the cursor unchanged. Native Tern uses its own editor caret
 events with the same atomic-chip rule. Pi custom editor components own their

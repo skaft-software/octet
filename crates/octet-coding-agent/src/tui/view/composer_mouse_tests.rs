@@ -47,6 +47,7 @@ fn pointer(shell: &mut InteractiveShell, kind: MouseEventKind, (row, column): (u
         active,
     );
     match action {
+        InputAction::ScrollLines(lines) => shell.scroll_lines(lines),
         InputAction::TranscriptPointer(PointerGesture::Begin { row, col, extend }) => {
             shell.begin_transcript_selection(row, col, extend)
         }
@@ -172,6 +173,101 @@ fn composer_click_drag_selects_without_moving_cursor_or_clicking_on_return() {
     );
     pointer(&mut shell, MouseEventKind::Up(MouseButton::Left), at);
     assert_eq!(shell.state.borrow().editor.cursor(), "editable draft".len());
+}
+
+#[test]
+fn composer_drag_wheel_release_keeps_selection_and_copies() {
+    for active in [false, true] {
+        for wheel in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
+            clipboard_transport::TEST_COPY.with(|copy| *copy.borrow_mut() = None);
+            let (mut shell, component) = fixture("editable draft", 40, 24);
+            shell.capture_mouse = true;
+            shell.state.borrow_mut().push_block(TranscriptBlock::Notice(
+                (0..80).map(|n| format!("history row {n}\n")).collect(),
+            ));
+            if active {
+                shell.begin_run("openai");
+            }
+            paint(&shell, &component);
+            shell.scroll_lines(-5);
+            let rows = paint(&shell, &component);
+            let at = cell(&rows, "editable");
+            pointer(&mut shell, MouseEventKind::Down(MouseButton::Left), at);
+            pointer(
+                &mut shell,
+                MouseEventKind::Drag(MouseButton::Left),
+                (at.0, at.1 + 4),
+            );
+            let before = shell.state.borrow().scroll_from_bottom.get();
+            pointer(&mut shell, wheel, (at.0, at.1 + 4));
+            assert_ne!(shell.state.borrow().scroll_from_bottom.get(), before);
+            paint(&shell, &component);
+            pointer(
+                &mut shell,
+                MouseEventKind::Drag(MouseButton::Left),
+                (at.0, at.1 + 8),
+            );
+            pointer(
+                &mut shell,
+                MouseEventKind::Up(MouseButton::Left),
+                (at.0, at.1 + 8),
+            );
+            assert_eq!(shell.state.borrow().editor.cursor(), "editable draft".len());
+            assert_eq!(
+                shell.state.borrow().copy_buffer.as_deref(),
+                Some("editable"),
+                "active={active}, wheel={wheel:?}"
+            );
+            clipboard_transport::TEST_COPY
+                .with(|copy| assert_eq!(copy.borrow().as_deref(), Some("editable")));
+            assert!(shell.state.borrow().pending_screen_press.is_none());
+        }
+    }
+}
+
+#[test]
+fn composer_drag_wheel_still_cancels_on_replacement_input() {
+    for cancel in ["focus", "resize", "edit", "press"] {
+        let (mut shell, component) = fixture("editable draft", 40, 24);
+        shell.capture_mouse = true;
+        let rows = paint(&shell, &component);
+        let at = cell(&rows, "editable");
+        pointer(&mut shell, MouseEventKind::Down(MouseButton::Left), at);
+        pointer(
+            &mut shell,
+            MouseEventKind::Drag(MouseButton::Left),
+            (at.0, at.1 + 4),
+        );
+        pointer(&mut shell, MouseEventKind::ScrollUp, at);
+        match cancel {
+            "focus" => {
+                shell.translate_input(Some(Event::FocusLost), false);
+            }
+            "resize" => shell.set_size(39, 24),
+            "edit" => shell.apply_edit(EditAction::Char('!')),
+            "press" => pointer(&mut shell, MouseEventKind::Down(MouseButton::Right), at),
+            _ => unreachable!(),
+        }
+        pointer(
+            &mut shell,
+            MouseEventKind::Up(MouseButton::Left),
+            (at.0, at.1 + 4),
+        );
+        assert!(shell.state.borrow().copy_buffer.is_none(), "{cancel}");
+    }
+}
+
+#[test]
+fn composer_click_wheel_invalidates_cursor_placement() {
+    let (mut shell, component) = fixture("editable draft", 40, 24);
+    shell.capture_mouse = true;
+    let rows = paint(&shell, &component);
+    let at = cell(&rows, "editable");
+    pointer(&mut shell, MouseEventKind::Down(MouseButton::Left), at);
+    pointer(&mut shell, MouseEventKind::ScrollUp, at);
+    pointer(&mut shell, MouseEventKind::Up(MouseButton::Left), at);
+    assert_eq!(shell.state.borrow().editor.cursor(), "editable draft".len());
+    assert!(shell.state.borrow().copy_buffer.is_none());
 }
 
 #[test]
