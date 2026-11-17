@@ -64,6 +64,7 @@
 - Gemini recordings validate request settings and strict tool schemas before resolving credentials or uploading files.
 - Anthropic usage preserves thinking-token counts when later output details omit the counter.
 - Pi command appends commit while parallel tools, background settlement, video preparation and provider retries are waiting.
+- Markdown selections copy math, displayed link destinations and unmapped painted spans while retaining mapped source syntax.
 - Video preparation follows the active branch and compaction window.
 - Pi command appends commit during streaming responses, and adapter retirement leaves pending response observations isolated.
 - Markdown rows keep isolated flag letters within the requested terminal width, including one-cell viewports.

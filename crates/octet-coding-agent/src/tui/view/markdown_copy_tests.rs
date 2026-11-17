@@ -165,6 +165,53 @@ fn markdown_source_copy_partial_inline_constructs_omit_enclosing_syntax() {
 }
 
 #[test]
+fn markdown_source_copy_math_preserves_surrounding_text_and_equation_source() {
+    for (label, expected) in [("before", "before"), ("x²", "$x^2$"), ("after", "after")] {
+        let mut shell = fixture("before $x^2$ after");
+        let a = cell(&shell, label, 0);
+        select(
+            &mut shell,
+            a,
+            (a.0, a.1 + sexy_tui_rs::visible_width(label) as u16),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn markdown_source_copy_partial_math_copies_painted_characters() {
+    let mut shell = fixture("before $x^2$ after");
+    let a = cell(&shell, "x²", 0);
+    select(&mut shell, (a.0, a.1 + 1), (a.0, a.1 + 2), "²");
+}
+
+#[test]
+fn markdown_source_copy_partial_link_destination_copies_displayed_text() {
+    let mut shell = fixture("prefix [docs](https://example.test) suffix");
+    for label in ["https://example.test", "example", " (https://example.test)"] {
+        let a = cell(&shell, label, 0);
+        select(&mut shell, a, (a.0, a.1 + label.len() as u16), label);
+    }
+    let label = "docs (https://example.test)";
+    let a = cell(&shell, label, 0);
+    select(
+        &mut shell,
+        a,
+        (a.0, a.1 + label.len() as u16),
+        "[docs](https://example.test)",
+    );
+}
+
+#[test]
+fn markdown_source_copy_unmapped_spans_fall_back_without_losing_mapped_syntax() {
+    let map = markdown_source::SourceMap::build("**first** missing **last**", "first PAINTED last");
+    assert_eq!(map.copy(6, 13).as_deref(), Some("PAINTED"));
+    assert_eq!(map.copy(2, 16).as_deref(), Some("rst PAINTED la"));
+    assert_eq!(map.copy(0, 14).as_deref(), Some("**first** PAINTED "));
+    assert_eq!(map.copy(6, 6).as_deref(), Some(""));
+}
+
+#[test]
 fn markdown_source_copy_partial_list_row_keeps_only_selected_marker_source() {
     let mut shell = fixture("399. MOUSE-ROW-399 clipboard line with unique words");
     shell.set_size(46, 12);

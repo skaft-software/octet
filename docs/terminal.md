@@ -346,6 +346,10 @@ selections copy raw code without fences. Partial table selections copy selected
 cell source text, separated by tabs within a row and newlines between rows;
 only whole rows retain their original `|` separators. Narrow table labels are
 presentation, not cell source. Repeated text maps to the selected occurrence.
+Math uses the renderer's transformation: a whole equation keeps its original
+source, while a partial equation copies its selected displayed characters.
+Displayed link destinations and other spans without source provenance copy the
+selected painted text, including when mixed with mapped Markdown spans.
 Streaming and reflow preserve source endpoints, or explicitly clear the selection
 when that mapping changes. Other blocks keep their existing text copy, and mixed
 selections keep transcript order.

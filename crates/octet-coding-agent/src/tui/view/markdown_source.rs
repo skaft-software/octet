@@ -27,6 +27,7 @@ enum Kind {
     Table,
     Cell,
     Text,
+    Painted,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +44,7 @@ struct Node {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Piece {
     Source(Range<usize>),
+    Painted(Range<usize>),
     Separator(&'static str),
 }
 
@@ -52,6 +54,7 @@ pub(super) struct SourceMap {
     pub(super) plain_len: usize,
     source_len: usize,
     source: std::sync::Arc<str>,
+    plain: std::sync::Arc<str>,
     pub(super) table_rows: Vec<Vec<Range<usize>>>,
     pub(super) tables: Vec<Range<usize>>,
 }
@@ -76,9 +79,12 @@ impl SourceMap {
             link: None,
         }];
         let mut cursor = 0;
-        for (event, range) in
-            Parser::new_ext(source, sexy_tui_rs::rich_text::markdown::parser_options())
-                .into_offset_iter()
+        let (protected, math) = sexy_tui_rs::rich_text::markdown::protect_math(source);
+        for (event, range) in Parser::new_ext(
+            &protected,
+            sexy_tui_rs::rich_text::markdown::parser_options(),
+        )
+        .into_offset_iter()
         {
             match event {
                 Event::Start(tag) => {
@@ -147,7 +153,28 @@ impl SourceMap {
                     if let Some(target) = frame.link {
                         let suffix = format!(" ({target})");
                         if plain[cursor..].starts_with(&suffix) {
+                            // Selecting the complete label still owns the original
+                            // link syntax. Its displayed destination is a separate
+                            // painted span, while the whole link copies source once.
+                            let source_range = trim_line_end(source, frame.source.clone());
+                            frame.children = vec![
+                                Node {
+                                    kind: Kind::Inline,
+                                    plain: start..end,
+                                    source: source_range.clone(),
+                                    children: frame.children,
+                                    units: Vec::new(),
+                                },
+                                Node {
+                                    kind: Kind::Painted,
+                                    plain: cursor..cursor + suffix.len(),
+                                    source: source_range.end..source_range.end,
+                                    children: Vec::new(),
+                                    units: Vec::new(),
+                                },
+                            ];
                             cursor += suffix.len();
+                            end = cursor;
                         }
                     }
                     let mut source_range = trim_line_end(source, frame.source);
@@ -163,6 +190,21 @@ impl SourceMap {
                         children: frame.children,
                         units: Vec::new(),
                     });
+                }
+                Event::Text(text)
+                    if math
+                        .get(math.partition_point(|token| token.range.end <= range.start))
+                        .is_some_and(|token| token.range.start < range.end) =>
+                {
+                    append_math_text(
+                        &mut stack.last_mut().unwrap().children,
+                        source,
+                        plain,
+                        &mut cursor,
+                        &text,
+                        range,
+                        &math,
+                    );
                 }
                 Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                     append_text(
@@ -256,6 +298,7 @@ impl SourceMap {
             plain_len: plain.len(),
             source_len: source.len(),
             source: std::sync::Arc::from(source),
+            plain: std::sync::Arc::from(plain),
             table_rows,
             tables,
         }
@@ -264,6 +307,9 @@ impl SourceMap {
     pub(super) fn pieces(&self, from: usize, to: usize) -> Vec<Piece> {
         let source = &self.source;
         let mut output = Vec::new();
+        if from == to {
+            return output;
+        }
         if from == 0 && to >= self.plain_len {
             output.push(Piece::Source(0..self.source_len));
         } else {
@@ -278,6 +324,7 @@ impl SourceMap {
         for piece in self.pieces(from, to) {
             match piece {
                 Piece::Source(range) => output.push_str(source.get(range)?),
+                Piece::Painted(range) => output.push_str(self.plain.get(range)?),
                 Piece::Separator(text) => output.push_str(text),
             }
         }
@@ -292,6 +339,9 @@ impl SourceMap {
                 Piece::Source(range) => {
                     self.source.get(range.clone()) == other.source.get(range.clone())
                 }
+                Piece::Painted(range) => {
+                    self.plain.get(range.clone()) == other.plain.get(range.clone())
+                }
                 Piece::Separator(_) => true,
             })
     }
@@ -300,6 +350,59 @@ impl SourceMap {
 fn trim_line_end(source: &str, mut range: Range<usize>) -> Range<usize> {
     range.end = range.start + source[range.clone()].trim_end_matches(['\n', '\r']).len();
     range
+}
+
+fn append_math_text(
+    nodes: &mut Vec<Node>,
+    source: &str,
+    plain: &str,
+    cursor: &mut usize,
+    text: &str,
+    range: Range<usize>,
+    math: &[sexy_tui_rs::rich_text::markdown::MathToken],
+) {
+    let mut at = range.start;
+    for token in math
+        .iter()
+        .skip(math.partition_point(|token| token.range.end <= range.start))
+        .take_while(|token| token.range.start < range.end)
+    {
+        if at < token.range.start {
+            append_text(
+                nodes,
+                source,
+                plain,
+                cursor,
+                &text[at - range.start..token.range.start - range.start],
+                at..token.range.start,
+                false,
+            );
+        }
+        let rendered = token.render(source);
+        if let Some(relative) = plain[*cursor..].find(&rendered) {
+            let start = *cursor + relative;
+            *cursor = start + rendered.len();
+            nodes.push(Node {
+                kind: Kind::Inline,
+                plain: start..*cursor,
+                source: token.range.clone(),
+                children: Vec::new(),
+                units: Vec::new(),
+            });
+        }
+        at = token.range.end.min(range.end);
+    }
+    if at < range.end {
+        append_text(
+            nodes,
+            source,
+            plain,
+            cursor,
+            &text[at - range.start..],
+            at..range.end,
+            false,
+        );
+    }
 }
 
 fn append_text(
@@ -387,6 +490,12 @@ fn collect(node: &Node, source: &str, from: usize, to: usize, output: &mut Vec<P
     if node.plain.is_empty() || from >= node.plain.end || to <= node.plain.start {
         return;
     }
+    let from = from.max(node.plain.start);
+    let to = to.min(node.plain.end);
+    if node.kind == Kind::Painted {
+        output.push(Piece::Painted(from..to));
+        return;
+    }
     let content_start = if node.kind == Kind::Item {
         node.children
             .iter()
@@ -404,6 +513,7 @@ fn collect(node: &Node, source: &str, from: usize, to: usize, output: &mut Vec<P
                     ..node.source.start + to.min(node.plain.end) - node.plain.start,
             ));
         } else {
+            let mut cursor = from;
             for (plain, raw) in node
                 .units
                 .iter()
@@ -412,7 +522,14 @@ fn collect(node: &Node, source: &str, from: usize, to: usize, output: &mut Vec<P
                 if plain.start >= to {
                     break;
                 }
+                if cursor < plain.start {
+                    output.push(Piece::Painted(cursor..plain.start));
+                }
                 output.push(Piece::Source(raw.clone()));
+                cursor = plain.end.min(to);
+            }
+            if cursor < to {
+                output.push(Piece::Painted(cursor..to));
             }
         }
     } else {
@@ -434,6 +551,7 @@ fn collect_children(
     output: &mut Vec<Piece>,
 ) {
     let mut previous = None;
+    let mut cursor = from;
     for node in nodes
         .iter()
         .skip(nodes.partition_point(|node| node.plain.end <= from))
@@ -447,9 +565,11 @@ fn collect_children(
         if pieces.is_empty() && !(node.kind == Kind::Cell && node.plain.is_empty()) {
             continue;
         }
+        let mut gap_mapped = false;
         if let Some(end) = previous {
             if let Some(separator) = separator {
                 output.push(Piece::Separator(separator));
+                gap_mapped = true;
             } else {
                 // Sibling constructs own their delimiters. Keep only the
                 // whitespace *between* their outer source ranges, not the
@@ -457,11 +577,23 @@ fn collect_children(
                 let gap = &source[end..node.source.start];
                 if !gap.is_empty() && gap.chars().all(char::is_whitespace) {
                     output.push(Piece::Source(end..node.source.start));
+                    gap_mapped = true;
                 }
             }
         }
+        let start = node.plain.start.max(from);
+        if !gap_mapped && cursor < start {
+            output.push(Piece::Painted(cursor..start));
+        }
         previous = Some(node.source.end);
         output.extend(pieces);
+        cursor = node.plain.end.min(to);
+    }
+    // Pi compatibility: packages/tui/src/tui-alt-screen.ts:1453-1474 copies
+    // painted characters. Keep those spans when no original-source node owns
+    // them, rather than confusing an unmapped range with an empty selection.
+    if cursor < to {
+        output.push(Piece::Painted(cursor..to));
     }
 }
 

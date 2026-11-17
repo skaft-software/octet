@@ -24,13 +24,14 @@ use std::ops::Range;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::{
-    latex::{
-        markdown::{protect, MathToken},
-        render_latex, RenderLatexOptions,
-    },
+    latex::{render_latex, RenderLatexOptions},
     mermaid::render_mermaid,
     Block, CodeBlock, Document, Inline, List, ListItem, ListKind, Table, TableAlignment, TableCell,
 };
+
+// Shared with native clipboard provenance so parsing and painting recognize
+// exactly the same math spans and retain original-source byte coordinates.
+pub use super::latex::markdown::{protect as protect_math, MathToken};
 
 /// Largest fenced body eligible for diagram rendering.
 ///
@@ -169,7 +170,7 @@ pub fn parser_options() -> Options {
 /// Parse Markdown into semantic content. Input is retained as text values and
 /// is sanitized only when rendered, so logging/debugging can keep the original.
 pub fn parse(source: &str) -> Document {
-    let (protected, math) = protect(source);
+    let (protected, math) = protect_math(source);
     let parser = Parser::new_ext(&protected, parser_options()).into_offset_iter();
     Builder::new(source, &math).build(parser)
 }
@@ -178,7 +179,7 @@ pub fn parse(source: &str) -> Document {
 pub(crate) fn top_level_block_starts(source: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut block_depth = 0usize;
-    let (protected, math) = protect(source);
+    let (protected, math) = protect_math(source);
     for (event, mut range) in Parser::new_ext(&protected, parser_options()).into_offset_iter() {
         let index = math.partition_point(|token| token.range.end <= range.start);
         if let Some(token) = math

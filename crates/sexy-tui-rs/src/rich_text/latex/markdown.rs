@@ -7,15 +7,18 @@ use pulldown_cmark::{Event, LinkType, Parser, Tag};
 use super::{render_latex, RenderLatexOptions};
 use crate::rich_text::markdown::{parser_options, MAX_DIAGRAM_FENCE_BYTES};
 
-pub(crate) struct MathToken {
+/// A recognized math span in original Markdown source coordinates.
+pub struct MathToken {
+    /// Original byte range, including the math delimiters.
     pub range: Range<usize>,
-    pub display: bool,
-    pub pending: bool,
+    pub(crate) display: bool,
+    pub(crate) pending: bool,
     body: Range<usize>,
     container_prefix: String,
 }
 
 impl MathToken {
+    /// Render this span with the same literal fallback used by Markdown paint.
     pub fn render(&self, source: &str) -> String {
         let body = self.without_container(&source[self.body.clone()]);
         if !self.pending && body.len() <= MAX_DIAGRAM_FENCE_BYTES {
@@ -60,7 +63,7 @@ impl MathToken {
 /// coordinates. Only recognized math is masked; code, escapes and HTML are not.
 /// Display delimiters become blank boundaries, and embedded newlines disappear
 /// so even malformed/pending math cannot become a heading, table, or code fence.
-pub(crate) fn protect(source: &str) -> (Cow<'_, str>, Vec<MathToken>) {
+pub fn protect(source: &str) -> (Cow<'_, str>, Vec<MathToken>) {
     if !source.contains('$') && !source.contains("\\(") && !source.contains("\\[") {
         return (Cow::Borrowed(source), Vec::new());
     }
