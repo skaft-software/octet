@@ -106,14 +106,19 @@ fn cold_video_read_keeps_foreground_input_pollable() {
         let mut run = agent.prompt("read clip.mp4").await.unwrap();
         let start = std::time::Instant::now();
         let started = std::path::PathBuf::from(std::env::var_os("OCTET_VIDEO_PROBE_STARTED").unwrap());
+        // Bound each poll, not the probe's launch: interpreter startup on a cold CI
+        // host can exceed half a second while the driver keeps yielding every tick.
         loop {
+            let poll = std::time::Instant::now();
             tokio::select! {
                 biased;
                 _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-                    assert!(start.elapsed() < std::time::Duration::from_millis(500), "foreground run.next() blocked input for {:?}", start.elapsed());
+                    assert!(poll.elapsed() < std::time::Duration::from_millis(500), "foreground run.next() blocked input for {:?}", poll.elapsed());
+                    assert!(start.elapsed() < std::time::Duration::from_secs(10), "probe never started");
                     if started.exists() { break; }
                 }
                 event = run.next() => {
+                    assert!(poll.elapsed() < std::time::Duration::from_millis(500), "foreground run.next() blocked input for {:?}", poll.elapsed());
                     assert!(event.is_some(), "run ended before decoder preparation");
                     assert!(!matches!(event, Some(AgentEvent::ToolFinished { .. })), "tool result commit blocked the input branch for {:?}", start.elapsed());
                 }
