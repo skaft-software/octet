@@ -4,201 +4,59 @@
 
 ### Added
 
-- Click the composer to place its cursor, with wrapped Unicode text, atomic attachment chips and drag-to-copy selection.
-- Copying formatted assistant output copies its Markdown source.
-- Scroll traces expose per-frame work and duration to help diagnose long-session stalls.
-
-- Verify independent tool and extension hosting with an offline consumer and compile-time orchestration boundary checks.
-- Build tools and the extension process host independently with octet-agent's default agent feature disabled.
-- Document the tool and extension-host module dependencies for independent embedding.
-
-- Document independent tool and extension use while retaining caller control flow outside the agent loop.
-
-- Add a provider-only loopback consumer and embedding notes for shared Codex storage, catalogs and one-request inference.
-
-- Opt-in fullscreen input traces report event-to-publication and completed-frame timing without recording input text.
-
-- Expose shared provider declarations and account-scoped Codex catalogs with explicit local reads, discovery and exact route binding.
-
-- Share Codex authentication and private storage through octet-ai with in-memory credentials and caller-owned login presentation.
-
-- Document the reusable provider boundary and explicit caller ownership of storage, login interaction and inference.
-- Pi conformance reports compare 14 source-cited offline journeys across commands, hooks, tools, UI, sessions, compaction and models.
-- Pi compatibility checks record long-session snapshot transitions, process exits and memory observations with isolated offline fixtures.
-- Pi session checks cover repeated tools, compaction, process restart and resume with durable private state and later turns.
-- Pi compatibility checks cover hook faults, history isolation, ownership, streaming cancellation and descendant cleanup.
-- Rust embedders can explicitly create, refresh and delete bounded Gemini caches with session-end cleanup and finite TTLs.
-- Send local video as four timestamped frames on image-capable routes, retain original session bytes and keep Gemini video native.
+- Click the composer to place the cursor, and drag to select and copy, as in a real text box.
+- Fullscreen selection copies on release, keeps extending while you scroll or output streams, and copies replies as Markdown source.
+- Scrolled transcripts show a clickable Jump to bottom button with a count of new output.
+- Local video goes to image-capable models as four timestamped frames; Gemini receives video natively.
+- Rust embedders can use octet's provider, tool and extension-host crates on their own, as described in the provider embedding guide.
 
 ### Changed
 
-- Mouse wheel and trackpad scrolling move one row per step with matching terminal guidance and PTY coverage; Alt+wheel moves 15.
-- Trackpad line reports accumulate without an extra application-side multiplier.
-- Recorded-audio guidance documents input paths, durable media and separate transport-acceptance and recognition checks.
-
-- Recorded media reuses prepared bytes across turns and resumes from session data; Gemini audio uses Files uploads when inline requests grow.
-
-- First sessions can continue after cancellation and resume with their saved model.
-- Composer overflow counts sit in centered border labels, leaving more room for draft text.
-- Codex uses provider-default context budgets, keeping GPT-6.1 Sol and Terra's advertised 500K windows.
-- Completed shell-tool rows show their recorded duration; themes can restyle or hide it.
-- The default splash is a compact two-line mark with the version, access mode and `/changelog`.
-- Document audio input paths, capability sources and provider wire formats.
-- Agent and subagent turns handle large tool-call batches in bounded concurrent waves while preserving explicit budgets.
-- Use shared Codex login, discovery and route binding in the frontend while retaining native presentation and model-selection policy.
+- Wheel and trackpad scrolling move one row per step; Alt+wheel moves 15.
+- The splash is a compact two-line mark with the version, access mode and `/changelog`.
+- Composer overflow counts sit in the border, leaving more room for your draft.
+- Codex uses provider-default context windows, keeping the 500K windows of GPT-6.1 Sol and Terra.
+- Completed tool cards show their duration on one row; themes can restyle or hide it.
+- Extension slash commands and shortcuts run immediately during a response.
+- Large tool-call batches run in bounded concurrent waves.
+- Recorded audio is prepared once and reused across turns; large Gemini clips upload through the Files API.
+- Shortcut hints, pickers and `/hotkeys` use consistent `Ctrl+T`-style labels.
 
 ### Fixed
 
 - Update quinn-udp to fix a receive loop that can spin after a truncated datagram. ([#735](https://github.com/skaft-software/octet/pull/735) by [@gafiatulin](https://github.com/gafiatulin))
 - Extension activation and trust flags preserve following subcommands. ([#734](https://github.com/skaft-software/octet/pull/734) by [@gafiatulin](https://github.com/gafiatulin))
-
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
-
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
-- Pi streaming tool arguments use incremental parsing and bounded snapshot work while preserving partial-argument previews.
-- Pi context phases carry excluded dialog time forward so later context handlers retain their execution budget.
-- Pi tool-call result getters stay under bounded supervision, with throwing getters isolated and reported by extension and stage.
-- Responses history preserves recorded reasoning effort before assistant replies whose text is edited by context hooks.
-- Responses history keeps tool-call and result IDs paired when context hooks edit assistant text.
-- Codex startup binds new catalogs to refreshed account and plan claims, including fallback after inventory failures.
-- Gemini recordings validate request settings and strict tool schemas before resolving credentials or uploading files.
-- Anthropic usage preserves thinking-token counts when later output details omit the counter.
-- Pi command appends commit while parallel tools, background settlement, video preparation and provider retries are waiting.
-- Composer drag selections keep their gesture and copy on release after wheel or trackpad scrolling.
-- Markdown selections copy math, displayed link destinations and unmapped painted spans while retaining mapped source syntax.
-- Delegated usage records retain the child's endpoint and model while counting settled spend exactly once across resume and model changes.
-- Codex GPT-6.1 Sol sessions and subagents retain reviewed token prices and long-context tiers in cost accounting.
-- Video frames reuse model-limit-specific prepared images across turns and replay, keeping decoding and resizing in cancellable async preparation.
-- Busy Pi commands read current history and retain append access across long responses and response settlement.
-- Pi keyboard shortcuts append through the active response writer with live owner and generation checks.
-- Concurrent Pi command appends keep independent receipt cursors and isolate malformed replies to the affected invocation.
-- Provider HTTP errors keep actionable messages with bounded request-echo, quote and remote-stack scrubbing.
-- Video preparation follows the active branch and compaction window.
-- Pi command appends commit during streaming responses, and adapter retirement leaves pending response observations isolated.
-- Markdown rows keep isolated flag letters within the requested terminal width, including one-cell viewports.
-- Terminal mouse and cursor reports with a zero coordinate are ignored as malformed instead of crashing the input decoder.
-- Pi session replacement, compaction and tree hooks isolate callback-owned error codes while preserving native refusals and explicit vetoes.
-- Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.
-- Pi adapter reloads preserve session history after forced restarts and keep extension warnings actionable while responses continue.
-- Closing a run during video preparation preserves completed foreground and background reads with their original bytes.
-- Video reads keep input responsive during cancellable frame preparation and preserve completed results with their original bytes.
-- Pi context hooks isolate callback-owned error codes while preserving native ownership and cancellation checks.
-- Pi context hooks preserve accepted edits and run later handlers after malformed result objects or message content.
-- Pi editors render from bounded local native observations while Rust retains editing and history authority.
-- Pi editors keep large completion menus responsive with display-only paint observations and actionable bounded host replies.
-- Splash clicks keep the byte mark fully painted and text selection confined to the clicked word.
-- Fullscreen selections belong to one surface at a time, and splash words copy on release.
-- Small upward scrolls keep the chosen transcript position through repaints, streaming and live-row height changes.
-- Composer clicks and completion selection use the painted rows beneath the independent working indicator during streaming.
-- Custom editors reserve space for working indicators and host chrome, keeping tall snapshots inside short terminal windows.
-- Pi editors keep their caret visible in short composer slots, and custom footers use the mounted editor's actual height.
-- Focused panels and transcript search stay visible beside working indicators and long wrapped errors in short terminals.
-- Custom working indicators retain activity-card borders, padding and fill while clipping styled content to the frame.
-- Pi working indicators preserve complete wide graphemes across the native spinner gutter.
-- Working indicators keep one independent slot below reasoning, text and tools until the run settles.
-- Shell cards keep their cached Pi renderer geometry until the final result frame is ready.
-- Subagent discovery and spawning bind each newly attached extension before its first request.
-- Pi permission hooks retain each worker's session context and keep lead tools and reports available across compaction and adapter restarts.
-- Fullscreen selection copies on release with brief feedback and extends across edge and wheel scrolling while output streams.
-- Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
-- Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
-- Retry countdowns and network-wait status stay visible over custom Pi working indicators and restore their styling when work resumes.
-- Pi working components align with the native spinner column and preserve their spacing within narrow terminal widths.
-- Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
-- Timed image reads retain inline previews while scrolling and cropping.
-- Empty and ellipsis-only running shell cards show an explicit interruptible state while live progress keeps its available rows.
-- Completed tool cards share one final duration row with a documented tool_duration theme setting.
-- Shell and Codemode output previews keep deliberate head and tail windows with exact omitted-middle counts.
-- ANSI tool command and output omissions use consistent hidden wording and Ctrl+O disclosure hints.
-- Working and Thinking timers and their terminal examples use the shared inline metadata separator.
-- Scrolled transcripts show a centered, clickable Jump to bottom button with optional new-output counts and pointer hover.
-- Transcript scrollbar hover, clicks and drags and Jump to bottom stay responsive while idle or streaming.
-- Transcript queue and omission counts use singular nouns for one row or byte.
-- Large tool sets (for example 135 Pi tools) no longer fail context preparation with a validation work limit.
-- Wheel events publish immediately during idle and active work, keeping continuous input independent of timer wakeups.
-- Scrolling reuses tool selection projections to avoid rewrapping and highlighting long collapsed outputs on each frame.
-- Wheel scrolling moves the transcript over hints and viewport edges while the scrollbar holds a pointer press.
-- Fullscreen wheel, selection and picker navigation preempt the stream frame timer just like composer edits.
-- Gemini file preparation validates requests before uploading recorded audio.
-- Gemini audio uploads validate proxies before resolving credentials, and invalid proxy settings keep all HTTP transport fail-closed.
-- OpenRouter audio discovery retains explicit and catalog capability sources through fresh inventories, cached replay and model admission.
-- Native context observers borrow accepted requests and compute request-shape diagnostics only when preparation is refused.
-- Pi child text and reasoning observations share immutable strings and update byte budgets from new deltas.
-- Pi streamed tool arguments accept native-sized chunks while retaining bounded, isolated observations.
-- Audio read errors identify the provider and model when the selected route cannot accept the clip.
-- Packaged documentation keeps internal investigation notes private.
-- Packaged documentation includes provider embedding examples, recorded-audio qualification guidance and all eleven Pi message compatibility cases.
-- Private temporary workspaces honor `TMPDIR` and bound native workspace discovery to the isolated home directory.
-- Provider request traces count signed Google parts by kind without exposing signatures.
-- Live activity timers show whole seconds again (`28s`, `1m49s`, `1h01m01s`).
-- Responses screenshot retention updates only new replay items instead of rescanning settled history.
-- Provider-context hook projections validate target-normalized replay, avoiding cross-protocol reasoning refusals.
-- Responses replay bounds ordinary tool-result screenshots while keeping native computer-call screenshots.
-- Opt-in request tracing reports the final Google contents role, including changes made by payload hooks.
-- TUI shortcut hints, pickers and `/hotkeys` consistently use `Ctrl+T`-style labels.
-- Completion, picker and report footers spell out navigation keys with the shared shortcut formatter.
-- Fullscreen scrolling and selection reuse unchanged row mappings instead of re-aligning long answers on every event.
-- Typing, scrolling and selection painting skip collapsed history blocks instead of scanning hidden runs each frame.
-- Google-compatible continuation requests no longer end with a `model` turn, avoiding HTTP 400 on OpenCode Go.
-- Tool labels use available terminal width while keeping their selected values readable.
-- Pi input hooks skip coded callback faults and malformed transforms while preserving later handlers and native authority.
-- Responses sessions continue with hook-edited messages, instructions and media while keeping opaque reasoning attached to its assistant.
-- Responses context projections retain chronological reasoning-effort updates and the selected effort for the next reply.
-- Scrolling preserves the reader's position during streamed output and follows new output at the live tail.
-- Pi prompt hooks preserve valid results around malformed prompt replacements.
-- Static models use provider-scoped catalog audio metadata when their declarations are silent.
-- Extension reverse requests remain available beyond 65,536 calls with bounded in-flight correlation.
-- Pi context, tool-result and session-operation hooks preserve accepted results when a sibling returns malformed data.
-- Pi streaming observations account for new deltas and share immutable text while preserving retained event snapshots.
-- Model discovery and custom audio declarations retain capability provenance through catalog registration and cached inventories.
-- Pi session mirrors index single-entry reads and maintain ordinary appends without rescanning earlier history.
-- Prompts continue while an extension append process restarts, and fresh callbacks use the current generation.
-- Resumed sessions drop foreign-model thinking from provider requests while preserving saved reasoning and normalizing tool-call IDs.
-- Reasoning continuation errors identify source and target models, including switches between models on the same protocol.
-- Native Pi snapshots share unchanged encoded history and expand inline replacement history only when requested.
-- Audio admission, codec errors and replay placeholders identify the provider and model when a route cannot accept a clip.
-- Completed tool durations display identically live and after resuming a session.
-- Provider HTTP failures show redacted structured error messages, codes and types, including pretty-printed Responses error bodies.
-- Plain-mode outcomes use compact durations with explicit completion, failure and interruption labels.
-- Pi turn observers isolate coded callback faults, preserve durable appends and continue later handlers.
-- Authenticated frontend model discovery keeps API keys within the requested HTTP origin.
-- Ctrl+D exits preserve starting terminal settings under tmux after native input readiness, extension reload and resize.
-- Assistant text edits retain their signed Responses reasoning items verbatim, including opaque provider fields.
-- Pi dispatcher liveness preserves user waits, isolates stalled callbacks and factory failures, and reports disconnects without replay.
-- Cancelled Pi prompt callbacks release dispatcher capacity while user waits remain unbounded and interrupted handlers stay unreplayed.
-- Model labels consistently show full IDs and distinct display names across the footer, picker, splash and session views.
-- Enabling Pi compatibility returns editable control while factories load with a visible status and hook-readiness tracing.
-- Model discovery keeps capability, pricing and audio provenance together during route registration.
-- Pi editors acknowledge completed no-op input across native panel focus changes while preserving the draft and stale-write fences.
-- Wheel bursts publish promptly after ready input drains, preserving every scroll delta without a second frame-period wait.
-- Pi terminal listeners retain their one-second fail-open deadline with dispatcher supervision, keeping subsequent typing responsive.
-- Pi extension load failures and discarded stalled factories appear as grouped, actionable errors while healthy siblings continue.
-- Fullscreen rendering keeps raw Kitty image placements aligned with their rows during scrolling and redraws.
-- Pi streaming observers receive subsequent events as soon as their handler settles, independently of dispatcher status delivery.
-- Cache accounting honors explicit final zero counters and counts one-hour writes once in session reports.
-- Payload hooks retain unchanged request bytes and field order across turns, preserving stable cache prefixes.
-- Pi conformance journeys require successful observations on both hosts and include startup writes in migration-safety checks.
-- Pi model selection delivers `model_select` with the current and previous models before an applied `pi.setModel()` resolves.
-- Pi session setup retains its extension owner across idle resource refreshes, allowing replacement and later commands to complete.
-- Anthropic cache TTL updates preserve omitted write totals and one-hour subsets independently.
-- Pi extensions can switch back to a previously opened session while captured contexts from its prior incarnation stay retired.
-- Wheel scrolling moves the transcript over hints and viewport edges while the scrollbar holds a pointer press.
-- Pi custom editors retain pending edits and resume ordered input when native panels such as `/extensions` close.
-- Fast terminal startup paints screen entry, resolved chrome, title and cursor together while slow initialization keeps editing responsive.
-- RPC resource reloads and subsequent provider turns fit the default thread stack in debug builds.
-- Early Pi submissions wait for their hooks, and cancellation preserves the still-loading setup for later prompts.
-- Auto theme detection applies late terminal replies through ordinary input without delaying the first submission.
-- Pi compatibility restores validated composer and footer templates at first paint while the live setup loads.
-- Pi startup chrome retires permanently on live frames, including empty footers, unmounts and startup failures.
-- Pi startup templates yield to live chrome after startup reconciles absent or cleared editor and footer slots.
-- Extension slash commands run immediately during active responses, with handler failures and timeouts isolated from the running turn.
-- Subagent spawn and continuation reach inference with resource-contributing extensions while parent authority refusals identify the guard.
-- Enabled octet-subagents tools retain their names alongside Pi packages, with package-attributed collision warnings and working unrelated commands.
-- Codemode keeps idle runners ready for later scripts and reports actionable runner-stage errors.
-- Fullscreen live updates keep transcript, composer and footer rows aligned across working, reasoning, tool and status changes.
-- Subagent rosters coalesce unchanged settled waves, share compact spacing, and reserve only used live detail rows until settlement.
-- Pi context hooks isolate callback-owned error codes while preserving native ownership and cancellation checks.
-- Pi context hooks preserve accepted edits and run later handlers after malformed result objects or message content.
+- The working indicator keeps one steady row below the response until the run ends, so tool completions stop shifting the screen.
+- Small upward scrolls stay where you put them while output streams, and long sessions scroll smoothly.
+- Jump to bottom and the scrollbar respond to hover, clicks and drags while idle or streaming.
+- Pi working indicators, colors and tool titles, including bash, render as the extension styles them.
+- Retry countdowns and network waits stay visible over custom working indicators.
+- Custom Pi editors and footers fit short terminals with the caret in view.
+- Pi composer and footer appear at first paint and hand over cleanly to the live extension.
+- Enabling Pi compatibility gives control back while extensions load; prompts typed early wait for their hooks.
+- A failing Pi hook is skipped with a warning naming the extension, and the session continues.
+- Pi command and shortcut appends commit during responses, including concurrent commands and long tool waves.
+- Pi adapter reloads keep session history and show actionable warnings.
+- Subagent fleets of 16 workers run alongside Pi permission extensions, each worker keeping its own session.
+- Subagent costs are priced, including GPT-6.1 Sol, and recorded under each worker's model.
+- Subagent rosters stay compact, without repeated waves.
+- Sessions with large tool sets, such as 135 Pi tools, prepare context normally.
+- Responses sessions continue after context hooks edit history, keeping tool calls paired and reasoning in place.
+- Resumed sessions switch models cleanly, keeping earlier thinking saved in the session.
+- Google-compatible routes, including OpenCode Go, continue multi-turn conversations.
+- Provider errors show the provider's message, scrubbed of request echoes and stack traces.
+- Payload hooks keep request bytes stable across turns, preserving prompt cache hits.
+- Cache and thinking-token counts stay accurate when providers send partial usage updates.
+- Codex sign-in refreshes bind the model list to your current plan.
+- Video and audio prepare in the background, keep typing responsive and survive cancellation.
+- Splash clicks and double-clicks select text without disturbing the mark.
+- Kitty images stay aligned with their rows while scrolling.
+- Ctrl+D restores terminal settings under tmux.
+- Live timers show whole seconds again (`28s`, `1m49s`).
+- Codemode keeps runners ready between scripts and reports actionable errors.
+- Model labels show full IDs consistently across the footer, picker, splash and session views.
 
 ## [0.10.4] - 2026-11-12
 
