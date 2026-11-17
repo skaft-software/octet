@@ -50,11 +50,12 @@
 ### Fixed
 
 - Update quinn-udp to fix a receive loop that can spin after a truncated datagram. ([#735](https://github.com/skaft-software/octet/pull/735) by [@gafiatulin](https://github.com/gafiatulin))
-
 - Extension activation and trust flags preserve following subcommands. ([#734](https://github.com/skaft-software/octet/pull/734) by [@gafiatulin](https://github.com/gafiatulin))
 
 - Model picker filters match names with separators omitted. ([#727](https://github.com/skaft-software/octet/pull/727) by [@XelHaku](https://github.com/XelHaku))
+
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
+- Terminal mouse and cursor reports with a zero coordinate are ignored as malformed instead of crashing the input decoder.
 - Pi session replacement, compaction and tree hooks isolate callback-owned error codes while preserving native refusals and explicit vetoes.
 - Pi editor painting reuses bounded native snapshots and keeps host waits outside component rendering.
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.

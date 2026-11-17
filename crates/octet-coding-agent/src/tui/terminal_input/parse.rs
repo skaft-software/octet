@@ -2,7 +2,8 @@
 //! Kept here because upstream exposes no byte decoder or raw-event provenance.
 //! Changes: public event imports, local protocol-event enum, always raw mode/paste,
 //! canonical Ctrl+- spelling for the ambiguous legacy byte 0x1f, and
-//! xterm modifyOtherKeys encoding for modified Enter.
+//! xterm modifyOtherKeys encoding for modified Enter, and checked 1-based
+//! coordinate conversion (a 0 coordinate is a parse error, not an underflow).
 
 use std::io;
 
@@ -218,6 +219,11 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
     Ok(input_event.map(InternalEvent::Event))
 }
 
+/// Convert a 1-based terminal coordinate to 0-based; 0 is malformed input.
+fn one_based(value: u16) -> io::Result<u16> {
+    value.checked_sub(1).ok_or_else(could_not_parse_event_error)
+}
+
 pub(crate) fn next_parsed<T>(iter: &mut dyn Iterator<Item = &str>) -> io::Result<T>
 where
     T: std::str::FromStr,
@@ -255,8 +261,8 @@ pub(crate) fn parse_csi_cursor_position(buffer: &[u8]) -> io::Result<Option<Inte
 
     let mut split = s.split(';');
 
-    let y = next_parsed::<u16>(&mut split)? - 1;
-    let x = next_parsed::<u16>(&mut split)? - 1;
+    let y = one_based(next_parsed::<u16>(&mut split)?)?;
+    let x = one_based(next_parsed::<u16>(&mut split)?)?;
 
     Ok(Some(InternalEvent::CursorPosition(x, y)))
 }
@@ -694,8 +700,8 @@ pub(crate) fn parse_csi_rxvt_mouse(buffer: &[u8]) -> io::Result<Option<InternalE
         .ok_or_else(could_not_parse_event_error)?;
     let (kind, modifiers) = parse_cb(cb)?;
 
-    let cx = next_parsed::<u16>(&mut split)? - 1;
-    let cy = next_parsed::<u16>(&mut split)? - 1;
+    let cx = one_based(next_parsed::<u16>(&mut split)?)?;
+    let cy = one_based(next_parsed::<u16>(&mut split)?)?;
 
     Ok(Some(InternalEvent::Event(Event::Mouse(MouseEvent {
         kind,
@@ -722,8 +728,8 @@ pub(crate) fn parse_csi_normal_mouse(buffer: &[u8]) -> io::Result<Option<Interna
     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
     // The upper left character position on the terminal is denoted as 1,1.
     // Subtract 1 to keep it synced with cursor
-    let cx = u16::from(buffer[4].saturating_sub(32)) - 1;
-    let cy = u16::from(buffer[5].saturating_sub(32)) - 1;
+    let cx = one_based(u16::from(buffer[4].saturating_sub(32)))?;
+    let cy = one_based(u16::from(buffer[5].saturating_sub(32)))?;
 
     Ok(Some(InternalEvent::Event(Event::Mouse(MouseEvent {
         kind,
@@ -752,8 +758,8 @@ pub(crate) fn parse_csi_sgr_mouse(buffer: &[u8]) -> io::Result<Option<InternalEv
     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
     // The upper left character position on the terminal is denoted as 1,1.
     // Subtract 1 to keep it synced with cursor
-    let cx = next_parsed::<u16>(&mut split)? - 1;
-    let cy = next_parsed::<u16>(&mut split)? - 1;
+    let cx = one_based(next_parsed::<u16>(&mut split)?)?;
+    let cy = one_based(next_parsed::<u16>(&mut split)?)?;
 
     // When button 3 in Cb is used to represent mouse release, you can't tell which button was
     // released. SGR mode solves this by having the sequence end with a lowercase m if it's a
@@ -883,6 +889,34 @@ mod tests {
     use crossterm::event::{KeyEventState, KeyModifiers, MouseButton, MouseEvent};
 
     use super::*;
+
+    #[test]
+    fn zero_based_terminal_coordinates_are_rejected_without_panicking() {
+        // Terminal coordinates are 1-based; a 0 (or an X10 byte below 33)
+        // from a buggy terminal or multiplexer must be a parse error, not an
+        // integer underflow that panics debug builds or wraps to 65535.
+        for bytes in [
+            &b"\x1B[0;5R"[..],
+            &b"\x1B[5;0R"[..],
+            &b"\x1B[<0;0;5M"[..],
+            &b"\x1B[<64;20;0M"[..],
+            &b"\x1B[46;0;5M"[..],
+            &b"\x1B[46;5;0M"[..],
+            &b"\x1B[M \x20\x21"[..],
+            &b"\x1B[M \x21\x1F"[..],
+        ] {
+            assert!(parse_event(bytes, false).is_err(), "{bytes:?}");
+        }
+        assert_eq!(
+            parse_event(b"\x1B[<0;1;1M", false).unwrap(),
+            Some(InternalEvent::Event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }))),
+        );
+    }
 
     #[test]
     fn test_esc_key() {
