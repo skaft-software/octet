@@ -22,6 +22,17 @@ pub(super) struct GeometryFence {
     follow_tail: bool,
 }
 impl GeometryFence {
+    pub(super) fn composer_current(self, state: &ShellState) -> bool {
+        let current = Self::capture(state);
+        Self {
+            transcript: current.transcript,
+            semantic: current.semantic,
+            scroll: current.scroll,
+            follow_tail: current.follow_tail,
+            ..self
+        } == current
+    }
+
     pub(super) fn capture(state: &ShellState) -> Self {
         Self {
             transcript: state.transcript_epoch,
@@ -240,6 +251,8 @@ pub(super) struct RenderedGeometry {
     pub(super) panel: Option<PanelRenderReceipt>,
     pub(super) report: Option<ReportRenderReceipt>,
     pub(super) navigation_frame: Option<super::transcript_navigation::NavigationFrame>,
+    pub(super) composer: Arc<crate::tui::composer::mouse::ComposerMouseGeometry>,
+    pub(super) completions: Vec<super::composer_pointer::CompletionHit>,
     pub(super) welcome_mark: Option<(u16, usize)>,
     pub(super) generation: u64,
     pub(super) total_rows: usize,
@@ -311,7 +324,31 @@ impl RenderedGeometry {
                 .sum::<usize>();
         });
         Self {
+            completions: super::composer_pointer::completion_hits(
+                state,
+                chrome.transcript_rows
+                    + chrome.header.len()
+                    + chrome.error.len()
+                    + chrome.pending.len()
+                    + chrome.panel.len()
+                    + chrome.extension_above.len()
+                    + chrome.subagents.len()
+                    + chrome.composer.len(),
+                chrome.suggestions.len(),
+                fence.input,
+            ),
             fence,
+            composer: Arc::new(crate::tui::composer_surface::composer_mouse_geometry(
+                state,
+                chrome.transcript_rows
+                    + chrome.header.len()
+                    + chrome.error.len()
+                    + chrome.pending.len()
+                    + chrome.panel.len()
+                    + chrome.extension_above.len()
+                    + chrome.subagents.len(),
+                chrome.composer.len(),
+            )),
             panel: PanelRenderReceipt::capture(state, &chrome.panel),
             report: ReportRenderReceipt::capture(state),
             navigation_frame: state.transcript_navigation.borrow().rendered_frame(),
@@ -359,6 +396,10 @@ impl RenderedGeometry {
             semantic: state.transcript_semantic_revision,
             ..self.fence
         } == GeometryFence::capture(state)
+    }
+
+    pub(super) fn is_composer_current(&self, state: &ShellState) -> bool {
+        self.fence.composer_current(state)
     }
 
     /// Whether this frame still describes the same rows after the application
@@ -414,6 +455,13 @@ impl ShellState {
             .as_deref()
             .or(self.render_geometry.as_deref())
             .filter(|geometry| geometry.is_pointer_current(self))
+    }
+
+    pub(super) fn composer_pointer_geometry(&self) -> Option<&RenderedGeometry> {
+        self.painted_geometry
+            .as_deref()
+            .or(self.render_geometry.as_deref())
+            .filter(|geometry| geometry.is_composer_current(self))
     }
 
     /// The frame an in-flight pointer gesture maps cells through. Scrolling is

@@ -1663,13 +1663,20 @@ pub(crate) struct PendingExtensionMessage {
     pub(crate) context_only: bool,
 }
 
-struct TranscriptLinkPress {
+enum ScreenPressTarget {
+    Link(String),
+    Composer(composer::mouse::ComposerPress),
+    Completion(composer_pointer::CompletionHit),
+}
+
+struct ScreenPress {
     cell: (u16, u16),
-    target: String,
+    target: ScreenPressTarget,
+    moved: bool,
     fence: renderer_geometry::GeometryFence,
 }
 
-impl TranscriptLinkPress {
+impl ScreenPress {
     fn new(state: &ShellState, row: u16, col: u16, target: String) -> Option<Self> {
         // OSC 8 allows file and application schemes too. Application-owned
         // clicks may only launch web pages, never a file or protocol handler.
@@ -1680,7 +1687,8 @@ impl TranscriptLinkPress {
         }
         Some(Self {
             cell: (row, col),
-            target: target.as_str().to_owned(),
+            target: ScreenPressTarget::Link(target.as_str().to_owned()),
+            moved: false,
             fence: renderer_geometry::GeometryFence::capture(state),
         })
     }
@@ -1933,8 +1941,9 @@ pub(crate) struct ShellState {
     /// Last press/drag cell. A stationary release keeps the semantic endpoint
     /// even when intervening layout moves different content under that cell.
     selection_pointer_cell: Option<(u16, u16)>,
-    /// A web link under a stationary press; dragging or a layout change revokes it.
-    pending_link_press: Option<TranscriptLinkPress>,
+    /// Screen-level click target shared by links, the composer and completions.
+    pending_screen_press: Option<ScreenPress>,
+    pub(crate) composer_selection: Option<(u64, std::ops::Range<usize>)>,
     /// A press whose frame was on screen before its geometry was recorded.
     deferred_pointer_press: Option<renderer_geometry::DeferredPointerPress>,
     /// A drag which began in the transcript remains transcript-owned even
@@ -2367,7 +2376,8 @@ impl ShellState {
             transcript_selection: Default::default(),
             pending_selection_anchor: Default::default(),
             selection_pointer_cell: Default::default(),
-            pending_link_press: Default::default(),
+            pending_screen_press: Default::default(),
+            composer_selection: None,
             deferred_pointer_press: Default::default(),
             selection_dragging: Default::default(),
             copy_buffer: Default::default(),
@@ -4365,6 +4375,7 @@ fn application_history_budget_scales_with_viewport() {
     assert_eq!(hydration_entry_budget(u16::MAX), 512);
 }
 
+mod composer_pointer;
 mod composer_slot;
 pub(crate) use composer_slot::ComposerSlotWrite;
 
@@ -7656,6 +7667,10 @@ impl InteractiveShell {
     /// Shift+click extends an existing selection without activating links.
     pub fn begin_transcript_selection(&mut self, row: u16, col: u16, extend: bool) {
         self.reset_input_interaction();
+        if self.begin_composer_pointer(row, col, extend) {
+            return;
+        }
+        self.state.borrow_mut().composer_selection = None;
         let link = (!extend)
             .then(|| self.transcript_link_at_screen_cell(row, col))
             .flatten();
@@ -7696,8 +7711,8 @@ impl InteractiveShell {
             // prior selection is cleared in `end_transcript_selection`.
             state.pending_selection_anchor = Some(position);
             state.selection_dragging = false;
-            state.pending_link_press =
-                link.and_then(|target| TranscriptLinkPress::new(&state, row, col, target));
+            state.pending_screen_press =
+                link.and_then(|target| ScreenPress::new(&state, row, col, target));
         }
     }
 
@@ -7719,12 +7734,11 @@ impl InteractiveShell {
         // Promote only after observing real movement.
         let mut state = self.state.borrow_mut();
         state.selection_pointer_cell = Some((row, col));
-        if state
-            .pending_link_press
-            .as_ref()
-            .is_some_and(|press| press.cell != (row, col))
-        {
-            state.pending_link_press = None;
+        if let Some(press) = state.pending_screen_press.as_mut() {
+            press.moved |= press.cell != (row, col);
+        }
+        if Self::extend_composer_pointer(&mut state, row, col) {
+            return;
         }
         Self::resolve_deferred_pointer_press(&mut state);
         if let Some(deferred) = state.deferred_pointer_press.as_mut() {
@@ -7786,7 +7800,7 @@ impl InteractiveShell {
 
     /// Finish a pointer gesture:
     /// - Drag that created a selection -> copy to clipboard, keep selection.
-    /// - Stationary click (no drag)    -> clear selection and open a web link.
+    /// - Stationary click (no drag)    -> activate its screen-level click target.
     pub fn end_transcript_selection(&mut self, row: u16, col: u16) {
         self.end_transcript_selection_with(
             row,
@@ -7797,7 +7811,12 @@ impl InteractiveShell {
 
     fn end_transcript_selection_with(&mut self, row: u16, col: u16, open: impl FnOnce(&str)) {
         let mut state = self.state.borrow_mut();
-        let pressed_link = state.pending_link_press.take();
+        if Self::extend_composer_pointer(&mut state, row, col) {
+            drop(state);
+            self.end_composer_pointer(row, col);
+            return;
+        }
+        let pressed_link = state.pending_screen_press.take();
         let last_cell = state.selection_pointer_cell.take();
         Self::resolve_deferred_pointer_press(&mut state);
         state.deferred_pointer_press = None;
@@ -7826,15 +7845,19 @@ impl InteractiveShell {
             state.transcript_selection = None;
             state.selection_dragging = false;
             let pressed_link = pressed_link.filter(|press| {
-                press.cell == (row, col)
+                !press.moved
+                    && press.cell == (row, col)
                     && press.fence == renderer_geometry::GeometryFence::capture(&state)
             });
             drop(state);
-            if let Some(press) = pressed_link {
-                if self.transcript_link_at_screen_cell(row, col).as_deref()
-                    == Some(press.target.as_str())
+            if let Some(ScreenPress {
+                target: ScreenPressTarget::Link(target),
+                ..
+            }) = pressed_link
+            {
+                if self.transcript_link_at_screen_cell(row, col).as_deref() == Some(target.as_str())
                 {
-                    open(&press.target);
+                    open(&target);
                 }
             }
             return;
@@ -7944,7 +7967,13 @@ impl InteractiveShell {
     }
 
     pub fn selected_plain_text(&self) -> Option<String> {
-        semantic_selected_text(&self.state.borrow())
+        let state = self.state.borrow();
+        if let Some((revision, range)) = &state.composer_selection {
+            if *revision == state.editor.text_revision() && !range.is_empty() {
+                return Some(sanitize_for_terminal(&state.editor.text()[range.clone()]));
+            }
+        }
+        semantic_selected_text(&state)
     }
 
     pub fn copy_selected_plain_text(&mut self) -> Option<String> {
@@ -9895,6 +9924,8 @@ mod shell_chrome {
 }
 mod extension_theme;
 pub(crate) use extension_theme::ExtensionPaletteKey;
+#[cfg(test)]
+mod composer_mouse_tests;
 mod startup_update;
 mod status_telemetry;
 mod surface_frame;

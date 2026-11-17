@@ -186,16 +186,10 @@ fn stationary_web_click_activates_once_after_release_and_survives_an_unchanged_p
         let (mut shell, row, col) = fixture(threaded, hyperlinks);
         assert!(release(&mut shell, row, col).is_empty());
         shell.begin_transcript_selection(row, col, false);
-        assert_eq!(
-            shell
-                .state
-                .borrow()
-                .pending_link_press
-                .as_ref()
-                .unwrap()
-                .target,
-            TARGET
-        );
+        assert!(matches!(
+            &shell.state.borrow().pending_screen_press.as_ref().unwrap().target,
+            ScreenPressTarget::Link(target) if target == TARGET
+        ));
         paint(&mut shell);
         assert_eq!(release(&mut shell, row, col), [TARGET]);
         assert!(release(&mut shell, row, col).is_empty());
@@ -297,7 +291,7 @@ fn input_and_layout_changes_revoke_a_pending_link_click() {
             }
             paint(&mut shell);
             assert!(release(&mut shell, row, col).is_empty(), "{change}");
-            assert!(shell.state.borrow().pending_link_press.is_none());
+            assert!(shell.state.borrow().pending_screen_press.is_none());
         }
     }
 }
@@ -311,7 +305,7 @@ fn a_press_without_painted_geometry_cannot_gain_link_authority_later() {
         state.painted_geometry = None;
     }
     shell.begin_transcript_selection(row, col, false);
-    assert!(shell.state.borrow().pending_link_press.is_none());
+    assert!(shell.state.borrow().pending_screen_press.is_none());
     paint(&mut shell);
     assert!(release(&mut shell, row, col).is_empty());
 }
@@ -325,7 +319,7 @@ fn browser_handoff_only_accepts_valid_http_and_https_targets() {
         "http://127.0.0.1:1234/path",
         "HTTPS://example.test/docs",
     ] {
-        assert!(TranscriptLinkPress::new(&state, 0, 0, target.into()).is_some());
+        assert!(ScreenPress::new(&state, 0, 0, target.into()).is_some());
     }
     for target in [
         "file:///tmp/executable",
@@ -340,7 +334,7 @@ fn browser_handoff_only_accepts_valid_http_and_https_targets() {
         "--help",
     ] {
         assert!(
-            TranscriptLinkPress::new(&state, 0, 0, target.into()).is_none(),
+            ScreenPress::new(&state, 0, 0, target.into()).is_none(),
             "{target:?}"
         );
     }

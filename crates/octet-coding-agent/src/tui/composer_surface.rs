@@ -6,8 +6,10 @@
 //! selection/event loops and model/session/extension/subagent flows remain with
 //! the view and picker owners.
 
+use crate::tui::composer::mouse::{ComposerMouseGeometry, ComposerMouseRow};
 use std::sync::OnceLock;
 use std::time::Instant;
+use unicode_segmentation::UnicodeSegmentation;
 
 use sexy_tui_rs::{visible_width, TextEditAction, TextEditor, TextEditorProjection, CURSOR_MARKER};
 
@@ -159,6 +161,49 @@ impl ComposerEditorProjection {
         self.projection
             .visual_target(self.display.layout_text(), action, preferred_column)
             .map(|display| self.display.display_to_source(display))
+    }
+
+    fn mouse_row(
+        &self,
+        row: usize,
+        screen_row: usize,
+        column: usize,
+        width: usize,
+    ) -> ComposerMouseRow {
+        let line = &self.projection.lines()[row];
+        let text = self.display.layout_text();
+        let mut cells = Vec::with_capacity(width);
+        let mut last = line.start();
+        let mut end = line.start();
+        for (relative, grapheme) in text[line.start()..line.visible_end()].grapheme_indices(true) {
+            let offset = line.start() + relative;
+            let size = sexy_tui_rs::WidthPolicy::default().grapheme_width(grapheme, cells.len());
+            if cells.len() + size > width {
+                break;
+            }
+            last = offset;
+            cells.extend(std::iter::repeat_n(
+                self.display.display_to_source(offset),
+                size,
+            ));
+            end = offset + grapheme.len();
+        }
+        // Pi compatibility: packages/tui/src/components/editor.ts:655-698.
+        // A soft-wrapped segment cannot place the cursor on the following row.
+        let wrapped = self
+            .projection
+            .lines()
+            .get(row + 1)
+            .is_some_and(|next| next.start() == line.end());
+        ComposerMouseRow {
+            row: screen_row,
+            column,
+            cells,
+            end: self.display.display_to_source(end),
+            click_end: self
+                .display
+                .display_to_source(if wrapped { last } else { end }),
+        }
     }
 
     #[must_use]
@@ -353,6 +398,126 @@ fn materialized_text_width(geometry: ComposerEditorGeometry, prefix: &str) -> us
     )
 }
 
+fn render_editor_row(
+    state: &super::view::ShellState,
+    editor: &ComposerEditorProjection,
+    row: usize,
+    cursor_marker: &str,
+    width: usize,
+) -> String {
+    let Some((_, selection)) = state
+        .composer_selection
+        .as_ref()
+        .filter(|(revision, _)| *revision == state.editor.text_revision())
+    else {
+        return editor.visible_row(row, cursor_marker, width);
+    };
+    let line = &editor.projection.lines()[row];
+    let start = editor
+        .display
+        .source_to_display(selection.start)
+        .max(line.start());
+    let end = editor
+        .display
+        .source_to_display(selection.end)
+        .min(line.visible_end());
+    if start >= end {
+        return editor.visible_row(row, cursor_marker, width);
+    }
+    let policy = sexy_tui_rs::WidthPolicy::default();
+    let text = editor.display.layout_text();
+    let left = policy.line_width(&text[line.start()..start]).min(width);
+    let right = policy.line_width(&text[line.start()..end]).min(width);
+    let plain = editor.visible_row(row, "", width);
+    let slice = |text: &str, from, count| sexy_tui_rs::slice_by_column(text, from, count, true);
+    let selected = format!(
+        "{}\x1b[7m{}\x1b[27m{}",
+        slice(&plain, 0, left),
+        slice(&plain, left, right - left),
+        slice(&plain, right, width)
+    );
+    if row == editor.cursor_row() && !cursor_marker.is_empty() {
+        let column = editor.projection.cursor().column().min(width);
+        format!(
+            "{}{cursor_marker}{}",
+            slice(&selected, 0, column),
+            slice(&selected, column, width)
+        )
+    } else {
+        selected
+    }
+}
+
+fn editor_window(
+    editor: &ComposerEditorProjection,
+    content_rows: usize,
+    ruled: bool,
+) -> std::ops::Range<usize> {
+    let total = editor.line_count();
+    let visible = if !ruled && total > content_rows {
+        content_rows.saturating_sub(1).max(1)
+    } else {
+        content_rows.max(1)
+    }
+    .min(total);
+    let start = editor
+        .cursor_row()
+        .saturating_add(1)
+        .saturating_sub(visible);
+    start..(start + visible).min(total)
+}
+
+/// Capture the exact native composer window from the same projection as paint.
+/// The caller supplies its screen origin after laying out the surrounding chrome.
+pub(crate) fn composer_mouse_geometry(
+    state: &super::view::ShellState,
+    top: usize,
+    height: usize,
+) -> ComposerMouseGeometry {
+    let width = state.size.0;
+    let geometry = composer_editor_geometry(state, width);
+    let editor = state.composer_editor_projection(geometry);
+    let content_rows = composer_content_rows(state.size.1, editor.line_count().max(1));
+    let chrome = composer_chrome(&state.theme);
+    let compact = width < 12;
+    let ruled = compact || matches!(chrome, ComposerChrome::Boxed | ComposerChrome::Framed);
+    let window = editor_window(&editor, content_rows, ruled);
+    let overflow = !ruled && window.start > 0;
+    let first_row =
+        top + usize::from(!compact || chrome == ComposerChrome::Topline) + usize::from(overflow);
+    let inset = usize::from(PresentationLayout::new(&state.theme, width).inset);
+    let cushion = if compact {
+        0
+    } else {
+        match chrome {
+            ComposerChrome::Framed => 2,
+            ComposerChrome::Shaded => 1,
+            _ => 0,
+        }
+    };
+    let mut rows = Vec::new();
+    if width >= 3 {
+        for (screen, visual) in window.enumerate() {
+            let prefix = if visual == 0 {
+                format!("{} ", state.theme.glyph("prompt"))
+            } else {
+                "  ".into()
+            };
+            let row = first_row + screen;
+            if row >= top + height {
+                break;
+            }
+            rows.push(editor.mouse_row(
+                visual,
+                row,
+                inset + cushion + visible_width(&prefix),
+                materialized_text_width(geometry, &prefix),
+            ));
+        }
+    }
+    ComposerMouseGeometry { top, height, rows }
+}
+
 /// Render composer content inside the shared horizontal inset. Plain boxed
 /// rules span the terminal, while explicit framed/shaded theme chrome stays
 /// on the content grid. Selected prompt text copies without chrome. Rules
@@ -389,17 +554,9 @@ fn render_composer_box(
         .flatten();
     let ruled = matches!(chrome, ComposerChrome::Boxed | ComposerChrome::Framed);
     let total_lines = editor.line_count();
-    let visible_rows = if !ruled && total_lines > content_rows {
-        content_rows.saturating_sub(1).max(1)
-    } else {
-        content_rows.max(1)
-    }
-    .min(total_lines);
-    let start = editor
-        .cursor_row()
-        .saturating_add(1)
-        .saturating_sub(visible_rows);
-    let end = (start + visible_rows).min(total_lines);
+    let window = editor_window(editor, content_rows, ruled);
+    let start = window.start;
+    let end = window.end;
     let hidden_above = start;
     let hidden_below = total_lines.saturating_sub(end);
     let render_rule = |count, above| overflow_rule(theme, border_rgb, terminal_width, count, above);
@@ -518,7 +675,9 @@ fn render_composer_box(
             } else {
                 "  ".to_owned()
             };
-            let row = editor.visible_row(
+            let row = render_editor_row(
+                state,
+                editor,
                 index,
                 cursor_marker,
                 materialized_text_width(geometry, &prefix),
@@ -573,7 +732,9 @@ fn render_plain_content(
         return vec![fit_line(&format!("{cursor_marker}{marker}"), width)];
     }
     let prefix = format!("{marker} ");
-    let row = editor.visible_row(
+    let row = render_editor_row(
+        state,
+        editor,
         editor.cursor_row(),
         cursor_marker,
         materialized_text_width(geometry, &prefix),
@@ -1147,7 +1308,9 @@ fn render_compact(
             "  ".to_owned()
         };
         let prefix = format!("{padding}{content_prefix}");
-        let row = editor.visible_row(
+        let row = render_editor_row(
+            state,
+            editor,
             index,
             cursor_marker,
             materialized_text_width(geometry, &content_prefix),

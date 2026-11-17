@@ -902,7 +902,7 @@ impl InteractiveShell {
         ) {
             // Revoke clicks before search, chrome or an exclusive input owner
             // can consume intervening wheel/focus/key/new-press events.
-            self.state.borrow_mut().pending_link_press = None;
+            self.state.borrow_mut().pending_screen_press = None;
         }
         if matches!(
             event,

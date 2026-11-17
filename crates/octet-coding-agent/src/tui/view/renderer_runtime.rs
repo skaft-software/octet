@@ -732,7 +732,7 @@ impl InteractiveShell {
             state.selection_pointer_cell = None;
             state.selection_dragging = false;
             state.deferred_pointer_press = None;
-            state.pending_link_press = None;
+            state.pending_screen_press = None;
             state.reset_transcript_navigation_pointer();
             previous_viewport
         };

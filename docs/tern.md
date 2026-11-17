@@ -480,8 +480,10 @@ are unfinished; repaired pane-return input has current 0.4.0 runtime evidence,
 not full lifecycle/version coverage; export's mutation/error matrix is unfinished.
 Native attachment-chip editing, paste intent, revision-complete composer/temporary
 edits and semantic transcript navigation/search/selection remain gaps. Ordinary
-editor pointer placement/range replacement is implemented; do not conflate it
-with transcript pointer geometry.
+editor pointer placement/range replacement is implemented; caret-only gestures
+inside intact attachment or paste chips snap to the nearest token boundary,
+including while a response streams. Do not conflate editor placement with
+transcript pointer geometry.
 Tern 0.3.1 is untested. This is an independent RAIL implementation deliverable,
 not full-parity or release-ready qualification.
 

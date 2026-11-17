@@ -596,6 +596,11 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         target.editor.set_text(source.editor.text());
     }
     target.editor.set_cursor(source.editor.cursor());
+    target.composer_selection = source
+        .composer_selection
+        .as_ref()
+        .filter(|(revision, _)| *revision == source.editor.text_revision())
+        .map(|(_, range)| (target.editor.text_revision(), range.clone()));
     *target.transcript_navigation.get_mut() =
         source.transcript_navigation.borrow().render_snapshot();
 }

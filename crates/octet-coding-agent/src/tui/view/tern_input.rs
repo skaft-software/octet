@@ -388,6 +388,14 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             if !shell.editor.edit_range(from..to, &text, cursor) {
                 return None;
             }
+            if shell.editor.text_revision() == text_revision {
+                let cursor = crate::tui::composer::mouse::atomic_cursor(
+                    shell.editor.text(),
+                    &shell.ledger,
+                    shell.editor.cursor(),
+                );
+                shell.editor.set_cursor(cursor);
+            }
             shell.prompt_history_navigation = None;
             shell.composer_preferred_column = None;
             if shell.editor.text_revision() != text_revision {

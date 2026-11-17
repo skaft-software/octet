@@ -188,6 +188,19 @@ typed path is just text](media.md#attach-explicitly). Undo and redo each keep at
 most 64 snapshots / 4 MiB, oldest first. An edit too big for that budget starts
 a new undo boundary instead of keeping an unbounded copy.
 
+With mouse capture on, a left click in the native composer places the cursor at
+that visible character, including wrapped or scrolled multiline drafts and while
+an answer streams. Wide characters and combining marks stay intact. Attachment
+and large-paste chips snap to their nearest boundary. Clicking beyond a wrapped
+segment stops at its last character; beyond a logical line it goes to line end.
+Dragging over composer text selects it without moving the edit cursor; release
+copies the displayed text, not a chip's hidden payload. Completion-list clicks
+accept the clicked suggestion instead of moving the cursor. Borders and blank
+composer rows leave the cursor unchanged. Native Tern uses its own editor caret
+events with the same atomic-chip rule. Pi custom editor components own their
+cursor; captured cell clicks do not reposition octet's hidden native mirror, and
+component mouse positioning is not currently bridged.
+
 While octet works:
 
 - Enter queues live steering for the next model boundary.

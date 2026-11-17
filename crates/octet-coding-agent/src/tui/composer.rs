@@ -12,6 +12,7 @@
 
 mod attachments;
 mod composition;
+pub(crate) mod mouse;
 mod paste;
 mod picker;
 
