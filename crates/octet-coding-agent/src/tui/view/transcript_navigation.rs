@@ -878,7 +878,7 @@ impl InteractiveShell {
         if let Event::Mouse(mouse) = event {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && mouse.modifiers.is_empty()
-                && super::builtin_welcome_card::click_mark(
+                && super::transcript_selection::click_splash(
                     &mut self.state.borrow_mut(),
                     mouse.column,
                     mouse.row,

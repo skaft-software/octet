@@ -3590,3 +3590,77 @@ fn real_octet_mark_click_blinks_then_settles_without_replay() {
     assert!(capture.status.success());
     assert!(capture.termios_restored);
 }
+
+#[test]
+fn real_octet_splash_double_click_keeps_mark_and_selection_local() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for args in [&[][..], &["--resume", "startup-history"][..]] {
+        let mut octet = PtyOctet::spawn_at_with_appearance_and_mode(
+            Path::new(env!("CARGO_BIN_EXE_octet")),
+            MouseMode::App,
+            None,
+            (true, false),
+            (80, 24),
+            (2, false, false),
+            (StartupFixture::Session(args), Some(true)),
+        );
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| {
+            synchronized_frame_end_containing(bytes, READY_MARKER).is_some()
+        });
+        octet.pty.drain_for(DRAIN_TIME);
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(&octet.pty.output);
+        let baseline = parser.screen().clone();
+        let start = octet.pty.output.len();
+        octet
+            .pty
+            .write_input(b"\x1b[<0;3;3M\x1b[<0;3;3m\x1b[<0;3;3M\x1b[<0;3;3m");
+        octet.pty.drain_for(Duration::from_millis(2600));
+        parser.process(&octet.pty.output[start..]);
+        for row in 1..=2 {
+            for column in 2..10 {
+                assert_eq!(
+                    parser.screen().cell(row, column),
+                    baseline.cell(row, column),
+                    "mark cell {row},{column}: {args:?}"
+                );
+            }
+        }
+        assert!(!contains_bytes(&octet.pty.output[start..], b"\x1b]52;"));
+        assert!((0..8).all(|row| (0..80).all(|col| !parser
+            .screen()
+            .cell(row, col)
+            .unwrap()
+            .inverse())));
+        let start = octet.pty.output.len();
+        octet
+            .pty
+            .write_input(b"\x1b[<0;15;3M\x1b[<0;15;3m\x1b[<0;15;3M\x1b[<0;15;3m");
+        octet.wait_until(STARTUP_TIMEOUT, |bytes| bytes[start..].ends_with(FRAME_END));
+        octet.pty.drain_for(DRAIN_TIME);
+        parser.process(&octet.pty.output[start..]);
+        for row in 0..8 {
+            for col in 0..80 {
+                assert_eq!(
+                    parser.screen().cell(row, col).unwrap().inverse(),
+                    row == 2 && (13..17).contains(&col),
+                    "selection cell {row},{col}: {args:?}"
+                );
+            }
+        }
+        for row in 1..=2 {
+            for column in 2..10 {
+                assert_eq!(
+                    parser.screen().cell(row, column),
+                    baseline.cell(row, column),
+                    "selection preserves mark cell {row},{column}: {args:?}"
+                );
+            }
+        }
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+    }
+}

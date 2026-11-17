@@ -2056,6 +2056,8 @@ pub(crate) struct ShellState {
     /// mutable until the first real conversation block.
     startup_card_started_at: Option<Instant>,
     welcome_reaction: Option<builtin_welcome_card::MarkReaction>,
+    welcome_text_selection: Option<transcript_selection::WelcomeWordSelection>,
+    welcome_last_click: Option<(Instant, transcript_selection::WelcomeWordSelection)>,
 }
 
 impl Default for ShellState {
@@ -2431,6 +2433,8 @@ impl ShellState {
             startup_pending: Default::default(),
             startup_card_started_at: Default::default(),
             welcome_reaction: None,
+            welcome_text_selection: None,
+            welcome_last_click: None,
         }
     }
 
@@ -7675,6 +7679,8 @@ impl InteractiveShell {
             .then(|| self.transcript_link_at_screen_cell(row, col))
             .flatten();
         let mut state = self.state.borrow_mut();
+        state.welcome_text_selection = None;
+        state.welcome_last_click = None;
         state.selection_pointer_cell = Some((row, col));
         state.deferred_pointer_press = None;
         let Some(position) = Self::transcript_position_at_screen_cell(&state, row, col) else {
@@ -7924,6 +7930,8 @@ impl InteractiveShell {
                 Some(format!("could not load older session history: {error}"));
         }
         let mut state = self.state.borrow_mut();
+        state.welcome_text_selection = None;
+        state.welcome_last_click = None;
         let Some(last) = state.transcript.len().checked_sub(1) else {
             state.transcript_selection = None;
             return;
@@ -9654,6 +9662,8 @@ impl InteractiveShell {
         state.tool_image_budget = image_budget;
         state.render_publication.reset();
         state.transcript.clear();
+        state.welcome_text_selection = None;
+        state.welcome_last_click = None;
         state.extension_transcript = Default::default();
         state.transcript_navigation.get_mut().reset_session();
         state.provisional_blocks.clear();

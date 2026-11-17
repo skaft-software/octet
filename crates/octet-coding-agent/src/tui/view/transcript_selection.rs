@@ -45,6 +45,84 @@ pub(super) struct TranscriptSelection {
     pub(super) focus: TranscriptPosition,
 }
 
+/// A splash word belongs to one painted prefix row, never a conversation block.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct WelcomeWordSelection {
+    row: usize,
+    line: String,
+    range: std::ops::Range<usize>,
+}
+
+/// Splash hit ownership precedes transcript selection, including inert history.
+pub(super) fn click_splash(
+    state: &mut ShellState,
+    col: u16,
+    row: u16,
+    now: std::time::Instant,
+) -> bool {
+    if super::builtin_welcome_card::click_mark(state, col, row, now) {
+        return true;
+    }
+    let word = state.pointer_render_geometry().and_then(|frame| {
+        let absolute = frame.visible_start + usize::from(row);
+        if absolute >= frame.welcome_rows || frame.welcome_mark.is_none() {
+            return None;
+        }
+        let line = strip_terminal_sequences(frame.visible_lines.get(usize::from(row))?);
+        let range = painted_word_range(&line, col)?;
+        Some(WelcomeWordSelection {
+            row: absolute,
+            line,
+            range,
+        })
+    });
+    state.welcome_text_selection = None;
+    let Some(word) = word else {
+        state.welcome_last_click = None;
+        return false;
+    };
+    // Pi's fullscreen word selection is row-local, with a 500ms click window:
+    // packages/tui/src/tui-alt-screen.ts:81-87,1190-1224,1254-1281.
+    // Native terminal ownership keeps this in Rust rather than the adapter.
+    let repeated = state
+        .welcome_last_click
+        .as_ref()
+        .is_some_and(|(at, previous)| {
+            now.saturating_duration_since(*at) <= std::time::Duration::from_millis(500)
+                && previous == &word
+        });
+    state.transcript_selection = None;
+    state.pending_selection_anchor = None;
+    state.selection_dragging = false;
+    state.deferred_pointer_press = None;
+    state.pending_screen_press = None;
+    state.welcome_text_selection = repeated.then(|| word.clone());
+    state.welcome_last_click = Some((now, word));
+    true
+}
+
+fn painted_word_range(line: &str, col: u16) -> Option<std::ops::Range<usize>> {
+    let offset = visual_col_to_offset(line, usize::from(col));
+    let segments = line.split_word_bound_indices().collect::<Vec<_>>();
+    let index = segments
+        .iter()
+        .position(|(start, text)| offset >= *start && offset < start + text.len())?;
+    let joiner = |text: &str| matches!(text, "/" | "-" | "+" | "\\" | "~" | "_" | ".");
+    let selectable = |text: &str| text.unicode_words().next().is_some() || joiner(text);
+    let joins = |left: &str, right: &str| {
+        selectable(left) && selectable(right) && (joiner(left) || joiner(right))
+    };
+    let mut first = index;
+    let mut last = index;
+    while first > 0 && joins(segments[first - 1].1, segments[first].1) {
+        first -= 1;
+    }
+    while last + 1 < segments.len() && joins(segments[last].1, segments[last + 1].1) {
+        last += 1;
+    }
+    Some(segments[first].0..segments[last].0 + segments[last].1.len())
+}
+
 /// Clean semantic text used by the application-owned selection/copy path.
 /// It intentionally never uses visual rows, ANSI styling, borders, elision,
 /// composer text, or footer text.
@@ -230,6 +308,9 @@ pub(super) fn presented_block_copy_text(state: &ShellState, index: usize) -> Str
 /// Side-effect-free semantic selection projection. Prompt expansion can read
 /// this without mutating the retained copy buffer or touching the clipboard.
 pub(super) fn semantic_selected_text(state: &ShellState) -> Option<String> {
+    if let Some(word) = &state.welcome_text_selection {
+        return Some(word.line[word.range.clone()].to_owned());
+    }
     let selection = state.transcript_selection.clone()?;
     let (start, end) = if (selection.anchor.block, selection.anchor.offset)
         <= (selection.focus.block, selection.focus.offset)
@@ -264,12 +345,30 @@ pub(super) fn semantic_selected_text(state: &ShellState) -> Option<String> {
 /// Layout and row-to-copy mapping remain renderer-owned; neither chrome nor
 /// decorative separators can acquire the selection's rendition.
 pub(super) fn decorate_selection(state: &ShellState, lines: &mut [String], start_row: usize) {
-    let Some(selection) = state.transcript_selection.as_ref() else {
-        return;
-    };
     if state.theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
         return;
     }
+    if let Some(word) = &state.welcome_text_selection {
+        if let Some(line) = word
+            .row
+            .checked_sub(start_row)
+            .and_then(|row| lines.get_mut(row))
+        {
+            // A resize or changed header must not move a historical highlight
+            // onto different text, a mark cell, or a later transcript block.
+            if strip_terminal_sequences(line) == word.line {
+                CopyRow {
+                    text: word.line.clone(),
+                    offset: 0,
+                    painted_cells: 0,
+                }
+                .decorate(line, word.range.start, word.range.end);
+            }
+        }
+    }
+    let Some(selection) = state.transcript_selection.as_ref() else {
+        return;
+    };
     let (start, end) = if (selection.anchor.block, selection.anchor.offset)
         <= (selection.focus.block, selection.focus.offset)
     {

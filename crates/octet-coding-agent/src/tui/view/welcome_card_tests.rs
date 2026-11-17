@@ -955,3 +955,212 @@ fn mark_reaction_respects_capabilities_and_replacement() {
     state.overlay = Some(super::super::ShellOverlay::Text("replacement".into()));
     assert!(mark_rect(&state).is_none());
 }
+
+fn splash_mouse(
+    shell: &mut InteractiveShell,
+    kind: crossterm::event::MouseEventKind,
+    col: u16,
+    row: u16,
+) -> crate::tui::keymap::InputAction {
+    use crate::tui::keymap::{InputAction, PointerGesture};
+    let active = shell.is_agent_run_active();
+    let action = shell.translate_input(
+        Some(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        )),
+        active,
+    );
+    match action {
+        InputAction::TranscriptPointer(PointerGesture::Begin { row, col, extend }) => {
+            shell.begin_transcript_selection(row, col, extend)
+        }
+        InputAction::TranscriptPointer(PointerGesture::Extend { row, col }) => {
+            shell.extend_transcript_selection(row, col)
+        }
+        InputAction::TranscriptPointer(PointerGesture::End { row, col }) => {
+            shell.end_transcript_selection(row, col)
+        }
+        _ => {}
+    }
+    action
+}
+
+fn splash_session(mode: &str) -> InteractiveShell {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(80, 24);
+    shell.state.borrow_mut().startup_card_started_at = Some(Instant::now());
+    shell.state.borrow_mut().application_viewport_requested = true;
+    if mode == "running" {
+        shell.on_prompt_submitted("/Users/example/reviews/a long prompt");
+        let run = shell.begin_run("fixture");
+        shell.on_run_event(run, &octet_agent::AgentEvent::TurnStarted);
+        shell.on_run_event(
+            run,
+            &octet_agent::AgentEvent::OutputDelta {
+                channel: octet_agent::OutputChannel::Text,
+                text: "Streaming response ".into(),
+            },
+        );
+    } else if mode == "resumed" {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = octet_agent::Session::create(dir.path().join("session.jsonl")).unwrap();
+        session
+            .append(octet_agent::EntryValue::Message(octet_ai::Message::User(
+                octet_ai::UserMessage {
+                    content: vec![octet_ai::UserPart::Text(
+                        "/Users/example/reviews/a long prompt".into(),
+                    )],
+                },
+            )))
+            .unwrap();
+        shell.hydrate(&session).unwrap();
+    }
+    shell.isolate_native_test_renderer();
+    shell.render_written_test_frame();
+    shell
+}
+
+fn repaint_splash_response(shell: &mut InteractiveShell, step: usize) {
+    if let Some(run) = shell.current_run_id() {
+        shell.on_run_event(
+            run,
+            &octet_agent::AgentEvent::OutputDelta {
+                channel: octet_agent::OutputChannel::Text,
+                text: format!("delta {step} "),
+            },
+        );
+    }
+    shell.render_written_test_frame();
+}
+
+fn assert_splash_double_click_mark(mode: &str) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut shell = splash_session(mode);
+    let before = shell
+        .state
+        .borrow()
+        .pointer_render_geometry()
+        .unwrap()
+        .visible_lines[..4]
+        .to_vec();
+    for step in 0..2 {
+        let action = splash_mouse(&mut shell, MouseEventKind::Down(MouseButton::Left), 2, 2);
+        assert!(
+            matches!(action, crate::tui::keymap::InputAction::Ignore),
+            "{mode}: mark press escaped into selection"
+        );
+        repaint_splash_response(&mut shell, step);
+        splash_mouse(&mut shell, MouseEventKind::Up(MouseButton::Left), 2, 2);
+        repaint_splash_response(&mut shell, step + 1);
+    }
+    if mode != "fresh" {
+        assert!(shell.state.borrow().welcome_reaction.is_none());
+    } else {
+        let mut state = shell.state.borrow_mut();
+        let reaction = state.welcome_reaction.as_mut().expect("live mark reacts");
+        reaction.started = Instant::now() - std::time::Duration::from_millis(140);
+        reaction.blink_started = reaction.started;
+        state.invalidate_transcript();
+        drop(state);
+        shell.render_written_test_frame();
+        assert_ne!(
+            shell
+                .state
+                .borrow()
+                .pointer_render_geometry()
+                .unwrap()
+                .visible_lines[..4],
+            before
+        );
+    }
+    advance_reaction(
+        &mut shell.state.borrow_mut(),
+        Instant::now() + std::time::Duration::from_secs(4),
+    );
+    shell.render_written_test_frame();
+    assert!(shell.selected_plain_text().is_none());
+    let state = shell.state.borrow();
+    assert!(state.transcript_selection.is_none());
+    assert!(state.pending_selection_anchor.is_none());
+    let after = &state.pointer_render_geometry().unwrap().visible_lines[..4];
+    assert_eq!(after, before, "{mode}: mark must finish completely painted");
+    let mut parser = vt100::Parser::new(4, 80, 0);
+    parser.process(after.join("\r\n").as_bytes());
+    for column in 2..10 {
+        assert_eq!(
+            parser.screen().cell(2, column).unwrap().contents(),
+            "█",
+            "{mode}: base cell {column}"
+        );
+        assert_eq!(
+            parser.screen().cell(1, column).unwrap().contents().trim(),
+            if [2, 5].contains(&column) { "" } else { "█" }
+        );
+    }
+}
+
+#[test]
+fn splash_double_click_mark_fresh() {
+    assert_splash_double_click_mark("fresh");
+}
+#[test]
+fn splash_double_click_mark_running() {
+    assert_splash_double_click_mark("running");
+}
+#[test]
+fn splash_double_click_mark_resumed() {
+    assert_splash_double_click_mark("resumed");
+}
+
+#[test]
+fn splash_double_click_text_stays_in_its_word_and_row() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    for (col, row, expected) in [
+        (14, 1, "octet"),
+        (14, 2, "full"),
+        (19, 2, "access"),
+        (29, 2, "/changelog"),
+    ] {
+        for mode in ["fresh", "running", "resumed"] {
+            let mut shell = splash_session(mode);
+            for step in 0..2 {
+                splash_mouse(
+                    &mut shell,
+                    MouseEventKind::Down(MouseButton::Left),
+                    col,
+                    row,
+                );
+                repaint_splash_response(&mut shell, step);
+                splash_mouse(&mut shell, MouseEventKind::Up(MouseButton::Left), col, row);
+                repaint_splash_response(&mut shell, step + 1);
+            }
+            assert_eq!(
+                shell.selected_plain_text().as_deref(),
+                Some(expected),
+                "{mode}"
+            );
+            assert!(
+                shell.state.borrow().transcript_selection.is_none(),
+                "prompt must not enter splash selection"
+            );
+            let state = shell.state.borrow();
+            let rows = super::super::render_shell_viewport_at(&state, 80, Instant::now());
+            let highlighted = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.contains("\x1b[0;7m"))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                highlighted,
+                [usize::from(row)],
+                "{mode}: only the clicked row is highlighted"
+            );
+        }
+    }
+}

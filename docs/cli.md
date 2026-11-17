@@ -380,7 +380,11 @@ work without interrupting the run or adding notes to the conversation.
 <summary>Where the changelog hint appears</summary>
 
 The muted `/changelog` hint sits beside the access label below the splash
-version. Narrow terminals stack the details. When startup finds a newer stable
+version. In application mouse mode, clicking the byte mark gives a finite blink
+and highlight; rapid clicks blend a bounded rainbow. Historical marks stay
+static and consume clicks without starting text selection. Double-clicking
+splash text selects only the word on that row, keeping the prompt below separate.
+Narrow terminals stack the details. When startup finds a newer stable
 release, an accent update hint replaces the changelog hint, and `octet update` uses rich Markdown
 inline-code styling rather than visible backticks. A late result appears once as
 a UI-only notice with the same rich action, instead of repainting historical

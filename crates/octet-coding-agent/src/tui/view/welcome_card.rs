@@ -58,7 +58,26 @@ fn interactive_mark(state: &ShellState) -> bool {
 
 /// Coordinates belong to the rendered transcript, before viewport translation.
 pub(super) fn mark_rect(state: &ShellState) -> Option<(u16, usize)> {
-    if !interactive_mark(state) {
+    interactive_mark(state)
+        .then(|| visible_mark_rect(state))
+        .flatten()
+}
+
+/// Hit ownership outlives animation eligibility: historical marks are inert,
+/// not text. Derive their cells from the same native layout as the live mark.
+pub(super) fn visible_mark_rect(state: &ShellState) -> Option<(u16, usize)> {
+    use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
+    if state.startup_card_started_at.is_none()
+        || state.startup_pending
+        || state.panel.is_some()
+        || state.overlay.is_some()
+        || state.tool_input_prompt.is_some()
+        || state.transcript_search_active()
+        || !state.application_viewport_requested
+        || pi_startup(state)
+        || state.extension_ui.remote.mount(Placement::Header).is_some()
+        || splash_geometry(state, state.size.0).0 != 2
+    {
         return None;
     }
     let width = state.transcript_content_width(state.size.0);
@@ -77,9 +96,6 @@ pub(super) fn mark_rect(state: &ShellState) -> Option<(u16, usize)> {
 }
 
 pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Instant) -> bool {
-    if !interactive_mark(state) {
-        return false;
-    }
     let hit = state.pointer_render_geometry().is_some_and(|geometry| {
         geometry.welcome_mark.is_some_and(|(x, y)| {
             column >= x && column < x + 8 && usize::from(row) >= y && usize::from(row) < y + 2
@@ -87,6 +103,16 @@ pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Ins
     });
     if !hit {
         return false;
+    }
+    state.transcript_selection = None;
+    state.pending_selection_anchor = None;
+    state.selection_dragging = false;
+    state.deferred_pointer_press = None;
+    state.pending_screen_press = None;
+    state.welcome_text_selection = None;
+    state.welcome_last_click = None;
+    if !interactive_mark(state) {
+        return true;
     }
     let strength = state.welcome_reaction.map_or(0.0, |previous| {
         let gap = now.duration_since(previous.started).as_secs_f32();
@@ -121,7 +147,7 @@ pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Ins
 
 pub(super) fn reaction_active(state: &ShellState) -> bool {
     state.welcome_reaction.is_some()
-        && interactive_mark(state)
+        && mark_rect(state).is_some()
         && state
             .pointer_render_geometry()
             .is_some_and(|g| g.welcome_mark.is_some())
