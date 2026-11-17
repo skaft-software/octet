@@ -279,10 +279,15 @@ test('unchanged context contributes no unnecessary canonical rewrite', async t =
   const reply = await peer.request('hook/run', contextParams(peer, 'unchanged')).response;
   assert.equal(reply.result.provider_context, undefined); await peer.close();
 });
-for (const mode of ['unknown-field', 'unknown-role', 'malformed']) test(`context refuses ${mode} rather than silently dropping fields/roles`, async t => {
+for (const mode of ['unknown-field', 'unknown-role', 'malformed']) test(`context reports and skips the complete ${mode} replacement`, async t => {
   const peer = launch(t, [fixture]); await peer.init();
   const reply = await peer.request('hook/run', contextParams(peer, mode)).response;
-  assert.ok(reply.error); assert.equal(reply.result, undefined); await peer.close();
+  assert.ok(reply.result, JSON.stringify(reply));
+  assert.equal(reply.result.provider_context, undefined, 'invalid edits must not replace the original context');
+  const issue = await peer.wait(frame => frame.method === 'notification' && frame.params.title === '[Extension issues]');
+  assert.equal(issue.params.level, 'warning');
+  assert.match(issue.params.message, /Octet Pi Compat: context hook .*skipped/);
+  await peer.close();
 });
 for (const mode of ['owner', 'head', 'unbound']) test(`context refuses invalid native preparation ${mode}`, async t => {
   const peer = launch(t, [fixture]); await peer.init(); const params = contextParams(peer);
@@ -476,7 +481,7 @@ test('process context validates opaque reasoning before callbacks and permits or
   await peer.close();
 });
 
-test('malformed context result preserves previous projection and later handlers', async () => {
+for (const replacement of [42, { messages: 'invalid' }, { messages: [{ role: 'user', content: 42 }] }]) test(`malformed context result ${JSON.stringify(replacement)} preserves previous projection and later handlers`, async () => {
   const runtime = new Runtime({ extensions: [fixture] }, { notify: async () => {} });
   runtime.uninstallChildren(); runtime.features.add('session_entries');
   const reports = []; runtime.reportCallbackError = (...args) => reports.push(args);
@@ -485,7 +490,7 @@ test('malformed context result preserves previous projection and later handlers'
   params.payload.request.tools = [];
   runtime.events.set('context', [
     { factory: 0, handler: () => ({ messages: [{ role: 'user', content: 'good' }] }) },
-    { factory: 0, handler: e => { e.messages[0].content = 'poison'; return { messages: 'invalid' }; } },
+    { factory: 0, handler: e => { e.messages[0].content = 'poison'; return replacement; } },
     { factory: 0, handler: e => { e.messages.push({ role: 'user', content: 'later' }); } },
   ]);
   const result = await projectContext(runtime, params, store);

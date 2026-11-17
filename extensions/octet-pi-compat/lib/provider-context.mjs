@@ -342,38 +342,28 @@ export async function projectContext(runtime, params, store) {
     const contextBudget = new HookBudget(runtime, store, 'context');
     for (const entry of [...runtime.events.get('context') || []]) {
       live(); const child = { ...store, factory: entry.factory }, visible = copyContext(messages);
-      let result;
       try {
         const run = await contextBudget.run(entry, child, () => runtime.scope.run(child, () => entry.handler(
           facade({ type: 'context', messages: visible }, 'context event'), createContext(runtime, child))));
         if (store.errors.length) throw store.errors[0];
         if (!run.ran) continue; // a stalled context callback leaves the messages as they are
-        result = run.value;
+        live();
+        let candidate = visible;
+        if (run.value !== undefined) {
+          record(run.value, ['messages'], 'context result');
+          const replacement = run.value.messages;
+          if (replacement !== undefined) candidate = array(replacement, 'context result messages');
+        }
+        // Pi packages/coding-agent/src/core/extensions/runner.ts:1311-1332
+        // catches per-handler processing too. Publish only a fully valid candidate.
+        piToCanonical(candidate);
+        messages = candidate;
       }
       catch (error) {
-        // Pi packages/coding-agent/src/core/extensions/runner.ts:1311-1332
-        // isolates callback exceptions; a numeric code alone is not native authority.
+        // A numeric callback code alone is not native authority.
         live(); if (isHostError(error) && (error.code === -32800 || error.code === -32002) || store.errors.includes(error)) throw error;
         runtime.reportCallbackError('context', entry.factory, error, store.state);
-        continue;
       }
-      live();
-      let candidate = visible;
-      if (result !== undefined) {
-        record(result, ['messages'], 'context result');
-        const replacement = result.messages;
-        if (replacement !== undefined) {
-          try { candidate = array(replacement, 'context result messages'); }
-          catch (error) {
-            live(); if (store.errors.includes(error)) throw error;
-            runtime.reportCallbackError('context', entry.factory, error, store.state);
-            continue;
-          }
-        }
-      }
-      // Refuse unsupported mutations before exposing them to another callback.
-      piToCanonical(candidate);
-      messages = candidate;
     }
     contextBudget.finish();
     if (runtime.events.has('context_with_system')) {

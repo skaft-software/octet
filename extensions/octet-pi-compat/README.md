@@ -608,8 +608,10 @@ qualification remain separate from this adapter contract.
 list/content in place. Callback-owned numeric error codes are reported by factory
 and context stage and skipped; only provenance-tagged native refusals, actual
 cancellation and tracked host failures stop preparation. The native system stays
-separate. Only canonical messages
-and system are returned, never replacement tools, credentials, route or Session.
+separate. Each handler's complete candidate, including message content conversion,
+is validated before acceptance; malformed results warn and leave the last accepted
+projection available to later handlers. Only canonical messages and system are
+returned, never replacement tools, credentials, route or Session.
 Text, tool calls/results and Pi custom messages have explicit translations.
 Context callbacks can retain unchanged, provenance-bound OpenAI encrypted reasoning
 and Anthropic redacted thinking while editing other messages. The original native
@@ -1147,7 +1149,7 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1662 tests: 1629 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1664 tests: 1631 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture, including startup-chrome and subagent-collision
 regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
