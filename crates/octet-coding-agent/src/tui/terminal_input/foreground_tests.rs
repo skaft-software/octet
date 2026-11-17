@@ -97,11 +97,14 @@ fn event(result: Poll<Option<io::Result<Event>>>) -> Event {
 }
 
 // Keep this test task runnable while the reactor observes local I/O. The
-// paused clock cannot auto-advance to the fallback timer and fake an I/O wake.
-// The bound is a watchdog in scheduler turns, not a latency assertion.
+// paused clock cannot auto-advance to the fallback timer and fake an I/O wake,
+// because a yielding task keeps the runtime busy. The bound is a wall-clock
+// watchdog, not a latency assertion: a fixed count of scheduler turns ran out
+// under parallel test load before the kernel delivered PTY readiness.
 async fn awakened<T>(task: &Spawn<T>) {
     let now = tokio::time::Instant::now();
-    for _ in 0..1024 {
+    let watchdog = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < watchdog {
         if task.is_woken() {
             assert_eq!(tokio::time::Instant::now(), now);
             return;
@@ -294,8 +297,26 @@ async fn drop_closes_the_notifier_after_cancelling_an_armed_wait() {
     }
     drop(source);
     // No integer-fd reuse race: EOF on the peer proves that both the synthetic
-    // foreground reader and its notifier descriptor were closed.
-    assert_eq!(writer.read(&mut [0]).unwrap(), 0);
+    // foreground reader and its notifier descriptor were closed. A sibling test
+    // that forks can briefly hold a CLOEXEC copy until its exec, so wait for the
+    // EOF under a wall-clock watchdog instead of reading exactly once.
+    let watchdog = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match writer.read(&mut [0]) {
+            Ok(read) => {
+                assert_eq!(read, 0);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < watchdog,
+                    "the dropped source kept its descriptors open"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("unexpected peer read error: {error}"),
+        }
+    }
 }
 
 fn termios(fd: std::os::fd::RawFd) -> libc::termios {
