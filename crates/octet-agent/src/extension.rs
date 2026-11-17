@@ -283,7 +283,6 @@ pub trait CacheWarmingDecisionHook: Send + Sync {
 }
 
 #[cfg(feature = "agent")]
-#[cfg(feature = "agent")]
 /// Host-derived identity for one effective provider-context preparation.
 ///
 /// These values fence a projection to the session branch and advertised tool
