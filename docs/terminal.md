@@ -453,13 +453,19 @@ copy. A failed run keeps `failed · <duration>` and a short reason with
 credentials removed.
 
 Tool results the model needs are saved and sent to the provider. Live progress
-is neither. [Tool presentation](design/octet-tui.md#tool-presentation).
+is neither. Replaceable tool-progress annotations use one clipped row, so phase
+labels of different lengths keep the transcript still; captured output retains
+its normal wrapping and disclosure.
+[Tool presentation](design/octet-tui.md#tool-presentation).
 
 While workers are active, a bounded, tool-like **Subagents** block in the
 transcript updates in place. It no longer stays pinned above the input. Its
 heading counts worker states, and up to four child lines show active tasks with
-input and output tokens. Ctrl+O keeps disclosure. `/subagents` opens the live
-worker list, including during a run, with the complete roster (up to 32) and
+input and output tokens. Detail slots grow as workers join and stay reserved
+until the block settles, including when a sibling fails or finishes. Older host
+snapshots and cached inspector projections do not replace newer live telemetry.
+Ctrl+O keeps disclosure. `/subagents` opens the live worker list, including
+during a run, with the complete roster (up to 32) and
 failure details. Enter opens a worker's read-only transcript and Ctrl+X stops
 the selected worker. `/subagents stop <name-or-id|all>` also works during a run;
 other worker operations wait for idle. `/extensions` manages extension

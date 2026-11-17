@@ -1952,7 +1952,8 @@ fn tool_node(
                         "muted",
                     )],
                 )
-                .set("wrap", "word"),
+                .set("wrap", "none")
+                .set("truncate", "end"),
         ));
     }
     if script_output {

@@ -101,7 +101,9 @@ fn render_progress_decoration(
         .map(sanitize_for_terminal)
         .filter(|detail| !detail.is_empty());
     let text = detail.map_or(label.clone(), |detail| format!("{label} · {detail}"));
-    wrap_hanging(&theme.fg("muted", &text), "", "", width)
+    // Replaceable state is one clipped row, not evidence/output. Different
+    // phase labels must not reflow the transcript on every progress update.
+    vec![fit_line(&theme.fg("muted", &text), width)]
 }
 
 fn append_nested_tool_output(
@@ -563,7 +565,13 @@ pub(super) fn render_block_planned_with_rainbow(
                     width,
                 ));
             }
-            finish_transcript_block(lines)
+            // These are live content reservations, not decorative block gaps;
+            // finish_transcript_block would trim them and reintroduce bouncing.
+            lines.resize(
+                1 + summary.reserved_worker_rows().max(lines.len() - 1),
+                String::new(),
+            );
+            lines
         }
         TranscriptBlock::Assistant(assistant) => finish_transcript_block(
             assistant.render_on_surface(rich_renderer, theme, width, content_background),

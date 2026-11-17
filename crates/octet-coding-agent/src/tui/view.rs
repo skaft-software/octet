@@ -723,6 +723,16 @@ impl SubagentTranscript {
         summary
     }
 
+    /// Detail slots belong to the whole wave, not just its still-running
+    /// members. Reuse vacated slots until settlement so the live tail can only
+    /// grow when another worker joins, never bounce as siblings finish.
+    fn reserved_worker_rows(&self) -> usize {
+        if self.active_count() == 0 || self.live_workers.is_empty() {
+            return 0;
+        }
+        self.worker_ids.len().min(4) + usize::from(self.worker_ids.len() > 4)
+    }
+
     fn active_count(&self) -> usize {
         self.queued + self.running
     }
@@ -1850,6 +1860,9 @@ pub(crate) struct ShellState {
     extension_commands: Arc<[(String, String)]>,
     /// Session-scoped live roster, rendered only in composer-adjacent chrome.
     pub(crate) subagent_activity: Option<SubagentActivityView>,
+    /// Native telemetry is authoritative over extension inspector projections.
+    /// Shared by active-event and idle-watch delivery for this session owner.
+    subagent_telemetry_revision: Option<u64>,
     /// Cumulative child spend already handed off to the root's durable ledger.
     subagent_committed_costs: HashMap<String, u64>,
     /// Hidden live calls remain indexed across root turns. Replay has its own
@@ -2315,6 +2328,7 @@ impl ShellState {
             skill_commands: Default::default(),
             extension_commands: Default::default(),
             subagent_activity: Default::default(),
+            subagent_telemetry_revision: None,
             subagent_committed_costs: Default::default(),
             hidden_subagent_calls: Default::default(),
             hidden_hydrated_subagent_calls: Default::default(),
@@ -4966,17 +4980,31 @@ impl InteractiveShell {
     fn apply_delegation_snapshot(
         state: &mut ShellState,
         snapshot: &octet_agent::DelegationTelemetrySnapshot,
-    ) {
+        include_cost_in_session_total: bool,
+    ) -> bool {
+        if state
+            .subagent_telemetry_revision
+            .is_some_and(|revision| snapshot.revision < revision)
+        {
+            return false;
+        }
+        state.subagent_telemetry_revision = Some(snapshot.revision);
         if !snapshot.children.is_empty() || snapshot.failure_reason.is_some() {
-            state.set_subagent_activity(SubagentActivityView {
+            let next = SubagentActivityView {
                 status_label: "Subagents".into(),
                 activities: Vec::new(),
                 telemetry: snapshot.children.clone(),
                 failure_class: snapshot.failure_class.clone(),
                 failure_reason: snapshot.failure_reason.clone(),
-                include_cost_in_session_total: true,
-            });
+                include_cost_in_session_total,
+            };
+            if state.subagent_activity.as_ref() == Some(&next) {
+                return false;
+            }
+            state.set_subagent_activity(next);
+            return true;
         }
+        false
     }
 
     fn append_outcome(state: &mut ShellState, outcome: RunOutcome) {
@@ -5087,7 +5115,7 @@ impl InteractiveShell {
         // finished run rejects further run events, but the live workers must
         // keep counting in place until they settle.
         if let AgentEvent::DelegationUpdated { snapshot } = event {
-            Self::apply_delegation_snapshot(&mut state, snapshot);
+            Self::apply_delegation_snapshot(&mut state, snapshot, true);
         }
         let update = state.run.apply_event(id, event);
         if !update.accepted {
@@ -6431,6 +6459,9 @@ impl InteractiveShell {
         snapshot: Option<&octet_agent::ExtensionPresentationSnapshot>,
         include_cost_in_session_total: bool,
     ) -> bool {
+        if self.state.borrow().subagent_telemetry_revision.is_some() {
+            return false;
+        }
         let next = snapshot.and_then(|snapshot| {
             let activities = snapshot
                 .activities
@@ -6467,28 +6498,14 @@ impl InteractiveShell {
         snapshot: Option<&octet_agent::DelegationTelemetrySnapshot>,
         include_cost_in_session_total: bool,
     ) -> bool {
-        let next = snapshot.and_then(|snapshot| {
-            (!snapshot.children.is_empty() || snapshot.failure_reason.is_some()).then_some(
-                SubagentActivityView {
-                    status_label: "Subagents".into(),
-                    activities: Vec::new(),
-                    telemetry: snapshot.children.clone(),
-                    failure_class: snapshot.failure_class.clone(),
-                    failure_reason: snapshot.failure_reason.clone(),
-                    include_cost_in_session_total,
-                },
-            )
-        });
-        let mut state = self.state.borrow_mut();
-        if let Some(next) = next {
-            if state.subagent_activity.as_ref() == Some(&next) {
-                return false;
-            }
-            state.set_subagent_activity(next);
-            return true;
-        }
-        // Missing/cleanup snapshots do not erase the session's roster identity.
-        false
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        Self::apply_delegation_snapshot(
+            &mut self.state.borrow_mut(),
+            snapshot,
+            include_cost_in_session_total,
+        )
     }
 
     /// Accept the selected trailing mention or literal path at the end of the draft.
@@ -9616,6 +9633,7 @@ impl InteractiveShell {
         // Session hydration may reuse this shell, so clear the roster pointer;
         // hydrated history never contains an executable worker event.
         state.subagent_activity = None;
+        state.subagent_telemetry_revision = None;
         state.session_work_elapsed = Duration::ZERO;
         state.run_model = None;
         state.run_model_lab = None;
@@ -9937,6 +9955,9 @@ mod welcome_card {
 
 #[cfg(test)]
 mod changelog_tests;
+#[cfg(test)]
+#[path = "view/live_region_stability_tests.rs"]
+mod live_region_stability_tests;
 #[cfg(test)]
 mod ordinary_surface_contract_tests;
 #[cfg(test)]

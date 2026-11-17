@@ -319,9 +319,14 @@ tokens, compacted with `K`/`M`/`B`/`T` suffixes. An inline
 `/subagents stop all` heading hint is shown only for live activity. Input includes
 uncached, cache-read, and cache-write usage; streamed
 output estimates carry `~` until provider usage settles. Later parent output
-is placed above this tail, and settlement fixes the summary in place without
-per-worker notices. Ctrl+O retains disclosure; the worker list exposes the
-complete roster, exact outcomes/reasons, model, tools, cost, and read-only child
+is placed above this tail. Detail slots are reserved for all members of the
+active wave (four rows plus an overflow slot), growing only when workers join
+and shrinking at settlement. Active-event and idle-watch deliveries share one
+host-revision watermark; cached extension inspector projections cannot overwrite
+native telemetry. Session hydration resets that ownership. Settlement fixes the
+summary in place without per-worker notices. Ctrl+O retains disclosure; the
+worker list exposes the complete roster, exact outcomes/reasons, model, tools,
+cost, and read-only child
 transcripts. Neither estimates nor UI refresh change billed usage or budgets.
 Raw first-party orchestration calls/results, including errors, stay out of the
 interactive transcript and semantic copy, live and on replay. This does not
@@ -574,8 +579,10 @@ Native Tern uses its own semantic code/queued-input chrome; see [Tern](../tern.m
 Final structured tool results remain provider-visible and persisted when the
 agent protocol requires them to continue a tool turn. This is operational
 model context, not a TUI disclosure channel. Live `ToolProgress` is ephemeral
-and is not persisted or sent to the model. Terminal-gate action receipts are
-bounded accountability input to the gate checker only, not ordinary model
+and is not persisted or sent to the model. Replaceable progress decorations
+occupy one cell-width-clipped row regardless of phase-label length; append-only
+status/output retains its normal wrapped preview. Terminal-gate action receipts
+are bounded accountability input to the gate checker only, not ordinary model
 context.
 
 ## Sessions and resources

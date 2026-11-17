@@ -76,6 +76,45 @@ fn codemode_native_source_and_output_preview_expand_without_replacing_nodes() {
 }
 
 #[test]
+fn native_progress_phase_replacements_keep_one_nonwrapping_node() {
+    for width in [24, 80, 120] {
+        let (mut shell, mut surface, _) = setup(10);
+        shell.set_size(width, 24);
+        let call = ToolCallId("progress-fixture".into());
+        shell.on_agent_event(&octet_agent::AgentEvent::ToolStarted {
+            id: call.clone(),
+            name: "codemode".into(),
+            args: json!({"code":"return 1"}),
+        });
+        let index = shell.state.borrow().tool_panels[&call];
+        let identity = shell.state.borrow().transcript_commit_ids[index];
+        for label in [
+            "Preparing frozen tool snapshot",
+            "Running JavaScript",
+            "Nested tool 256/256",
+        ] {
+            shell.on_agent_event(&octet_agent::AgentEvent::ToolProgress {
+                id: call.clone(),
+                progress: octet_agent::ToolProgress::Decoration(
+                    octet_agent::ToolProgressDecoration::new(
+                        label,
+                        Some("long detail ".repeat(20)),
+                    )
+                    .unwrap(),
+                ),
+            });
+            surface.flush(&shell.state).unwrap();
+            let progress = find_node(&surface.sent.main, &id(identity, "progress")).unwrap();
+            assert_eq!(progress.k, Kind::Text);
+            let props = progress.p.as_ref().unwrap().as_map();
+            assert_eq!(props["wrap"], "none");
+            assert_eq!(props["truncate"], "end");
+            assert!(serde_json::to_string(progress).unwrap().contains(label));
+        }
+    }
+}
+
+#[test]
 fn native_tools_share_one_header_and_read_has_only_one_path() {
     let (shell, mut surface, _) = setup(3);
     shell.state.borrow_mut().workspace = Some("/tmp/native-fixture".into());

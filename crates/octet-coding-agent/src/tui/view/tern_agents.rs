@@ -93,6 +93,13 @@ pub(super) fn transcript(identity: u64, view: &SubagentTranscript, _verbose: boo
             ));
         }
     }
+    for index in body.len()..view.reserved_worker_rows() {
+        body.push(Node::new(
+            id(&format!(".reserved{index}")),
+            Kind::Text,
+            Props::new().text("spans", vec![Span::new(" ")]),
+        ));
+    }
     Node::with_children(
         id(""),
         Kind::Card,
