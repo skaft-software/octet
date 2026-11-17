@@ -53,6 +53,14 @@ impl Agent {
     }
 
     fn delegation_template(&self) -> DelegationTemplate {
+        let mut extensions = self.extensions.clone();
+        // Children have separate session owners and consume the admitted prompt
+        // snapshot, not the parent's live frontend resource binding. Keep those
+        // guards on the parent; inheritable hooks still bind the child's context
+        // and retain their fail-closed authority checks.
+        extensions
+            .provider_context_hooks
+            .retain(|hook| hook.inherit_in_child_session());
         DelegationTemplate {
             model_resolver: std::sync::RwLock::new(self.delegation_model_resolver.clone()),
             client: self.client.clone(),
@@ -64,7 +72,7 @@ impl Agent {
             ),
             sandbox: self.sandbox.clone(),
             effect_broker: self.effect_broker.clone(),
-            extensions: self.extensions.clone(),
+            extensions,
             max_turns: self.max_turns,
             reasoning: std::sync::RwLock::new(self.reasoning.clone()),
             reasoning_mode: self.reasoning_mode,

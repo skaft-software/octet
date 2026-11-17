@@ -380,6 +380,15 @@ pub trait ProviderContextSessionWait: Send {
 /// use its guard-owned future instead of an unbound foreground RPC.
 #[async_trait::async_trait]
 pub trait ProviderContextHook: Send + Sync {
+    /// Whether delegation templates inherit this hook for a child's own session.
+    /// A frontend-only authority guard may opt out when children consume an
+    /// already-authorized frozen resource snapshot instead of its live binding.
+    /// Inherited hooks must derive authority from the child's context, not reuse
+    /// the parent's session lease. This does not relax failure policy.
+    fn inherit_in_child_session(&self) -> bool {
+        true
+    }
+
     /// Extension-owned hooks continue with the prior projection if handler
     /// execution fails. Host authority guards retain the default fail-closed policy.
     fn continues_on_failure(&self) -> bool {
@@ -391,7 +400,7 @@ pub trait ProviderContextHook: Send + Sync {
         None
     }
 
-    /// Extension name for payload-free failure notices, when available.
+    /// Hook or extension name for payload-free failure diagnostics, when available.
     fn failure_notice_name(&self) -> Option<&str> {
         None
     }

@@ -331,6 +331,9 @@ struct Refuse {
 }
 #[async_trait::async_trait]
 impl ProviderContextHook for Refuse {
+    fn failure_notice_name(&self) -> Option<&str> {
+        Some("host-resource-authority")
+    }
     async fn project_context(
         &self,
         _: &Request,
@@ -966,20 +969,77 @@ async fn host_owned_context_hook_still_fails_closed_by_default() {
         wait: false,
         cancel: None,
     });
-    assert!(matches!(
-        super::project_provider_context(
+    let error = super::project_provider_context(
+        request(),
+        &[hook],
+        &identity(),
+        &model(),
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AgentError::ProviderContextPreparation(_)));
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("context hook #1 \"host-resource-authority\""),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("secret-bearing"));
+    assert!(notices.is_empty());
+}
+
+struct ActivationRefusal(&'static str);
+#[async_trait::async_trait]
+impl ProviderContextHook for ActivationRefusal {
+    fn continues_on_failure(&self) -> bool {
+        true
+    }
+    fn failure_notice_name(&self) -> Option<&str> {
+        Some("session-authority")
+    }
+    fn begin_session_wait(
+        &self,
+        _: &Session,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<Box<dyn crate::ProviderContextSessionWait>>, String> {
+        Err(self.0.into())
+    }
+    async fn project_context(
+        &self,
+        _: &Request,
+        _: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        panic!("authority refusal must not dispatch the extension hook")
+    }
+}
+
+#[tokio::test]
+async fn activation_authority_refusals_name_the_hook_and_redact_private_details() {
+    for detail in [
+        "session_append_authority_unavailable",
+        "/private/path secret-token",
+    ] {
+        let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![Arc::new(ActivationRefusal(detail))];
+        let error = project_with_fresh_session(
             request(),
-            &[hook],
+            &hooks,
             &identity(),
             &model(),
             &AbortFlag::default(),
-            &mut session,
-            &mut notices,
         )
-        .await,
-        Err(AgentError::ProviderContextPreparation(_))
-    ));
-    assert!(notices.is_empty());
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AgentError::ProviderContextPreparation(_)));
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("context hook #1 \"session-authority\""),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("/private/path"));
+        assert!(!diagnostic.contains("secret-token"));
+    }
 }
 
 fn tool_history() -> Request {

@@ -390,7 +390,19 @@ async fn project_context_hooks(
     // and fail closed after an extension consumes that budget, so each trusted
     // guard receives its own bounded deadline.
     let extension_deadline = tokio::time::Instant::now() + budget;
-    for hook in hooks {
+    for (index, hook) in hooks.iter().enumerate() {
+        // Only declared identities and finite native reasons reach diagnostics;
+        // arbitrary hook errors may carry paths, session content or secrets.
+        let refuse = |reason: &str| {
+            let name = hook
+                .failure_notice_name()
+                .map(|name| format!(" \"{}\"", bounded_name(name)))
+                .unwrap_or_default();
+            refused_owned(format!(
+                "{reason}; context hook #{}{name}; check the hook's configuration and session binding, then retry",
+                index + 1
+            ))
+        };
         let request = projected.as_ref().unwrap_or(canonical);
         if abort.is_set() {
             return Err(AgentError::Cancelled);
@@ -421,7 +433,7 @@ async fn project_context_hooks(
             // Activation implementations historically return String. Expose
             // only the finite native refusal codes, never arbitrary hook
             // errors, credentials, paths or session content.
-            refused(match error.as_str() {
+            refuse(match error.as_str() {
                 "session_append_authority_unavailable" => "session_append_authority_unavailable",
                 "session_append_lease_busy" => "session_append_lease_busy",
                 "session_append_process_retired" => "session_append_process_retired",
@@ -466,7 +478,7 @@ async fn project_context_hooks(
                         }
                         service.as_mut().expect("only an active service becomes ready")
                             .consume_next(session, context)
-                            .map_err(|_| refused("session append service failed"))?;
+                            .map_err(|_| refuse("session append service failed"))?;
                     },
                 }
             }
@@ -485,13 +497,13 @@ async fn project_context_hooks(
             // Never fall back after a host-authority or native validation
             // refusal, whatever the hook's isolation policy says.
             Err(ProviderContextHookError::Refused) => {
-                return Err(refused("host authority refused preparation"))
+                return Err(refuse("host authority refused preparation"))
             }
             Err(ProviderContextHookError::Failed(_)) if recoverable => {
                 note_context_failure(hook.as_ref(), session, notices);
                 continue;
             }
-            Err(ProviderContextHookError::Failed(_)) => return Err(refused("hook failed")),
+            Err(ProviderContextHookError::Failed(_)) => return Err(refuse("hook failed")),
         };
         // The request that reached this hook. If the hook's projection produces
         // something the provider cannot represent, that projection is the
@@ -513,7 +525,7 @@ async fn project_context_hooks(
                         .iter()
                         .find(|original| original.name == tool.name)
                     else {
-                        return Err(refused_owned(format!(
+                        return Err(refuse(&format!(
                             "loadout introduced unregistered tool {}",
                             bounded_name(&tool.name)
                         )));
@@ -524,7 +536,7 @@ async fn project_context_hooks(
                         || serde_json::to_value(&unchanged).expect("canonical tool serializes")
                             != serde_json::to_value(original).expect("canonical tool serializes")
                     {
-                        return Err(refused_owned(format!(
+                        return Err(refuse(&format!(
                             "loadout changed the authority of tool {}",
                             bounded_name(&tool.name)
                         )));
@@ -663,7 +675,7 @@ async fn project_context_hooks(
             return Err(AgentError::Cancelled);
         }
         if !recoverable && tokio::time::Instant::now() >= deadline {
-            return Err(refused("hook deadline exceeded"));
+            return Err(refuse("hook deadline exceeded"));
         }
         if let std::borrow::Cow::Owned(request) = request {
             projected = Some(request);

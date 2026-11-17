@@ -430,6 +430,212 @@ async fn published_resource_guard_allows_provider_after_extension_timeout() {
     assert_eq!(captures.lock().unwrap().len(), 1);
 }
 
+async fn delegate(
+    process: &ExtensionProcess,
+    owner: &str,
+    operation: &str,
+    arguments: Value,
+) -> Value {
+    let context = super::super::extension_execution_context(process, Some(owner));
+    let reply = process
+        .execute_command(
+            "delegate",
+            vec![operation.into(), arguments.to_string()],
+            context,
+        )
+        .await
+        .unwrap();
+    let reply: Value = serde_json::from_str(&reply.text).unwrap();
+    assert!(reply.get("error").is_none(), "{reply}");
+    reply["result"].clone()
+}
+
+struct ChildContextProbe(Arc<Mutex<Vec<String>>>);
+#[async_trait::async_trait]
+impl octet_agent::ProviderContextHook for ChildContextProbe {
+    async fn project_context(
+        &self,
+        _: &Request,
+        context: &octet_agent::ProviderContextProjectionContext,
+    ) -> Result<Option<octet_agent::ProviderContextProjection>, String> {
+        self.0.lock().unwrap().push(context.resource_owner.clone());
+        Ok(None)
+    }
+}
+
+struct ChildWaveCapture {
+    permits: Arc<tokio::sync::Semaphore>,
+    requests: Arc<Mutex<Vec<Request>>>,
+}
+#[async_trait::async_trait]
+impl HostStreamTransport for ChildWaveCapture {
+    async fn stream(
+        &self,
+        model: HostStreamModel,
+        request: Request,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Result<ResponseStream, AiError> {
+        self.permits.acquire().await.unwrap().forget();
+        Capture(self.requests.clone())
+            .stream(model, request, diagnostics)
+            .await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_parent_resource_guard_allows_child_wave_and_continuation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut app, resource_process, captures) = fixture(&root).await;
+    app.refresh_resource_paths_headless().await.unwrap();
+    complete(&mut app).await.unwrap();
+    let owners = Arc::new(Mutex::new(Vec::new()));
+    app.agent
+        .extension_host_mut()
+        .provider_context_hook(ChildContextProbe(owners.clone()));
+    app.agent.extension_host_mut().load(&octet_agent::CoreTools);
+    let permits = Arc::new(tokio::sync::Semaphore::new(0));
+    app.client.register_host_stream_transport(
+        app.model.endpoint.id.clone(),
+        Arc::new(ChildWaveCapture {
+            permits: permits.clone(),
+            requests: captures.clone(),
+        }),
+    );
+    app.agent
+        .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
+            root.join("children"),
+        ))
+        .unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/extensions/resource_paths/delegation_fixture.py");
+    let manifest = ExtensionManifest::parse(&format!(
+        r#"
+name = "child-peer"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "python3"
+args = [{script:?}]
+[contributes]
+commands = ["delegate"]
+"#
+    ))
+    .unwrap();
+    let mut runtime = ExtensionRuntimeConfig::new(root.join("workspace"));
+    runtime.agent_sessions = true;
+    runtime.supervise = false;
+    let process = ExtensionProcess::start(
+        DiscoveredExtension {
+            manifest,
+            manifest_path: root.join("child-peer/extension.toml"),
+            source: ExtensionSource::Explicit,
+            activation: ExtensionActivation {
+                enabled: true,
+                trust: ExtensionTrust::Trusted,
+            },
+        },
+        runtime,
+    )
+    .await
+    .unwrap();
+    assert!(app.agent.bind_extension_agent_sessions(&process).unwrap());
+    let owner = app.executable_extensions.resource_owner.clone().unwrap();
+    let mut ids = Vec::new();
+    for index in 0..16 {
+        let spawned = delegate(
+            &process,
+            &owner,
+            "agent/spawn",
+            serde_json::json!({
+                "task_name": format!("reader-{index}"),
+                "message": format!("Read-only task {index}"),
+                "idempotency_key": format!("reader-{index}"),
+                "policy": {
+                    "tools": ["read"], "max_depth": 1, "max_concurrent_children": 16,
+                    "max_turns": 2, "max_output_bytes": 4096,
+                }
+            }),
+        )
+        .await;
+        ids.push(spawned["agent_id"].as_str().unwrap().to_owned());
+    }
+    permits.add_permits(16);
+    let settled = delegate(
+        &process,
+        &owner,
+        "agent/wait",
+        serde_json::json!({"timeout_ms": 10_000}),
+    )
+    .await;
+    assert_eq!(settled["timed_out"], false, "{settled}");
+    let agents = settled["snapshot"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 16);
+    for child in agents {
+        assert_eq!(child["status"]["state"], "completed", "{child}");
+    }
+    assert_eq!(captures.lock().unwrap().len(), 17);
+    // The child's authorized frozen snapshot is independent of parent discovery.
+    resource_process.shutdown().await;
+    permits.add_permits(1);
+    delegate(
+        &process,
+        &owner,
+        "agent/follow_up",
+        serde_json::json!({
+            "target": ids[0], "message": "Continue the same read-only task"
+        }),
+    )
+    .await;
+    let settled = delegate(
+        &process,
+        &owner,
+        "agent/wait",
+        serde_json::json!({"timeout_ms": 10_000}),
+    )
+    .await;
+    assert_eq!(settled["timed_out"], false, "{settled}");
+    for child in settled["snapshot"]["agents"].as_array().unwrap() {
+        assert_eq!(child["status"]["state"], "completed", "{child}");
+    }
+    {
+        let requests = captures.lock().unwrap();
+        assert_eq!(requests.len(), 18);
+        for request in &requests[1..] {
+            assert!(request
+                .system
+                .as_ref()
+                .unwrap()
+                .contains("CATALOG-SENTINEL"));
+            assert_eq!(request.tools.len(), 1);
+            assert_eq!(request.tools[0].name, "read");
+        }
+        let continued = serde_json::to_string(&requests.last().unwrap().messages).unwrap();
+        assert!(continued.contains("Read-only task 0"));
+        assert!(continued.contains("Continue the same read-only task"));
+    }
+    let child_owners = owners.lock().unwrap().clone();
+    assert_eq!(child_owners.len(), 17);
+    assert!(child_owners.iter().all(|child_owner| child_owner != &owner));
+    assert_eq!(
+        child_owners
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        16
+    );
+    // The frontend guard remains authoritative for the parent after child use.
+    let before = captures.lock().unwrap().len();
+    let refusal = complete(&mut app).await.unwrap_err().to_string();
+    assert!(
+        refusal.contains("context hook #1 \"frontend-resource-guard\""),
+        "{refusal}"
+    );
+    assert!(!refusal.contains(root.to_str().unwrap()));
+    assert_eq!(captures.lock().unwrap().len(), before);
+    process.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manually_admitted_process_app_first_request_reload_and_empty_replace_resources() {
     let temp = tempfile::tempdir().unwrap();

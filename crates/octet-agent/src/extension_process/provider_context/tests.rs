@@ -548,8 +548,9 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolate
         .await
         .unwrap();
         match case {
-            // Pi isolates handler failure: a malformed projection or a validation
-            // refusal skips that extension's changes and keeps the request.
+            // Pi isolates handler failure (packages/coding-agent/src/core/
+            // extensions/runner.ts:1305-1333): a malformed projection or a
+            // validation refusal skips that extension's changes and keeps the request.
             "valid" | "failure" | "invalid" | "refusal" => {
                 let (answer, reason) = result.unwrap();
                 assert_eq!(answer, "answer");
@@ -560,7 +561,8 @@ async fn real_run_process_hook_waits_for_original_writer_commit_once_and_isolate
                 matches!(
                     &result,
                     Err(crate::AgentError::ProviderContextPreparation(reason))
-                        if reason.starts_with("host authority refused preparation; request ")
+                        if reason.starts_with("host authority refused preparation; context hook #1 \"context-process\"; ")
+                            && reason.contains("; request ")
                             && !reason.contains("secret-bearing remote detail")
                 ),
                 "host refusal must stop preparation, got {result:?}"

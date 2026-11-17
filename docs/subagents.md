@@ -28,6 +28,23 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
   [session-scoped delegation](#session-scoped-delegation) for what that means
   when a worker outlives the turn that spawned it.
 
+## Resource context and provider hooks
+
+Workers receive a frozen copy of the parent's published system/resource context
+and their own restricted tool snapshot. A parent frontend's live resource-discovery
+guard stays on the parent: workers have separate session owners and no frontend
+discovery phase. Spawn and continuation therefore work with resource-contributing
+extensions, including the Pi adapter, without borrowing the parent's resource lease.
+Parent resource retirement still blocks parent inference until discovery settles.
+
+Other provider-context hooks remain inherited and use the child's own session
+context; authority refusals remain fail-closed. Rust embedders can mark a
+frontend-only guard with `ProviderContextHook::inherit_in_child_session() = false`
+when children use the already-authorized frozen snapshot. The default is `true`.
+Refusal diagnostics identify the context hook's registration number and declared
+hook or extension name, without exposing callback error text. Check that hook's
+configuration and session binding before retrying.
+
 ## Per-worker provider, model, and reasoning
 
 `subagent_spawn` accepts optional `provider`, `model`, and `reasoning` identifiers.

@@ -70,6 +70,16 @@ impl ResourceProviderGuard {
 }
 #[async_trait::async_trait]
 impl octet_agent::ProviderContextHook for ResourceProviderGuard {
+    fn inherit_in_child_session(&self) -> bool {
+        // Delegation copies the published system/resource snapshot. A child has
+        // no frontend discovery phase and must never reuse this parent's lease.
+        false
+    }
+
+    fn failure_notice_name(&self) -> Option<&str> {
+        Some("frontend-resource-guard")
+    }
+
     async fn project_context(
         &self,
         _: &octet_ai::Request,
