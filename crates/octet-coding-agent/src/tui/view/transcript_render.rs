@@ -713,7 +713,7 @@ pub(super) fn render_block_planned_with_rainbow(
         rainbow_strength,
         collapsed_reasoning,
     );
-    let marker = match block {
+    let (marker, component_line) = match block {
         TranscriptBlock::Reasoning(reasoning)
             if collapsed_reasoning
                 && !reasoning.finished
@@ -723,7 +723,14 @@ pub(super) fn render_block_planned_with_rainbow(
                     .as_ref()
                     .is_some_and(|working| working.component_line.is_some()) =>
         {
-            None
+            (
+                None,
+                reasoning
+                    .extension_working
+                    .as_ref()
+                    .filter(|working| working.visible != Some(false))
+                    .and_then(|working| working.component_line.as_deref()),
+            )
         }
         TranscriptBlock::Reasoning(reasoning)
             if collapsed_reasoning
@@ -734,11 +741,11 @@ pub(super) fn render_block_planned_with_rainbow(
                     .as_ref()
                     .is_some_and(|working| working.frames.is_some()) =>
         {
-            super::remote_ui::working_frame(reasoning)
+            (super::remote_ui::working_frame(reasoning), None)
         }
-        _ => marker,
+        _ => (marker, None),
     };
-    let lines = decorate_surface_with_frame(
+    let mut lines = decorate_surface_with_frame(
         lines,
         &plan,
         theme,
@@ -747,6 +754,27 @@ pub(super) fn render_block_planned_with_rainbow(
         collapsed_reasoning,
         marker,
     );
+    if let Some(line) = component_line {
+        // Pi packages/coding-agent/src/modes/interactive/components/
+        // status-indicator.ts:24-26 embeds the Loader without Text padding.
+        // The cached row includes its spinner: terminal-owned placement starts
+        // at the native marker, and clips only after adding that offset.
+        let left = if plan.marker_enabled {
+            plan.frame_left.saturating_sub(2)
+        } else {
+            plan.geometry.content_left
+        };
+        let row = fit_line(
+            &format!("{}{line}", " ".repeat(usize::from(left))),
+            outer_width,
+        );
+        lines[plan.geometry.transition_rows + plan.geometry.leading_rows] =
+            if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+                sexy_tui_rs::strip_terminal_sequences(&row)
+            } else {
+                row
+            };
+    }
     RenderedTranscriptBlock {
         lines,
         geometry,

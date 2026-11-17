@@ -410,6 +410,80 @@ fn fullscreen_live_frames_stay_inside_the_terminal() {
 }
 
 #[test]
+fn working_component_starts_at_the_native_spinner_column_and_clips_by_cells() {
+    let mut themes = themes();
+    themes.push(
+        compiled_theme_for_selector(
+            "default",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        )
+        .unwrap()
+        .unwrap(),
+    );
+    for theme in themes {
+        let renderer = theme.rich_renderer();
+        let mut reasoning = AssistantBlock::streaming_reasoning("");
+        reasoning.show_reasoning_hint = false;
+        for width in [80, 20, 12, 8, 7, 6, 5, 4, 3, 2, 1, 160] {
+            let native = render_block(
+                None,
+                &TranscriptBlock::Reasoning(Box::new(reasoning.clone())),
+                &theme,
+                &renderer,
+                &renderer,
+                width,
+                false,
+            );
+            let (row_index, native_row) = native
+                .iter()
+                .map(|row| strip_terminal_sequences(row))
+                .enumerate()
+                .find(|(_, row)| !row.trim().is_empty())
+                .unwrap();
+            let column = visible_width(
+                &native_row[..native_row.find(|c: char| !c.is_whitespace()).unwrap()],
+            );
+            for component in [
+                "◟ msg",
+                "\x1b[31m◟\x1b[0m 雪e\u{301} msg",
+                "界 msg",
+                ">>> msg",
+                "◟  msg",
+                " ◟ msg",
+            ] {
+                reasoning.extension_working = Some(ShellExtensionWorking {
+                    component_line: Some(component.into()),
+                    ..Default::default()
+                });
+                let rows = render_block(
+                    None,
+                    &TranscriptBlock::Reasoning(Box::new(reasoning.clone())),
+                    &theme,
+                    &renderer,
+                    &renderer,
+                    width,
+                    false,
+                );
+                assert_eq!(rows.len(), native.len());
+                assert!(rows
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                let row = &rows[row_index];
+                let expected = format!("{}{component}", " ".repeat(column));
+                assert_eq!(
+                    strip_terminal_sequences(row),
+                    strip_terminal_sequences(&fit_line(&expected, width)),
+                    "{}/{width}: {component:?}",
+                    theme.metadata().name,
+                );
+            }
+            reasoning.extension_working = None;
+        }
+    }
+}
+
+#[test]
 fn pi_palette_keeps_exact_accent_and_explicit_default_backgrounds_after_model_changes() {
     for mut theme in themes() {
         let accent = theme.role_rgb("model_accent");

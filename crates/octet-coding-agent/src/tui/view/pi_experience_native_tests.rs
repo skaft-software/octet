@@ -189,6 +189,38 @@ fn native_pi_spinner_changes_glyph_not_label_style_and_honors_reduced_motion() {
 }
 
 #[test]
+fn native_working_component_uses_the_spinner_slot_without_added_padding() {
+    for theme in themes() {
+        let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme);
+        shell.begin_run("test");
+        for width in [1, 2, 3, 4, 5, 8, 20, 80, 160] {
+            shell.set_size(width, 24);
+            shell.set_extension_ui(Default::default());
+            let native = working_row(&shell.state.borrow(), false).unwrap();
+            for line in ["◟ msg", "\x1b[31m界\x1b[0m 雪e\u{301} msg", ">>>  msg"] {
+                shell.set_extension_ui(super::super::ShellExtensionUi {
+                    working: Some(super::super::ShellExtensionWorking {
+                        component_line: Some(line.into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                let component = working_row(&shell.state.borrow(), false).unwrap();
+                assert_eq!(
+                    component.p, native.p,
+                    "native row positioning stays unchanged"
+                );
+                let children = component.c.as_ref().unwrap();
+                assert_eq!(children[0].id, native.c.as_ref().unwrap()[0].id);
+                assert_eq!(children[0].k, Kind::Ansi);
+                assert_eq!(children[0].p.as_ref().unwrap().as_map()["text"], line);
+                assert!(!children.iter().any(|child| child.id == "work.label"));
+            }
+        }
+    }
+}
+
+#[test]
 fn native_working_component_paints_one_effective_row_without_reanimation() {
     for theme in themes() {
         let mut shell = super::super::InteractiveShell::test_shell_with_theme(theme);

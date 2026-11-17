@@ -56,6 +56,7 @@
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
+- Pi working components align with the native spinner column and preserve their spacing within narrow terminal widths.
 - Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
 - Timed image reads retain inline previews while scrolling and cropping.
 - Empty and ellipsis-only running shell cards show an explicit interruptible state while live progress keeps its available rows.
