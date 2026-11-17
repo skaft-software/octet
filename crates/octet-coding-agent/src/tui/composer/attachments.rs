@@ -156,9 +156,8 @@ fn prepare_media(
             octet_ai::video::MAX_VIDEO_BYTES as u64,
         ),
     };
-    if !modalities.contains(modality)
-        && !(matches!(kind, MediaKind::Video(_)) && modalities.contains(Modality::Video))
-    {
+    let native_video = matches!(kind, MediaKind::Video(_)) && modalities.contains(Modality::Video);
+    if !(native_video || modalities.contains(modality)) {
         return Err(AttachError::UnsupportedModality {
             modality: modality_name,
         });
