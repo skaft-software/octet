@@ -14,6 +14,7 @@ use octet_agent::EntryValue;
 // reachable at the path it has always used.
 pub(super) use support::terminal_theme_test_config;
 
+mod active_extension_commands_tests;
 mod active_reports_and_status_tests;
 mod active_run_commands_and_steering_tests;
 mod active_settings_tests;

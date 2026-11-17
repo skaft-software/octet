@@ -6,6 +6,16 @@ use octet_agent::extension_process::{
 };
 
 impl ExecutableExtensions {
+    pub(super) fn has_command_dialog_process(&self, name: &str, generation: u64) -> bool {
+        self.command_dialog_process
+            .as_ref()
+            .is_some_and(|(owner, current)| owner == name && *current == generation)
+            || self
+                .active_commands
+                .iter()
+                .any(|(_, command)| command.owns_dialog_process(name, generation))
+    }
+
     pub fn shadows_native_command(&self, name: &str) -> bool {
         self.command_registry().iter().any(|command| {
             command.owner == super::lifecycle::PI_BRIDGE_EXTENSION_NAME
@@ -585,6 +595,7 @@ impl ExecutableExtensions {
             frontend_tick,
             started,
             operation: None,
+            started_open: true,
             cancellation_token,
             execution,
             progress_rx,
@@ -781,12 +792,20 @@ pub(crate) struct OwnedExtensionCommand {
     frontend_tick: tokio::time::Interval,
     started: tokio::sync::oneshot::Receiver<ExtensionOperationToken>,
     operation: Option<ExtensionOperationToken>,
+    started_open: bool,
     cancellation_token: CancellationToken,
     execution: Pin<Box<dyn Future<Output = Result<CommandOutput, ExtensionRuntimeError>> + Send>>,
     progress_rx: mpsc::Receiver<ToolProgress>,
     approval_budget: usize,
     output: Option<Result<CommandOutput, ExtensionRuntimeError>>,
     headless_messages: BoundedDiagnostics,
+}
+
+pub(crate) enum OwnedCommandEvent {
+    Settled,
+    Progress(ToolProgress),
+    Notification(Box<Result<ExtensionEvent, broadcast::error::RecvError>>),
+    Wake,
 }
 
 impl OwnedExtensionCommand {
@@ -838,25 +857,7 @@ impl OwnedExtensionCommand {
         if self.output.is_some() {
             return Ok(None);
         }
-        let Self {
-            process,
-            name,
-            extension_name,
-            events,
-            events_open,
-            remote_ui_wake,
-            frontend_tick,
-            started,
-            operation,
-            cancellation_token,
-            execution,
-            progress_rx,
-            approval_budget,
-            headless_messages,
-            ..
-        } = self;
-        let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
-        let result = loop {
+        loop {
             if let Some(shell) = confirmations.command_shell() {
                 if !shell.is_agent_run_active() {
                     if mutations {
@@ -895,145 +896,171 @@ impl OwnedExtensionCommand {
                 // Headless commands can await reverse requests too (e.g. MCP
                 // registration). Use the same bounded, owner-fenced drain,
                 // without an editor lease, and retain notices until completion.
-                headless_messages.extend(extensions.drain_events());
+                self.headless_messages.extend(extensions.drain_events());
             }
-            // The cancellation future and confirmation UI borrow the same
-            // frontend. Keep the select in its own scope so cancellation
-            // is dropped before a confirmation prompt borrows it again.
-            let mut command_progress = None;
-            let mut command_input = None;
-            let event = {
+            let incoming = {
                 let cancellation = confirmations.wait_for_command_event();
                 tokio::pin!(cancellation);
                 tokio::select! {
-                    result = &mut *execution => break result,
-                    started = &mut *started, if operation.is_none() => match started {
-                        Ok(started) => {
-                            *operation = Some(started);
-                            None
-                        }
-                        Err(_) => break execution.await,
-                    },
-                    progress = progress_rx.recv() => {
-                        command_progress = progress;
-                        None
-                    },
-                    event = events.recv(), if *events_open && operation.is_some() => Some(event),
-                    incoming = &mut cancellation => {
-                        command_input = Some(incoming.with_context(|| format!(
-                            "command input failed for extension {extension_name:?}"
-                        ))?);
-                        None
-                    }
-                    _ = remote_ui::notified(remote_ui_wake) => None,
-                    _ = frontend_tick.tick() => None,
+                    event = self.next_event() => Ok(event),
+                    incoming = &mut cancellation => Err(incoming.with_context(|| format!(
+                        "command input failed for extension {:?}", self.extension_name
+                    ))?),
                 }
             };
-            if let Some(incoming) = command_input {
-                let cancelled = match incoming {
-                    None => true,
-                    Some(event) => {
-                        if confirmations.command_cancellation_event(&event) {
-                            true
-                        } else {
-                            let consumed = confirmations.command_shell().is_some_and(|shell| {
-                                extensions.route_remote_ui_event(shell, &event, false)
-                            });
-                            !consumed && confirmations.command_event(event)
+            match incoming {
+                Ok(OwnedCommandEvent::Settled) => return Ok(None),
+                Ok(event) => self.handle_event(event, extensions, confirmations).await?,
+                Err(incoming) => {
+                    let cancelled = match incoming {
+                        None => true,
+                        Some(event) => {
+                            if confirmations.command_cancellation_event(&event) {
+                                true
+                            } else {
+                                let consumed = confirmations.command_shell().is_some_and(|shell| {
+                                    extensions.route_remote_ui_event(shell, &event, false)
+                                });
+                                !consumed && confirmations.command_event(event)
+                            }
                         }
-                    }
-                };
-                if cancelled {
-                    cancellation_token.cancel();
-                    anyhow::bail!("extension command {name:?} cancelled");
-                }
-                continue;
-            }
-            if let Some(progress) = command_progress {
-                if let ToolProgress::Confirmation(request) = &progress {
-                    let approved = confirmations
-                        .confirm_effect(extension_name, request)
-                        .await?;
-                    request.respond(approved);
-                } else {
-                    confirmations.progress(extension_name, &progress);
-                }
-                continue;
-            }
-            let Some(event) = event else {
-                continue;
-            };
-            match event {
-                Ok(ExtensionEvent::ConfirmationRequested {
-                    request_id,
-                    generation,
-                    parent_request_id,
-                    request,
-                }) if parent_request_id.is_some_and(|parent| {
-                    operation.is_some_and(|operation| operation.owns(generation, parent))
-                }) || (legacy_uncorrelated
-                    && parent_request_id.is_none()
-                    && operation.is_some_and(|operation| operation.generation == generation)) =>
-                {
-                    if process.confirmation_answered(&request_id, generation) {
-                        continue;
-                    }
-                    let confirmed = if *approval_budget > 0 {
-                        *approval_budget -= 1;
-                        true
-                    } else {
-                        confirmations
-                            .confirm(extension_name, &request)
-                            .await
-                            .with_context(|| {
-                                format!("confirmation UI failed for extension {extension_name:?}")
-                            })?
                     };
-                    process
-                        .respond_to_confirmation(
-                            request_id,
-                            generation,
-                            ConfirmationResponse { confirmed },
-                        )
-                        .await?;
-                }
-                Ok(ExtensionEvent::PolicyEvaluationRequested { .. }) => {}
-                Ok(ExtensionEvent::InputRequested {
-                    request_id,
-                    generation,
-                    parent_request_id,
-                    request,
-                }) if operation
-                    .is_some_and(|operation| operation.owns(generation, parent_request_id)) =>
-                {
-                    if process.input_answered(&request_id, generation) {
-                        continue;
+                    if cancelled {
+                        self.cancellation_token.cancel();
+                        anyhow::bail!("extension command {:?} cancelled", self.name);
                     }
-                    let value = confirmations
-                        .input(extension_name, &request)
+                }
+            }
+        }
+    }
+
+    /// Only receive here: a losing select branch must not drop a consumed UI
+    /// request or a partially applied confirmation. The foreground handles the
+    /// returned event outside its select, alongside the real Run event pump.
+    pub(crate) async fn next_event(&mut self) -> OwnedCommandEvent {
+        tokio::select! {
+            result = &mut self.execution => {
+                self.output = Some(result);
+                OwnedCommandEvent::Settled
+            }
+            started = &mut self.started, if self.started_open => {
+                self.started_open = false;
+                if let Ok(started) = started { self.operation = Some(started); }
+                OwnedCommandEvent::Wake
+            }
+            progress = self.progress_rx.recv() => progress.map_or(OwnedCommandEvent::Wake, OwnedCommandEvent::Progress),
+            event = self.events.recv(), if self.events_open && self.operation.is_some() => OwnedCommandEvent::Notification(Box::new(event)),
+            _ = remote_ui::notified(&self.remote_ui_wake) => OwnedCommandEvent::Wake,
+            _ = self.frontend_tick.tick() => OwnedCommandEvent::Wake,
+        }
+    }
+
+    pub(crate) fn owns_dialog_process(&self, name: &str, generation: u64) -> bool {
+        self.extension_name == name && self.generation == generation
+    }
+
+    pub(crate) fn extension_name(&self) -> &str {
+        &self.extension_name
+    }
+
+    pub(crate) async fn handle_event<H>(
+        &mut self,
+        event: OwnedCommandEvent,
+        extensions: &mut ExecutableExtensions,
+        confirmations: &mut H,
+    ) -> anyhow::Result<()>
+    where
+        H: ExtensionConfirmationHandler + ?Sized,
+    {
+        let Self {
+            process,
+            extension_name,
+            operation,
+            approval_budget,
+            events_open,
+            ..
+        } = self;
+        let legacy_uncorrelated = process.api_version() == EXTENSION_API_VERSION_0_1;
+        if let OwnedCommandEvent::Progress(progress) = event {
+            if let ToolProgress::Confirmation(request) = &progress {
+                let approved = confirmations
+                    .confirm_effect(extension_name, request)
+                    .await?;
+                request.respond(approved);
+            } else {
+                confirmations.progress(extension_name, &progress);
+            }
+            return Ok(());
+        }
+        let OwnedCommandEvent::Notification(event) = event else {
+            return Ok(());
+        };
+        match *event {
+            Ok(ExtensionEvent::ConfirmationRequested {
+                request_id,
+                generation,
+                parent_request_id,
+                request,
+            }) if parent_request_id.is_some_and(|parent| {
+                operation.is_some_and(|operation| operation.owns(generation, parent))
+            }) || (legacy_uncorrelated
+                && parent_request_id.is_none()
+                && operation.is_some_and(|operation| operation.generation == generation)) =>
+            {
+                if process.confirmation_answered(&request_id, generation) {
+                    return Ok(());
+                }
+                let confirmed = if *approval_budget > 0 {
+                    *approval_budget -= 1;
+                    true
+                } else {
+                    confirmations
+                        .confirm(extension_name, &request)
                         .await
                         .with_context(|| {
-                            format!("input UI failed for extension {extension_name:?}")
-                        })?;
-                    process
-                        .respond_to_input(request_id, generation, ExtensionInputResponse { value })
-                        .await?;
-                }
-                Ok(_) => {
-                    // The product's persistent receiver owns ordinary
-                    // notifications, status, context, and diagnostics.
-                }
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    extensions.diagnostics.push(format!(
-                        "warning: {extension_name}: confirmation listener lagged by {count} events"
-                    ));
-                }
-                Err(broadcast::error::RecvError::Closed) => *events_open = false,
+                            format!("confirmation UI failed for extension {extension_name:?}")
+                        })?
+                };
+                process
+                    .respond_to_confirmation(
+                        request_id,
+                        generation,
+                        ConfirmationResponse { confirmed },
+                    )
+                    .await?;
             }
-        };
-
-        self.output = Some(result);
-        Ok(None)
+            Ok(ExtensionEvent::PolicyEvaluationRequested { .. }) => {}
+            Ok(ExtensionEvent::InputRequested {
+                request_id,
+                generation,
+                parent_request_id,
+                request,
+            }) if operation
+                .is_some_and(|operation| operation.owns(generation, parent_request_id)) =>
+            {
+                if process.input_answered(&request_id, generation) {
+                    return Ok(());
+                }
+                let value = confirmations
+                    .input(extension_name, &request)
+                    .await
+                    .with_context(|| format!("input UI failed for extension {extension_name:?}"))?;
+                process
+                    .respond_to_input(request_id, generation, ExtensionInputResponse { value })
+                    .await?;
+            }
+            Ok(_) => {
+                // The product's persistent receiver owns ordinary
+                // notifications, status, context, and diagnostics.
+            }
+            Err(broadcast::error::RecvError::Lagged(count)) => {
+                extensions.diagnostics.push(format!(
+                    "warning: {extension_name}: confirmation listener lagged by {count} events"
+                ));
+            }
+            Err(broadcast::error::RecvError::Closed) => *events_open = false,
+        }
+        Ok(())
     }
 
     /// Keep the real command deadline and cancellation path polled while the

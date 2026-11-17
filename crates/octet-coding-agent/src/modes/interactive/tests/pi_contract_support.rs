@@ -164,7 +164,7 @@ providers = true
     .unwrap();
 }
 
-/// A minimal API 0.1 extension that answers `command/execute` with one bounded
+/// A minimal API 0.4 extension that answers `command/execute` with one bounded
 /// text line. It is the native (non-Pi) half of the single command registry.
 fn write_native_command_extension(root: &std::path::Path, extension: &str, command: &str) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -176,7 +176,7 @@ fn write_native_command_extension(root: &std::path::Path, extension: &str, comma
         format!(
             r#"name = {extension:?}
 version = "0.1.0"
-api_version = "0.1"
+api_version = "0.4"
 
 [entrypoint]
 command = "probe.sh"
@@ -195,12 +195,16 @@ commands = [{command:?}]
 request_id() {{ sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }}
 IFS= read -r initialize
 id=$(printf '%s' "$initialize" | request_id)
-printf '{{"jsonrpc":"2.0","id":%s,"result":{{"api_version":"0.1","tools":[],"commands":[{{"name":{command:?},"description":"Native fixture command"}}]}}}}\n' "$id"
+printf '{{"jsonrpc":"2.0","id":%s,"result":{{"api_version":"0.4","tools":[],"commands":[{{"name":{command:?},"description":"Native fixture command"}}],"protocol":{{"version":"0.4","features":["request_cancellation","content_parts","terminal_handoff"],"limits":{{"max_concurrent_requests":4}}}}}}}}\n' "$id"
 while IFS= read -r request; do
   case "$request" in
     *'"method":"command/execute"'*)
       id=$(printf '%s' "$request" | request_id)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"text":"native fixture ran"}}}}\n' "$id"
+      case "$request" in
+        *'"arguments":["fail"]'*) printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32603,"message":"private exception must stay private"}}}}\n' "$id" ;;
+        *'"arguments":["stall"]'*) ;; # Let the ordinary native request deadline expire.
+        *) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"text":"native fixture ran"}}}}\n' "$id" ;;
+      esac
       ;;
     *'"method":"shutdown"'*)
       id=$(printf '%s' "$request" | request_id)

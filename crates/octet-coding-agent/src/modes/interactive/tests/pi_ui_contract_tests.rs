@@ -772,9 +772,9 @@ export default pi => {
                 assert!(pending.is_empty());
                 assert_eq!(shell.queued_follow_up_len(), 0);
             }
-            "/fixture-command" => assert!(
-                matches!(pending.front(), Some(PendingIdleAction::ExtensionCommand {name, ..}) if name == "fixture-command")
-            ),
+            "/fixture-command" => {
+                assert!(pending.is_empty(), "extension handler must run while busy")
+            }
             "steer text" => assert!(
                 context.contains(text),
                 "busy Enter did not steer: {context}"

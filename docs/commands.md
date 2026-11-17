@@ -211,10 +211,13 @@ third-party extension without its own menu gets one entry per command it
 declares, which asks for that command's arguments.
 
 Commands published by ready extensions appear in slash completion and execute
-through their registered handlers. During active work, commands that need an
-idle boundary are visibly queued. `/extensions` remains the configuration menu;
-`/subagents` remains a runtime slash command while its first-party extension is
-ready.
+through their registered handlers immediately, including during an active response.
+This includes Pi adapter commands. Handler failures or timeouts warn with the
+extension and command name without stopping the response. Session replacement
+and other mutations needing the session writer still wait for settlement; the
+handler itself is not queued or replayed. `/extensions` remains the configuration
+menu; `/subagents` keeps its dedicated runtime controls and idle-only operations
+while its first-party extension is ready.
 The menu never writes a trust
 grant on enablement. Full access implicitly trusts enabled extensions; safe
 mode starts only enabled extensions with explicit source-bound host authority.

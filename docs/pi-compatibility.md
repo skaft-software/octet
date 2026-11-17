@@ -152,6 +152,13 @@ the registration. Pi extensions may use octet-only built-in names such as `/goal
 names retain native precedence; conflicting
 extension commands are available as `/<extension-owner>:<command>`.
 
+Extension slash commands submitted in the composer execute immediately while a
+response is running, as in Pi. The response keeps running if a handler fails or
+times out; a warning names the extension and command. A handler requesting a
+session replacement waits for the current response to settle before the native
+host lends it the session writer. The command is not replayed at that boundary.
+Built-in native commands and prompt templates retain their existing scheduling.
+
 A Pi tool takes precedence over an optional first-party octet extension's tool
 with the same name, without disabling either process or unrelated tools.
 Overrides of native tools such as `read` and `bash` still require their explicit

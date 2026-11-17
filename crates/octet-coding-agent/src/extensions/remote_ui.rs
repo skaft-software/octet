@@ -1002,7 +1002,7 @@ impl RemoteUi {
         true
     }
 
-    pub(super) fn take_ready_composer_event(&mut self) -> Option<Event> {
+    pub(super) fn composer_input_ready(&self) -> bool {
         // An explicit fullscreen view owns fresh input, never a buffered
         // composer event. Keep those events fenced to their editor mount.
         if self
@@ -1010,12 +1010,27 @@ impl RemoteUi {
             .iter()
             .any(|mount| mount.view.placement == ExtensionRemoteUiPlacement::Fullscreen)
         {
-            return None;
+            return false;
         }
-        let (id, _) = self.pending_input.front()?;
-        let mount = self.mounts.iter().find(|mount| &mount.view.id == id)?;
-        let editor = mount.editor.as_ref()?;
+        let Some((id, _)) = self.pending_input.front() else {
+            return false;
+        };
+        let Some(editor) = self
+            .mounts
+            .iter()
+            .find(|mount| &mount.view.id == id)
+            .and_then(|mount| mount.editor.as_ref())
+        else {
+            return false;
+        };
         if editor.input_revision != editor.acknowledged_input_revision || editor.expected_clear {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn take_ready_composer_event(&mut self) -> Option<Event> {
+        if !self.composer_input_ready() {
             return None;
         }
         self.replaying_input = true;

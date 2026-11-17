@@ -100,6 +100,7 @@ use crate::tui::view::{
 mod admission;
 mod command_catalog;
 mod commands;
+pub(crate) use commands::{OwnedCommandEvent, OwnedExtensionCommand};
 mod composition;
 mod confirmation;
 mod event_drain;
@@ -446,6 +447,9 @@ pub struct ExecutableExtensions {
     remote_ui: remote_ui::RemoteUi,
     remote_ui_wake: Option<Arc<tokio::sync::Notify>>,
     command_dialog_process: Option<(String, u64)>,
+    // Bounded by frontend admission; retains in-flight handlers across Run
+    // settlement without replaying their process requests at the idle boundary.
+    pub(crate) active_commands: Vec<(String, OwnedExtensionCommand)>,
     dynamic_shortcuts: Vec<RegisteredDynamicShortcut>,
     shortcut_tasks: Vec<JoinHandle<()>>,
     event_drain_cursor: usize,
@@ -555,6 +559,7 @@ impl Default for ExecutableExtensions {
             remote_ui: remote_ui::RemoteUi::default(),
             remote_ui_wake: None,
             command_dialog_process: None,
+            active_commands: Vec::new(),
             dynamic_shortcuts: Vec::new(),
             shortcut_tasks: Vec::new(),
             event_drain_cursor: 0,

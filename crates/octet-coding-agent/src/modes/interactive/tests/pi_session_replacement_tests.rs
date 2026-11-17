@@ -791,6 +791,7 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
         .unwrap();
     let old_path = app.agent.session().path().to_owned();
     let old_id = session_id(app.agent.session());
+    let inspection = ActiveRunInspection::capture(&app);
     let run_id = shell.begin_run("test");
     let mut run = app
         .agent
@@ -809,46 +810,49 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
         }
     }).await.unwrap();
     let old_busy_bytes = std::fs::read(&old_path).unwrap();
-    // A live command may outlast the boundary at which it was admitted. Drive
-    // its real native pump without lending it the Agent borrowed by this Run.
-    let mut command = app
-        .executable_extensions
-        .prepare_owned_command(
-            Some("octet-pi-compat"),
-            "probe",
-            vec![old_path.to_str().unwrap().into()],
-            false,
-            0,
-        )
-        .unwrap();
-    let dialogs = app.executable_extensions.lifecycle_snapshot();
-    {
-        let mut frontend = InteractiveExtensionConfirmations {
-            shell: &mut shell,
-            input: &mut input,
-            dialogs: &dialogs,
-            input_retired: false,
-        };
-        let requested = async {
-            loop {
-                if trace(&directory)
-                    .iter()
-                    .any(|event| event["step"] == "requested-options")
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+    // Submit through the real composer while the response owns the Agent.
+    // Only the session replacement, not its command handler, may wait for idle.
+    let text = format!("/probe {}", old_path.display());
+    let events = text
+        .chars()
+        .map(|ch| {
+            Ok(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )))
+        })
+        .chain(std::iter::once(Ok(Event::Key(
+            crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ))));
+    let mut input = futures_util::stream::iter(events).chain(futures_util::stream::pending());
+    let mut pending = VecDeque::new();
+    let control = run.control();
+    let mut quit = false;
+    let mut made_tool_call = false;
+    let mut deadline = None;
+    let requested = async {
+        loop {
+            if trace(&directory)
+                .iter()
+                .any(|event| event["step"] == "requested-options")
+            {
+                break;
             }
-            // Keep pumping beyond the real request dispatch and a frontend tick.
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        tokio::time::timeout(Duration::from_secs(10), async {
-            tokio::select! {
-                result = command.advance(&mut app.executable_extensions, &mut frontend, true, None) => panic!("busy command handed off or settled: {:?}", result.map(|request| request.is_some())),
-                _ = requested => {}
-            }
-        }).await.unwrap();
-    }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = drive_active_run(&mut run, &control, &mut shell, &mut input,
+                &mut pending, &mut quit, None, None, &mut app.executable_extensions,
+                &mut made_tool_call, &inspection, &mut deadline) => panic!("held response settled: {result:?}"),
+            _ = requested => {}
+        }
+    })
+    .await
+    .unwrap();
+    assert!(pending.is_empty(), "command must not wait for idle");
     assert!(shell.is_agent_run_active());
     let busy_trace = trace(&directory);
     assert_eq!(step(&busy_trace, "requested-options")["id"], old_id);
@@ -860,23 +864,33 @@ async fn pi_new_session_requested_while_busy_waits_for_settlement_before_setup()
     );
     assert_eq!(std::fs::read(&old_path).unwrap(), old_busy_bytes);
     release.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(event) = run.next().await {
-            shell.on_run_event(run_id, &event);
-            if let AgentEvent::RunFinished { reason, .. } = event {
-                assert!(
-                    matches!(reason, octet_agent::FinishReason::Completed),
-                    "{reason:?}"
-                );
-            }
-        }
-    })
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        drive_active_run(
+            &mut run,
+            &control,
+            &mut shell,
+            &mut input,
+            &mut pending,
+            &mut false,
+            None,
+            None,
+            &mut app.executable_extensions,
+            &mut false,
+            &inspection,
+            &mut None,
+        ),
+    )
     .await
+    .unwrap()
     .unwrap();
+    assert_eq!(outcome, HostRunOutcome::Completed);
     drop(run); // Only now may the idle lifecycle owner replace the writer.
     assert!(!shell.is_agent_run_active());
     let settled_bytes = std::fs::read(&old_path).unwrap();
     assert_ne!(settled_bytes, old_busy_bytes);
+    let (_, mut command) = app.executable_extensions.active_commands.remove(0);
+    let dialogs = app.executable_extensions.lifecycle_snapshot();
     let output = tokio::time::timeout(Duration::from_secs(20), async {
         let mut frontend = InteractiveExtensionConfirmations {
             shell: &mut shell,

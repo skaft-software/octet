@@ -366,7 +366,7 @@ async fn run_interactive_extension_command<H: InteractiveCommandFrontend>(
         &app.reasoning,
         &app.sessions,
     );
-    let Some(mut command) = app.executable_extensions.prepare_owned_command(
+    let Some(command) = app.executable_extensions.prepare_owned_command(
         extension,
         name,
         arguments,
@@ -375,6 +375,16 @@ async fn run_interactive_extension_command<H: InteractiveCommandFrontend>(
     ) else {
         return Ok(None);
     };
+    finish_interactive_extension_command(app, frontend, command)
+        .await
+        .map(Some)
+}
+
+async fn finish_interactive_extension_command<H: InteractiveCommandFrontend>(
+    app: &mut App,
+    frontend: &mut H,
+    mut command: crate::extensions::OwnedExtensionCommand,
+) -> anyhow::Result<String> {
     let failure = loop {
         match command
             .advance(
@@ -403,7 +413,6 @@ async fn run_interactive_extension_command<H: InteractiveCommandFrontend>(
     command
         .finish(&mut app.executable_extensions, frontend, failure)
         .await
-        .map(Some)
 }
 
 async fn run_interactive_presentation_action<H: InteractiveCommandFrontend>(
@@ -566,12 +575,6 @@ pub enum PendingIdleAction {
     /// Worker commands that need the idle application owner (wait, reattach,
     /// inspect, and pane planning); live list and stop controls never queue here.
     Subagents(Vec<String>),
-    /// Typed extension invocation, fenced by the owner that registered it.
-    ExtensionCommand {
-        owner: String,
-        name: String,
-        arguments: Vec<String>,
-    },
     /// `/pi` lifecycle and setup review, applied only with idle application ownership.
     Pi(commands::PiSubcommand),
     /// Display is already changed; only config synchronization/persistence waits.
@@ -2956,7 +2959,10 @@ where
             && extensions.command_owner(name).is_none()
             && shell.has_prompt_template(name)
     }));
+    let live_extension = matches!(&command, Command::Unknown(text)
+        if split_prompt_invocation(text).is_some_and(|(name, _)| name != "subagents" && extensions.command_owner(name).is_some()));
     if active_command_needs_idle_slot(&command)
+        && !live_extension
         && !template
         && queue.len() >= MAX_PENDING_IDLE_ACTIONS
     {
@@ -3455,17 +3461,30 @@ where
                         .split_whitespace()
                         .map(str::to_owned)
                         .collect();
-                    push_pending_action(
-                        queue,
-                        PendingIdleAction::ExtensionCommand {
-                            owner,
-                            name: name.to_owned(),
+                    if extensions.active_commands.len() >= MAX_PENDING_IDLE_ACTIONS {
+                        shell.notice_error(format!("extension {owner} command /{name} not started: too many active commands; retry when one finishes"));
+                    } else if let Some(registered) =
+                        extensions.registered_command_name(&owner, name)
+                    {
+                        // Native dispatch must cross the process boundary here: the
+                        // adapter cannot undo a command held in the host's idle queue.
+                        // Pi: packages/coding-agent/src/core/agent-session.ts:2120-2129,
+                        // 2201-2225 executes extension commands before streaming input
+                        // admission and treats a throwing handler as handled.
+                        if let Some(command) = extensions.prepare_owned_command(
+                            Some(&owner),
+                            &registered,
                             arguments,
-                        },
-                    );
-                    shell.notice(
-                        "extension command queued; it runs when the current response finishes",
-                    );
+                            // This is concurrent with the response, not a modal
+                            // attended action: retain the ordinary request budget.
+                            false,
+                            0,
+                        ) {
+                            extensions.active_commands.push((name.to_owned(), command));
+                        } else {
+                            shell.notice_error(format!("extension {owner} command /{name} unavailable; check /extensions status"));
+                        }
+                    }
                 }
             } else if shell.has_prompt_template(name) {
                 shell.queue_follow_up(ComposedInput::from_text(text));
@@ -4168,6 +4187,7 @@ where
             subagent_stop = subagent_stops.pop_front();
         }
 
+        let composer_input_ready = executable_extensions.composer_input_ready(shell);
         tokio::select! {
             biased;
             _ = crate::tui::terminal::wait_for_shutdown_signal() => {
@@ -4182,6 +4202,27 @@ where
                 )
                 .await;
                 return Ok(HostRunOutcome::shutdown());
+            }
+            (index, event) = async {
+                let futures: Vec<_> = executable_extensions.active_commands.iter_mut()
+                    .map(|(_, command)| Box::pin(command.next_event())).collect();
+                let (event, index, _) = futures_util::future::select_all(futures).await;
+                (index, event)
+            }, if !executable_extensions.active_commands.is_empty() => {
+                let (name, mut command) = executable_extensions.active_commands.remove(index);
+                let extension = command.extension_name().to_owned();
+                let dialogs = executable_extensions.lifecycle_snapshot();
+                let mut frontend = InteractiveExtensionConfirmations {
+                    shell, input, dialogs: &dialogs, input_retired: !input_open,
+                };
+                let settled = matches!(event, crate::extensions::OwnedCommandEvent::Settled);
+                let failure = command.handle_event(event, executable_extensions, &mut frontend).await.err();
+                if settled || failure.is_some() {
+                    let result = command.finish(executable_extensions, &mut frontend, failure).await;
+                    show_live_extension_result(shell, &extension, &name, result);
+                } else {
+                    executable_extensions.active_commands.insert(index, (name, command));
+                }
             }
             result = futures_util::future::OptionFuture::from(extension_collection.as_mut().map(|collection| collection.future.as_mut())), if extension_collection.is_some() => {
                 extension_collection = None;
@@ -4313,13 +4354,17 @@ where
             incoming = async {
                 if let Some(event) = clipboard_fallback.take() {
                     (Some(Ok(event)), true)
-                } else if let Some(event) = executable_extensions.take_ready_composer_event(shell) {
-                    (Some(Ok(event)), false)
+                } else if composer_input_ready {
+                    (None, false)
                 } else {
                     (input.next().await, false)
                 }
             }, if input_open => {
                 let (maybe, clipboard_replay) = incoming;
+                let maybe = if composer_input_ready && maybe.is_none() {
+                    let Some(event) = executable_extensions.take_ready_composer_event(shell) else { continue; };
+                    Some(Ok(event))
+                } else { maybe };
                 let event = match maybe {
                     Some(Ok(event)) => event,
                     Some(Err(error)) => {
@@ -4784,7 +4829,14 @@ where
                             || matches!(pending_actions.back(), Some(PendingIdleAction::ChangeThinking(_)
                                 | PendingIdleAction::ChangeThinkingLevel(_) | PendingIdleAction::ActiveThinkingSelection(_)))
                         );
-                        if active_command_needs_idle_slot(&parsed) && !prompt_template && !live_subagent_control && !replaces_thinking && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
+                        let live_extension = matches!(&parsed, Command::Unknown(text)
+                            if split_prompt_invocation(text).is_some_and(|(name, _)| name != "subagents" && executable_extensions.command_owner(name).is_some()));
+                        if live_extension && executable_extensions.active_commands.len() >= MAX_PENDING_IDLE_ACTIONS {
+                            shell.notice_error("extension command capacity reached; draft retained, retry when a command finishes");
+                            shell.render();
+                            continue;
+                        }
+                        if active_command_needs_idle_slot(&parsed) && !live_extension && !prompt_template && !live_subagent_control && !replaces_thinking && pending_actions.len() >= MAX_PENDING_IDLE_ACTIONS {
                             shell.error("command queue is full; draft and attachments retained".into());
                             shell.render();
                             continue;
@@ -7282,6 +7334,22 @@ where
     })
 }
 
+fn show_live_extension_result(
+    shell: &mut InteractiveShell,
+    extension: &str,
+    name: &str,
+    result: anyhow::Result<String>,
+) {
+    match result {
+        Ok(output) if output.trim().is_empty() => {}
+        Ok(output) => shell.show_extension_output(name, output),
+        Err(_) => shell.notice_error(format!(
+            "extension {extension} command /{name} failed or timed out; check /extensions status or disable the extension"
+        )),
+    }
+    shell.render();
+}
+
 fn run_typed_extension_command<'a, S>(
     app: &'a mut App,
     shell: &'a mut InteractiveShell,
@@ -8900,6 +8968,24 @@ async fn apply_pending_actions(
             app.config.theme_explicit = config.theme_explicit;
             app.config.show_images = config.show_images;
         }
+        // Commands already ran during streaming. Only their remaining callbacks
+        // cross this boundary: Run held the sole mutable Agent/session writer,
+        // so session replacement and synchronous append must wait for settlement.
+        while !app.executable_extensions.active_commands.is_empty() {
+            let (name, command) = app.executable_extensions.active_commands.remove(0);
+            let extension = command.extension_name().to_owned();
+            let dialogs = app.executable_extensions.lifecycle_snapshot();
+            let mut frontend = InteractiveExtensionConfirmations {
+                shell,
+                input,
+                dialogs: &dialogs,
+                input_retired: false,
+            };
+            let result =
+                finish_interactive_extension_command(&mut app, &mut frontend, command).await;
+            show_live_extension_result(shell, &extension, &name, result);
+            *goal_deadline = recovered_goal_deadline(&app)?;
+        }
         refresh_resource_paths(&mut app, shell, input).await?;
         let Some(action) = pending_actions.pop_front() else {
             shell.set_pending_controls(Vec::new());
@@ -9100,14 +9186,6 @@ async fn apply_pending_actions(
             }
             PendingIdleAction::Subagents(arguments) => {
                 run_subagents_command(&mut app, shell, input, arguments).await?;
-                *goal_deadline = recovered_goal_deadline(&app)?;
-            }
-            PendingIdleAction::ExtensionCommand {
-                owner,
-                name,
-                arguments,
-            } => {
-                run_typed_extension_command(&mut app, shell, input, owner, name, arguments).await?;
                 *goal_deadline = recovered_goal_deadline(&app)?;
             }
             PendingIdleAction::ExtensionMenuEffect(effect) => {

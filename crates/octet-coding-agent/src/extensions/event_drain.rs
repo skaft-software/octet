@@ -86,6 +86,11 @@ impl ExecutableExtensions {
 
     /// Re-enter the native input dispatcher only after the slot's completed
     /// checkpoint (and any accepted host clear) has settled.
+    pub(crate) fn composer_input_ready(&mut self, shell: &mut InteractiveShell) -> bool {
+        self.sync_remote_ui(shell);
+        !shell.remote_ui_input_blocked() && self.remote_ui.composer_input_ready()
+    }
+
     pub(crate) fn take_ready_composer_event(
         &mut self,
         shell: &mut InteractiveShell,
@@ -689,7 +694,7 @@ impl ExecutableExtensions {
                         request,
                         ..
                     }) => {
-                        if self.command_dialog_process.as_ref() == Some(&(name.clone(), generation))
+                        if self.has_command_dialog_process(&name, generation)
                             || process.as_ref().is_some_and(|process| {
                                 process.confirmation_answered(&request_id, generation)
                             })
@@ -725,7 +730,7 @@ impl ExecutableExtensions {
                         request,
                         ..
                     }) => {
-                        if self.command_dialog_process.as_ref() == Some(&(name.clone(), generation))
+                        if self.has_command_dialog_process(&name, generation)
                             || process.as_ref().is_some_and(|process| {
                                 process.input_answered(&request_id, generation)
                             })

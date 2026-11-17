@@ -813,9 +813,9 @@ async fn native_pi_custom_editor_busy_slot_steers_queues_and_keeps_refused_draft
         let context = format!("{:?}", agent.session().context().unwrap());
         match text {
             "/model" => assert!(pending.is_empty()),
-            "/fixture-command" => assert!(
-                matches!(pending.front(), Some(PendingIdleAction::ExtensionCommand {name, ..}) if name == "fixture-command")
-            ),
+            "/fixture-command" => {
+                assert!(pending.is_empty(), "extension handler must run while busy")
+            }
             "steer text" => assert!(
                 context.contains(text),
                 "busy Enter did not steer: {context}"

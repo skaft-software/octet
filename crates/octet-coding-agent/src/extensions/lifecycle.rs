@@ -1404,6 +1404,7 @@ impl ExecutableExtensions {
     }
 
     pub(super) fn cancel_background_work(&mut self) {
+        self.active_commands.clear();
         self.deferred_startup.take();
         self.cancel_session_hook_starts();
         for task in self.renderer_tasks.drain(..) {
