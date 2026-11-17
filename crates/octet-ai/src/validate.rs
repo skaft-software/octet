@@ -558,9 +558,10 @@ pub(crate) fn validate_request(
                         }
                         UserPart::Media(Media::Video(video)) => {
                             crate::video::validate_video(video)?;
-                            if !caps.input_modalities.contains(crate::Modality::Image)
-                                && !(protocol == Protocol::GoogleGenerativeAi
-                                    && caps.input_modalities.contains(crate::Modality::Video))
+                            let native_video = protocol == Protocol::GoogleGenerativeAi
+                                && caps.input_modalities.contains(crate::Modality::Video);
+                            if !(native_video
+                                || caps.input_modalities.contains(crate::Modality::Image))
                             {
                                 return Err(UnsupportedError::Video.into());
                             }
