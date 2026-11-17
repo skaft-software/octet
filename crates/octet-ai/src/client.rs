@@ -1365,6 +1365,7 @@ impl AiClient {
         }
 
         let fallback_request = HttpStreamRequest {
+            request_context: &req,
             model: model.clone(),
             compatibility: req.compatibility,
             parts,

@@ -72,6 +72,7 @@
 - Busy Pi commands read current history and retain append access across long responses and response settlement.
 - Pi keyboard shortcuts append through the active response writer with live owner and generation checks.
 - Concurrent Pi command appends keep independent receipt cursors and isolate malformed replies to the affected invocation.
+- Provider HTTP errors keep actionable messages with bounded request-echo, quote and remote-stack scrubbing.
 - Video preparation follows the active branch and compaction window.
 - Pi command appends commit during streaming responses, and adapter retirement leaves pending response observations isolated.
 - Markdown rows keep isolated flag letters within the requested terminal width, including one-cell viewports.

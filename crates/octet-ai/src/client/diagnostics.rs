@@ -157,12 +157,287 @@ fn sanitize_batch_error(redactor: &CredentialRedactor, error: &mut crate::batch:
     }
 }
 
+const MAX_HTTP_MESSAGE_CHARS: usize = 200;
+const MIN_REQUEST_ECHO_CHARS: usize = 24;
+const MAX_REQUEST_TEXT_BYTES: usize = 64 * 1024;
+const MAX_REQUEST_TEXT_PARTS: usize = 4096;
+
+/// Fixed-width character windows make echo matching linear in the bounded
+/// request text, rather than searching the request again for every substring.
+fn echo_windows(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.char_indices()
+        .map(|(start, _)| start)
+        .zip(
+            text.char_indices()
+                .skip(MIN_REQUEST_ECHO_CHARS)
+                .map(|(end, _)| end)
+                .chain(std::iter::once(text.len())),
+        )
+        .filter_map(move |(start, end)| {
+            (text[start..end].chars().count() == MIN_REQUEST_ECHO_CHARS)
+                .then_some((start, &text[start..end]))
+        })
+}
+
+/// Visit text lazily with a single budget shared across messages and parts,
+/// including empty/media parts. No history-sized snapshot is retained.
+fn visit_request_text(request: &crate::Request, mut visit: impl FnMut(&str) -> bool) {
+    use crate::{AssistantPart, Message, ToolResultPart, UserPart};
+    let mut remaining_parts = MAX_REQUEST_TEXT_PARTS;
+    for message in request.messages.iter().rev().take(MAX_REQUEST_TEXT_PARTS) {
+        match message {
+            Message::User(message) => {
+                for part in &message.content {
+                    if remaining_parts == 0 {
+                        return;
+                    }
+                    remaining_parts -= 1;
+                    match part {
+                        UserPart::Text(text) => {
+                            if !visit(text) {
+                                return;
+                            }
+                        }
+                        UserPart::ToolResult(result) => {
+                            for part in &result.content {
+                                if remaining_parts == 0 {
+                                    return;
+                                }
+                                remaining_parts -= 1;
+                                if let ToolResultPart::Text(text) = part {
+                                    if !visit(text) {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        UserPart::Media(_) => {}
+                    }
+                }
+            }
+            Message::Assistant(message) => {
+                for part in &message.content {
+                    if remaining_parts == 0 {
+                        return;
+                    }
+                    remaining_parts -= 1;
+                    let text = match part {
+                        AssistantPart::Text(text) => text,
+                        AssistantPart::ToolCall(call) => &call.arguments_json,
+                        _ => continue,
+                    };
+                    if !visit(text) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    for text in request
+        .system
+        .as_deref()
+        .into_iter()
+        .chain(request.tools.iter().map(|tool| tool.description.as_str()))
+    {
+        if remaining_parts == 0 {
+            return;
+        }
+        remaining_parts -= 1;
+        if !visit(text) {
+            return;
+        }
+    }
+}
+
+fn scrub_request_echoes(message: &str, request: &crate::Request) -> String {
+    let mut candidates: std::collections::HashSet<&str> =
+        echo_windows(message).map(|(_, text)| text).collect();
+    if candidates.is_empty() {
+        return message.to_owned();
+    }
+    let mut matches = std::collections::HashSet::new();
+    // Inspect recent conversation text first, then system and tool descriptions.
+    // This runs only on HTTP failure, with both byte and part-count bounds.
+    let mut remaining = MAX_REQUEST_TEXT_BYTES;
+    visit_request_text(request, |text| {
+        let mut end = text.len().min(remaining);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        for (_, window) in echo_windows(&text[..end]) {
+            if let Some(candidate) = candidates.take(window) {
+                matches.insert(candidate);
+            }
+        }
+        remaining -= end;
+        remaining > 0 && !candidates.is_empty()
+    });
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (start, window) in echo_windows(message) {
+        if matches.contains(window) {
+            let end = start + window.len();
+            if let Some((_, previous_end)) = spans.last_mut().filter(|(_, end)| start <= *end) {
+                *previous_end = end;
+            } else {
+                spans.push((start, end));
+            }
+        }
+    }
+    let mut output = String::new();
+    let mut copied = 0;
+    for (start, end) in spans {
+        let matched = &message[start..end];
+        // Preserve existing surrounding whitespace for readable recovery text.
+        let (start, end) = if matched.trim().is_empty() {
+            (start, end)
+        } else {
+            (
+                start + matched.len() - matched.trim_start().len(),
+                end - (matched.len() - matched.trim_end().len()),
+            )
+        };
+        output.push_str(&message[copied..start]);
+        output.push_str("[request text]");
+        copied = end;
+    }
+    output.push_str(&message[copied..]);
+    output
+}
+
+fn scrub_long_quotes(message: &str) -> String {
+    let mut output = String::new();
+    let mut copied = 0;
+    let mut opening = None;
+    let mut escaped = false;
+    for (index, character) in message.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if !matches!(character, '\'' | '"' | '`') {
+            continue;
+        }
+        // An apostrophe inside a word is not a quote delimiter.
+        if character == '\''
+            && message[..index].ends_with(char::is_alphanumeric)
+            && message[index + 1..].starts_with(char::is_alphanumeric)
+        {
+            continue;
+        }
+        if let Some((start, quote)) = opening {
+            if character == quote {
+                if message[start + 1..index].chars().count() > 48 {
+                    output.push_str(&message[copied..start]);
+                    output.push_str("[quoted text]");
+                    copied = index + 1;
+                }
+                opening = None;
+            }
+        } else if character != '\'' || !message[..index].ends_with(char::is_alphanumeric) {
+            opening = Some((index, character));
+        }
+    }
+    // A bounded/truncated body may end before the closing delimiter.
+    if let Some((start, _)) = opening {
+        if message[start + 1..].chars().count() > 48 {
+            output.push_str(&message[copied..start]);
+            output.push_str("[quoted text]");
+            copied = message.len();
+        }
+    }
+    output.push_str(&message[copied..]);
+    output
+}
+
+fn is_stack_frame(text: &str) -> bool {
+    text.split_once('(')
+        .is_some_and(|(name, _)| name.contains('.') && !name.contains(char::is_whitespace))
+}
+
+fn sanitize_http_message(
+    redactor: &CredentialRedactor,
+    message: &str,
+    request: Option<&crate::Request>,
+) -> Option<String> {
+    let mut message = message.split(['\r', '\n']).next()?.trim();
+    while let Some((class, human)) = message.split_once(':') {
+        if (class.ends_with("Error") || class.ends_with("Exception"))
+            && class
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$'))
+        {
+            message = human.trim();
+        } else {
+            break;
+        }
+    }
+    // A first-line frame/trace has no human diagnostic to retain. Inline stack
+    // material is removed without looking at or retaining subsequent lines.
+    if message.starts_with("Traceback")
+        || message.starts_with("File \"")
+        || message.starts_with("File '")
+        || message.strip_prefix("at ").is_some_and(is_stack_frame)
+    {
+        return None;
+    }
+    for marker in ["Traceback (", " at "] {
+        if let Some((human, stack)) = message.split_once(marker) {
+            if marker.starts_with("Traceback") || is_stack_frame(stack) {
+                message = human.trim_end();
+            }
+        }
+    }
+    // Bound untrusted input even for callers that did not read a capped body.
+    let mut end = message.len().min(MAX_PROVIDER_DIAGNOSTIC_BYTES);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Redact before any replacement/cut too: an echo or quote can overlap a
+    // credential, and replacing only that overlap must not expose its remainder.
+    let redacted = redactor.redact(&message[..end]);
+    let scrubbed = request.map_or_else(
+        || redacted.clone(),
+        |request| scrub_request_echoes(&redacted, request),
+    );
+    let scrubbed = scrub_long_quotes(&scrubbed);
+    if !scrubbed
+        .replace("[request text]", "")
+        .replace("[quoted text]", "")
+        .chars()
+        .any(char::is_alphanumeric)
+    {
+        return None;
+    }
+    let mut scrubbed = scrubbed;
+    if let Some((end, _)) = scrubbed.char_indices().nth(MAX_HTTP_MESSAGE_CHARS) {
+        scrubbed.truncate(end);
+        scrubbed.pop();
+        scrubbed.push('…');
+    }
+    (!scrubbed.trim().is_empty())
+        .then(|| sanitize_diagnostic(redactor, &scrubbed, MAX_PROVIDER_DIAGNOSTIC_BYTES / 4))
+}
+
 // Pi compatibility: packages/ai/src/api/openai-codex-responses.ts:1613-1642
 // extracts error.message and error.code/error.type before falling back to status.
+// octet additionally scrubs and caps human messages per AGENTS.md's privacy rule.
 // Parse before escaping: escaping pretty-printed JSON's whitespace first makes
 // it invalid JSON and hides the useful error behind a bare HTTP 400.
-fn sanitize_http_body(redactor: &CredentialRedactor, body: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+fn sanitize_http_body(
+    redactor: &CredentialRedactor,
+    body: &str,
+    request: Option<&crate::Request>,
+) -> Option<String> {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        // Malformed/truncated JSON cannot safely identify a message field.
+        Err(_) if body.trim_start().starts_with(['{', '[']) => return None,
+        Err(_) => return sanitize_http_message(redactor, body, request),
+    };
     let error = value.get("error").unwrap_or(&value);
     let mut fields = serde_json::Map::new();
     for field in ["code", "type"] {
@@ -182,25 +457,27 @@ fn sanitize_http_body(redactor: &CredentialRedactor, body: &str) -> Option<Strin
         .find_map(|field| error.get(*field).and_then(serde_json::Value::as_str))
         .or_else(|| error.as_str())
     {
-        fields.insert(
-            "message".into(),
-            serde_json::Value::String(sanitize_diagnostic(
-                redactor,
-                message,
-                MAX_PROVIDER_DIAGNOSTIC_BYTES / 4,
-            )),
-        );
+        if let Some(message) = sanitize_http_message(redactor, message, request) {
+            fields.insert("message".into(), serde_json::Value::String(message));
+        }
     }
     if fields.is_empty() {
         return None;
     }
-    // Only structured diagnostic fields cross this boundary, never echoed
-    // prompts, request objects, headers or arbitrary provider body metadata.
+    // Only selected, scrubbed diagnostic fields cross this boundary.
     // Per-field caps leave room for JSON escaping within the body snippet cap.
     Some(serde_json::json!({"error": fields}).to_string())
 }
 
-pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiError) -> AiError {
+pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, error: AiError) -> AiError {
+    sanitize_request_error(redactor, error, None)
+}
+
+pub(super) fn sanitize_request_error(
+    redactor: &CredentialRedactor,
+    mut error: AiError,
+    request: Option<&crate::Request>,
+) -> AiError {
     match &mut error {
         AiError::Http(error) => {
             sanitize_optional_diagnostic(
@@ -233,9 +510,7 @@ pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiErro
                             sanitize_diagnostic(redactor, &kind, MAX_DIAGNOSTIC_METADATA_BYTES)
                         });
                 }
-                *body = sanitize_http_body(redactor, body).unwrap_or_else(|| {
-                    sanitize_diagnostic(redactor, body, MAX_PROVIDER_DIAGNOSTIC_BYTES)
-                });
+                error.body_snippet = sanitize_http_body(redactor, body, request);
             }
         }
         AiError::Transport(error) | AiError::NetworkUnavailable(error) => {
@@ -264,7 +539,7 @@ pub(crate) fn sanitize_ai_error(redactor: &CredentialRedactor, mut error: AiErro
             // provider text; only the wrapped inner error can, so sanitize
             // that in place.
             let drained = std::mem::replace(&mut **inner, AiError::Canceled);
-            **inner = sanitize_ai_error(redactor, drained);
+            **inner = sanitize_request_error(redactor, drained, request);
         }
         AiError::Batch(error) => sanitize_batch_error(redactor, error),
         // A deferred poll refusal carries only the static refusal wording and

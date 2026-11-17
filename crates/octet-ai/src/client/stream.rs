@@ -25,8 +25,8 @@ use futures_util::StreamExt;
 
 use super::diagnostics::{
     json_scalar_string, lifecycle_from_sse_comment, parse_provider_lifecycle,
-    provider_error_from_success_body, sanitize_ai_error, LIFECYCLE_HEADER, LIFECYCLE_REQUEST_VALUE,
-    MAX_PROVIDER_LIFECYCLE_EVENTS,
+    provider_error_from_success_body, sanitize_ai_error, sanitize_request_error, LIFECYCLE_HEADER,
+    LIFECYCLE_REQUEST_VALUE, MAX_PROVIDER_LIFECYCLE_EVENTS,
 };
 use super::transport::{
     annotate_stream_failure, next_body_chunk, prepare_request_body, request_open_transport_error,
@@ -41,7 +41,8 @@ use crate::error::{
 use crate::runtime::HookModelContext;
 use crate::stream::{ResponseBuilder, ResponseStream, StreamEvent};
 use crate::types::{Protocol, ToolDef};
-pub(super) struct HttpStreamRequest {
+pub(super) struct HttpStreamRequest<'a> {
+    pub(super) request_context: &'a crate::Request,
     pub(super) model: Model,
     pub(super) compatibility: crate::types::CompatibilityMode,
     pub(super) parts: crate::protocol::HttpRequestParts,
@@ -268,13 +269,14 @@ fn bedrock_response_stream(request: BedrockResponseStreamRequest) -> ResponseStr
 pub(super) async fn stream_http(
     http: reqwest::Client,
     host_http_sender: Option<Arc<crate::host_http::OneShotHostHttpSender>>,
-    request: HttpStreamRequest,
+    request: HttpStreamRequest<'_>,
     request_dispatch: Option<Arc<std::sync::atomic::AtomicBool>>,
     stream_initial_timeout: Duration,
     stream_idle_timeout: Duration,
     stream_deadline: Duration,
 ) -> Result<ResponseStream, AiError> {
     let HttpStreamRequest {
+        request_context,
         model,
         compatibility,
         parts,
@@ -368,7 +370,9 @@ pub(super) async fn stream_http(
                 message: "request timed out waiting for response headers".to_string(),
             })
         })?
-        .map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))?;
+        .map_err(|error| {
+            sanitize_request_error(&diagnostic_redactor, error, Some(request_context))
+        })?;
 
     // A host response hook observes every provider response (success or error)
     // before the body stream is touched. It is advisory and cannot replace or
@@ -456,7 +460,7 @@ pub(super) async fn stream_http(
                 | http::StatusCode::GATEWAY_TIMEOUT
         );
 
-        return Err(sanitize_ai_error(
+        return Err(sanitize_request_error(
             &diagnostic_redactor,
             AiError::Http(HttpError {
                 status,
@@ -470,6 +474,7 @@ pub(super) async fn stream_http(
                 },
                 retryable,
             }),
+            Some(request_context),
         ));
     }
 

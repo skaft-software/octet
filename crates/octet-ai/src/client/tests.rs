@@ -496,6 +496,222 @@ async fn google_files_strict_schema_precedes_credentials() {
     assert_google_files_validation_precedes_credentials(true).await;
 }
 
+fn http_message(message: &str, field: &str) -> Option<String> {
+    http_message_with_request(message, field, None, &CredentialRedactor::default())
+}
+
+fn http_message_with_request(
+    message: &str,
+    field: &str,
+    request: Option<&crate::Request>,
+    redactor: &CredentialRedactor,
+) -> Option<String> {
+    let error = super::diagnostics::sanitize_request_error(
+        redactor,
+        AiError::Http(HttpError {
+            status: http::StatusCode::BAD_REQUEST,
+            request_id: None,
+            retry_after: None,
+            provider_code: Some("invalid_request".into()),
+            body_snippet: Some(serde_json::json!({"error": {field: message}}).to_string()),
+            retryable: false,
+        }),
+        request,
+    );
+    let AiError::Http(error) = error else {
+        unreachable!()
+    };
+    let body: serde_json::Value = serde_json::from_str(error.body_snippet.as_deref()?).unwrap();
+    body["error"]["message"].as_str().map(str::to_owned)
+}
+
+#[test]
+fn http_messages_keep_actionable_provider_guidance() {
+    for field in ["message", "detail", "description"] {
+        for message in [
+            "The model `x` does not exist",
+            "Invalid value for 'reasoning.effort'",
+            "maximum context length is 128000 tokens",
+            "Please try at least one model (for example x)",
+        ] {
+            assert_eq!(http_message(message, field).as_deref(), Some(message));
+        }
+    }
+}
+
+#[test]
+fn http_messages_strip_remote_exception_and_stack_material() {
+    for message in [
+        "ValueError: rejected request\nTraceback (most recent call last):\n  File \"private.py\", line 9",
+        "Exception: rejected request\n    at x.y(private.js:1)",
+        "java.lang.IllegalArgumentException: rejected request at x.y(private.js:1)",
+    ] {
+        assert_eq!(http_message(message, "message").as_deref(), Some("rejected request"));
+    }
+    for message in [
+        "Traceback (most recent call last):",
+        "  File \"private.py\", line 9",
+        "    at x.y(private.js:1)",
+        "ValueError:",
+        "Exception:   ",
+        "\nprivate second line",
+    ] {
+        assert_eq!(http_message(message, "message"), None, "{message}");
+    }
+}
+
+#[test]
+fn http_messages_scrub_long_quotes_and_cap_unicode() {
+    for quote in ['\'', '"', '`'] {
+        let message = format!(
+            "rejected {quote}{}{quote}; try a smaller request",
+            "界".repeat(49)
+        );
+        assert_eq!(
+            http_message(&message, "message").as_deref(),
+            Some("rejected [quoted text]; try a smaller request")
+        );
+    }
+    assert_eq!(
+        http_message(&format!("rejected '{}'", "x".repeat(5000)), "message").as_deref(),
+        Some("rejected [quoted text]")
+    );
+    assert_eq!(
+        http_message(&format!("'{}'", "x".repeat(49)), "message"),
+        None
+    );
+    let message = "界".repeat(201);
+    let result = http_message(&message, "message").unwrap();
+    assert_eq!(result, format!("{}…", "界".repeat(199)));
+    assert_eq!(result.chars().count(), 200);
+    assert_eq!(
+        http_message(&"界".repeat(200), "message")
+            .unwrap()
+            .chars()
+            .count(),
+        200
+    );
+}
+
+#[test]
+fn http_request_echoes_match_all_text_sources_and_unicode_spans() {
+    use crate::{
+        AssistantMessage, AssistantPart, Message, ToolDef, ToolResult, ToolResultPart, UserMessage,
+        UserPart,
+    };
+    let private = "confidential acquisition plan";
+    let mut request = crate::test_fixtures::base_request();
+    let sources = [
+        (Some(private.to_owned()), vec![], vec![]),
+        (
+            None,
+            vec![Message::User(UserMessage {
+                content: vec![UserPart::Text(private.into())],
+            })],
+            vec![],
+        ),
+        (
+            None,
+            vec![Message::User(UserMessage {
+                content: vec![UserPart::ToolResult(ToolResult {
+                    tool_call_id: crate::ToolCallId("call".into()),
+                    content: vec![ToolResultPart::Text(private.into())],
+                    is_error: false,
+                    added_tool_names: None,
+                    tool_name: None,
+                })],
+            })],
+            vec![],
+        ),
+        (
+            None,
+            vec![Message::Assistant(AssistantMessage {
+                model: crate::ModelId("model".into()),
+                protocol: crate::Protocol::OpenAiChat,
+                content: vec![AssistantPart::Text(private.into())],
+            })],
+            vec![],
+        ),
+        (
+            None,
+            vec![],
+            vec![ToolDef {
+                name: "tool".into(),
+                description: private.into(),
+                parameters: serde_json::json!({}),
+                async_execution: false,
+                constrained_sampling: None,
+            }],
+        ),
+    ];
+    for (system, messages, tools) in sources {
+        request.system = system;
+        request.messages = messages;
+        request.tools = tools;
+        let message = http_message_with_request(
+            &format!("ValueError: rejected prompt: {private}"),
+            "message",
+            Some(&request),
+            &CredentialRedactor::default(),
+        );
+        assert_eq!(message.as_deref(), Some("rejected prompt: [request text]"));
+    }
+    request.messages.clear();
+    request.tools.clear();
+    for private in ["x".repeat(24), "界".repeat(24), "a".repeat(199)] {
+        request.system = Some(private.clone());
+        let redactor = CredentialRedactor::default();
+        assert_eq!(
+            http_message_with_request(
+                &format!("Rejected: {private}!"),
+                "detail",
+                Some(&request),
+                &redactor
+            )
+            .as_deref(),
+            Some("Rejected: [request text]!")
+        );
+        assert_eq!(
+            http_message_with_request(&private, "message", Some(&request), &redactor),
+            None
+        );
+    }
+    request.system = Some("x".repeat(23));
+    assert_eq!(
+        http_message_with_request(
+            &format!("Rejected: {}", "x".repeat(23)),
+            "message",
+            Some(&request),
+            &CredentialRedactor::default()
+        )
+        .unwrap(),
+        format!("Rejected: {}", "x".repeat(23))
+    );
+}
+
+#[test]
+fn http_message_redaction_prevents_partial_secrets_at_the_cap() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("authorization", "private-credential".parse().unwrap());
+    let mut redactor = CredentialRedactor::default();
+    redactor.include_header_values(&headers);
+    let message = format!("{}private-credential ", "x".repeat(191));
+    let result = http_message_with_request(&message, "message", None, &redactor).unwrap();
+    assert!(!result.contains("private"), "{result}");
+    assert_eq!(result.chars().count(), 200);
+    assert!(result.ends_with('…'));
+    assert_eq!(
+        http_message_with_request(
+            "invalid credential: private-credential\u{1b}",
+            "message",
+            None,
+            &redactor
+        )
+        .as_deref(),
+        Some(r"invalid credential: [REDACTED]\u{1b}")
+    );
+}
+
 #[tokio::test]
 async fn google_files_proxy_preflight_precedes_credentials_and_upload() {
     let direct = wiremock::MockServer::start().await;

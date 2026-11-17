@@ -2899,6 +2899,36 @@ async fn responses_bad_request_retains_structured_error_without_request_data() {
 }
 
 #[tokio::test]
+async fn http_error_message_scrubs_request_echoes_before_publication() {
+    let private = "confidential acquisition plan";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {
+                "message": format!("ValueError: rejected prompt: {private}"),
+                "code": "invalid_request", "type": "invalid_request_error"
+            }
+        })))
+        .mount(&server)
+        .await;
+    let model = make_test_model(&server.uri(), Protocol::OpenAiChat, false);
+    let mut request = text_request();
+    request.messages = vec![Message::User(UserMessage {
+        content: vec![UserPart::Text(format!("Review this {private} today."))],
+    })];
+    let error = AiClient::new().stream(&model, request).await.err().unwrap();
+    let AiError::Http(http) = &error else {
+        panic!("{error:?}")
+    };
+    let body: serde_json::Value =
+        serde_json::from_str(http.body_snippet.as_deref().unwrap()).unwrap();
+    assert_eq!(body["error"]["message"], "rejected prompt: [request text]");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert_eq!(http.provider_code.as_deref(), Some("invalid_request"));
+    assert!(!format!("{error} {error:?}").contains(private));
+}
+
+#[tokio::test]
 async fn http_error_type_is_available_when_code_or_message_is_absent() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

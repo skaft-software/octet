@@ -460,6 +460,60 @@ async fn custom_http_preserves_bounded_error_body_and_credential_redaction() {
 }
 
 #[tokio::test]
+async fn custom_http_scrubs_request_echoes_and_keeps_actionable_messages() {
+    for (message, expected) in [
+        (
+            "ValueError: rejected prompt: confidential acquisition plan",
+            "rejected prompt: [request text]",
+        ),
+        (
+            "The model `x` does not exist",
+            "The model `x` does not exist",
+        ),
+        (
+            "Invalid value for 'reasoning.effort'",
+            "Invalid value for 'reasoning.effort'",
+        ),
+        (
+            "maximum context length is 128000 tokens",
+            "maximum context length is 128000 tokens",
+        ),
+    ] {
+        let tracked = client().track_request_dispatch();
+        let requests = Arc::default();
+        let request = Request {
+            system: Some("Review the confidential acquisition plan".into()),
+            ..request()
+        };
+        let body = json!({"error": {"message": message, "code": "invalid_request"}}).to_string();
+        let error = tracked
+            .stream_custom_http_with_host_options(
+                &model(Protocol::OpenAiChat),
+                request,
+                RequestOverrides::default(),
+                HostRequestOptions::default(),
+                sender(
+                    &tracked,
+                    response(400, body.into()),
+                    &requests,
+                    &Observations::default(),
+                ),
+            )
+            .await
+            .err()
+            .unwrap();
+        let AiError::Http(error) = error else {
+            panic!("expected HTTP error")
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(error.body_snippet.as_deref().unwrap()).unwrap();
+        assert_eq!(body["error"]["message"], expected);
+        assert_eq!(error.provider_code.as_deref(), Some("invalid_request"));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn custom_http_rejects_malformed_and_oversized_native_sse() {
     for body in [
         "data: {bad-json}\n\n".into(),
