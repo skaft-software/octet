@@ -305,6 +305,8 @@ pub struct Agent {
     client: AiClient,
     model: Model,
     session: Session,
+    /// Incremental cursor for cold durable video preparation between requests.
+    prepared_video_entries: usize,
     extensions: ExtensionHost,
     sandbox: SandboxConfig,
     effect_broker: EffectBroker,
@@ -639,6 +641,7 @@ impl Agent {
             client: config.client,
             model: config.model,
             session: config.session,
+            prepared_video_entries: 0,
             extensions: config.extensions,
             sandbox: config.sandbox,
             effect_broker: config.effect_broker,
@@ -1298,6 +1301,7 @@ impl Agent {
         self.session_id = resource_owner.clone();
         self.resource_owner = resource_owner;
         self.session = session;
+        self.prepared_video_entries = 0;
         self.last_run_lifecycle = None;
         // This is a one-shot transcript projection for a future prompt in the
         // old session, not a durable cross-session setting.
@@ -1308,6 +1312,7 @@ impl Agent {
     /// Mutable access to the session for history operations between runs
     /// (checkout, manual compaction, config entries).
     pub fn session_mut(&mut self) -> &mut Session {
+        self.prepared_video_entries = 0;
         let _ = self
             .cache_warmer
             .cancel(&mut self.session, "conversation context changed");

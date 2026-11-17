@@ -103,6 +103,7 @@ impl Agent {
                     ))),
                 }
             };
+            prepare_tool_result_frames(&result, &self.model, None).await;
             let (message, _, _, _, details) = lower_tool_result(
                 call.id,
                 &result,
@@ -322,6 +323,7 @@ impl Agent {
                 )
             })
             .collect::<Vec<_>>();
+        let prepared_video_entries = &mut self.prepared_video_entries;
         let session = &mut self.session;
 
         let stream = async_stream::stream! {
@@ -409,7 +411,7 @@ impl Agent {
                 && extension_host.provider_context_hooks.is_empty()
                 && model.endpoint.transport == octet_ai::EndpointTransport::WebSocketPreferred
                 && max_session_tokens.is_none() && max_session_cost_microdollars.is_none();
-            let mut background_tools = background_tools::BackgroundTools::new(parallel_read_wave_width);
+            let mut background_tools = background_tools::BackgroundTools::new(parallel_read_wave_width, Arc::clone(&abort));
             let background_cancellation = abort.cancellation.clone();
             let mut pending_reasoning = None;
             let mut pending_steer: Vec<ReservedInput> = Vec::new();
@@ -454,6 +456,24 @@ impl Agent {
             let mut turn_attempt_succeeded = false;
 
             let mut reason: FinishReason = 'run: loop {
+                // Rebuild cold resumed frames once, from only newly encountered
+                // entries. Shared caches also serve Responses replay projections.
+                // Native/text-only routes defer this work until a frame-capable route.
+                if model.spec.supports_video_input() && !model.spec.supports_native_video() {
+                    let end = session.entries().len();
+                    for entry in &session.entries()[*prepared_video_entries..end] {
+                        if let EntryValue::Message(message) = &entry.value {
+                            tokio::select! {
+                                biased;
+                                _ = abort.wait() => break 'run FinishReason::Aborted,
+                                changed = octet_ai::video::prepare_message_frames(&model, std::slice::from_ref(message)) => {
+                                    if changed { context_capacity.invalidate(); }
+                                }
+                            }
+                        }
+                    }
+                    *prepared_video_entries = end;
+                }
                 for event in committed_custom_message_events(session, &mut custom_message_cursor) {
                     notify_observers(&observers, &event); yield event;
                 }
@@ -3255,10 +3275,11 @@ impl Agent {
 
                     // ── COMMIT BOUNDARY ──────────────────────────────────
                     // Tool::execute resolved (or an immediate error was
-                    // produced). Persist the result immediately before
-                    // draining progress or checking abort. An abort
-                    // received after this point cannot erase an already-
-                    // committed result.
+                    // produced). Optional frame preparation yields to input and
+                    // abort, then lowering consumes local prepared state only.
+                    // Even if aborted, commit the completed result and original
+                    // video bytes before draining progress or ending the run.
+                    prepare_tool_result_frames(&result, &model, Some(&abort)).await;
                     // Every tool owns the same configured output allowance.
                     // A large early result must never starve later successful
                     // calls in the same model turn. Structured media is lowered

@@ -396,6 +396,9 @@ pub enum ConfigError {
     /// Configuration parsing failure.
     #[error("Parse error: {0}")]
     Parse(String),
+    /// Local video frame preparation failed before request encoding.
+    #[error("{0}")]
+    VideoPreparation(#[from] crate::video::VideoPreparationError),
     /// An extension provider hook refused or could not complete a request.
     /// The text is host-authored and already names the hook and extension.
     #[error("{0}")]

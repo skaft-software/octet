@@ -12,6 +12,9 @@ mod effective_media_estimate_tests;
 mod pending_messages_tests;
 #[path = "tool_schema_budget_tests.rs"]
 mod tool_schema_budget_tests;
+#[cfg(unix)]
+#[path = "video_preparation_tests.rs"]
+mod video_preparation_tests;
 
 fn image_input_fixture(large: bool) -> InputPart {
     let encoded = if large {
@@ -5264,11 +5267,11 @@ async fn video_admission_is_bounded_and_original_survives_session_resume() {
         video.data.as_ref(),
         include_bytes!("../../../octet-ai/src/video/tiny.mp4")
     );
-    assert_eq!(video.sampled_frames().unwrap().len(), 4);
+    assert_eq!(video.prepare_frames().await.unwrap().len(), 4);
 }
 
-#[test]
-fn video_tool_lowering_preserves_source_and_reports_frame_delivery() {
+#[tokio::test]
+async fn video_tool_lowering_preserves_source_and_reports_frame_delivery() {
     let model = tool_media_model(
         Protocol::OpenAiResponses,
         octet_ai::ModalitySet::none().with(Modality::Image),
@@ -5277,6 +5280,7 @@ fn video_tool_lowering_preserves_source_and_reports_frame_delivery() {
         unreachable!()
     };
     let output = Ok(ToolOutput::new("read=video").with_media(media));
+    prepare_tool_result_frames(&output, &model, None).await;
     let (message, accepted, text, is_error, _) = lower_tool_result(
         octet_ai::ToolCallId("call".into()),
         &output,

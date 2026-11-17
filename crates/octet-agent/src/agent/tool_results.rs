@@ -319,6 +319,36 @@ pub(super) fn truncate_ordered_tool_text(
     lowered
 }
 
+/// Optional preparation must not erase a completed tool result on abort. Pi
+/// finalizes each executed result before checking abort (reference
+/// packages/agent/src/agent-loop.ts:580-587). Native video decoding lives here
+/// because result commitment and durable media do not require the Pi process.
+pub(super) async fn prepare_tool_result_frames(
+    result: &Result<ToolOutput, ToolError>,
+    model: &Model,
+    abort: Option<&AbortFlag>,
+) {
+    if model.spec.supports_native_video() || !model.spec.supports_video_input() {
+        return;
+    }
+    if let Some(output) = resolved_tool_output(result) {
+        for media in output.media() {
+            if let Media::Video(video) = media {
+                let preparation = video.prepare_frames();
+                if let Some(abort) = abort {
+                    tokio::select! {
+                        biased;
+                        _ = abort.wait() => break,
+                        _ = preparation => {}
+                    }
+                } else {
+                    let _ = preparation.await;
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn lower_tool_media_part(
     media: &Media,
     model: &Model,
@@ -357,7 +387,8 @@ pub(super) fn lower_tool_media_part(
                             omissions.push(format!("video sent as {} frames", frames.len()))
                         }
                         Err(error) => omissions.push(format!(
-                            "{error}; original video retained, continuing without frames"
+                            "{error}; provider {} model {} continues without frames; original video retained",
+                            model.endpoint.id.0, model.spec.api_name,
                         )),
                     }
                 }

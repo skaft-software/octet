@@ -156,7 +156,10 @@ from your OS package manager. Only whitelisted local containers/protocols are
 opened; source frames are capped at **16 million pixels**, duration at **24 hours**,
 decoder allocation size at **64 MiB**, and the complete preparation at **30 seconds**.
 JPEG output and private scratch are bounded and removed after preparation.
-A timeout kills and reaps the decoder. The decoder is not an OS sandbox.
+Preparation runs off the interactive driver, with at most two decoder workers per
+process; queueing and decoding share the 30-second deadline. Input and interrupts
+remain available while a cold video read is prepared. Cancellation and timeout
+kill and reap the decoder. The decoder is not an OS sandbox.
 
 The **original video bytes** stay in session JSONL, including tool reads; deleting
 or replacing the source path does not affect later turns or resume. Sampled frames
@@ -166,7 +169,17 @@ versions may change JPEG bytes. Missing decoders or invalid clips produce an
 actionable preparation error before a new sampled user attachment is committed. A saved
 video whose frames cannot be prepared uses an explanatory placeholder so the
 session can continue; a read result reports the problem and retains its source.
-Switching to a text-only model also derives a placeholder without erasing video.
+Interrupting optional frame preparation still commits a completed tool read and
+its original bytes. Preparation failures are cached for that source in the current
+process, so encoding and later turns do not retry the decoder; read or attach the
+clip again to retry. Switching to a text-only model also derives a placeholder
+without erasing video.
+
+Rust embedders call `VideoMedia::prepare_frames().await` before synchronous
+lowering or encoding. `sampled_frames()` and `cached_frames()` consume local
+prepared state only, including while a decoder is running. `AiClient` prepares
+cold request videos asynchronously; the agent also prepares resumed session bytes
+before request/replay projection, inspecting only newly encountered entries.
 
 For Pi compatibility, the reference defines only `ImageContent` for binary visual
 input (`packages/ai/src/types.ts:438–442`), sniffs still images

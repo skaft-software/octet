@@ -790,6 +790,7 @@ impl AiClient {
         }
         req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
         crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
+        crate::video::prepare_message_frames(model, &req.messages).await;
         let parts = crate::protocol::openai_responses::build_request(model, &req)?;
         if parts.body.len() > 64 * 1024 * 1024 {
             return Err(DecodeError::ResponseTooLarge.into());
@@ -919,6 +920,8 @@ impl AiClient {
         crate::catalog::validate_endpoint(&prepared.endpoint)?;
         crate::catalog::validate_model_spec(&prepared.spec)?;
         // Validate before a potentially rotating credential exchange.
+        crate::video::prepare_message_frames(&prepared, &request.messages).await;
+        crate::video::prepare_message_frames(&prepared, &warm_request.messages).await;
         crate::protocol::openai_responses::build_request(&prepared, &request)?;
         crate::protocol::openai_responses::build_request(&prepared, &warm_request)?;
         if let crate::Auth::Dynamic(resolver) = &prepared.endpoint.auth {
@@ -966,6 +969,7 @@ impl AiClient {
         let mut req = req;
         req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
         crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
+        crate::video::prepare_message_frames(model, &req.messages).await;
         let parts = crate::protocol::openai_responses::build_request(model, &req)?;
         if self.request_proxy(&parts.url)?.is_some() {
             return Ok(());
@@ -1083,6 +1087,7 @@ impl AiClient {
             )
             .into());
         }
+        crate::video::prepare_message_frames(model, &req.messages).await;
         if let Some(transport) = host_transport {
             // Keep host-mediated transports on the canonical side of the same
             // replay-history and capability boundary as HTTP codecs. Unlike a
@@ -1881,6 +1886,7 @@ impl AiClient {
         crate::catalog::validate_model_spec(&model.spec)?;
         Self::validate_deferred_overrides(&overrides)?;
         let transport = self.deferred_endpoint_transport(model)?;
+        crate::video::prepare_message_frames(model, &req.messages).await;
         let (request, diagnostics) = prepare_host_request(model, req)?;
         self.mark_request_dispatch();
         let stream = transport

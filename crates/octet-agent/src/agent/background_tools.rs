@@ -14,6 +14,7 @@ pub(super) struct BackgroundTools {
     jobs: VecDeque<BackgroundJob>,
     /// The run's read-wave width; a wholly eligible batch never exceeds it.
     capacity: usize,
+    abort: Arc<AbortFlag>,
 }
 
 impl Drop for BackgroundTools {
@@ -29,10 +30,11 @@ impl Drop for BackgroundTools {
 }
 
 impl BackgroundTools {
-    pub(super) fn new(capacity: usize) -> Self {
+    pub(super) fn new(capacity: usize, abort: Arc<AbortFlag>) -> Self {
         Self {
             jobs: VecDeque::new(),
             capacity,
+            abort,
         }
     }
 
@@ -173,6 +175,7 @@ impl BackgroundTools {
                 decision,
             });
         }
+        prepare_tool_result_frames(&execution.result, model, Some(&self.abort)).await;
         let (message, accepted_media, text, is_error, details) = lower_tool_result(
             call.id.clone(),
             &execution.result,
@@ -297,6 +300,7 @@ mod tests {
                 completed: None,
             }]),
             capacity: MIN_PARALLEL_READ_WAVE_WIDTH,
+            abort: Arc::new(AbortFlag::default()),
         };
         let sandbox = SandboxConfig::new(directory.path());
         let context = ContextTracker::default();
@@ -309,7 +313,7 @@ mod tests {
                     &sandbox,
                     &context,
                     &mut usage,
-                    &mut None
+                    &mut None,
                 )
                 .await
                 .is_err());

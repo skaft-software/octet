@@ -9,7 +9,10 @@ use std::{
     borrow::Cow,
     fs,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -33,10 +36,54 @@ pub struct VideoFrame {
     pub image: crate::ImageMedia,
 }
 
-pub(crate) type FrameCache = Arc<Mutex<Option<(Bytes, Arc<Vec<VideoFrame>>)>>>;
+type PreparedFrames = Result<Arc<Vec<VideoFrame>>, VideoPreparationError>;
 
-fn error(message: &str) -> AiError {
-    crate::error::ConfigError::Parse(format!("video preparation: {message}")).into()
+#[derive(Debug, Default)]
+pub(crate) struct FramePreparation {
+    // Never held while decoding or waiting for a worker.
+    outcome: Mutex<Option<(Bytes, PreparedFrames)>>,
+    worker: Arc<tokio::sync::Mutex<()>>,
+}
+
+pub(crate) type FrameCache = Arc<FramePreparation>;
+
+/// A local, payload-free video preparation failure.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("video preparation: {0}")]
+pub struct VideoPreparationError(&'static str);
+
+impl From<VideoPreparationError> for AiError {
+    fn from(error: VideoPreparationError) -> Self {
+        crate::ConfigError::VideoPreparation(error).into()
+    }
+}
+
+fn error(message: &'static str) -> VideoPreparationError {
+    VideoPreparationError(message)
+}
+
+const TIMED_OUT: &str = "decoder exceeded the 30-second preparation deadline; use a shorter clip";
+const CANCELLED: &str = "cancelled; read or attach the clip again to retry frame preparation";
+
+struct CancelPreparation {
+    video: VideoMedia,
+    cancelled: Arc<AtomicBool>,
+    completed: bool,
+    deadline: Instant,
+}
+
+impl Drop for CancelPreparation {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancelled.store(true, Ordering::Release);
+            self.video
+                .store_frames(Err(error(if Instant::now() >= self.deadline {
+                    TIMED_OUT
+                } else {
+                    CANCELLED
+                })));
+        }
+    }
 }
 
 /// Recognized local video containers. Content is validated by the decoder when
@@ -64,53 +111,120 @@ pub fn video_mime(extension: &str) -> Option<mime::Mime> {
 /// Validate raw-byte admission independently of the selected wire route.
 pub fn validate_video(video: &VideoMedia) -> Result<(), AiError> {
     if video.data.is_empty() || video.data.len() > MAX_VIDEO_BYTES {
-        return Err(error(
-            "video must contain 1 byte to 10 MiB; use a smaller clip",
-        ));
+        return Err(error("video must contain 1 byte to 10 MiB; use a smaller clip").into());
     }
     if !matches!(video.media_type.type_().as_str(), "video") {
-        return Err(error("expected a video MIME type"));
+        return Err(error("expected a video MIME type").into());
     }
     Ok(())
 }
 
 impl VideoMedia {
-    /// Already prepared frames only; presentation and context accounting never
-    /// spawn decoders. Bytes changed by an embedder invalidate the cache.
-    pub fn cached_frames(&self) -> Option<Arc<Vec<VideoFrame>>> {
+    fn prepared_frames(&self) -> Option<PreparedFrames> {
         self.frames
+            .outcome
             .lock()
             .expect("video frame cache")
             .as_ref()
             .filter(|(source, _)| source == &self.data)
-            .map(|(_, frames)| Arc::clone(frames))
+            .map(|(_, result)| result.clone())
     }
 
-    /// Decode once per immutable source per process. Resume uses durable bytes,
-    /// never the original path. No source bytes or decoder stderr enter errors.
+    fn store_frames(&self, result: PreparedFrames) {
+        *self.frames.outcome.lock().expect("video frame cache") = Some((self.data.clone(), result));
+    }
+
+    /// Already prepared frames only; presentation and context accounting never
+    /// wait for decoders. Bytes changed by an embedder invalidate the cache.
+    pub fn cached_frames(&self) -> Option<Arc<Vec<VideoFrame>>> {
+        self.prepared_frames().and_then(Result::ok)
+    }
+
+    /// Consume prepared state only. Synchronous lowering/encoding never starts
+    /// subprocesses, including when replaying a cold or failed video.
     pub fn sampled_frames(&self) -> Result<Arc<Vec<VideoFrame>>, AiError> {
+        self.prepared_frames()
+            .unwrap_or_else(|| {
+                Err(error(
+                    "frames not prepared; prepare the clip before encoding",
+                ))
+            })
+            .map_err(Into::into)
+    }
+
+    /// Prepare once per immutable source off the driver, caching failures too.
+    /// At most two decoders run per process; queueing and decoding share one
+    /// 30-second deadline. Dropping this future stops and reaps its subprocess.
+    /// Resume uses durable bytes, never the original path.
+    pub async fn prepare_frames(&self) -> Result<Arc<Vec<VideoFrame>>, AiError> {
         validate_video(self)?;
-        let mut cache = self.frames.lock().expect("video frame cache");
-        if let Some((source, frames)) = &*cache {
-            if source == &self.data {
-                return Ok(Arc::clone(frames));
-            }
+        if let Some(result) = self.prepared_frames() {
+            return result.map_err(Into::into);
         }
-        let frames = Arc::new(sample(self)?);
-        *cache = Some((self.data.clone(), Arc::clone(&frames)));
-        Ok(frames)
+        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let deadline = Instant::now() + DEADLINE;
+        let result = tokio::time::timeout(DEADLINE, async {
+            let source = Arc::clone(&self.frames.worker).lock_owned().await;
+            if let Some(result) = self.prepared_frames() {
+                return result;
+            }
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let mut guard = CancelPreparation {
+                video: self.clone(),
+                cancelled: Arc::clone(&cancelled),
+                completed: false,
+                deadline,
+            };
+            let permit = WORKERS.acquire().await.expect("video workers stay open");
+            let video = self.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let (_source, _permit) = (source, permit);
+                let result = sample(&video, deadline, &cancelled).map(Arc::new);
+                // Publication and cancellation use the same short cache lock;
+                // a late worker cannot overwrite its cancelled owner's outcome.
+                let mut cache = video.frames.outcome.lock().expect("video frame cache");
+                if !cancelled.load(Ordering::Acquire) {
+                    *cache = Some((video.data.clone(), result.clone()));
+                }
+                result
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(error(
+                    "decoder worker failed; read or attach the clip again",
+                ))
+            });
+            self.store_frames(worker.clone());
+            guard.completed = true;
+            worker
+        })
+        .await;
+        match result {
+            Ok(result) => result.map_err(Into::into),
+            Err(_) => Err(error(TIMED_OUT).into()),
+        }
     }
 }
 
 // Spawn directly, never through a shell. Only local containers are demuxed;
 // playlists/network protocols cannot turn an admitted clip into a remote read.
-fn run(command: &mut Command, deadline: Instant) -> Result<(), AiError> {
+fn run(
+    command: &mut Command,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<(), VideoPreparationError> {
+    check_preparation(deadline, cancelled)?;
     let mut child = command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| error("install ffmpeg and ffprobe on PATH to send video as frames"))?;
     loop {
+        if let Err(error) = check_preparation(deadline, cancelled) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 return if status.success() {
@@ -125,20 +239,35 @@ fn run(command: &mut Command, deadline: Instant) -> Result<(), AiError> {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(error(
-                    "decoder exceeded the 30-second preparation deadline; use a shorter clip",
-                ));
+                return Err(error(TIMED_OUT));
             }
         }
     }
 }
 
-fn sample(video: &VideoMedia) -> Result<Vec<VideoFrame>, AiError> {
+fn check_preparation(
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<(), VideoPreparationError> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(error(CANCELLED))
+    } else if Instant::now() >= deadline {
+        Err(error(TIMED_OUT))
+    } else {
+        Ok(())
+    }
+}
+
+fn sample(
+    video: &VideoMedia,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Vec<VideoFrame>, VideoPreparationError> {
+    check_preparation(deadline, cancelled)?;
     let dir = tempfile::tempdir()
         .map_err(|_| error("cannot create private decoder scratch directory"))?;
     let input = dir.path().join("input");
     fs::write(&input, &video.data).map_err(|_| error("cannot write decoder input"))?;
-    let deadline = Instant::now() + DEADLINE;
     let metadata = dir.path().join("metadata");
     let output =
         fs::File::create(&metadata).map_err(|_| error("cannot create decoder metadata"))?;
@@ -165,6 +294,7 @@ fn sample(video: &VideoMedia) -> Result<Vec<VideoFrame>, AiError> {
             .arg(&input)
             .stdout(output),
         deadline,
+        cancelled,
     )?;
     if fs::metadata(&metadata)
         .map_err(|_| error("missing video metadata"))?
@@ -236,6 +366,7 @@ fn sample(video: &VideoMedia) -> Result<Vec<VideoFrame>, AiError> {
                 .arg(&output)
                 .stdout(Stdio::null()),
             deadline,
+            cancelled,
         )?;
         let len = fs::metadata(&output)
             .map_err(|_| error("video has no frame at a sampled timestamp"))?
@@ -261,6 +392,39 @@ fn sample(video: &VideoMedia) -> Result<Vec<VideoFrame>, AiError> {
         fs::remove_file(output).map_err(|_| error("cannot remove sampled frame scratch"))?;
     }
     Ok(frames)
+}
+
+/// Prepare video sources before synchronous request/replay projection. Failed
+/// sources remain in canonical history and project an actionable placeholder.
+/// Native video and text-only routes never start a decoder. Returns whether
+/// cold state was encountered, so owners can invalidate derived context sizes.
+pub async fn prepare_message_frames(model: &crate::Model, messages: &[Message]) -> bool {
+    if model.spec.supports_native_video() || !model.spec.supports_video_input() {
+        return false;
+    }
+    let mut changed = false;
+    for message in messages {
+        if let Message::User(user) = message {
+            for part in &user.content {
+                match part {
+                    UserPart::Media(Media::Video(video)) => {
+                        changed |= video.prepared_frames().is_none();
+                        let _ = video.prepare_frames().await;
+                    }
+                    UserPart::ToolResult(result) => {
+                        for part in &result.content {
+                            if let ToolResultPart::Media(Media::Video(video)) = part {
+                                changed |= video.prepared_frames().is_none();
+                                let _ = video.prepare_frames().await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Project owned host requests without cloning conversation history. Native

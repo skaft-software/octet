@@ -107,18 +107,28 @@ pub(super) async fn prepare_user_images(
         CustomMessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, CustomMessagePart::Image { .. })))) {
         return Ok(input);
     }
+    if !model.spec.supports_native_video() {
+        for part in &input.parts {
+            if let InputPart::Media(Media::Video(video)) = part {
+                let preparation = video.prepare_frames();
+                if let Some(abort) = abort {
+                    tokio::select! {
+                        biased;
+                        _ = abort.wait() => return Err(AgentError::Cancelled),
+                        result = preparation => { result?; }
+                    }
+                } else {
+                    preparation.await?;
+                }
+            }
+        }
+    }
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = CancelBlockingImages(Arc::clone(&cancelled));
-    let native_video = model.spec.supports_native_video();
     let worker = tokio::task::spawn_blocking(move || {
         for part in &mut input.parts {
             if cancelled.load(Ordering::Acquire) {
                 return Err(AgentError::Cancelled);
-            }
-            if let InputPart::Media(Media::Video(video)) = part {
-                if !native_video {
-                    video.sampled_frames()?;
-                }
             }
             if let InputPart::Media(Media::Image(image)) = part {
                 *image = octet_ai::prepare_user_image(image, limits)?;
