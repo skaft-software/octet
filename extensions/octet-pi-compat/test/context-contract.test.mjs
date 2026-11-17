@@ -430,3 +430,33 @@ test('input skips coded callback faults and malformed transforms atomically', as
   assert.deepEqual(seen, ['raw', 'eA==']);
   assert.equal(errors.length, 1); // diagnostics are deduplicated per factory/stage
 });
+
+for (const member of ['block', 'reason', 'terminate']) test(`tool guard isolates a throwing ${member} getter and continues`, async () => {
+  const { runtime, store, errors } = harness();
+  let later = 0;
+  runtime.events.set('tool_call', [
+    { factory: 0, handler() { return { block: true, get [member]() { throw new Error('PRIVATE result'); } }; } },
+    { factory: 1, handler() { later++; return { block: true, reason: 'accepted' }; } },
+  ]);
+  assert.deepEqual(await runtime.runEvent('tool_call', {}, store, { veto: true }), { action: 'deny', reason: 'accepted' });
+  assert.equal(later, 1);
+  assert.match(errors[0].message, /First:.*tool_call hook failed and was skipped/);
+  assert.doesNotMatch(errors[0].message, /PRIVATE/);
+});
+
+test('tool guard consumes result fields once under bounded dispatcher supervision', async () => {
+  const { runtime, store } = harness();
+  let reads = 0;
+  runtime.events.set('tool_call', [{ factory: 0, handler() { return {
+    get block() {
+      reads++;
+      const callback = runtime.dispatcher.snapshot().callbacks.find(callback => callback.kind === 'tool_call');
+      assert.ok(callback, 'result processing still owns a dispatcher record');
+      assert.ok(Number.isFinite(callback.remaining_ms));
+      return true;
+    }, reason: 'accepted',
+  }; } }]);
+  assert.deepEqual(await runtime.runEvent('tool_call', {}, store, { veto: true }), { action: 'deny', reason: 'accepted' });
+  assert.equal(reads, 1);
+  assert.equal(runtime.dispatcher.snapshot().callbacks.length, 0);
+});

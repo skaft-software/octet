@@ -123,7 +123,13 @@ later factories and subsequent turns still run. Permission/veto hooks and owner 
 to fail closed; cancellation remains enforced. A later callback timeout does not
 discard host-operation failures already recorded at the live boundary, but an
 operation failure arriving after that boundary settles cannot retroactively
-change its response. Callback wait budgets do not bound a subsequent flush of
+change its response. Tool-call guards retain bounded dispatcher supervision while
+reading and validating their result, until the veto is plain host-safe data.
+Throwing result getters are reported by factory and `tool_call` stage; later
+guards still run. Synchronously stuck getters retain the bounded record so native
+supervision can retire that process generation without replaying the callback.
+Input hooks and open UI dialogs keep their unbounded waits.
+Callback wait budgets do not bound a subsequent flush of
 pending tracked host operations, transport or synchronously blocked JavaScript;
 the native deadline can still expire. See [slow or stalled extensions](../../docs/pi-compatibility.md#slow-or-stalled-extensions). This is
 isolation, not API parity. Print and JSON output both use the native `print`

@@ -894,7 +894,25 @@ export class Runtime {
         const childStore = { ...store, factory: entry.factory };
         let result;
         try {
-          const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore))));
+          const run = await budget.run(entry, childStore, () => this.scope.run(childStore, () => entry.handler(value, createContext(this, childStore))), {
+            consume: result => this.scope.run(childStore, () => {
+              if (result === undefined) return;
+              if (veto && result && typeof result === 'object' && Object.keys(result).every(k => ['block', 'reason', 'terminate'].includes(k))) {
+                // Pi packages/coding-agent/src/core/extensions/runner.ts:1255-1259
+                // consumes block after awaiting the handler. Keep that read and
+                // the complete host-bound snapshot inside our child supervision.
+                if (!result.block) return;
+                const terminate = result.terminate;
+                if (terminate !== undefined && typeof terminate !== 'boolean') invalid('tool_call terminate');
+                const reason = result.reason ?? 'Blocked by Pi extension';
+                return { terminate, reason: bounded(reason, 'tool_call reason', 262144, { controls: true }) };
+              }
+              if (event.startsWith('session_before_') || veto) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+              // Pi ignores observation return values; never inspect them.
+              // Retain only their presence for a detached callback's warning.
+              return null;
+            }),
+          });
           store.controller.signal.throwIfAborted();
           // A stalled callback is skipped; only an explicit block vetoes.
           if (!run.ran) {
@@ -912,16 +930,9 @@ export class Runtime {
           continue;
         }
         store.controller.signal.throwIfAborted();
-        if (result !== undefined) {
-          if (veto && result && typeof result === 'object' && Object.keys(result).every(k => ['block', 'reason', 'terminate'].includes(k))) {
-            if (result.block) {
-              if (result.terminate !== undefined && typeof result.terminate !== 'boolean') invalid('tool_call terminate');
-              store.toolTermination = result.terminate;
-              return { action: 'deny', reason: result.reason ?? 'Blocked by Pi extension' };
-            }
-          } else if (event.startsWith('session_before_')) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
-          // Pi ignores other handlers' return values.
-          else if (veto) unsupported(`${event} result`, 'wire cannot apply this event transformation or veto');
+        if (result != null) {
+          store.toolTermination = result.terminate;
+          return { action: 'deny', reason: result.reason };
         }
       }
       return { action: 'continue' };

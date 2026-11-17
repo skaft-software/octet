@@ -223,7 +223,10 @@ export class HookBudget {
     const pendingBefore = new Set(store.pending);
     const userWait = child.userWait = new UserWait(() => { this.runtime.dispatcher?.publish().catch(error => this.runtime.backgroundError(error)); });
     const callback = await this.runtime.dispatcher?.begin(child, this.event, this.describe(entry), budget ? waited : undefined);
-    const settled = Promise.resolve().then(call).then(value => ({ value }), error => ({ error }));
+    // Consume extension-owned results before completing supervision: getters,
+    // proxies and serialization may execute just as much JS as the handler.
+    const settled = Promise.resolve().then(call).then(value => options.consume ? options.consume(value) : value)
+      .then(value => ({ value }), error => ({ error }));
     if (budget) entry.busy = true;
     settled.then(async late => {
       // Pi packages/agent/src/agent-loop.ts:434-450 delivers every stream

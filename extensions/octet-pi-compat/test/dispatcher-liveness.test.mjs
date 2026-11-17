@@ -159,3 +159,22 @@ test('200 cancelled never-settling inputs leave capacity for a healthy input', a
   assert.ok(snapshot.callbacks.every(callback => callback.interrupted));
   await peer.close();
 });
+
+for (const member of ['block', 'reason']) test(`a looping tool guard ${member} getter retains bounded native supervision`, async t => {
+  const path = await fixture(t, `export default pi => pi.on('tool_call', () => ({
+    block: true, get ${member}() { process.stderr.write('getter entered\\n'); while (true) {} }
+  }));`);
+  const peer = launch(t, [path], {env:{OCTET_PI_HANDLER_BUDGET_MS:'30'}});
+  await peer.init(['dispatcher_liveness_v1']);
+  guard(peer).response.catch(() => {}); // retirement rejects the synthetic host waiter
+  // The synthetic peer cannot preempt synchronous JS itself. Model the native
+  // supervisor's last published record, then retire only this process.
+  await peer.waitStderr(/getter entered/);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const records = peer.seen.filter(frame => frame.method === 'status/contribution' && frame.params.liveness);
+  const callback = records.at(-1).params.liveness.callbacks.find(callback => callback.kind === 'tool_call');
+  assert.ok(callback, 'native supervisor must retain the callback until consumption completes');
+  assert.ok(Number.isFinite(callback.remaining_ms));
+  assert.equal(callback.extension, path);
+  peer.child.kill('SIGKILL');
+});
