@@ -186,6 +186,10 @@ These do not run on every push. Trigger them deliberately.
 | `provider-acceptance.yml` | manual, needs a candidate SHA | live provider behaviour against real endpoints |
 | `production-panic-audit.yml` | manual, needs a candidate SHA and confirmation | that the candidate adds no reachable production panic |
 
+The AddressSanitizer lane includes Python runtime setup verification. Its archive
+fixtures own a bounded set of digest pins, one per supported target, so repeated
+checks allocate no leaked static strings and the sanitizer remains enabled.
+
 Provider acceptance and the panic audit may require credentials or real
 hardware. They and the live models.dev freshness check are separate from the
 required CI workflow, not hidden prerequisites for a green build.

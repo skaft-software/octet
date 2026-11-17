@@ -1048,17 +1048,40 @@ mod tests {
     }
 
     fn fixture_asset(target: Asset) -> (Asset, Vec<u8>) {
-        let name = format!("python/{}", target.interpreter());
-        let source = archive(&[(&name, b'0', "", b"fixture - never executed")]);
-        let digest = Box::leak(format!("{:x}", Sha256::digest(&source)).into_boxed_str());
+        // Asset borrows static pins. Retain one owned fixture per catalogue
+        // target instead of leaking a fresh digest on every test invocation.
+        static FIXTURES: std::sync::LazyLock<BTreeMap<&str, (String, Vec<u8>)>> =
+            std::sync::LazyLock::new(|| {
+                ASSETS
+                    .iter()
+                    .map(|asset| {
+                        let name = format!("python/{}", asset.interpreter());
+                        let source = archive(&[(&name, b'0', "", b"fixture - never executed")]);
+                        let digest = format!("{:x}", Sha256::digest(&source));
+                        (asset.target, (digest, source))
+                    })
+                    .collect()
+            });
+        let (digest, source) = FIXTURES.get(target.target).unwrap();
         (
             Asset {
                 target: target.target,
                 bytes: source.len(),
                 digest,
             },
-            source,
+            source.clone(),
         )
+    }
+
+    #[test]
+    fn fixture_assets_reuse_bounded_owned_digest_pins() {
+        for target in ASSETS {
+            let (first, source) = fixture_asset(*target);
+            let (second, repeated) = fixture_asset(*target);
+            assert!(std::ptr::eq(first.digest, second.digest));
+            assert_eq!(source, repeated);
+            assert_eq!(first.digest, format!("{:x}", Sha256::digest(&source)));
+        }
     }
 
     fn cached_fixture(root: &Path, target: Asset) -> (Asset, PathBuf) {
