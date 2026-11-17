@@ -160,6 +160,8 @@ export function registerTool(runtime, factory, definition) {
   if (!runtime.loaded) { runtime.tools.set(definition.name, entry); return; }
   runtime.require('dynamic_tools');
   const store = runtime.current(factory);
+  // Registration changes the process-wide catalog, not one worker's session.
+  runtime.assertOwner(store);
   // Pi registration is synchronous void. Reuse the transport worker so a
   // following getter sees the host ACK, not an optimistic local catalog.
   const result = runtime.transport.requestSync('tools/register', { tools: [toolWire(definition.name, entry)] }, { signal: store.controller.signal });

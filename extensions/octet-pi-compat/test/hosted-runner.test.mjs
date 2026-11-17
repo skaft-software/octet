@@ -15,7 +15,7 @@ function host() {
     scope: new AsyncLocalStorage(), entrypoint: factory => factory,
     features: new Set(['tool_composition_v1', 'composition_builtin_tools_v1', 'composition_preflight_v1']),
     require(feature) { assert.ok(this.features.has(feature), feature); },
-    assertOwner(value) { assert.equal(value.state, state); assert.ok(state.alive); },
+    assertSessionOwner(value) { assert.equal(value.state, state); assert.ok(state.alive); },
     async runEvent(type, event, bound) { assert.equal(bound, store); events.push({ type, event }); },
     async hostCall(method, params, bound) {
       assert.equal(bound, store); calls.push({ method, params });

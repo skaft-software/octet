@@ -2373,10 +2373,14 @@ impl Agent {
                     progress: ToolProgressSink::null(),
                     cancellation: CancellationToken::default(),
                 };
+                // A session-bound permission hook needs this writer polled
+                // through the causal driver, including in delegated sessions.
+                // Detached/parallel waves currently have no such writer seam.
+                let hooks_need_session_driver = tool_call_hooks.iter().any(|hook| hook.requires_session_driver());
                 // Defer only a complete, bounded batch of independent host
                 // observations. Mixed/sync/effectful batches keep ordinary order.
                 // Hard ceilings serialize tool accounting before another request.
-                if model.responses_features().async_tools
+                if !hooks_need_session_driver && model.responses_features().async_tools
                     && max_session_tokens.is_none() && max_session_cost_microdollars.is_none()
                     && calls.len() <= parallel_read_wave_width
                     && !abort.is_set()
@@ -2426,7 +2430,7 @@ impl Agent {
                 while call_index < calls.len() {
                     // Only two or more remaining calls can overlap; each is
                     // classified once while the wave is scanned.
-                    if parallel_results.is_empty()
+                    if !hooks_need_session_driver && parallel_results.is_empty()
                         && !abort.is_set()
                         && calls.len() - call_index > 1
                     {
@@ -2821,7 +2825,7 @@ impl Agent {
                                     .and_then(|head| session.resolve_active_skills(&head).ok())
                                     .map(|state| state.active_skills)
                                     .unwrap_or_default();
-                                let (mut session_driver, session_route) = crate::extension_process::session_leaf::driver::SessionDriver::new(resource_owner.clone());
+                                let (mut session_driver, session_route) = crate::extension_process::session_leaf::driver::SessionDriver::new(resource_owner.clone(), session_id.clone());
                                 let mut inference_binding = inference_resolver.as_ref().map(|resolver| {
                                     tool_inference::InferenceDriver::new(
                                         session.resource_owner_key(), call.id.0.clone(), session_id.clone(),

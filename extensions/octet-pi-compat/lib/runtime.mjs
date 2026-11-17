@@ -254,15 +254,15 @@ export class Runtime {
   }
   require(feature) { if (!this.features.has(feature)) unsupportedAPI(feature, 'feature was not negotiated'); }
   assertSessionOwner(store) {
-    if (!store?.state?.owner || !store.state.alive) throw rpcError(-32002, 'not_foreground_owner retained context is unavailable');
+    if (!store?.state?.owner || !store.state.alive) throw rpcError(-32002, 'not_foreground_owner retained context is unavailable at session binding; retry from the active session');
   }
   assertOwner(store) {
     this.assertSessionOwner(store);
     // Pi retains contexts across turns, not session replacement (pi-reference/
     // node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:482-491,613-620).
     // Private background bindings may read their own session, but sharing a
-    // process/workspace cannot grant the foreground's native UI/write authority.
-    if (store.state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session');
+    // process/workspace cannot grant the foreground's terminal/composer authority.
+    if (store.state !== this.foreground) throw rpcError(-32002, 'not_foreground_owner context belongs to an inactive session at terminal admission; use the lead session for UI actions');
   }
   assertFactory(factory) {
     if (this.failedFactories.has(factory)) throw rpcError(-32002, 'failed extension factory is unavailable');
@@ -270,7 +270,10 @@ export class Runtime {
   current(factory) {
     this.assertFactory(factory);
     const s = this.scope.getStore();
-    this.assertOwner(s); return { ...s, factory };
+    // Pi's runner resolves session APIs against its own sessionManager, not a
+    // terminal lease (packages/coding-agent/src/core/extensions/runner.ts:884-920).
+    // Native workers share this process but retain distinct issued owners.
+    this.assertSessionOwner(s); return { ...s, factory };
   }
   hostCall(method, params, store = this.scope.getStore(), requestOptions = {}) {
     store = compactionCallbackStore(this, store);
@@ -280,7 +283,10 @@ export class Runtime {
     const live = this.active.get(store.id)?.controller === store.controller && store.live;
     const retained = retainedMethods.has(method) && Boolean(store.state?.owner);
     if (!live && !retained) throw rpcError(-32002, `not_foreground_owner ${method} requires a live request`);
-    if (retained || retainedMethods.has(method) && method !== 'shortcut/register') this.assertOwner(store);
+    if (retained || retainedMethods.has(method) && method !== 'shortcut/register') {
+      this.assertSessionOwner(store);
+      if (['ui/open', 'ui/close', 'composer/get', 'composer/set', 'composer/insert', 'composer/history', 'shortcut/register'].includes(method)) this.assertOwner(store);
+    }
     const surface = store.surface, checkpoint = method === 'composer/set' && params.editor_checkpoint;
     const independentCheckpoint = retained && surface?.store === store && surface.placement === 'editor'
       && surface.opened && surface.editor && !surface.editor.retired
@@ -313,7 +319,7 @@ export class Runtime {
     return response.then(result => {
       // This correlated receipt, not a UI mount or an asynchronous snapshot,
       // commits read-after-write facts. A retired owner cannot accept a late ACK.
-      store.controller.signal.throwIfAborted(); this.assertOwner(store);
+      store.controller.signal.throwIfAborted(); this.assertSessionOwner(store);
       fields(result, ['name'], 'session name receipt');
       const name = result.name === null ? null : bounded(result.name, 'committed session name', 4096);
       store.state.host.session_name = name;

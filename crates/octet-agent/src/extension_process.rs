@@ -722,6 +722,8 @@ impl_owner_scoped_host_request!(ExtensionRemoteUiOpenRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiCloseRequest);
 impl_owner_scoped_host_request!(ExtensionRemoteUiChromeRequest);
 
+#[cfg(all(test, feature = "agent", unix))]
+mod fleet_owner_tests;
 #[cfg(test)]
 pub(crate) mod pi_fixture;
 #[cfg(test)]

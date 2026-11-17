@@ -170,6 +170,184 @@ fn reload_history_rebind_preserves_unavailability_and_refuses_new_generation_quo
     assert_eq!(replacement.retained(), (0, 0, 0));
 }
 
+struct FleetCapture(Arc<StdMutex<Vec<octet_ai::Request>>>);
+#[async_trait::async_trait]
+impl octet_ai::HostStreamTransport for FleetCapture {
+    async fn stream(
+        &self,
+        model: octet_ai::HostStreamModel,
+        request: octet_ai::Request,
+        _: Vec<octet_ai::Diagnostic>,
+    ) -> Result<octet_ai::ResponseStream, octet_ai::AiError> {
+        self.0.lock().unwrap().push(request);
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(octet_ai::StreamEvent::Started { response_id: None }),
+            Ok(octet_ai::StreamEvent::TextStart { index: 0 }),
+            Ok(octet_ai::StreamEvent::TextDelta {
+                index: 0,
+                delta: "answer".into(),
+            }),
+            Ok(octet_ai::StreamEvent::TextEnd { index: 0 }),
+            Ok(octet_ai::StreamEvent::Finished(octet_ai::Response {
+                message: octet_ai::AssistantMessage {
+                    model: model.id,
+                    protocol: model.protocol,
+                    content: vec![octet_ai::AssistantPart::Text("answer".into())],
+                },
+                stop_reason: octet_ai::StopReason::EndTurn,
+                usage: octet_ai::Usage::default(),
+                cost: Some(octet_ai::Cost::default()),
+                response_id: None,
+                responses_output: None,
+                deferred: None,
+                inference: None,
+                diagnostics: Vec::new(),
+            })),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn reload_with_unavailable_history_preserves_lead_tools_and_child_reports() {
+    use crate::{Agent, AgentConfig, CoreTools, EffectBroker, ExtensionHost, SandboxConfig};
+    use octet_ai::{CacheRetention, ModelCatalog, ModelId, ReasoningConfig, ReasoningMode};
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp.path().join("fleet-owner.mjs");
+    std::fs::write(
+        &factory,
+        r#"export default pi => {
+      pi.on('tool_call', () => { pi.getThinkingLevel(); });
+      pi.on('session_start', () => {});
+    };"#,
+    )
+    .unwrap();
+    let manifest_path =
+        crate::extension_process::pi_fixture::capture(temp.path(), &[factory]).await;
+    let manifest = ExtensionManifest::load(&manifest_path).unwrap();
+    let mut config = ExtensionRuntimeConfig::new(temp.path());
+    config.supervise = false;
+    config.agent_sessions = true;
+    config.host_state.has_ui = Some(false);
+    config.host_state.reasoning = Some("off".into());
+    let process = ExtensionProcess::start(
+        trusted_descriptor(manifest_path.parent().unwrap(), manifest),
+        config,
+    )
+    .await
+    .unwrap();
+    let mut host = ExtensionHost::new();
+    host.load(&CoreTools);
+    process.register(&mut host);
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let client = octet_ai::AiClient::new();
+    let captures = Arc::new(StdMutex::new(Vec::new()));
+    client.register_host_stream_transport(
+        model.endpoint.id.clone(),
+        Arc::new(FleetCapture(captures.clone())),
+    );
+    let mut agent = Agent::new(AgentConfig {
+        client,
+        model: model.clone(),
+        session: Session::create(temp.path().join("lead.jsonl")).unwrap(),
+        extensions: host,
+        system: "fleet owner".into(),
+        sandbox: SandboxConfig::new(temp.path()),
+        effect_broker: EffectBroker::default(),
+        max_turns: Some(3),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    let owner = agent.session().resource_owner_key();
+    process
+        .set_host_state_with_session(process.current_context().host, agent.session())
+        .unwrap();
+    process
+        .start_session_hook_binding(owner.clone())
+        .await
+        .unwrap();
+    agent
+        .enable_v2_delegation_extension_only(crate::DelegationConfig::new(
+            temp.path().join("children"),
+        ))
+        .unwrap();
+    agent.bind_extension_agent_sessions(&process).unwrap();
+    let service = read_std_lock(&process.inner.delegation_service)
+        .clone()
+        .unwrap();
+    for index in 0..16 {
+        service.spawn(&owner, ExtensionDelegationSpawnRequest {
+            task_name:format!("worker-{index}"), message:"offline report".into(), idempotency_key:format!("worker-{index}"),
+            profile:None, fingerprint:None,
+            policy:serde_json::from_value(json!({"tools":["read"], "max_depth":1, "max_concurrent_children":16,"max_output_bytes":4096})).unwrap(),
+        }).unwrap();
+    }
+    let waited = service
+        .wait(
+            &owner,
+            Duration::from_secs(10),
+            &CancellationToken::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waited["timed_out"], false, "{waited}");
+    // A failed publication can leave a bounded history view unavailable. A
+    // lifecycle owner binding must still reach the replacement process: a
+    // read-only history barrier is not permission to retire the lead session.
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let wire_owner = process
+        .current_context_for_resource_owner(owner.clone())
+        .resource_owner
+        .unwrap();
+    lock_std_mutex(&connection.session_leaf.transport)
+        .current
+        .insert(wire_owner, None);
+    process.reload().await.unwrap();
+    // Refreshing authentic history alone must not leave the process in a
+    // permanent background-only state after its session_start was suppressed.
+    process
+        .set_host_state_with_session(process.current_context().host, agent.session())
+        .unwrap();
+    let context = process.current_context_for_resource_owner(owner.clone());
+    for name in ["read", "bash", "subagent_status", "subagent_wait"] {
+        process
+            .run_hook(
+                ExtensionHook::BeforeToolCall,
+                json!({"name":name,"arguments":{},"tool_call_id":name}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+    }
+    let listed = service.list(&owner).unwrap();
+    assert_eq!(listed["agents"].as_array().unwrap().len(), 16);
+    let waited = service
+        .wait(
+            &owner,
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        )
+        .await
+        .unwrap();
+    for child in waited["snapshot"]["agents"].as_array().unwrap() {
+        assert_eq!(child["status"]["state"], "completed", "{child}");
+        assert!(child.to_string().contains("answer"), "{child}");
+    }
+    // Ordinary inference remains bound to the same root after the child wave.
+    assert_eq!(
+        agent.complete("lead continues").await.unwrap().text,
+        "answer"
+    );
+    assert_eq!(agent.session().resource_owner_key(), owner);
+    assert!(captures.lock().unwrap().len() >= 17);
+    assert!(process.shutdown().await);
+}
+
 #[tokio::test]
 async fn reload_session_start_reads_authentic_nonempty_history_before_frontend_refresh() {
     assert_reload_session_history(false).await;

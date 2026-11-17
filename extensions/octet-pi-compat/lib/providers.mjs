@@ -288,6 +288,7 @@ function mutation(runtime, factory, name, entry) {
     if (entry?.inherited) runtime.require('provider_inheritance_v1');
     if (needsGoogle(entry)) runtime.require('provider_google_generative_ai_v1');
     store = runtime.current(factory);
+    runtime.assertOwner(store); // Registration changes the process-wide provider catalog.
     store.controller.signal.throwIfAborted();
   }
   const revision = Symbol();

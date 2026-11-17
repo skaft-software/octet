@@ -950,12 +950,19 @@ pub(super) fn attach_request_session_mirror(
     owner: Option<&ExtensionResourceOwner>,
     params: &mut serde_json::Value,
 ) -> Result<(), ExtensionRuntimeError> {
+    let lifecycle = params
+        .get("hook")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|hook| matches!(hook, "session_start" | "session_end"));
     if let Some(owner) = owner {
         if let Some(host) = params
             .get_mut("context")
             .and_then(|context| context.get_mut("host"))
         {
-            attach_session_mirror(connection, owner, host, false)?;
+            // A lifecycle binding must survive an unavailable read-only view.
+            // Exact owner/generation checks still apply; null history remains
+            // unavailable to callbacks instead of preventing session_start.
+            attach_session_mirror(connection, owner, host, lifecycle)?;
         }
     }
     Ok(())

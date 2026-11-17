@@ -22,7 +22,7 @@ function replacementPublication() {
   const state = { key: ownerKey(next), owner: next, alive: true, host: { session_id: 'replacement', session_view_revision: 2, session_entries: null } };
   const store = { method: 'command/execute', controller, state: { key: ownerKey(owner), owner } };
   const runtime = {
-    assertOwner: fresh => assert.ok(fresh === store || fresh.state === state), require() {}, track: promise => promise,
+    assertSessionOwner: fresh => assert.ok(fresh === store || fresh.state === state), require() {}, track: promise => promise,
     hostCall: async () => ({ session_id: 'replacement' }), foregroundFor: async () => state,
     scope: { run: (_store, callback) => callback() },
     sessionFacts: fresh => runtime.sessionTransport.host(fresh),

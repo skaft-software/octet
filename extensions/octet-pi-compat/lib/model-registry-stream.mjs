@@ -122,7 +122,7 @@ export function consumeRegistryUsageEcho(runtime, store, usage) {
     || store.controller.signal.aborted || runtime.active.get(store.id)?.controller !== store.controller
     || receipt.id !== store.id || receipt.state !== store.state || receipt.owner !== ownerKey(store.state.owner)
     || !isDeepStrictEqual(usage, receipt.usage)) unsupported('tool result usage', 'only an exact settled native inference echo from this live invocation is supported');
-  runtime.assertOwner(store);
+  runtime.assertSessionOwner(store);
   receipts.delete(store.controller);
 }
 export function streamRegistryModel(runtime, model, context, options = {}) {
@@ -143,7 +143,7 @@ export function streamRegistryModel(runtime, model, context, options = {}) {
   try {
     runtime.require('nested_inference_v1');
     store = runtime.current();
-    runtime.assertOwner(store);
+    runtime.assertSessionOwner(store);
     store.controller.signal.throwIfAborted();
     if (store.method !== 'tool/call') unsupported('nested inference parent', 'a live model-tool parent is required');
     const selected = { provider: identity(model?.provider), id: identity(model?.id) };
@@ -184,7 +184,7 @@ export function registryInferenceEvent(runtime, params) {
   fields(params, ['inference_id', 'sequence', 'kind', 'payload'], 'nested inference event');
   const job = jobs(runtime).get(params.inference_id);
   if (!job) unsupported('nested inference event', 'no live matching inference');
-  runtime.assertOwner(job.store);
+  runtime.assertSessionOwner(job.store);
   try {
     if (params.sequence !== job.sequence++) invalid('nested inference event sequence');
     const bytes = Buffer.byteLength(JSON.stringify(params));

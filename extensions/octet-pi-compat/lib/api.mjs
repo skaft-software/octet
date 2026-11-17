@@ -141,6 +141,7 @@ export function createAPI(runtime, factory) {
         const previous = runtime.commands.get(key);
         if (previous && previous.factory !== factory) invalid(`registration ${key} belongs to another factory`);
         const s = store();
+        runtime.assertOwner(s); // Process-wide registration stays with the frontend.
         if (runtime.stopping) throw rpcError(-32002, 'host is draining');
         s.controller.signal.throwIfAborted();
         const result = runtime.transport.requestSync('commands/register', {
@@ -160,6 +161,7 @@ export function createAPI(runtime, factory) {
         runtime.assertFactory(factory);
         runtime.require('shortcuts');
         const s = store();
+        runtime.assertOwner(s);
         if (runtime.stopping) throw rpcError(-32002, 'host is draining');
         s.controller.signal.throwIfAborted();
         const nativeName = `pi-runtime-shortcut-${runtime.shortcuts.size}`;

@@ -33,7 +33,7 @@ function publish(store, result) {
 }
 
 export function setModel(runtime, store, model) {
-  runtime.require('session_control_v1'); runtime.assertOwner(store);
+  runtime.require('session_control_v1'); runtime.assertSessionOwner(store);
   if (!model || typeof model !== 'object') invalid('model');
   bounded(model.provider, 'provider', 256); bounded(model.id, 'model id', 256);
   const previousModel = currentModel(store.state.host, runtime);
@@ -41,7 +41,7 @@ export function setModel(runtime, store, model) {
     resource_owner: store.state.owner,
     selection: { operation: 'model', provider: model.provider, id: model.id },
   }, store).then(async result => {
-    store.controller.signal.throwIfAborted(); runtime.assertOwner(store);
+    store.controller.signal.throwIfAborted(); runtime.assertSessionOwner(store);
     const selected = publish(store, result);
     // Pi packages/coding-agent/src/core/agent-session.ts:2542-2581 emits and
     // awaits model_select after committing a changed identity. Native model/select
@@ -57,7 +57,7 @@ export function setModel(runtime, store, model) {
 }
 
 export function setThinkingLevel(runtime, store, level) {
-  runtime.require('session_control_v1'); runtime.assertOwner(store);
+  runtime.require('session_control_v1'); runtime.assertSessionOwner(store);
   if (!levels.has(level)) invalid('thinking level');
   store.controller.signal.throwIfAborted();
   if (runtime.stopping || !Number.isSafeInteger(store.id) || store.id < 0) invalid('owner-bound thinking selection required');

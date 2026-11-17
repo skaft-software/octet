@@ -39,13 +39,13 @@ export function captureChildHost() {
   const runtime = installedRuntime;
   if (!runtime) unsupported('createAgentSession', 'Rust owns agent sessions; a live authenticated host child binding is required (no Pi runtime fallback)');
   const store = runtime.scope.getStore();
-  runtime.assertOwner(store);
+  runtime.assertSessionOwner(store);
   for (const feature of CHILD_FEATURES) runtime.require(feature);
   ownerKey(store.state.owner);
   return {
     identity: store.state, owner: store.state.owner, cwd: store.state.workspace,
     model: store.state.host.model_view, features: runtime.features,
-    assertLive: () => { runtime.assertOwner(store); store.controller.signal.throwIfAborted(); },
+    assertLive: () => { runtime.assertSessionOwner(store); store.controller.signal.throwIfAborted(); },
     request: (method, params) => runtime.hostCall(method, params, store),
     track: promise => runtime.track(promise, store),
   };
@@ -54,7 +54,7 @@ export function captureSettingsHost() {
   const runtime = installedRuntime;
   if (!runtime) unsupported('SettingsManager.create', 'a native settings host is required');
   const store = runtime.scope.getStore();
-  runtime.assertOwner(store);
+  runtime.assertSessionOwner(store);
   ownerKey(store.state.owner);
   return { runtime, store };
 }

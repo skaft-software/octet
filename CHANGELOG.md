@@ -70,6 +70,7 @@
 - Working indicators keep one independent slot below reasoning, text and tools until the run settles.
 - Shell cards keep their cached Pi renderer geometry until the final result frame is ready.
 - Subagent discovery and spawning bind each newly attached extension before its first request.
+- Pi permission hooks retain each worker's session context and keep lead tools and reports available across compaction and adapter restarts.
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
 - Pi working components align with the native spinner column and preserve their spacing within narrow terminal widths.

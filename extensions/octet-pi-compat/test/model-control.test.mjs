@@ -14,7 +14,7 @@ function fixture() {
     runEvent: async (event, value) => { calls.push({ event, value }); },
     stopping: false, active: new Map([[17, { controller }]]),
     require: feature => assert.equal(feature, 'session_control_v1'),
-    assertOwner: value => assert.equal(value, store),
+    assertSessionOwner: value => assert.equal(value, store),
     track: promise => promise,
     hostCall: (method, params) => { calls.push({ method, params }); return runtime.reply; },
     transport: { requestSync: (method, params) => { calls.push({ method, params }); return runtime.receipt; } },

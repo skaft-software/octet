@@ -14,6 +14,7 @@ function fixture() {
   const frames = [], pending = [], store = { controller: new AbortController() };
   const runtime = { initialized: false, stopping: false, features: new Set(['provider_proxy_v1']),
     require: feature => assert.ok(runtime.features.has(feature)), current: () => store,
+    assertOwner: value => assert.equal(value, store),
     track: promise => { pending.push(promise); return promise; }, scope: { run: (_, fn) => fn() },
     backgroundError: error => { throw error; },
     transport: { request: async (method, params) => { frames.push({ method, params }); return { revision: 1 }; }, notify: async (method, params) => { frames.push({ method, params }); } },

@@ -16,6 +16,7 @@ function runtime() {
   const store = { id: 2, state: { owner: { session_id: 's', extension_instance_id: 'i', process_generation: 1 } }, live: true, controller: new AbortController() };
   return { loaded: false, tools: new Map(), nativeSubagentTools: new Set(), features: new Set(['request_progress', 'dynamic_tools', 'active_tools', 'artifacts']),
     scope: new AsyncLocalStorage(), current: () => store, require: () => {}, track: p => p,
+    assertOwner: value => assert.equal(value, store),
     flush: async () => {}, store };
 }
 

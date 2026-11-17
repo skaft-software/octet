@@ -2,7 +2,7 @@
 import { bounded, fields, invalid, strict } from './errors.mjs';
 
 export async function exec(runtime, store, command, args, options = {}) {
-  runtime.require('process_exec_v1'); runtime.assertOwner(store);
+  runtime.require('process_exec_v1'); runtime.assertSessionOwner(store);
   fields(options, ['cwd', 'timeout', 'signal'], 'exec options');
   bounded(command, 'exec command', 131072, { controls: true });
   if (!command || command.includes('\0')) invalid('exec command');

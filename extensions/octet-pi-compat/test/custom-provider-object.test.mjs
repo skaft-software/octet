@@ -24,7 +24,8 @@ function fixture() {
   const frames = [], pending = [], errors = [], store = { controller: new AbortController(), state: {} };
   const runtime = { initialized: false, stopping: false, features: new Set(['provider_proxy_v1']),
     require(feature) { if (!this.features.has(feature)) throw new Error(`unsupported_feature ${feature}`); },
-    current() { assert.ok(this.initialized, 'admitted invocation only'); return store; }, scope: { run: (_, work) => work() },
+    current() { assert.ok(this.initialized, 'admitted invocation only'); return store; },
+    assertOwner(value) { assert.equal(value, store); }, scope: { run: (_, work) => work() },
     hostCall() { assert.fail('native credentials are never consulted for a custom object'); },
     track(promise) { pending.push(promise); promise.catch(() => {}); return promise; }, backgroundError(error) { errors.push(error); },
     transport: { async request(method, params) { frames.push({ method, params: structuredClone(params) }); assert.notEqual(method, 'providers/inherit'); assert.notEqual(method, 'provider/delegate'); return { revision: 1 }; },

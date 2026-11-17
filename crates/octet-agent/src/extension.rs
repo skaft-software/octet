@@ -122,6 +122,13 @@ pub trait EventObserver: Send + Sync {
 /// boundary: the deterministic effect broker always runs first.
 #[async_trait::async_trait]
 pub trait ToolCallHook: Send + Sync {
+    /// Requires the owning Session writer to service invocation-scoped hook
+    /// reads and appends. Such hooks use ordered dispatch instead of detached
+    /// or parallel read waves, which do not poll that writer.
+    fn requires_session_driver(&self) -> bool {
+        false
+    }
+
     /// Runs after argument validation and before effect admission. Returns
     /// replacement arguments, or `None` to keep them; hooks run in order and
     /// each sees the previous replacement. The broker then classifies and

@@ -595,10 +595,17 @@ or full-Pi qualification.
 refuse. With paired session transport, queue-only `runtime.updated` publications
 update an existing live exact owner's retained fact without `remote_ui` or a UI
 mount. They cannot change foreground ownership, history or editor/UI authority,
-and accept no additional host fields. Native foreground actions require the exact
-current state, not merely a matching process, generation or workspace. Retained
+and accept no additional host fields. Session APIs use the exact live owner of
+the callback, including native workers sharing this adapter process. Each worker's
+permission hooks can read its own session and make owner-scoped host requests;
+they do not borrow the lead's session or suppress its hooks. Native workers enter
+through scoped hooks, not the frontend's root `session_start` transition. The
+native writer supplies the actual invocation's session ID and history; hooks that
+need that writer keep ordered dispatch instead of detached or parallel waves.
+Terminal, composer and process-wide registration actions still require the exact
+foreground state, not merely a matching process, generation or workspace. Retained
 same-session contexts survive turn settlement; private background bindings never
-acquire that authority, even before the first foreground binding. Coalesced chrome
+acquire foreground authority, even before the first frontend binding. Coalesced chrome
 setters check at enqueue and again at delivery, dropping cancelled or superseded
 work before any native request. Delayed publications for unknown or retired
 owners are ignored without creating state or reviving action authority; retained
@@ -1155,8 +1162,8 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 
 The recorded base adapter run, with two test files in parallel, is
 **1685 tests: 1652 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
-and the pinned Pi provider fixture, including startup-chrome, subagent-collision
-and session callback-code isolation regressions.
+and the pinned Pi provider fixture, including startup-chrome, subagent-collision,
+session callback-code isolation and live worker session-ownership regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing

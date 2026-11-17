@@ -69,7 +69,7 @@ function receiptMethods(receipt) {
   const store = { method: 'command/execute', state: { owner }, controller: new AbortController() };
   const bindings = [];
   const runtime = {
-    assertOwner: () => {}, require: () => {}, track: p => p,
+    assertSessionOwner: () => {}, require: () => {}, track: p => p,
     sessionFacts: runtimeStore => runtimeStore.state.host,
     prepareSessionReplacement: () => () => assert.fail('cancelled setup must not bind'),
     hostCall: async () => receipt,
@@ -118,7 +118,7 @@ function setupReceipts() {
   let count = 0;
   const runtime = {
     namespace: 'octet-pi-compat', active: new Map([[store.id, store]]),
-    assertOwner: s => { assert.equal(s.state.alive, true); }, require: () => {}, track: p => p,
+    assertSessionOwner: s => { assert.equal(s.state.alive, true); }, require: () => {}, track: p => p,
     sessionFacts: runtimeStore => runtimeStore.state.host,
     scope: { run: (_store, callback) => callback() },
     foregroundFor: () => assert.fail('setup must bind its native creation receipt'),

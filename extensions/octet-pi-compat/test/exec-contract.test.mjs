@@ -7,7 +7,7 @@ import { Runtime } from '../lib/runtime.mjs';
 function fixture(result = { stdout: 'a b', stderr: 'err', code: 7, killed: false }) {
   const calls = [], notices = [];
   const runtime = {
-    require: feature => assert.equal(feature, 'process_exec_v1'), assertOwner() {},
+    require: feature => assert.equal(feature, 'process_exec_v1'), assertSessionOwner() {},
     transport: { childId: 0, notify: async (...args) => { notices.push(args); } },
     hostCall: (method, params, store) => { calls.push({ method, params, store }); ++runtime.transport.childId; return Promise.resolve(result); },
     track: promise => promise, backgroundError: error => { throw error; },
@@ -36,15 +36,15 @@ test('exec can serve a live extension-owned background task after its origin req
   assert.equal(calls[0].options.signal, store.controller.signal);
 });
 
-test('background exec retains the current-session owner fence', async () => {
-  const state = { alive: true, workspace: '/tmp/work', owner: {session_id: 'old'} };
+test('background exec retains the retired-session owner fence', async () => {
+  const state = { alive: false, workspace: '/tmp/work', owner: {session_id: 'old'} };
   const store = { id: 43, live: false, state, controller: new AbortController() };
   const runtime = Object.assign(Object.create(Runtime.prototype), {
     features: new Set(['process_exec_v1']), stopping: false,
     foreground: { alive: true, owner: {session_id: 'new'} }, active: new Map(),
     transport: { childId: 0, closed: false, request() { assert.fail('stale exec reached host'); }, notify: async () => {} },
   });
-  await assert.rejects(exec(runtime, store, '/bin/echo', []), /inactive session/);
+  await assert.rejects(exec(runtime, store, '/bin/echo', []), /retained context is unavailable/);
 });
 
 test('exec keeps command, argv, cwd, timeout and native result without shell joining', async () => {

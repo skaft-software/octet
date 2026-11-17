@@ -23,7 +23,7 @@ export function sessionHeader(host) {
 // wait for the foreground lifecycle driver to commit against the real Session.
 function setupManager(runtime, store) {
   let writable = true;
-  const live = () => { runtime.assertOwner(store); store.controller.signal.throwIfAborted(); };
+  const live = () => { runtime.assertSessionOwner(store); store.controller.signal.throwIfAborted(); };
   // Session facts come from whichever transport delivers them; owner, cwd and
   // workspace stays host-owned and reading them grants no authority.
   const facts = () => { live(); return runtime.sessionFacts(store); };
@@ -127,7 +127,7 @@ async function lease(runtime, store, snapshot) {
 export function sessionMethods(runtime, store, createContext) {
   const command = name => {
     if (store.method !== 'command/execute') unsupportedAPI(`ctx.${name}`, 'command context only');
-    runtime.assertOwner(store);
+    runtime.assertSessionOwner(store);
   };
   const replace = async (name, method, params, withSession, setup) => {
     command(name);
@@ -161,7 +161,7 @@ export function sessionMethods(runtime, store, createContext) {
         // Foreground binding proves ownership, not completion of a newer history
         // publication. Do not expose synchronous getters until that view is ready.
         if (runtime.sessionTransport) await cancellable(runtime.sessionTransport.ready(fresh), fresh.controller.signal);
-        runtime.assertOwner(fresh);
+        runtime.assertSessionOwner(fresh);
         await runtime.scope.run(fresh, () => withSession(createContext(runtime, fresh, true)));
       }
       return { cancelled: false };

@@ -21,6 +21,7 @@ pub(crate) struct DriverRequest {
 
 pub(crate) struct SessionDriver {
     owner: String,
+    session_id: String,
     receiver: mpsc::Receiver<DriverRequest>,
     activations: Vec<DriverActivation>,
 }
@@ -37,6 +38,7 @@ pub(crate) enum DriverEvent {
 }
 
 pub(crate) struct LinkedSessionInvocation {
+    session_id: String,
     process: ExtensionProcess,
     connection: Arc<ProcessConnection>,
     bound: Arc<BoundLeaf>,
@@ -66,11 +68,12 @@ impl SessionDriverRoute {
 }
 
 impl SessionDriver {
-    pub(crate) fn new(owner: String) -> (Self, SessionDriverRoute) {
+    pub(crate) fn new(owner: String, session_id: String) -> (Self, SessionDriverRoute) {
         let (sender, receiver) = mpsc::channel(64);
         (
             Self {
                 owner: owner.clone(),
+                session_id,
                 receiver,
                 activations: Vec::new(),
             },
@@ -217,6 +220,7 @@ impl SessionDriver {
                 .store(view.descriptor.view_revision, Ordering::Release);
         }
         Ok(LinkedSessionInvocation {
+            session_id: self.session_id.clone(),
             process: process.clone(),
             connection,
             bound: Arc::clone(&active.lease.bound),
@@ -274,6 +278,7 @@ impl LinkedSessionInvocation {
         params["session_leaf"] = serde_json::to_value(current).map_err(|_| {
             ExtensionRuntimeError::Protocol("linked session grant unavailable".into())
         })?;
+        params["context"]["host"]["session_id"] = self.session_id.clone().into();
         self.snapshot.attach(&self.connection, params)
     }
 
@@ -281,8 +286,12 @@ impl LinkedSessionInvocation {
         self,
         hook: ExtensionHook,
         payload: serde_json::Value,
-        context: ExtensionExecutionContext,
+        mut context: ExtensionExecutionContext,
     ) -> Result<ExtensionHookOutput, ExtensionRuntimeError> {
+        // The shared process's idle facts describe the frontend, not this
+        // invocation. Pi's runner owns its sessionManager per session
+        // (packages/coding-agent/src/core/extensions/runner.ts:884-920).
+        context.host.session_id = Some(self.session_id.clone());
         if context.resource_owner.as_ref() != Some(&self.bound.snapshot.owner)
             || !self.process.inner.contributions.hooks.contains(&hook)
             || !lock_std_mutex(&self.connection.session_leaf.bound)

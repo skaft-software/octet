@@ -256,7 +256,7 @@ async fn real_agent_tool_body_append_presents_the_operations_single_use_grant() 
 async fn native_driver_route_wrong_owner_refuses_before_activation() {
     let temp = tempfile::tempdir().unwrap();
     let process = process(&temp).await;
-    let (_, route) = SessionDriver::new("real-owner".into());
+    let (_, route) = SessionDriver::new("real-owner".into(), "real-session".into());
     assert!(route.prepare(&process, "foreign-owner").await.is_err());
     let connection = read_std_lock(&process.inner.connection).clone();
     assert!(lock_std_mutex(&connection.session_leaf.bound).is_empty());
@@ -348,8 +348,10 @@ async fn two_native_owner_drivers_share_process_without_foreground_promotion() {
     process
         .set_host_state_with_session(ExtensionHostState::default(), &root)
         .unwrap();
-    let (mut root_driver, root_route) = SessionDriver::new(root_owner.clone());
-    let (mut child_driver, child_route) = SessionDriver::new(child_owner.clone());
+    let (mut root_driver, root_route) =
+        SessionDriver::new(root_owner.clone(), "root-session".into());
+    let (mut child_driver, child_route) =
+        SessionDriver::new(child_owner.clone(), "child-session".into());
     let root_work = async {
         let invocation = root_route.prepare(&process, &root_owner).await.unwrap();
         invocation

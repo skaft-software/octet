@@ -870,6 +870,10 @@ fn replace_tool_result(
 
 #[async_trait::async_trait]
 impl ToolCallHook for ExtensionProcess {
+    fn requires_session_driver(&self) -> bool {
+        self.supports_feature("session_owner_routes_v1")
+    }
+
     async fn transform_tool_call(
         &self,
         name: &str,

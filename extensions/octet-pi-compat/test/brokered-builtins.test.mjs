@@ -8,7 +8,7 @@ function host() {
   const store = { id: 3, method: 'tool/call', live: true, state, controller: new AbortController() };
   const runtime = { features: new Set(['tool_composition_v1', 'composition_builtin_tools_v1']),
     require(feature) { assert.ok(this.features.has(feature), feature); },
-    assertOwner(value) { assert.equal(value.state, state); assert.ok(state.alive); },
+    assertSessionOwner(value) { assert.equal(value.state, state); assert.ok(state.alive); },
     hostCall: async (method, params) => { calls.push({ method, params }); return { value: {
       tool_call: { id: 'outer/1', name: params.name, arguments: params.arguments },
       content: [{ Text: 'native output' }], is_error: false,

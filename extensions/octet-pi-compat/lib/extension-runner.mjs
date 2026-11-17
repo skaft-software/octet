@@ -48,7 +48,7 @@ const shared = globalThis[Symbol.for('octet.pi.hostedExtensionRunner')] ??= (() 
     }
     createContext() {
       const store = this.#runtime.scope.getStore();
-      this.#runtime.assertOwner(store);
+      this.#runtime.assertSessionOwner(store);
       return createContext(this.#runtime, store);
     }
     getActiveTools() { return [...toolSnapshot(this.#runtime, this.#runtime.scope.getStore()?.factory).active_tools]; }

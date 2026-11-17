@@ -50,6 +50,22 @@ Refusal diagnostics identify the context hook's registration number and declared
 hook or extension name, without exposing callback error text. Check that hook's
 configuration and session binding before retrying.
 
+Pi tool-call permission hooks stay enabled on workers. Each live worker uses its
+own host-issued session owner, history and session ID, without taking the lead's
+terminal or composer. Starting a worker does not switch the frontend lifecycle;
+only a root session replacement sends the adapter's `session_start` binding.
+Session-dependent tool hooks use ordered native dispatch so their real session
+writer remains available, including for batched read/bash requests. Other hooks
+retain normal parallel tool scheduling. Rust hooks can declare that dependency
+with `ToolCallHook::requires_session_driver()`.
+
+Compaction preserves the lead owner. An adapter restart rebinds that owner even
+when a read-only history publication is temporarily unavailable; refreshing the
+history restores reads without granting stale contexts authority. Worker status
+and targeted waits remain usable afterward, and a targeted `subagent_wait`
+returns the worker's final summary. Retired owners still cannot act, and workers
+never borrow the parent's frontend resource-discovery guard.
+
 ## Per-worker provider, model, and reasoning
 
 `subagent_spawn` accepts optional `provider`, `model`, and `reasoning` identifiers.

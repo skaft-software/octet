@@ -7,7 +7,7 @@ function fixture(features = ['nested_inference_v1']) {
   const frames = [], store = { id: 7, method: 'tool/call', live: true, controller: new AbortController(), state: { alive: true, owner: { session_id: 'stream-session', extension_instance_id: 'stream-instance', process_generation: 1 } } };
   let settle;
   const runtime = { features: new Set(features), stopping: false,
-    current: () => store, assertOwner(value) { assert.equal(value, store); },
+    current: () => store, assertSessionOwner(value) { assert.equal(value, store); },
     require(feature) { if (!this.features.has(feature)) throw new Error(`unsupported_feature ${feature}`); },
     hostCall(method, params, value) { assert.equal(value, store); frames.push({ method, params }); return new Promise(resolve => { settle = resolve; }); },
     track: work => work,

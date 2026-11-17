@@ -67,7 +67,7 @@ export class TranscriptRenderers {
     const register = (kind, customType, callback) => {
       if (this.runtime.stopping) throw rpcError(-32002, 'renderer runtime is retired');
       this.runtime.scope.getStore()?.controller.signal.throwIfAborted();
-      if (this.runtime.loaded) this.runtime.current(factory);
+      if (this.runtime.loaded) this.runtime.assertOwner(this.runtime.current(factory));
       if (typeof callback !== 'function') invalid(`${kind} renderer must be a function`);
       let entries = this.factories.get(factory);
       if (!entries) { entries = { message: new Map(), entry: new Map(), markdown: undefined, tool: [] }; this.factories.set(factory, entries); }

@@ -111,6 +111,28 @@ pub(in crate::extension_process) fn attach(
     } else if wants_session {
         match store.current.get(owner) {
             Some(Some(view)) => Some(Arc::clone(view)),
+            Some(None)
+                if params
+                    .get("hook")
+                    .and_then(Value::as_str)
+                    .is_some_and(|hook| matches!(hook, "session_start" | "session_end")) =>
+            {
+                // Lifecycle binding is native authority, not a history read.
+                // Pi retains the session while compaction updates its projection
+                // (packages/coding-agent/src/core/agent-session.ts:3258-3275).
+                // Deliver that binding even after a failed history publication;
+                // explicit unavailable facts still refuse history-dependent APIs.
+                let host = &mut params["context"]["host"];
+                super::super::merge_session_snapshot(
+                    host,
+                    &json!({
+                        "session_entries":null, "session_branch":null,
+                        "session_leaf_id":null, "session_file":null,
+                        "session_header":null, "session_labels":null,
+                    }),
+                );
+                None
+            }
             Some(None) => return Err(unavailable()),
             None => None,
         }

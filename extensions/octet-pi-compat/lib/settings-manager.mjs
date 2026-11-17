@@ -6,7 +6,7 @@ import { captureSettingsHost } from './children.mjs';
 const SECRET = Symbol('native settings manager');
 function live({ runtime, store }) {
   runtime.require('pi_settings_v1');
-  runtime.assertOwner(store);
+  runtime.assertSessionOwner(store);
   store.controller.signal.throwIfAborted();
   if (runtime.stopping) throw rpcError(-32002, 'host is draining');
 }

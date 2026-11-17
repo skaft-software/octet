@@ -9,7 +9,7 @@ export function currentToolHost() {
   const binding = scope.getStore();
   if (!binding || binding.store.method !== 'tool/call' || !binding.store.live) unsupported('tool execution', 'a live model-tool parent is required');
   const { runtime, store } = binding;
-  runtime.assertOwner(store);
+  runtime.assertSessionOwner(store);
   store.controller.signal.throwIfAborted();
   runtime.require('tool_composition_v1');
   return binding;

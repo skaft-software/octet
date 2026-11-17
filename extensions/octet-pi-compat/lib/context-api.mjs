@@ -30,7 +30,7 @@ export function contextFacts(runtime, store) {
     getSystemPrompt() {
       runtime.require('system_prompt_read');
       if (runtime.stopping) throw rpcError(-32002, 'host is draining');
-      runtime.assertOwner(store);
+      runtime.assertSessionOwner(store);
       store.controller.signal.throwIfAborted();
       const scoped = store.promptReadScope !== undefined && runtime.features.has('run_system_prompt_read_v1');
       const observation = !store.live && store.method === 'turn/started' && scoped
