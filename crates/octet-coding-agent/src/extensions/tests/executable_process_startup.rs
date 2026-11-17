@@ -598,8 +598,11 @@ async fn tool_clash_turns_off_the_external_extension_instead_of_failing() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_subagent_collision_keeps_native_tools_and_package_commands() {
-    let temp = tempfile::tempdir().unwrap();
-    let extension_root = temp.path().join("extensions");
+    let temp_dir = tempfile::tempdir().unwrap();
+    // The Pi mirror refuses paths with symlinked components, and macOS temp
+    // directories live under the `/var` symlink; mirror a canonical root.
+    let temp = temp_dir.path().canonicalize().unwrap();
+    let extension_root = temp.join("extensions");
     let native = extension_root.join(SUBAGENTS_EXTENSION_NAME);
     std::fs::create_dir_all(&native).unwrap();
     let tools = [
@@ -625,7 +628,7 @@ for await (const line of createInterface({{input:process.stdin}})) {{
   if (method === 'shutdown') process.exit(0);
 }}
 "#, tools = serde_json::json!(tools))).unwrap();
-    let package = temp.path().join("pi-subagents");
+    let package = temp.join("pi-subagents");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.json"),
@@ -654,7 +657,7 @@ export default pi => {{
         .arg("--output")
         .arg(extension_root.join("octet-pi-compat"))
         .arg(&factory)
-        .env("OCTET_PI_AGENT_DIR", temp.path().join("no-pi-agent"))
+        .env("OCTET_PI_AGENT_DIR", temp.join("no-pi-agent"))
         .output()
         .unwrap();
     assert!(
@@ -664,7 +667,7 @@ export default pi => {{
     );
     let bridge_manifest = extension_root.join("octet-pi-compat/extension.toml");
     let reviewed = ExtensionManifest::load(&bridge_manifest).unwrap();
-    let agent_dir = temp.path().join("pi-agent");
+    let agent_dir = temp.join("pi-agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("settings.json"),
@@ -699,7 +702,7 @@ export default pi => {{
         }
         std::fs::write(&bridge_manifest, toml::to_string(&manifest).unwrap()).unwrap();
         let mut config =
-            executable_extension_config(temp.path(), &extension_root, "octet-pi-compat");
+            executable_extension_config(temp.as_path(), &extension_root, "octet-pi-compat");
         config.effect_policy = octet_agent::EffectPolicy::UnsafeHost;
         if enabled {
             config
@@ -710,11 +713,11 @@ export default pi => {{
                 .push(SUBAGENTS_EXTENSION_NAME.into());
         }
         let session = Session::create(
-            temp.path()
+            temp.as_path()
                 .join(format!("session-{enabled}-{timing:?}-{mirror}.jsonl")),
         )
         .unwrap();
-        let sessions = SessionStore::new(&config.session_dir, temp.path());
+        let sessions = SessionStore::new(&config.session_dir, temp.as_path());
         let model = octet_ai::ModelCatalog::builtin()
             .unwrap()
             .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
