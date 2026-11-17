@@ -60,6 +60,7 @@
 - Pi session replacement, compaction and tree hooks isolate callback-owned error codes while preserving native refusals and explicit vetoes.
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.
 - Pi adapter reloads preserve session history after forced restarts and keep extension warnings actionable while responses continue.
+- Closing a run during video preparation preserves completed foreground and background reads with their original bytes.
 - Video reads keep input responsive during cancellable frame preparation and preserve completed results with their original bytes.
 - Pi context hooks isolate callback-owned error codes while preserving native ownership and cancellation checks.
 - Pi context hooks preserve accepted edits and run later handlers after malformed result objects or message content.

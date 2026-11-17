@@ -2,35 +2,55 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
-struct VideoReadTransport;
+struct VideoReadTransport(bool);
 
 #[async_trait::async_trait]
 impl octet_ai::HostStreamTransport for VideoReadTransport {
     async fn stream(
         &self,
         model: octet_ai::HostStreamModel,
-        _: Request,
+        request: Request,
         _: Vec<octet_ai::Diagnostic>,
     ) -> Result<octet_ai::ResponseStream, AiError> {
+        let continuing = self.0
+            && request
+                .messages
+                .iter()
+                .any(|message| matches!(message, Message::Assistant(_)));
+        let output = if continuing {
+            serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]})
+        } else {
+            serde_json::json!({"type":"function_call","call_id":"video-read","name":"read","arguments":r#"{"path":"clip.mp4"}"#})
+        };
+        let responses_output = (model.protocol == Protocol::OpenAiResponses)
+            .then(|| octet_ai::ResponsesOutput::new(vec![serde_json::from_value(output).unwrap()]));
         Ok(Box::pin(futures_util::stream::iter([
             Ok(StreamEvent::Started { response_id: None }),
             Ok(StreamEvent::Finished(octet_ai::Response {
                 message: AssistantMessage {
-                    content: vec![AssistantPart::ToolCall(ToolCall {
-                        id: octet_ai::ToolCallId("video-read".into()),
-                        name: "read".into(),
-                        arguments_json: r#"{"path":"clip.mp4"}"#.into(),
-                        argument_error: None,
-                        async_execution: false,
-                    })],
+                    content: if continuing {
+                        vec![AssistantPart::Text("done".into())]
+                    } else {
+                        vec![AssistantPart::ToolCall(ToolCall {
+                            id: octet_ai::ToolCallId("video-read".into()),
+                            name: "read".into(),
+                            arguments_json: r#"{"path":"clip.mp4"}"#.into(),
+                            argument_error: None,
+                            async_execution: self.0,
+                        })]
+                    },
                     model: model.id,
                     protocol: model.protocol,
                 },
-                stop_reason: StopReason::ToolUse,
+                stop_reason: if continuing {
+                    StopReason::EndTurn
+                } else {
+                    StopReason::ToolUse
+                },
                 usage: Usage::default(),
                 cost: None,
                 response_id: None,
-                responses_output: None,
+                responses_output,
                 deferred: None,
                 inference: None,
                 diagnostics: Vec::new(),
@@ -82,7 +102,7 @@ fn cold_video_read_keeps_foreground_input_pollable() {
         let mut agent = active_tool_test_agent(dir.path(), Session::create(&path).unwrap(), host);
         assert!(!agent.model.spec.supports_native_video());
         assert!(agent.model.spec.supports_video_input());
-        agent.client.register_host_stream_transport(agent.model.endpoint.id.clone(), Arc::new(VideoReadTransport));
+        agent.client.register_host_stream_transport(agent.model.endpoint.id.clone(), Arc::new(VideoReadTransport(false)));
         let mut run = agent.prompt("read clip.mp4").await.unwrap();
         let start = std::time::Instant::now();
         let started = std::path::PathBuf::from(std::env::var_os("OCTET_VIDEO_PROBE_STARTED").unwrap());
@@ -125,7 +145,8 @@ fn cold_video_read_keeps_foreground_input_pollable() {
         if aborting { assert!(settlement.elapsed() < std::time::Duration::from_millis(500)); }
         drop(run);
         let result_text = persisted_tool_result_texts(agent.session()).join("\n");
-        assert!(result_text.contains(if aborting { "cancelled" } else { "decoder rejected" }));
+        assert!(result_text.contains("video source retained; frames prepared before provider input"));
+        assert!(!result_text.contains("frames not prepared"));
         let context = agent.session().context().unwrap();
         let video = context.iter().find_map(|message| match message {
             Message::User(user) => user.content.iter().find_map(|part| match part {
@@ -136,7 +157,8 @@ fn cold_video_read_keeps_foreground_input_pollable() {
         }).expect("original video is durable even on preparation failure/abort");
         assert_eq!(video.data.as_ref(), include_bytes!("../../../octet-ai/src/video/tiny.mp4"));
         let again = std::time::Instant::now();
-        assert!(video.prepare_frames().await.is_err());
+        let error = video.prepare_frames().await.unwrap_err().to_string();
+        assert!(error.contains(if aborting { "cancelled" } else { "decoder rejected" }));
         assert!(again.elapsed() < std::time::Duration::from_millis(100), "failed sampling must stay cached");
         if aborting {
             let pid: i32 = std::fs::read_to_string(&started).unwrap().parse().unwrap();
@@ -207,5 +229,161 @@ async fn resumed_video_prepares_before_request_projection_without_reloading_the_
     assert_eq!(
         agent.prepared_video_entries,
         agent.session().entries().len() - 1
+    );
+}
+
+// Isolate decoder PATH changes in a child so other tests retain real FFmpeg.
+fn with_slow_decoder(test_name: &str, test: impl FnOnce()) {
+    const CHILD: &str = "OCTET_VIDEO_LIFECYCLE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        test();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let probe = dir.path().join("ffprobe");
+    std::fs::write(
+        &probe,
+        concat!(
+        "#!/usr/bin/python3\n",
+        "import os, time\n",
+        "open(os.environ['OCTET_VIDEO_PROBE_STARTED'], 'w').write(str(os.getpid()))\n",
+        "time.sleep(2)\n",
+        "print('{\"streams\":[{\"width\":16,\"height\":16}],\"format\":{\"duration\":\"2\"}}')\n",
+    ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(format!(
+            "agent::tests::video_preparation_tests::{test_name}"
+        ))
+        .arg("--nocapture")
+        .env(CHILD, test_name)
+        .env("PATH", dir.path())
+        .env("OCTET_VIDEO_PROBE_STARTED", dir.path().join("started"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("video lifecycle test child exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn drop_completed_video_read(background: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("drop.jsonl");
+    let source = dir.path().join("clip.mp4");
+    std::fs::write(
+        &source,
+        include_bytes!("../../../octet-ai/src/video/tiny.mp4"),
+    )
+    .unwrap();
+    let mut host = ExtensionHost::new();
+    host.load(&crate::tools::CoreTools);
+    let mut agent = active_tool_test_agent(dir.path(), Session::create(&path).unwrap(), host);
+    if background {
+        agent.model = octet_ai::ModelCatalog::builtin()
+            .unwrap()
+            .resolve(&octet_ai::ModelId("gpt-6-astra".into()))
+            .unwrap();
+        Arc::make_mut(&mut agent.model.endpoint).transport = octet_ai::EndpointTransport::Http;
+        assert!(agent.model.responses_features().async_tools);
+        agent.reasoning = ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low);
+        agent.max_turns = Some(2);
+    }
+    agent.client.register_host_stream_transport(
+        agent.model.endpoint.id.clone(),
+        Arc::new(VideoReadTransport(background)),
+    );
+    let mut run = agent.prompt("read video").await.unwrap();
+    let started = std::path::PathBuf::from(std::env::var_os("OCTET_VIDEO_PROBE_STARTED").unwrap());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(10)) => if started.exists() { break; },
+                event = run.next() => {
+                    assert!(!matches!(event, Some(AgentEvent::RunFinished { reason: FinishReason::Failed(_), .. })), "{event:?}");
+                    assert!(event.is_some(), "run ended before optional preparation");
+                    assert!(!matches!(event, Some(AgentEvent::ToolFinished { .. })));
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::remove_file(source).unwrap();
+    // Match interactive shutdown: abandon the stream without draining it.
+    drop(run);
+    let context = agent.session().context().unwrap();
+    assert!(context.iter().any(|message| matches!(message, Message::User(user) if user.content.iter().any(|part| matches!(part, UserPart::Media(Media::Video(_)))))), "completed video read lost its durable bytes during optional preparation");
+    assert!(persisted_tool_result_texts(agent.session())
+        .iter()
+        .any(|text| text.contains("read=video")));
+    drop(agent);
+    let session = Session::open(&path).unwrap();
+    let context = session.context().unwrap();
+    let videos: Vec<_> = context
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(&user.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            UserPart::Media(Media::Video(video)) => Some(video),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        videos.len(),
+        1,
+        "the completed result is committed exactly once"
+    );
+    assert_eq!(
+        videos[0].data.as_ref(),
+        include_bytes!("../../../octet-ai/src/video/tiny.mp4")
+    );
+    assert!(!persisted_tool_result_texts(&session)
+        .iter()
+        .any(|text| text.contains("tool execution cancelled")));
+}
+
+#[test]
+fn dropped_run_preserves_completed_video_bytes() {
+    with_slow_decoder("dropped_run_preserves_completed_video_bytes", || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(drop_completed_video_read(false));
+    });
+}
+
+#[test]
+fn dropped_background_settlement_preserves_completed_video_bytes() {
+    with_slow_decoder(
+        "dropped_background_settlement_preserves_completed_video_bytes",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(drop_completed_video_read(true));
+        },
     );
 }

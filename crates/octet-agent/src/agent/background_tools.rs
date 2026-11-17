@@ -175,7 +175,6 @@ impl BackgroundTools {
                 decision,
             });
         }
-        prepare_tool_result_frames(&execution.result, model, Some(&self.abort)).await;
         let (message, accepted_media, text, is_error, details) = lower_tool_result(
             call.id.clone(),
             &execution.result,
@@ -208,6 +207,10 @@ impl BackgroundTools {
         {
             session.record_tool_composition_usage(call.id.0.clone(), usage)?;
         }
+        // The completed result and billing evidence are durable before this
+        // optional wait. A dropped settlement cannot lose original media or
+        // leave the job queued for a second result append.
+        prepare_tool_result_frames(&execution.result, model, Some(&self.abort)).await;
         if let Some(evidence) = evidence {
             evidence.record_action(&call.name, &call.arguments_json, is_error, &text);
         }

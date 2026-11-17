@@ -319,8 +319,8 @@ pub(super) fn truncate_ordered_tool_text(
     lowered
 }
 
-/// Optional preparation must not erase a completed tool result on abort. Pi
-/// finalizes each executed result before checking abort (reference
+/// Prepare only after the completed output is durable, so even dropping this
+/// wait preserves it. Pi records each executed result before abort (reference
 /// packages/agent/src/agent-loop.ts:580-587). Native video decoding lives here
 /// because result commitment and durable media do not require the Pi process.
 pub(super) async fn prepare_tool_result_frames(
@@ -382,15 +382,15 @@ pub(super) fn lower_tool_media_part(
                 accepted_kinds.push(ToolOutputMediaKind::Video);
                 adjacent_media.push(media.clone());
                 if !model.spec.supports_native_video() {
-                    match video.sampled_frames() {
-                        Ok(frames) => {
-                            omissions.push(format!("video sent as {} frames", frames.len()))
+                    // Frame delivery is derived at request projection, not a
+                    // durable failure of the completed read. Cold/failed state
+                    // can still change after this append or a process restart.
+                    omissions.push(match video.cached_frames() {
+                        Some(frames) => format!("video sent as {} frames", frames.len()),
+                        None => {
+                            "video source retained; frames prepared before provider input".into()
                         }
-                        Err(error) => omissions.push(format!(
-                            "{error}; provider {} model {} continues without frames; original video retained",
-                            model.endpoint.id.0, model.spec.api_name,
-                        )),
-                    }
+                    });
                 }
             } else {
                 // Retain raw bytes even on a text-only model; replay derives a placeholder.

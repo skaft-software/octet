@@ -103,7 +103,6 @@ impl Agent {
                     ))),
                 }
             };
-            prepare_tool_result_frames(&result, &self.model, None).await;
             let (message, _, _, _, details) = lower_tool_result(
                 call.id,
                 &result,
@@ -120,6 +119,7 @@ impl Agent {
                 }),
             )?;
             resolve_tool_delivery_after_persistence(&result, sandbox.max_output_bytes);
+            prepare_tool_result_frames(&result, &self.model, None).await;
         }
         Ok(())
     }
@@ -3279,11 +3279,11 @@ impl Agent {
 
                     // ── COMMIT BOUNDARY ──────────────────────────────────
                     // Tool::execute resolved (or an immediate error was
-                    // produced). Optional frame preparation yields to input and
-                    // abort, then lowering consumes local prepared state only.
-                    // Even if aborted, commit the completed result and original
-                    // video bytes before draining progress or ending the run.
-                    prepare_tool_result_frames(&result, &model, Some(&abort)).await;
+                    // produced). Commit its original media before optional
+                    // preparation can suspend. Dropping Run during that await
+                    // must not replace completed output with cancellation text.
+                    // Pi records the result before checking abort (reference
+                    // packages/agent/src/agent-loop.ts:579-587).
                     // Every tool owns the same configured output allowance.
                     // A large early result must never starve later successful
                     // calls in the same model turn. Structured media is lowered
@@ -3342,6 +3342,7 @@ impl Agent {
                     // work while executing. Acknowledge it only once the
                     // complete, untruncated result is in the session.
                     resolve_tool_delivery_after_persistence(&result, sandbox.max_output_bytes);
+                    prepare_tool_result_frames(&result, &model, Some(&abort)).await;
 
                     // ── Drain accepted progress before ToolFinished ───────
                     let mut drain_preview = LivePreviewPacer::new();

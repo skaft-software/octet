@@ -169,10 +169,13 @@ versions may change JPEG bytes. Missing decoders or invalid clips produce an
 actionable preparation error before a new sampled user attachment is committed. A saved
 video whose frames cannot be prepared uses an explanatory placeholder so the
 session can continue; a read result reports the problem and retains its source.
-Interrupting optional frame preparation still commits a completed tool read and
-its original bytes. Preparation failures are cached for that source in the current
-process, so encoding and later turns do not retry the decoder; read or attach the
-clip again to retry. Switching to a text-only model also derives a placeholder
+Completed foreground and background tool reads commit their original bytes
+before optional frame preparation begins. Interrupting preparation or closing the
+run without draining it preserves that completed result, including after restart.
+A cold read records deferred frame delivery, not a preparation failure; the
+provider-input projection reports the current frame outcome. Preparation failures
+are cached for that source in the current process, so encoding and later turns do
+not retry the decoder; read or attach the clip again to retry. Switching to a text-only model also derives a placeholder
 without erasing video.
 
 Rust embedders call `VideoMedia::prepare_frames().await` before synchronous
