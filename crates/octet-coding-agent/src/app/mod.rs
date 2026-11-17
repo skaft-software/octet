@@ -657,7 +657,6 @@ impl App {
     pub(crate) async fn pump_extension_startup(
         &mut self,
     ) -> anyhow::Result<crate::extensions::DeferredStartupProgress> {
-        let service_available = self.executable_extensions.has_agent_session_service();
         let was_pending = self.executable_extensions.startup_pending();
         let (host, session) = self.agent.extension_host_and_session();
         let mut progress = self
@@ -675,7 +674,9 @@ impl App {
             self.executable_extensions.complete_provider_reload(None);
         }
         self.activate_resource_paths_consumer();
-        if !service_available && self.executable_extensions.has_agent_session_service() {
+        // Each process needs its own service binding, even when an earlier
+        // attachment already made the fleet's aggregate service available.
+        if !progress.attached.is_empty() {
             self.executable_extensions
                 .bind_agent_sessions(&self.agent)?;
         }
@@ -690,7 +691,6 @@ impl App {
     /// that already attached are never waited for again. Returns the notices
     /// from projecting the providers of what attached.
     pub(crate) async fn await_extension_prompt_hooks(&mut self) -> anyhow::Result<Vec<String>> {
-        let service_available = self.executable_extensions.has_agent_session_service();
         let attached = self.executable_extensions.attached_count();
         let was_pending = self.executable_extensions.startup_pending();
         let (host, session) = self.agent.extension_host_and_session();
@@ -706,7 +706,7 @@ impl App {
         self.activate_resource_paths_consumer();
         // This wait also installs completed non-hook activations. Bind even
         // when another prompt-hook owner times out after subagents attached.
-        if !service_available && self.executable_extensions.has_agent_session_service() {
+        if self.executable_extensions.attached_count() > attached {
             self.executable_extensions
                 .bind_agent_sessions(&self.agent)?;
         }

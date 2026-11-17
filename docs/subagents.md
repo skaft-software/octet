@@ -30,6 +30,11 @@ Bundle documentation: [extension README](../extensions/octet-subagents/README.md
 
 ## Resource context and provider hooks
 
+Deferred startup binds each extension's child-session service when that process
+attaches, even if another extension already supplies subagent services. Model
+lookup and spawning are ready after that extension's startup completes. A binding
+refusal names the `agent_sessions` dispatch stage: wait for startup, then retry.
+
 Workers receive a frozen copy of the parent's published system/resource context
 and their own restricted tool snapshot. A parent frontend's live resource-discovery
 guard stays on the parent: workers have separate session owners and no frontend

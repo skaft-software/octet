@@ -160,7 +160,7 @@ async fn child_events_and_stop_have_real_dispatch_and_strict_wire_gates() {
         assert_eq!(response["error"]["code"], -32002);
         assert_eq!(
             response["error"]["message"],
-            "agent session service is not bound to this host-owned resource owner"
+            "agent_sessions dispatch is not bound to this session owner; wait for extension startup, then retry"
         );
         assert!(
             response.get("result").is_none(),

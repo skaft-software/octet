@@ -450,6 +450,174 @@ async fn delegate(
     reply["result"].clone()
 }
 
+struct OfflineParentModel;
+impl octet_agent::delegation::AgentModelResolver for OfflineParentModel {
+    fn resolve(
+        &self,
+        _: &octet_agent::delegation::AgentModelSelection,
+        model: &octet_ai::Model,
+        reasoning: &octet_ai::ReasoningConfig,
+    ) -> Result<octet_agent::delegation::ResolvedAgentModel, String> {
+        Ok(octet_agent::delegation::ResolvedAgentModel {
+            model: model.clone(),
+            reasoning: reasoning.clone(),
+            metadata: octet_agent::delegation::AgentModelSelection {
+                provider: model.endpoint.id.0.clone(),
+                model: model.spec.id.0.clone(),
+                reasoning: "off".into(),
+            },
+        })
+    }
+    fn models(
+        &self,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<octet_agent::delegation::AgentModelDescriptor>, String> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staggered_resource_owners_bind_each_child_service_before_first_spawn() {
+    // Both attachment orders and frontend entry points matter: an existing
+    // negotiated service does not mean a later process has its own binding.
+    for first in ["octet-subagents", "octet-pi-compat"] {
+        for await_hooks in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let (mut app, resource_process, captures) = fixture(&root).await;
+            resource_process.shutdown().await;
+            let names = [
+                first,
+                if first == "octet-subagents" {
+                    "octet-pi-compat"
+                } else {
+                    "octet-subagents"
+                },
+            ];
+            let extension_root = root.join("fleet");
+            let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/extensions/resource_paths/fleet_fixture.py");
+            for name in names {
+                let directory = extension_root.join(name);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join("extension.toml"),
+                    format!(
+                        r#"
+name = "{name}"
+version = "0.1.0"
+api_version = "0.4"
+[entrypoint]
+command = "python3"
+args = [{script:?}, {root:?}, {name:?}]
+[contributes]
+commands = ["{name}"]
+hooks = ["session_start", "resources_discover"]
+"#
+                    ),
+                )
+                .unwrap();
+            }
+            let mut config = app.config.clone();
+            config.start_extension_processes = true;
+            config.extension_paths = vec![extension_root];
+            config.enabled_extensions = names.map(str::to_owned).to_vec();
+            config.invocation_trusted_extensions = config.enabled_extensions.clone();
+            let mut host = octet_agent::ExtensionHost::new();
+            host.load(&octet_agent::CoreTools);
+            app.executable_extensions =
+                ExecutableExtensions::discover_and_start_with_provider_runtime_and_reason(
+                    &config,
+                    app.agent.session(),
+                    &app.model,
+                    &app.reasoning,
+                    &app.sessions,
+                    &mut host,
+                    None,
+                    super::super::ExtensionProviderRuntime::default(),
+                    crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+                    None,
+                    "startup",
+                    super::super::ExtensionStartupTiming::AfterFirstFrame,
+                );
+            *app.agent.extension_host_mut() = host;
+            app.resource_paths = ResourcePathConsumer::new(
+                &config,
+                &app.skills,
+                &app.prompts,
+                &mut app.executable_extensions,
+                app.agent.extension_host_mut(),
+                crate::app::resource_paths::ResourceConsumerCapability::AppFrontend,
+            );
+            app.agent
+                .enable_v2_delegation_extension_only(octet_agent::DelegationConfig::new(
+                    root.join("children"),
+                ))
+                .unwrap();
+            for name in names {
+                std::fs::write(root.join(format!("release-{name}")), "").unwrap();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !app
+                        .executable_extensions
+                        .processes
+                        .iter()
+                        .any(|p| p.descriptor().manifest.name == name)
+                    {
+                        if await_hooks {
+                            app.await_extension_prompt_hooks().await.unwrap();
+                        } else {
+                            app.pump_extension_startup().await.unwrap();
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                app.refresh_resource_paths_headless().await.unwrap();
+                app.agent
+                    .set_delegation_model_resolver(Arc::new(OfflineParentModel));
+                let process = app
+                    .executable_extensions
+                    .processes
+                    .iter()
+                    .find(|p| p.descriptor().manifest.name == name)
+                    .unwrap();
+                let owner = app.agent.session().resource_owner_key();
+                let call = |operation: &str, args: Value| {
+                    let process = process.clone();
+                    let context = process.current_context_for_resource_owner(owner.clone());
+                    let operation = operation.to_owned();
+                    async move {
+                        let reply = process
+                            .execute_command(name, vec![operation, args.to_string()], context)
+                            .await
+                            .unwrap();
+                        let reply: Value = serde_json::from_str(&reply.text).unwrap();
+                        assert!(reply.get("error").is_none(), "{name}: {reply}");
+                        reply["result"].clone()
+                    }
+                };
+                call("agent/models", serde_json::json!({})).await;
+                call("agent/spawn", serde_json::json!({
+                    "task_name": name, "message": "offline child", "idempotency_key": name,
+                    "policy": {"tools": ["read"], "max_depth": 1, "max_concurrent_children": 16, "max_output_bytes": 4096}
+                })).await;
+                let waited = call("agent/wait", serde_json::json!({"timeout_ms": 5000})).await;
+                assert_eq!(waited["timed_out"], false, "{waited}");
+                assert_eq!(
+                    waited["snapshot"]["agents"][0]["status"]["state"], "completed",
+                    "{waited}"
+                );
+            }
+            assert_eq!(captures.lock().unwrap().len(), 2);
+            for process in &app.executable_extensions.processes {
+                process.shutdown().await;
+            }
+        }
+    }
+}
+
 struct ChildContextProbe(Arc<Mutex<Vec<String>>>);
 #[async_trait::async_trait]
 impl octet_agent::ProviderContextHook for ChildContextProbe {

@@ -255,7 +255,7 @@ pub(super) fn queue_agent_session_operation(
                 }
             }
         } else {
-            Err("agent session service is not bound to this host-owned resource owner".to_owned())
+            Err("agent_sessions dispatch is not bound to this session owner; wait for extension startup, then retry".to_owned())
         };
         let response = match result {
             Ok(result) => serde_json::json!({
