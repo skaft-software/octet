@@ -106,3 +106,21 @@ test('a hook arriving during that revision\'s preparation waits for it instead o
   assert.equal(hookStore.sessionView, prepared);
   assert.equal(h.reads.get(hookDescriptor.transfer_id), undefined);
 });
+
+test('concurrent invocations validate receipts against independent native cursors', async () => {
+  const h = harness(), value = history(['seed']);
+  const prepared = await h.publish(h.transport.invalidate(owner, 1), h.describe(1, value));
+  const stores = [h.fresh(), h.fresh()];
+  for (const store of stores) await h.transport.hydrate(h.hook(h.describe(1, value)), store);
+  const first = message('first', 'e0', 'first'), second = message('second', 'first', 'second');
+  h.transport.append(stores[0], { previous_revision: 1, previous_head: 'e0', view_revision: 2,
+    entry_id: first.id, head: first.id, entry: first }, null, null);
+  h.transport.append(stores[1], { previous_revision: 1, previous_head: 'e0', view_revision: 3,
+    entry_id: second.id, head: second.id, gap: [structuredClone(first)], entry: second }, null, null);
+  assert.deepEqual(prepared.document.entries.map(entry => entry.id), ['e0', 'first', 'second']);
+  assert.equal(h.transport.bytes, Buffer.byteLength(JSON.stringify(prepared.document)));
+  assert.throws(() => h.transport.append(stores[1], { previous_revision: 1, previous_head: 'e0', view_revision: 4,
+    entry_id: 'third', head: 'third', gap: [first, second], entry: message('third', 'second', 'third') }, null, null), /receipt/);
+  h.transport.settle(stores[0]); h.transport.settle(stores[1]); h.transport.retire(h.store.state);
+  assert.deepEqual([h.transport.bytes, h.transport.records, h.transport.views], [0, 0, 0]);
+});

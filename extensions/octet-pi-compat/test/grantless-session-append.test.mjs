@@ -106,7 +106,8 @@ test('grant-less routed appends never accept an unbound legacy ACK or mint a suc
     const { runtime, store, view, failures } = fixture(mutate);
     assert.throws(() => runtime.appendEntry('private', {}, store), /outcome unknown/);
     assert.equal(view.document.entries.length, 0);
-    assert.equal(failures.length, 1);
+    assert.equal(failures.length, 0);
+    assert.throws(() => runtime.appendEntry('retry', {}, store), /invalid commit reply/);
   }
 });
 
@@ -188,6 +189,7 @@ test('native gap chains reject broken links, malformed messages, private foreign
     const { runtime, store, view, failures } = fixture(mutate);
     assert.throws(() => runtime.appendEntry('private', {}, store), /outcome unknown/);
     assert.equal(view.document.entries.length, 0);
-    assert.equal(failures.length, 1);
+    assert.equal(failures.length, 0);
+    assert.throws(() => runtime.appendEntry('retry', {}, store), /invalid commit reply/);
   }
 });

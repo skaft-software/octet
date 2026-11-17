@@ -705,6 +705,10 @@ both `session_snapshot_transport_v1`/`session_owner_routes_v1`. Grant-less appen
 from live hooks, commands, shortcuts and tools then publish the actual native durable
 entry into that invocation's pinned view before returning. Receipt revision,
 head, ancestry and view quotas must match; no session-leaf grant is minted.
+Concurrent commands retain independent native receipt cursors while sharing indexed
+history; an overlapping receipt must match the already observed entries exactly.
+A malformed receipt fails only its invocation, warns with the factory and append
+stage, and prevents retries from that invocation; the adapter keeps serving work.
 Immediate sessionManager getters therefore see the committed ID, parent and
 native timestamp. Busy commands and live keyboard shortcuts use the owning native
 Run's bounded append lane with the same parent, owner and generation checks,

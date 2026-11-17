@@ -1,6 +1,7 @@
 import { jsonBytes } from './json-count.mjs';
 // session-repair.v2. Tokens identify inert documents, never session authority.
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { fields, invalid, ownerKey, rpcError } from './errors.mjs';
 
 export const SESSION_FEATURES = ['session_owner_routes_v1', 'session_snapshot_transport_v1'];
@@ -174,6 +175,7 @@ export class SessionTransport {
     const reused = await this.reuse(d, store);
     const view = reused ?? await this.read(d, store);
     store.sessionView = view;
+    store.receiptCursor = { revision: d.view_revision, head: d.head };
     if (!reused) this.history(view);
     if (params.session_payload !== undefined) {
       if (Object.hasOwn(params, 'payload')) invalid('inline and transferred invocation payload');
@@ -261,9 +263,11 @@ export class SessionTransport {
     if (!Array.isArray(gap) || gap.length > 16 || receipt.gap !== undefined && !gap.length) invalid('session append view receipt gap');
     let parent = receipt.previous_head;
     const ids = view?.byId;
+    const cursor = store.activation ? { revision: d?.view_revision, head: d?.head }
+      : store.receiptCursor ?? { revision: d?.view_revision, head: d?.head };
     const addedIds = new Set();
     for (const entry of gap) {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || ids?.has(entry.id) || addedIds.has(entry.id)
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || addedIds.has(entry.id)
           || entry.parent !== parent || !entry.value) invalid('session append view receipt gap');
       if (entry.value.type === 'message' && (Object.hasOwn(entry.value, 'User') === Object.hasOwn(entry.value, 'Assistant')))
         invalid('session append view receipt gap');
@@ -271,10 +275,27 @@ export class SessionTransport {
         if (namespace !== this.runtime.namespace && metadata.public !== true) invalid('foreign private session metadata');
       addedIds.add(entry.id); parent = entry.id;
     }
-    if (!d || receipt.previous_revision !== d.view_revision || receipt.previous_head !== d.head
+    if (!d || receipt.previous_revision !== cursor.revision || receipt.previous_head !== cursor.head
         || !integer(receipt.view_revision, 1) || receipt.view_revision <= d.view_revision
         || receipt.entry?.id !== receipt.entry_id || ids.has(receipt.entry_id) || addedIds.has(receipt.entry_id) || receipt.entry?.parent !== parent) invalid('session append view receipt');
-    const h = view.document, p = this.profile, added = [...gap, receipt.entry];
+    // Pi uses the current SessionManager leaf for independent busy commands:
+    // packages/coding-agent/src/core/agent-session.ts:2120-2129,3487-3492.
+    // Shared parsed history can advance, but each native parent has its own
+    // receipt cursor. Reconcile only an exact already-observed prefix, never
+    // accept a duplicate receipt or clone the whole history for an invocation.
+    let sharedHead = cursor.head, suffix = false;
+    const added = [];
+    for (const entry of [...gap, receipt.entry]) {
+      const known = ids.get(entry.id);
+      if (known) {
+        if (suffix || !isDeepStrictEqual(known, entry)) invalid('session append view receipt overlap');
+        sharedHead = entry.id;
+      } else {
+        if (!suffix && sharedHead !== d.head) invalid('session append view receipt head');
+        suffix = true; added.push(entry);
+      }
+    }
+    const h = view.document, p = this.profile;
     // These are the exact changes to the compact six-field history document.
     let delta = jsonBytes(receipt.head, p.snapshot_bytes) - jsonBytes(h.head, p.snapshot_bytes);
     added.forEach((entry, index) => {
@@ -295,6 +316,7 @@ export class SessionTransport {
     h.head = receipt.head; view.host.session_leaf_id = receipt.head;
     view.descriptor = { ...d, bytes: d.bytes + delta, entry_count: d.entry_count + added.length, branch_count: d.branch_count + added.length, head: receipt.head, view_revision: receipt.view_revision };
     // Parent and child linked by the native driver share this receipt chain.
+    store.receiptCursor = { revision: receipt.view_revision, head: receipt.head };
     if (store.activation) store.activation.leaf.grant = successor;
   }
   async projection(result, store) {

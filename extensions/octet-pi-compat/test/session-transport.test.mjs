@@ -449,3 +449,67 @@ test('foreign-owner history never hydrates or poisons a later live-owner invocat
   assert.deepEqual(later.result?.provider_context?.messages, [{ User: { content: [{ Text: 'count:1' }] } }]);
   await peer.close();
 });
+
+test('two commands append durably against one prepared view while a response is held', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'concurrent-append-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const peer = launch(t, [fixture(directory, `import fs from 'node:fs';
+    export default pi => {
+      const wait = async file => { while (!fs.existsSync(file)) await new Promise(resolve => setTimeout(resolve, 5)); };
+      pi.on('after_response', async () => { fs.writeFileSync('response-held', ''); await wait('release-response'); });
+      pi.registerCommand('append', { handler: async (args, ctx) => {
+        fs.writeFileSync('ready-' + args, ''); await wait('release-' + args);
+        pi.appendEntry('concurrent', { command: args });
+        if (ctx.sessionManager.getEntries().at(-1).data.command !== args) throw new Error('missing receipt');
+      }});
+    }`)], { cwd: directory, hold: ['session/append_entry', 'session/snapshot/read', 'session/snapshot/release'] });
+  assert.ok((await peer.request('initialize', { api_version: '0.4', workspace: directory, host: peer.context().host,
+    extension: { name: 'octet-pi-compat' }, contributes: { tools: [], commands: ['append'], hooks: peer.metadata.hooks },
+    protocol: { version: '0.4', required_features: ['request_cancellation', 'content_parts'],
+      optional_features: [...features, 'session_append_receipts_v1'], ...offer } }).response).result);
+  const parts = descriptors([message('seed', null, 'prompt')], 1);
+  parts.snapshot.descriptor.preparation = null;
+  const d = parts.snapshot.descriptor, buffers = new Map([[d.transfer_id, parts.snapshot.bytes]]);
+  const prepared = peer.request('session/snapshot/prepare', { resource_owner: owner, snapshot: d, host: peer.context().host });
+  await serve(peer, buffers, d.transfer_id); assert.ok((await prepared.response).result);
+  await peer.start();
+  const held = peer.request('hook/run', { hook: 'after_response', payload: {}, context: peer.context() });
+  const { existsSync, readFileSync, appendFileSync } = await import('node:fs');
+  const waitFile = async file => {
+    const deadline = Date.now() + 5000;
+    while (!existsSync(join(directory, file))) {
+      assert.ok(Date.now() < deadline, `${file}: ${peer.stderr()}`);
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+  await waitFile('response-held');
+  const commands = [];
+  for (const name of ['a', 'b']) {
+    const snapshot = { ...d, transfer_id: hash(name) };
+    commands.push(peer.request('command/execute', { name: 'append', arguments: [name], context: peer.context(), session_snapshot: snapshot }));
+    const release = await peer.wait(f => f.method === 'session/snapshot/release' && f.params.transfer_id === snapshot.transfer_id);
+    peer.send({ jsonrpc: '2.0', id: release.id, result: { released: true } });
+    await waitFile('ready-' + name);
+  }
+  const entries = [];
+  for (const [index, name] of ['a', 'b'].entries()) {
+    writeFileSync(join(directory, 'release-' + name), '');
+    const request = await peer.wait(f => f.method === 'session/append_entry');
+    const entry = { id: name, parent: entries.at(-1)?.id ?? 'seed', timestamp_unix_ms: 1,
+      value: { type: 'config', model: null, reasoning: null, reasoning_mode: null },
+      metadata: { extension_metadata: { 'octet-pi-compat': { public: false,
+        provenance: { extension: 'octet-pi-compat', process_generation: owner.process_generation },
+        value: { entry_type: request.params.entry_type, data: request.params.data } } } } };
+    appendFileSync(join(directory, 'durable.jsonl'), JSON.stringify(entry) + '\n');
+    peer.send({ jsonrpc: '2.0', id: request.id, result: { entry_id: name, head: name, successor: null,
+      previous_revision: 1, previous_head: 'seed', view_revision: index + 2, entry,
+      ...(entries.length ? { gap: entries } : {}) } });
+    entries.push(entry);
+    const reply = await commands[index].response;
+    assert.ok(reply.result, JSON.stringify(reply) + peer.stderr());
+  }
+  assert.equal(readFileSync(join(directory, 'durable.jsonl'), 'utf8').trim().split('\n').length, 2);
+  writeFileSync(join(directory, 'release-response'), ''); assert.ok((await held.response).result);
+  assert.equal(peer.child.exitCode, null);
+  await peer.close();
+});

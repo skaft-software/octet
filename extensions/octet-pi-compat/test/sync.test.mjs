@@ -116,9 +116,17 @@ for (const update of [{owner:{...owner,process_generation:99}},{activation_epoch
 });
 for (const result of [{entry_id:'fake'}, {...ack(),head:'other'}, {...ack(),successor:grant('a','native-entry')}, {...ack(),successor:{...grant('b','native-entry'),activation_epoch:8}}, {...ack(),successor:{...grant('b','native-entry'),owner:{...owner,process_generation:3}}}]) test('malformed commit reply is unknown, no optimistic mirror success or replay', async t => {
   const peer = await fixture(t), parent = peer.invoke(); parent.response.catch(()=>{});
-  const request = await peer.wait(f => f.method === 'session/append_entry'), exited = once(peer.child,'exit');
-  peer.send({jsonrpc:'2.0',id:request.id,result}); assert.equal((await exited)[0],1);
-  assert.ok(!peer.seen.some(f => f.method === 'notification')); assert.equal(peer.seen.filter(f => f.method === 'session/append_entry').length,1);
+  const request = await peer.wait(f => f.method === 'session/append_entry');
+  peer.send({jsonrpc:'2.0',id:request.id,result});
+  assert.match((await peer.report()).error, /outcome unknown/);
+  assert.ok((await parent.response).error);
+  const warning = await peer.wait(f => f.method === 'notification');
+  assert.match(warning.params.message, /Sync.*session\/append_entry/);
+  assert.equal(peer.child.exitCode, null);
+  const next = peer.command('append', [], peer.snapshot);
+  const append = await peer.wait(f => f.method === 'session/append_entry');
+  peer.send({jsonrpc:'2.0',id:append.id,result:{entry_id:'later-durable'}});
+  assert.ok((await next.response).result); await peer.close();
 });
 test('lost reply EOF wakes blocked caller as unknown and reaps helper worker without replay', async t => {
   const peer = await fixture(t), parent = peer.invoke(); parent.response.catch(()=>{});

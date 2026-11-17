@@ -328,6 +328,7 @@ export class Runtime {
   }
   appendEntry(type, data, store = this.scope.getStore()) {
     this.require('session_entries');
+    if (store?.appendError) throw store.appendError;
     // A timed-out context handler may resume while a later handler still owns
     // the hook's leaf. It must not consume that later handler's authority.
     if (store?.providerContext && store.detached) throw rpcError(-32002, 'detached context handler cannot append');
@@ -361,7 +362,12 @@ export class Runtime {
       if (routed) this.sessionTransport.append(store, result, grant, committed.successor); }
     catch (error) {
       const ambiguous = rpcError(-32002, `session append outcome unknown: invalid commit reply (${error.message})`);
-      this.transport.fail(ambiguous); throw appendFailure(ambiguous);
+      // A malformed receipt revokes this invocation, not every factory in
+      // the adapter. Never retry a write whose durability is already unknown.
+      store.appendError = ambiguous;
+      if (!store.providerContext) store.errors.push(ambiguous);
+      this.reportCallbackError('session/append_entry', store.factory, ambiguous, store.state);
+      throw appendFailure(ambiguous);
     }
     if (store.leaf) store.leaf.grant = committed.successor;
     if (routed) return undefined;
