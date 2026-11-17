@@ -1,6 +1,6 @@
 //! Semantic transcript-block dispatch into focused presenters and surface framing.
 
-use sexy_tui_rs::{slice_by_column, visible_width, Color, RichRenderer};
+use sexy_tui_rs::{slice_by_column, slice_with_width, visible_width, Color, RichRenderer};
 
 use super::assistant_block::AssistantBlock;
 use super::bash_render::{project_bash_row, project_compact_bash_output};
@@ -453,7 +453,8 @@ pub(super) fn render_block_planned_with_rainbow(
     rainbow_strength: u16,
     subagents_running: bool,
 ) -> RenderedTranscriptBlock {
-    let plan = compile_surface_plan_for_render(previous, block, theme, outer_width, verbose_tools);
+    let mut plan =
+        compile_surface_plan_for_render(previous, block, theme, outer_width, verbose_tools);
     let still_grouping = theme
         .resolve::<bool>("quiet_tool_summaries")
         .unwrap_or(false);
@@ -747,12 +748,26 @@ pub(super) fn render_block_planned_with_rainbow(
         }
         _ => (marker, None),
     };
-    let component_gutter = if plan.marker_enabled {
+    let mut component_gutter = if plan.marker_enabled {
         usize::from(plan.frame_left.min(2))
     } else {
         0
     };
     if let Some(line) = component_line {
+        // Pi packages/tui/src/components/loader.ts:88-105 keeps the indicator
+        // intact. Move the seam before a crossing grapheme, returning those
+        // cells to the frame so its right edge and the spinner column stay put.
+        if slice_with_width(line, 0, component_gutter, false).width > component_gutter {
+            let safe = slice_with_width(line, 0, component_gutter, true).width;
+            let returned = (component_gutter - safe) as u16;
+            component_gutter = safe;
+            plan.frame_left -= returned;
+            plan.frame_width += returned;
+            plan.bleed_left = plan.bleed_left.saturating_sub(returned);
+            plan.geometry.content_left -= returned;
+            plan.geometry.content_width += returned;
+            geometry = plan.geometry;
+        }
         // Pi packages/tui/src/components/loader.ts:93-96 supplies spinner and
         // message content, not the host's outer surface. Keep its gutter at
         // the native spinner column and decorate the remaining content using

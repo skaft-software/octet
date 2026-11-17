@@ -448,6 +448,9 @@ fn working_component_starts_at_the_native_spinner_column_and_clips_by_cells() {
                 "◟ msg",
                 "\x1b[31m◟\x1b[0m 雪e\u{301} msg",
                 "界 msg",
+                "A界 msg",
+                "\x1b[31mA👩‍💻\x1b[0m msg",
+                "Ae\u{301}界 msg",
                 ">>> msg",
                 "◟  msg",
                 " ◟ msg",
@@ -1621,4 +1624,53 @@ fn explicit_tool_header_resets_override_surface_without_bleeding() {
     assert!(cell.bold());
     assert!(cell.italic());
     assert_row_does_not_bleed(&header);
+}
+
+#[test]
+fn working_component_keeps_crossing_graphemes_between_gutter_and_frame() {
+    for chrome in ["card", "rail", "band"] {
+        let theme = test_theme_from_source(&format!(
+            "[roles.\"surface.reasoning\"]\nbackground = \"#213141\"\n\
+             [surfaces.reasoning]\nchrome = \"{chrome}\"\nnarrow_chrome = \"{chrome}\"\n\
+             padding = 1\nnarrow_padding = 1\n"
+        ));
+        let renderer = theme.rich_renderer();
+        for width in [20, 80] {
+            let mut reasoning = AssistantBlock::streaming_reasoning("");
+            reasoning.show_reasoning_hint = false;
+            let block = TranscriptBlock::Reasoning(Box::new(reasoning.clone()));
+            let plan = compile_surface_plan(None, &block, &theme, width);
+            for glyph in ["界", "👩‍💻", "界e\u{301}"] {
+                reasoning.extension_working = Some(ShellExtensionWorking {
+                    component_line: Some(format!("\x1b[31mA{glyph}\x1b[0m msg")),
+                    ..Default::default()
+                });
+                let rows = render_block(
+                    None,
+                    &TranscriptBlock::Reasoning(Box::new(reasoning.clone())),
+                    &theme,
+                    &renderer,
+                    &renderer,
+                    width,
+                    false,
+                );
+                assert!(rows
+                    .iter()
+                    .all(|row| visible_width(row) <= usize::from(width)));
+                let row = rows.iter().find(|row| row.contains(glyph)).unwrap();
+                let plain = strip_terminal_sequences(row);
+                assert_eq!(
+                    visible_width(&plain[..plain.find('A').unwrap()]),
+                    usize::from(plan.frame_left - 2)
+                );
+                assert_eq!(
+                    visible_width(&plain[..plain.find(glyph).unwrap()]),
+                    usize::from(plan.geometry.content_left - 1)
+                );
+                if chrome == "card" {
+                    assert_eq!(plain.matches('│').count(), 2, "{plain:?}");
+                }
+            }
+        }
+    }
 }

@@ -89,6 +89,7 @@
 - Custom editors reserve space for working indicators and host chrome, keeping tall snapshots inside short terminal windows.
 - Focused panels and transcript search stay visible beside working indicators and long wrapped errors in short terminals.
 - Custom working indicators retain activity-card borders, padding and fill while clipping styled content to the frame.
+- Pi working indicators preserve complete wide graphemes across the native spinner gutter.
 - Working indicators keep one independent slot below reasoning, text and tools until the run settles.
 - Shell cards keep their cached Pi renderer geometry until the final result frame is ready.
 - Subagent discovery and spawning bind each newly attached extension before its first request.

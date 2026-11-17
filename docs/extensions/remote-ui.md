@@ -181,7 +181,9 @@ fenced natively. No unrelated dialog Loader contributes to this row.
 Rust paints the cached component output without a second animation or duplicate
 spinner/message. Its first cell occupies the native spinner's margin column, and
 the remaining cells keep the component's spacing and styling, clipped to the
-available row width without splitting wide glyphs. Tern uses the same native
+available row width without splitting wide glyphs. When a grapheme crosses the
+spinner gutter, the host moves the gutter seam before it, keeping the complete
+grapheme in the content and the spinner's starting column unchanged. Tern uses the same native
 spinner slot. Final clipping, elapsed time and accessibility remain host-owned.
 Reduced motion and disabled terminal animation use the native static marker and
 plain working message instead of animated component presentation. Retry countdowns
