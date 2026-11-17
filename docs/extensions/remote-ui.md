@@ -51,7 +51,9 @@ Diagnostics go to stderr.
 Success returns `{"columns":80,"rows":24}` after the host admits the mount.
 `placement` defaults to `fullscreen`; other placements are `header`, `footer`,
 `above_editor`, `below_editor`, and `editor`. Header/footer/editor replace their
-corresponding host surface; widgets compose around the composer. Restoring a
+corresponding host surface; widgets compose around the composer. Editor snapshots
+fit the rows left after reserving the working indicator, header, errors, queued
+input, suggestions and footer, including in short terminal windows. Restoring a
 mount restores the ordinary host surface, not an extension-owned terminal.
 Surface IDs are scoped to extension instance, generation, and foreground owner.
 There are at most 16 live mounts. Focus conflicts, occupied exclusive placements,

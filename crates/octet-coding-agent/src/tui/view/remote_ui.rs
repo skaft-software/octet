@@ -99,20 +99,34 @@ pub(super) fn shell_chrome(
     } else {
         None
     };
-    if let Some(editor) = editor {
-        // The composer slot renders the extension component's own rows. Octet's
-        // slash popup, queue hint and status stay in their own chrome rows
-        // around the slot; nothing here is a second full-screen owner.
-        chrome.composer = rows(remote, editor, width, height, budget.saturating_sub(1));
-    }
-    let mut footer_rows = if let Some(footer) = footer {
+    let mut footer_rows = footer.map_or_else(Vec::new, |footer| {
         rows(remote, footer, width, height, budget)
-    } else {
+    });
+    if let Some(editor) = editor {
+        // The host owns the terminal rectangle. A custom editor receives only
+        // the rows left after status, focused chrome and footer reservations.
+        let reserved = chrome.header.len()
+            + chrome.working.len()
+            + chrome.error.len()
+            + chrome.pending.len()
+            + chrome.subagents.len()
+            + chrome.suggestions.len();
+        // Bound oversized footers using the native editor's existing allowance
+        // before sharing the remaining space with a potentially tall editor.
+        footer_rows.truncate(budget.saturating_sub(reserved + chrome.composer.len() + 1));
+        let footer_height = if footer.is_none() {
+            usize::from(builtin_footer.is_some())
+        } else {
+            footer_rows.len()
+        };
+        let editor_limit = budget.saturating_sub(reserved + footer_height + 1);
+        chrome.composer = rows(remote, editor, width, height, editor_limit);
+    }
+    if footer.is_none() {
         if let Some(footer) = builtin_footer {
             chrome.composer.push(footer);
         }
-        Vec::new()
-    };
+    }
     // Keep installed widgets adjacent to their corresponding editor region.
     for mount in &remote.mounts {
         match mount.placement {

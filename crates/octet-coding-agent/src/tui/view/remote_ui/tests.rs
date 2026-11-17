@@ -80,6 +80,71 @@ fn remote_ui_composes_editor_widgets_and_replacing_footer_without_rpc() {
 }
 
 #[test]
+fn tall_remote_editor_reserves_working_slot() {
+    use crate::tui::view::{render_shell_viewport_at, InteractiveShell};
+
+    for (width, height, extra_chrome) in [
+        (80, 24, false),
+        (42, 12, false),
+        (24, 8, false),
+        (42, 16, true),
+    ] {
+        for custom_footer in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            shell.set_size(width, height);
+            shell.state.borrow_mut().application_viewport_requested = true;
+            if extra_chrome {
+                shell.set_theme(crate::tui::theme::test_theme_from_source(
+                    "[layout]\nshow_header = true\nnarrow_show_header = true\n",
+                ));
+                shell.error("An inline error".into());
+            }
+            shell.begin_run("fixture");
+            let mut entries = vec![(Placement::Editor, "editor")];
+            if custom_footer {
+                entries.push((Placement::Footer, "FOOTER-0"));
+            }
+            let mut remote = projection((width, height), &entries);
+            let editor_id = remote.mount(Placement::Editor).unwrap().id.clone();
+            Arc::make_mut(&mut remote.components)
+                .store_render(
+                    &editor_id,
+                    width,
+                    (0..64).map(|row| format!("EDITOR-{row}")).collect(),
+                )
+                .unwrap();
+            shell.set_remote_ui(remote);
+            let state = shell.state.borrow();
+            let chrome = shell_chrome(&state, width, Instant::now());
+            assert!(!chrome.working.is_empty());
+            assert!(chrome.composer.iter().any(|row| row.contains("EDITOR-0")));
+            if custom_footer {
+                assert!(chrome.extension_below.last().unwrap().contains("FOOTER-0"));
+            } else {
+                let native = builtin_shell_chrome::shell_chrome(&state, width, Instant::now());
+                assert_eq!(chrome.composer.last(), native.composer.last());
+            }
+            let frame = render_shell_viewport_at(&state, width, Instant::now());
+            assert!(
+                frame.len() <= usize::from(height),
+                "{width}x{height}: {} rows",
+                frame.len()
+            );
+            assert_eq!(
+                frame
+                    .iter()
+                    .filter(|row| sexy_tui_rs::strip_terminal_sequences(row).contains("Working"))
+                    .count(),
+                1
+            );
+            assert!(frame
+                .iter()
+                .all(|row| sexy_tui_rs::visible_width(row) <= usize::from(width)));
+        }
+    }
+}
+
+#[test]
 fn cached_component_styles_and_title_survive_native_theme_and_model_switches() {
     use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
     use crate::tui::theme::{compiled_theme_for_selector, TerminalBackground};
