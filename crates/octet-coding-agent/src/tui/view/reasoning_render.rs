@@ -1209,12 +1209,16 @@ pub(super) fn collapsed_reasoning_lines_sized(
             .filter(|_| !reasoning.text.is_empty())
             .map_or_else(Vec::new, |label| vec![theme.fg("muted", label)]);
     }
+    // Pi replaces the current indicator on retry (packages/coding-agent/src/modes/
+    // interactive/interactive-mode.ts:2413-2417,3805-3813). Working-only overrides
+    // must not replace or hide the host's retry/network status.
     if let Some(working) = reasoning.extension_working.as_ref().filter(|working| {
-        working.component_line.is_some()
-            || working.message.is_some()
-            || working.visible.is_some()
-            || working.frames.is_some()
-            || working.interval_ms.is_some()
+        reasoning.retry_activity.is_none()
+            && (working.component_line.is_some()
+                || working.message.is_some()
+                || working.visible.is_some()
+                || working.frames.is_some()
+                || working.interval_ms.is_some())
     }) {
         let hidden = || {
             reasoning
@@ -1252,11 +1256,9 @@ pub(super) fn collapsed_reasoning_lines_sized(
         return lines;
     }
     if reasoning.is_working_activity() {
-        if reasoning
-            .extension_working
-            .as_ref()
-            .is_some_and(|working| working.visible == Some(false))
-        {
+        if reasoning.extension_working.as_ref().is_some_and(|working| {
+            working.visible == Some(false) && reasoning.retry_activity.is_none()
+        }) {
             return Vec::new();
         }
         let label = reasoning

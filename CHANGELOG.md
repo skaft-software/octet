@@ -93,6 +93,7 @@
 - Fullscreen selection copies on release with brief feedback and extends across edge and wheel scrolling while output streams.
 - Live worker detail slots stay reserved until settlement, and tool-progress labels keep a fixed row while newer host snapshots stay authoritative.
 - Pi working indicators render through the shared Loader, preserving extension patches, colors and multi-character frames in the native row.
+- Retry countdowns and network-wait status stay visible over custom Pi working indicators and restore their styling when work resumes.
 - Pi working components align with the native spinner column and preserve their spacing within narrow terminal widths.
 - Tool result connectors attach to visible output while preserving blank-row spacing and the shared gutter.
 - Timed image reads retain inline previews while scrolling and cropping.

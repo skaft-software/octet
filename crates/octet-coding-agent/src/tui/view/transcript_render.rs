@@ -718,6 +718,7 @@ pub(super) fn render_block_planned_with_rainbow(
             if collapsed_reasoning
                 && !reasoning.finished
                 && theme.capabilities().animation
+                && reasoning.retry_activity.is_none()
                 && reasoning
                     .extension_working
                     .as_ref()
@@ -736,6 +737,7 @@ pub(super) fn render_block_planned_with_rainbow(
             if collapsed_reasoning
                 && !reasoning.finished
                 && theme.capabilities().animation
+                && reasoning.retry_activity.is_none()
                 && reasoning
                     .extension_working
                     .as_ref()

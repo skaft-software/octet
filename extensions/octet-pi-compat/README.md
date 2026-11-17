@@ -429,7 +429,10 @@ deliberate differences from Pi's unbounded, blocking chain.
   row once, retains elapsed-time/layout ownership and suppresses animated
   component presentation under reduced motion or disabled terminal animation,
   using the plain working message instead. Without an active component, the
-  native spinner remains available. No paint path calls the host synchronously.
+  native spinner remains available. Native retry countdowns and network-wait
+  status take precedence over the ordinary Loader, message and visibility in
+  fullscreen and Tern; retained custom styling returns when recovery ends.
+  No paint path calls the host synchronously.
 - `setStatus` retains footer-provider metadata and, without a custom Pi footer,
   projects one width-clipped status row below the native footer through an
   owner-fenced `below_editor` slot. Keys sort deterministically; setting an

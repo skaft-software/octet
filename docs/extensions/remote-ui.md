@@ -184,7 +184,10 @@ the remaining cells keep the component's spacing and styling, clipped to the
 available row width without splitting wide glyphs. Tern uses the same native
 spinner slot. Final clipping, elapsed time and accessibility remain host-owned.
 Reduced motion and disabled terminal animation use the native static marker and
-plain working message instead of animated component presentation.
+plain working message instead of animated component presentation. Retry countdowns
+and network-wait labels take precedence over the ordinary component, custom
+message and working visibility in both fullscreen and Tern. The retained component
+presentation returns when recovery ends; no extension restyling is lost.
 
 ### `ui/chrome` — native component editor service
 

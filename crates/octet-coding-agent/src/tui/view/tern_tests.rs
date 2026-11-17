@@ -2576,6 +2576,66 @@ fn transcript_extension_snapshots_feed_native_ansi_and_markdown_without_changing
     assert!(snapshot.contains("canonical markdown"));
 }
 
+#[test]
+fn retry_status_preempts_component_loader_and_restores_it() {
+    use crate::tui::view::{ShellExtensionUi, ShellExtensionWorking};
+    use octet_agent::AgentEvent;
+    use std::time::Duration;
+
+    for visible in [true, false] {
+        for network in [false, true] {
+            let (mut shell, _, _) = setup(16);
+            let run = shell.begin_run("test");
+            shell.set_extension_ui(ShellExtensionUi {
+                working: Some(ShellExtensionWorking {
+                    component_line: Some("\x1b[32m>>> CUSTOM LOADER\x1b[0m".into()),
+                    message: Some("CUSTOM MESSAGE".into()),
+                    visible: Some(visible),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let before = serde_json::to_string(&working_row(&shell.state.borrow(), false)).unwrap();
+            assert_eq!(before.contains("CUSTOM LOADER"), visible);
+            shell.on_run_event(
+                run,
+                &if network {
+                    AgentEvent::ProviderWaitingForNetwork {
+                        attempt: 2,
+                        delay: Duration::from_secs(5),
+                        error: "diagnostic-only cause".into(),
+                    }
+                } else {
+                    AgentEvent::ProviderRetry {
+                        attempt: 1,
+                        max_attempts: 3,
+                        delay: Duration::from_secs(5),
+                        error: "diagnostic-only cause".into(),
+                    }
+                },
+            );
+            for reduce_motion in [false, true] {
+                let retry =
+                    serde_json::to_string(&working_row(&shell.state.borrow(), reduce_motion))
+                        .unwrap();
+                let label = if network {
+                    "Waiting for network · attempt 2 in 5s"
+                } else {
+                    "Retrying 1/3 in 5s"
+                };
+                assert!(retry.contains(label), "{retry}");
+                assert!(!retry.contains("CUSTOM LOADER") && !retry.contains("CUSTOM MESSAGE"));
+                assert!(!retry.contains("work.elapsed"));
+            }
+            shell.on_run_event(run, &AgentEvent::TurnStarted);
+            let restored =
+                serde_json::to_string(&working_row(&shell.state.borrow(), false)).unwrap();
+            assert_eq!(restored.contains("CUSTOM LOADER"), visible, "{restored}");
+            assert!(!restored.contains("Retrying") && !restored.contains("Waiting for network"));
+        }
+    }
+}
+
 #[path = "tern_rail_tests.rs"]
 mod rail;
 

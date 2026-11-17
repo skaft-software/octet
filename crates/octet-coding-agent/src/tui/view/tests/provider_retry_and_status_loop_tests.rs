@@ -45,6 +45,50 @@ fn provider_retry_countdown_is_typed_and_stops_at_attempt_start_and_cancellation
 }
 
 #[test]
+fn provider_retry_preempts_component_loader_and_restores_it() {
+    for visible in [true, false] {
+        for network in [false, true] {
+            let mut shell = InteractiveShell::test_shell();
+            let id = shell.begin_run("test");
+            shell.set_extension_ui(ShellExtensionUi {
+                working: Some(ShellExtensionWorking {
+                    component_line: Some("\x1b[32m>>> CUSTOM LOADER\x1b[0m".into()),
+                    message: Some("CUSTOM MESSAGE".into()),
+                    visible: Some(visible),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let frame = || render_shell(&shell.state.borrow(), 120).join("\n");
+            assert_eq!(frame().contains("CUSTOM LOADER"), visible);
+            let event = if network {
+                AgentEvent::ProviderWaitingForNetwork {
+                    attempt: 2,
+                    delay: Duration::from_secs(5),
+                    error: "diagnostic-only cause".into(),
+                }
+            } else {
+                retry_event(1)
+            };
+            shell.on_run_event(id, &event);
+            let retry =
+                strip_terminal_sequences(&render_shell(&shell.state.borrow(), 120).join("\n"));
+            let label = if network {
+                "Waiting for network · attempt 2 in 5s"
+            } else {
+                "Retrying 1/3 in 5s"
+            };
+            assert!(retry.contains(label), "{retry}");
+            assert!(!retry.contains("CUSTOM LOADER") && !retry.contains("CUSTOM MESSAGE"));
+            shell.on_run_event(id, &AgentEvent::TurnStarted);
+            let restored = render_shell(&shell.state.borrow(), 120).join("\n");
+            assert_eq!(restored.contains("CUSTOM LOADER"), visible, "{restored}");
+            assert!(!restored.contains(label));
+        }
+    }
+}
+
+#[test]
 fn provider_retry_preserves_accepted_turn_output() {
     let mut shell = InteractiveShell::test_shell();
     let id = shell.begin_run("test");

@@ -1272,12 +1272,19 @@ fn text_node(identity: u64, text: &str, token: &str) -> Node {
 
 fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     let run = shell.run.current().filter(|run| run.is_active())?;
-    if shell
+    let retry = shell
+        .working_status
+        .as_ref()
+        .and_then(|block| block.retry_activity.as_ref());
+    // Pi replaces the working indicator on retry (packages/coding-agent/src/modes/
+    // interactive/interactive-mode.ts:2413-2417,3805-3813). Retain custom styling
+    // for ordinary work without masking recovery labels or hiding them.
+    let working = shell
         .extension_ui
         .working
         .as_ref()
-        .is_some_and(|working| working.visible == Some(false))
-    {
+        .filter(|_| retry.is_none());
+    if working.is_some_and(|working| working.visible == Some(false)) {
         return None;
     }
     let now = Instant::now();
@@ -1287,10 +1294,6 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             Some(TranscriptBlock::Reasoning(block)) if !block.finished => Some(block),
             _ => None,
         });
-    let retry = shell
-        .working_status
-        .as_ref()
-        .and_then(|block| block.retry_activity.as_ref());
     let label = if let Some(retry) = retry {
         retry.label_at(now)
     } else {
@@ -1327,10 +1330,7 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             crate::presentation::RunPhase::Finished(_) => return None,
         }
     };
-    let label = shell
-        .extension_ui
-        .working
-        .as_ref()
+    let label = working
         .and_then(|working| working.message.as_deref())
         .unwrap_or(&label);
     let age = run.elapsed_at(now).as_millis() as u64;
@@ -1398,11 +1398,8 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
     }
     // These frames are animated by the host, not by a remote component. Do not
     // let them replace the static marker selected for reduced motion above.
-    if let Some(working) = shell
-        .extension_ui
-        .working
-        .as_ref()
-        .filter(|_| !reduce_motion && shell.theme.capabilities().animation)
+    if let Some(working) =
+        working.filter(|_| !reduce_motion && shell.theme.capabilities().animation)
     {
         if let Some(line) = &working.component_line {
             // The Pi component owns animation and message styling. Paint its
