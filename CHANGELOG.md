@@ -64,6 +64,7 @@
 - Pi context hooks isolate callback-owned error codes while preserving native ownership and cancellation checks.
 - Pi context hooks preserve accepted edits and run later handlers after malformed result objects or message content.
 - Pi editors render from bounded local native observations while Rust retains editing and history authority.
+- Pi editors keep large completion menus responsive with display-only paint observations and actionable bounded host replies.
 - Splash clicks keep the byte mark fully painted and text selection confined to the clicked word.
 - Small upward scrolls keep the chosen transcript position through repaints, streaming and live-row height changes.
 - Composer clicks and completion selection use the painted rows beneath the independent working indicator during streaming.

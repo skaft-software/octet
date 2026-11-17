@@ -1,6 +1,7 @@
 //! ExecutableExtensions host requests: admission, session and context operations, editor and terminal grants.
 
 use super::*;
+use octet_agent::extension_process::ExtensionRuntimeError;
 
 impl ExecutableExtensions {
     /// Answer one host-mediated extension request exactly once without blocking
@@ -20,11 +21,35 @@ impl ExecutableExtensions {
             return;
         };
         handle.spawn(async move {
-            let _ = tokio::time::timeout(
-                EXTENSION_UI_EDITOR_RESPONSE_DEADLINE,
-                process.respond_to_extension_request(request_id, generation, outcome),
-            )
+            let delivery = tokio::time::timeout(EXTENSION_UI_EDITOR_RESPONSE_DEADLINE, async {
+                match process
+                    .respond_to_extension_request(request_id.clone(), generation, outcome)
+                    .await
+                {
+                    // Transport sizing happens before response admission. Only
+                    // this failure may replace the unsent result; the same
+                    // generation/cancellation fences still govern the refusal.
+                    Err(ExtensionRuntimeError::MessageTooLarge { limit }) => {
+                        process
+                            .respond_to_extension_request(
+                                request_id,
+                                generation,
+                                ExtensionRequestOutcome::Failed(
+                                    ExtensionRequestFailure::BoundsExceeded,
+                                    format!("{name}: host response exceeds the {limit}-byte transport bound; reduce the requested data before reading again; prior changes may already be applied"),
+                                ),
+                            )
+                            .await
+                    }
+                    result => result,
+                }
+            })
             .await;
+            if !matches!(delivery, Ok(Ok(()))) {
+                crate::output::stderr_line(format!(
+                    "warning: {name}: host response delivery failed or timed out; reload the extension before continuing; prior changes may already be applied"
+                ));
+            }
         });
     }
 

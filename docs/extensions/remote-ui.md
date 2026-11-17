@@ -193,6 +193,19 @@ operations, before invoking component paint. Render-time getters and layout read
 only that local observation, including on resize; they never call the host.
 The last painted geometry is supplied to native navigation at the next input,
 outside paint. No local observation can edit native text or history.
+Menu observations carry display labels/descriptions. Only empty-label display
+fallbacks retain their insertion value; other value fields are empty. They do not
+duplicate hidden insertion values or callback handles; the native menu and adapter
+callback table retain those.
+Both paint reads and last-painted geometry replies use this display-only menu.
+
+The transport checks the complete escaped reply against its active envelope bound.
+An oversized host result receives a small `bounds_exceeded` refusal naming the
+extension, host-response stage and byte limit, rather than leaving its reader
+waiting. Reduce the requested data before reading again; previous mutations may
+already have applied and are not replayed. Delivery failures and deadline expiry
+produce an extension-named warning.
+
 The native autocomplete service issues query
 IDs and revisions, bounds incoming suggestions, owns selection/navigation and
 checks the originating revision before completion. Completion coordinates are

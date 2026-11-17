@@ -185,6 +185,23 @@ impl Editor {
             "undo_history":self.model.history_depths()})
     }
 
+    fn paint_menu(&self) -> Option<Value> {
+        self.menu
+            .as_ref()
+            .filter(|menu| menu.revision == self.model.revision())
+            .map(|menu| {
+                // Pi packages/tui/src/components/select-list.ts:266-268 paints
+                // label || value. Callback handles and insertion values stay
+                // native/adapter-owned; do not repeat them in paint responses.
+                let items = menu.items.iter().map(|item| json!({
+                    "label": item.label,
+                    "value": if item.label.is_empty() { &item.value } else { "" },
+                    "description": item.description,
+                })).collect::<Vec<_>>();
+                json!({"items":items,"selected":menu.selected,"max_visible":self.autocomplete_max_visible})
+            })
+    }
+
     // Process-boundary observation only. Pi-shaped layout stays in the adapter;
     // the native model remains the sole editing, caret, paste and menu authority.
     fn paint_snapshot(&self) -> Value {
@@ -209,7 +226,7 @@ impl Editor {
             "padding_x":self.padding,"autocomplete_max_visible":self.autocomplete_max_visible,
             "pastes":self.pastes.iter().filter(|(id,_)|markers.iter().any(|(_,_,marker_id)|marker_id == *id)).map(|(id,text)|json!([id,text])).collect::<Vec<_>>(),
             "undo_history":self.model.history_depths(),
-            "autocomplete":self.menu.as_ref().filter(|menu|menu.revision == self.model.revision()).map(|menu|json!({"items":menu.items,"selected":menu.selected,"max_visible":self.autocomplete_max_visible}))})
+            "autocomplete":self.paint_menu()})
     }
 
     fn markers(&self) -> Vec<(usize, usize, u64)> {
@@ -849,7 +866,7 @@ impl Editor {
         Ok(
             json!({"lines":lines,"padding":padding,"content_width":content_width,
             "hidden_above":self.scroll,"hidden_below":projection.lines().len()-end,
-            "autocomplete":self.menu.as_ref().filter(|menu|menu.revision == self.model.revision()).map(|menu|json!({"items":menu.items,"selected":menu.selected,"max_visible":self.autocomplete_max_visible}))}),
+            "autocomplete":self.paint_menu()}),
         )
     }
 }
@@ -1286,11 +1303,11 @@ mod tests {
         assert_eq!(paint["autocomplete"], Value::Null);
         let query = call(json!({"op":"query","force":true})).unwrap()["query"]["id"].clone();
         call(json!({"op":"suggestions","query_id":query,"prefix":"x","items":[{"id":0,"value":"xyz","label":"xyz"}]})).unwrap();
-        assert_eq!(
-            call(json!({"op":"read","field":"paint"})).unwrap()["value"]["autocomplete"]["items"]
-                [0]["value"],
-            "xyz"
-        );
+        let paint = call(json!({"op":"read","field":"paint"})).unwrap();
+        let item = &paint["value"]["autocomplete"]["items"][0];
+        assert_eq!(item["label"], "xyz");
+        assert_eq!(item["value"], "");
+        assert!(item.get("id").is_none());
     }
 
     #[test]

@@ -169,6 +169,7 @@ async fn fixture(temp: &tempfile::TempDir) -> (ExecutableExtensions, PathBuf) {
         temp,
         &["session_start", "session_end"],
         Duration::from_secs(3),
+        None,
     )
     .await
 }
@@ -179,6 +180,7 @@ async fn input_hook_fixture(temp: &tempfile::TempDir) -> (ExecutableExtensions, 
         temp,
         &["session_start", "session_end", "before_prompt"],
         Duration::from_secs(30),
+        None,
     )
     .await
 }
@@ -187,6 +189,7 @@ async fn fixture_with(
     temp: &tempfile::TempDir,
     hooks: &[&str],
     request_timeout: Duration,
+    max_message_bytes: Option<usize>,
 ) -> (ExecutableExtensions, PathBuf) {
     let script = temp.path().join("remote-ui-fixture.py");
     std::fs::write(&script, FIXTURE).unwrap();
@@ -215,6 +218,9 @@ notifications = true
     runtime.host_state.session_id = Some("remote-test-session".into());
     runtime.remote_ui = Some(wake.clone());
     runtime.request_timeout = request_timeout;
+    if let Some(limit) = max_message_bytes {
+        runtime.max_message_bytes = limit;
+    }
     let process = ExtensionProcess::start(
         DiscoveredExtension {
             manifest,
@@ -350,6 +356,77 @@ fn wire(path: &PathBuf) -> Vec<serde_json::Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+#[tokio::test]
+async fn oversized_host_reply_delivers_a_small_actionable_refusal() {
+    use octet_agent::extension_process::{
+        ExtensionEvent, ExtensionRequestOutcome, ExtensionRuntimeError,
+    };
+
+    for limit in [1_048_576, 65_536] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut extensions, log) =
+            fixture_with(&temp, &[], Duration::from_secs(3), Some(limit)).await;
+        let process = extensions.processes[0].clone();
+        let mut events = process.subscribe();
+        let command = tokio::spawn({
+            let process = process.clone();
+            async move {
+                process
+                    .execute_command(
+                        "mount",
+                        vec!["chrome".into(), r#"{"kind":"theme_get"}"#.into()],
+                        process.current_context_for_resource_owner("remote-test-session"),
+                    )
+                    .await
+            }
+        });
+        let (request_id, generation) = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let ExtensionEvent::RemoteUiRequested {
+                    request_id,
+                    generation,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    break (request_id, generation);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        extensions.queue_host_request_response(
+            process.clone(),
+            request_id,
+            generation,
+            ExtensionRequestOutcome::Ok(serde_json::json!({"value":"\"".repeat(600_000)})),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(1), command)
+            .await
+            .expect("an oversized reply must answer instead of stranding the synchronous reader")
+            .unwrap();
+        let Err(ExtensionRuntimeError::Remote { code, message, .. }) = result else {
+            panic!("expected a bounded refusal, got {result:?}");
+        };
+        assert_eq!(code, ExtensionRequestFailure::BoundsExceeded.code());
+        assert!(message.starts_with("bounds_exceeded:"), "{message}");
+        assert!(message.contains("remote-ui-fixture"), "{message}");
+        assert!(message.contains("host response"), "{message}");
+        assert!(message.contains("reduce"), "{message}");
+        assert!(message.contains(&format!("{limit}-byte")), "{message}");
+        let replies = wire(&log)
+            .into_iter()
+            .filter(|message| message["id"] == "chrome-1")
+            .collect::<Vec<_>>();
+        assert_eq!(replies.len(), 1, "exactly one terminal response");
+        assert!(serde_json::to_vec(&replies[0]).unwrap().len() < 1024);
+        assert!(
+            process.is_running(),
+            "the refused result does not kill the extension"
+        );
+        assert!(process.shutdown().await);
+    }
 }
 
 #[tokio::test]

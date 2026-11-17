@@ -8,7 +8,32 @@ import { inRender, rendering } from '../lib/ui-delivery.mjs';
 import { nativeEditorHost } from './native-editor-host.mjs';
 
 const plain = lines => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '').replaceAll('\x1b_pi:c\x07', '');
-for (const placement of ['editor', 'fullscreen']) test(`${placement} Editor paints native observations without synchronous host I/O`, t => {
+
+test('large draft and escaped completion values keep paint observations within the physical frame bound', t => {
+  const peer = nativeEditorHost(t), surface_id = 'paint-bound';
+  peer.call('ui/open', { surface_id });
+  const request = (operation, editor_id) => peer.call('ui/chrome', { chrome: { kind: 'editor', surface_id, editor_id, operation } });
+  const { editor_id } = request({ op: 'create', padding_x: 0, autocomplete_max_visible: 5 });
+  const call = operation => request(operation, editor_id);
+  const text = 'a'.repeat(200000) + '@x', value = '"'.repeat(4096);
+  call({ op: 'set_text', text });
+  const { query } = call({ op: 'query', force: true });
+  const items = Array.from({ length: 110 }, (_, id) => ({ id, value, label: 'item' }));
+  const suggestions = { op: 'suggestions', query_id: query.id, prefix: 'x', items };
+  assert.ok(Buffer.byteLength(JSON.stringify(suggestions)) < 1048576);
+  assert.equal(call(suggestions).accepted, true);
+  const paint = call({ op: 'read', field: 'paint' });
+  assert.ok(Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 'paint', result: paint }) + '\n') <= 1048576);
+  assert.equal(paint.value.text, text);
+  assert.equal(paint.value.autocomplete.items.length, items.length);
+  assert.equal(paint.value.autocomplete.items[0].label, 'item');
+  assert.equal(paint.value.autocomplete.items[0].value, '', 'paint does not copy completion insertion values');
+  assert.equal(call({ op: 'selection' }).selection.id, 0);
+  call({ op: 'input', data: '', action: 'down', disable_submit: false });
+  assert.equal(call({ op: 'selection' }).selection.id, 1, 'native menu selection keeps original callback handles');
+  assert.equal(call({ op: 'read', field: 'paint' }).value.autocomplete.selected, 1);
+});
+for (const placement of ['editor', 'fullscreen']) test(`${placement} Editor paints native observations without synchronous host I/O`, async t => {
   const peer = nativeEditorHost(t), calls = [];
   const store = { id: 1, live: true, controller: new AbortController(), state: {
     alive: true, owner: { session_id: 's', extension_instance_id: 'i', process_generation: 1 },
@@ -25,7 +50,10 @@ for (const placement of ['editor', 'fullscreen']) test(`${placement} Editor pain
     } };
   peer.call('ui/open', { surface_id: surface.id });
   const tui = new RemoteTUI(surface).facade;
-  const editor = new Editor(tui, { borderColor: s => s });
+  const identity = s => s;
+  const editor = new Editor(tui, { borderColor: identity, selectList: {
+    selectedPrefix: identity, selectedText: identity, description: identity, scrollInfo: identity, noMatch: identity,
+  } });
   editor.focused = true;
   editor.setText('native draft');
   editor.borderColor = text => { editor.getCursor(); return text; };
@@ -52,6 +80,28 @@ for (const placement of ['editor', 'fullscreen']) test(`${placement} Editor pain
   assert.deepEqual(editor.getCursor(), { line: 0, col: 5 });
   editor.setText('next');
   assert.match(plain(inRender(() => editor.render(40))), /next/);
+  // Pi SelectList paints labels, falling back to values only for empty labels;
+  // accepting a completion still passes the original item to the provider.
+  const items = [{ value: '"'.repeat(4096), label: 'display label', description: 'description' },
+    { value: 'fallback value', label: '' }];
+  editor.setAutocompleteProvider({
+    getSuggestions: () => ({ items, prefix: 'x' }),
+    applyCompletion(_lines, _line, _col, item) {
+      assert.equal(item, items[0]);
+      return { lines: [item.value], cursorLine: 0, cursorCol: item.value.length };
+    },
+  });
+  editor.setText('@x');
+  editor.handleInput('\t');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(editor.isShowingAutocomplete(), true);
+  const beforeMenuPaint = calls.length, menu = plain(inRender(() => editor.render(40)));
+  assert.match(menu, /display label/);
+  assert.match(menu, /fallback value/);
+  assert.doesNotMatch(menu, /"{2}/);
+  assert.equal(calls.length, beforeMenuPaint);
+  editor.handleInput('\t');
+  assert.equal(editor.getText(), items[0].value);
   assert.equal(calls.some(call => call.painting), false);
 });
 
