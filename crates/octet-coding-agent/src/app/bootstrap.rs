@@ -6427,6 +6427,24 @@ fn register_openai_codex_with_notes(
     offline: bool,
     notes: &mut CodexContextNotes,
 ) -> anyhow::Result<()> {
+    register_openai_codex_with_discovery(
+        catalog,
+        store,
+        offline,
+        notes,
+        cfg!(test),
+        discover_codex_models_within_envelope,
+    )
+}
+
+fn register_openai_codex_with_discovery(
+    catalog: &mut ModelCatalog,
+    store: crate::auth::codex::CredentialStore,
+    offline: bool,
+    notes: &mut CodexContextNotes,
+    fixture: bool,
+    discover: impl FnOnce(crate::auth::codex::CredentialStore) -> anyhow::Result<CodexDiscovery>,
+) -> anyhow::Result<()> {
     use crate::auth::codex;
 
     let Some(initial_claims) = codex::usable_subscription_claims(&store)? else {
@@ -6439,14 +6457,23 @@ fn register_openai_codex_with_notes(
     // online and reduced to the conservative fallback offline, so dynamic
     // capabilities can never survive past the freshness boundary. A first
     // launch performs one bounded discovery to seed the cache.
-    let (models, _source) = codex_inventory_models(
-        &store,
-        &initial_claims,
-        offline,
-        cfg!(test),
-        discover_codex_models_within_envelope,
-    );
-    let resolver = std::sync::Arc::new(codex::CodexResolver::for_account(store, &initial_claims));
+    let mut catalog_claims = initial_claims.clone();
+    let (models, source) =
+        codex_inventory_models(&store, &initial_claims, offline, fixture, |store| {
+            let discovery = discover(store)?;
+            catalog_claims = discovery.claims.clone();
+            Ok(discovery)
+        });
+    if source == CodexInventorySource::ConservativeFallback {
+        // Refresh can persist new claims even if the subsequent inventory fetch
+        // fails. Bind the replacement fallback to those current credentials.
+        // Pi compatibility: packages/ai/src/auth/resolve.ts:173-187.
+        let Some(current_claims) = codex::usable_subscription_claims(&store)? else {
+            return Ok(());
+        };
+        catalog_claims = current_claims;
+    }
+    let resolver = std::sync::Arc::new(codex::CodexResolver::for_account(store, &catalog_claims));
     let user_override = codex_context_override_from_env()?;
     octet_ai::providers::codex::register_codex_models(
         catalog,

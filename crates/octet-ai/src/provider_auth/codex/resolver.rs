@@ -47,9 +47,18 @@ impl CodexResolver {
         }
     }
 
-    pub(crate) fn with_lock_wait(mut self, wait: std::time::Duration) -> Self {
-        self.refresh_lock_wait = wait;
-        self
+    pub(crate) fn for_discovery(
+        store: CredentialStore,
+        refresh_lock_wait: std::time::Duration,
+    ) -> Result<Self> {
+        super::local_subscription_claims(&store)?.ok_or_else(|| anyhow!("Codex login required"))?;
+        // A replacement catalog has no account binding yet. Match Pi auth
+        // resolution using the refreshed credential (packages/ai/src/auth/resolve.ts:
+        // 173-187); only inference from an existing catalog pins older claims.
+        Ok(Self {
+            refresh_lock_wait,
+            ..Self::new(store)
+        })
     }
 
     #[cfg(test)]
@@ -249,6 +258,63 @@ mod tests {
             })
             .unwrap();
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn discovery_refresh_uses_current_claims_and_old_catalog_stays_invalid() {
+        use base64::Engine as _;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let token = |plan| {
+            let payload = serde_json::json!({"https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_9", "chatgpt_plan_type": plan
+            }});
+            format!(
+                "h.{}.s",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+            )
+        };
+        let (_dir, store) = store_with(0);
+        let mut credential = store.load().unwrap().unwrap();
+        credential.tokens.access_token = token("plus");
+        store.save(&credential).unwrap();
+        let old_claims = super::super::local_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let old_catalog = CodexResolver::for_account(store.clone(), &old_claims);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": token("pro"), "refresh_token": "rotated", "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut resolver =
+            CodexResolver::for_discovery(store.clone(), std::time::Duration::from_secs(1)).unwrap();
+        resolver.token_url = format!("{}/token", server.uri());
+        let (headers, claims) = resolver.discovery_headers().await.unwrap();
+        assert_ne!(claims, old_claims);
+        assert_eq!(
+            claims,
+            super::super::local_subscription_claims(&store)
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(headers["chatgpt-account-id"], "acct_9");
+        assert_eq!(
+            store.load().unwrap().unwrap().tokens.refresh_token,
+            "rotated"
+        );
+        assert!(CodexResolver::for_account(store, &claims)
+            .resolve()
+            .await
+            .is_ok());
+        assert!(matches!(
+            old_catalog.resolve().await,
+            Err(AuthError::Resolve)
+        ));
+        server.verify().await;
     }
 
     #[tokio::test]

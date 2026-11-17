@@ -60,6 +60,7 @@
 - Pi tool-call result getters stay under bounded supervision, with throwing getters isolated and reported by extension and stage.
 - Responses history preserves recorded reasoning effort before assistant replies whose text is edited by context hooks.
 - Responses history keeps tool-call and result IDs paired when context hooks edit assistant text.
+- Codex startup binds new catalogs to refreshed account and plan claims, including fallback after inventory failures.
 - Provider HTTP errors keep status and recognized classifications while keeping free-form remote error text private.
 - Gemini recordings validate request settings and strict tool schemas before resolving credentials or uploading files.
 - Anthropic usage preserves thinking-token counts when later output details omit the counter.

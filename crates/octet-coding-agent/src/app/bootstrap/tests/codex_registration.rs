@@ -135,6 +135,56 @@ async fn codex_inference_uses_pi_parallel_wire_contract_when_inventory_prefers_l
     }
 }
 
+#[tokio::test]
+async fn registration_binds_post_refresh_claims_for_discovery_and_fallback() {
+    for discovery_succeeds in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("codex.json");
+        write_codex_credential(&path, false, "plus");
+        let store = crate::auth::codex::CredentialStore::new(&path);
+        let old_claims = crate::auth::codex::usable_subscription_claims(&store)
+            .unwrap()
+            .unwrap();
+        let old_resolver =
+            crate::auth::codex::CodexResolver::for_account(store.clone(), &old_claims);
+        let mut catalog = base_model_catalog(true).unwrap();
+        register_openai_codex_with_discovery(
+            &mut catalog,
+            store.clone(),
+            false,
+            &mut CodexContextNotes::default(),
+            false,
+            |store| {
+                // Fake discovery models a refresh that persisted before the inventory result.
+                write_codex_credential(&path, false, "pro");
+                if !discovery_succeeds {
+                    anyhow::bail!("fixture inventory unavailable after refresh");
+                }
+                Ok(CodexDiscovery {
+                    claims: crate::auth::codex::usable_subscription_claims(&store)?.unwrap(),
+                    models: fallback_codex_models(),
+                })
+            },
+        )
+        .unwrap();
+        let model = catalog
+            .resolve(&ModelId("codex/gpt-6.1-sol".into()))
+            .unwrap();
+        let Auth::Dynamic(resolver) = &model.endpoint.auth else {
+            panic!("expected dynamic Codex credentials")
+        };
+        resolver
+            .resolve()
+            .await
+            .expect("new catalog accepts the refreshed plan without restart");
+        use octet_ai::CredentialResolver as _;
+        assert!(
+            old_resolver.resolve().await.is_err(),
+            "old catalogs remain invalidated"
+        );
+    }
+}
+
 #[test]
 fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
     let directory = tempfile::tempdir().unwrap();

@@ -697,10 +697,7 @@ pub async fn discover_inventory_with(
     refresh_lock_wait: Duration,
     before_inventory: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<(CodexDiscovery, Vec<String>)> {
-    let claims = codex::local_subscription_claims(store)?
-        .ok_or_else(|| anyhow::anyhow!("Codex login required"))?;
-    let resolver =
-        codex::CodexResolver::for_account(store.clone(), &claims).with_lock_wait(refresh_lock_wait);
+    let resolver = codex::CodexResolver::for_discovery(store.clone(), refresh_lock_wait)?;
     let (mut headers, claims) = resolver.discovery_headers().await?;
     before_inventory()?;
     headers.extend(super::headers::public_headers(

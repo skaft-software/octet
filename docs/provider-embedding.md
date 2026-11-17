@@ -76,7 +76,9 @@ The frontend owns its branded callback page; the library has no frontend assets.
 Keep the store/catalog and the Tokio runtime alive while requests are active.
 A catalog binding pins the account and plan; logout or replacement requires
 reloading/rebinding, not silent credential substitution. Already-dispatched
-requests are not remotely revoked by local logout.
+requests are not remotely revoked by local logout. Discovery establishes its
+account/plan identity after any credential refresh, so a new snapshot binds the
+current identity rather than invalidating itself against the pre-refresh plan.
 
 Refresh rechecks credentials inside the process/store locks. File-lock contention
 is bounded at three seconds; token HTTP work is bounded at sixty seconds. A

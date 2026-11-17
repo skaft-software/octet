@@ -248,6 +248,11 @@ advertised, select `codex/gpt-6.1-sol`, `codex/gpt-6.1-terra`, `codex/gpt-6-astr
 direct OpenAI presets. When discovery is unreachable, 6.1 Sol leads the fallback
 suggestions.
 
+When startup discovery refreshes a credential, the new catalog uses the refreshed
+account and plan, including conservative fallback after an inventory failure.
+Existing catalogs remain pinned to the account and plan that supplied them;
+subsequent account or plan changes require reloading the catalog.
+
 Account-advertised input/output modalities and exact thinking choices/defaults
 survive discovery and its normalized cache, including newly named models such as
 Terra when an account actually advertises them. Explicit text-only, false or
