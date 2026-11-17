@@ -67,6 +67,37 @@ fn session_detail_reports_file_identity_messages_tokens_cost_and_uncertainty() {
 }
 
 #[test]
+fn session_detail_prices_delegated_codex_sol_usage_after_resume() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("priced-child.jsonl");
+    let usage = Usage {
+        input_tokens: 200_000,
+        cache_read_tokens: 100_000,
+        output_tokens: 1_000,
+        total_tokens: 301_000,
+        ..Default::default()
+    };
+    let pricing = crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-sol")
+        .expect("reviewed Codex price");
+    let cost = octet_ai::pricing::cost_of(&pricing, &usage).unwrap();
+    let record = serde_json::json!({
+        "type": "usage", "record": {
+            "kind": {"kind": "delegated_agent", "agent_id": "agent-1", "turn_count": 1, "tool_call_count": 0},
+            "endpoint": "openai-codex", "model": "codex/gpt-6.1-sol",
+            "usage": usage, "cost": cost, "cost_microdollars": cost.total,
+            "session_cost_microdollars": cost.total,
+            "session_cost_picodollars_remainder": cost.total_picodollars_remainder
+        }
+    });
+    std::fs::write(&path, format!("{record}\n")).unwrap();
+    let session = Session::open(&path).unwrap();
+    let text = session_text(&session, &Default::default());
+    assert!(text.contains("Cost: $0.835000"), "{text}");
+    assert!(!text.contains("uncertain"), "{text}");
+    assert!(!text.contains("known subtotal"), "{text}");
+}
+
+#[test]
 fn debug_is_hidden_but_parses_and_reports_every_rendered_line() {
     assert_eq!(parse("/debug"), Command::Debug);
     assert!(matches!(parse("/debug extra"), Command::Unknown(_)));

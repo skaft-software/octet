@@ -303,8 +303,11 @@ context-policy records while retaining account/plan binding and freshness checks
 OpenAI's [pricing guide](https://developers.openai.com/codex/pricing) states that
 Sol's included subscription usage has no long-context surcharge and that API
 prices do not estimate included tasks. octet's Codex cost accounting is
-unchanged: the reviewed subscription allowlist keeps its API-equivalent rates and
-long-context tiers, an unreviewed model stays unpriced, and a public quote on the
+API-equivalent: the reviewed subscription allowlist includes `gpt-6.1-sol` with
+$2/$10/$0.10/$2.50 input/output/cache-read/cache-write per million tokens and
+$4/$15/$0.20/$5 above 272K input, matching Pi's Codex catalog. These are usage
+accounting estimates, not subscription invoices or included-task counts. An
+unreviewed model stays unpriced, and a public quote on the
 direct OpenAI route never prices an OAuth route automatically. Credit rates are
 not converted into an invented per-token USD tariff. Context length alone does
 not mark token usage uncertain. See [Codex context windows](codex-context.md).
@@ -970,8 +973,8 @@ Above 272K input, the whole request uses $2/$7.50/$0.10/$2.50. The legacy
 does not advertise a five-minute retention contract.
 Exact public pricing is recorded in [the catalog sources](../crates/octet-ai/models/SOURCES.md).
 These declarations do not establish Codex Terra availability, controls, context
-or pricing. Public prices aren't borrowed for Codex Sol, Luna or 6.1 Sol, whose
-subscription cost stays unknown.
+or pricing. Codex 6.1 Sol has an explicit reviewed accounting price as described
+above; Codex Sol and Luna remain unpriced.
 
 Model and endpoint feature declarations must **both** opt in:
 

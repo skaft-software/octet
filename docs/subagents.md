@@ -73,6 +73,8 @@ Omitted values (or `inherit`) inherit the parent's selection. Explicit selection
 require negotiated `agent_model_selection_v1`; older hosts fail closed before
 creating a worker. The host resolves configured, credential-available routes and
 never substitutes the parent model for an unknown or unavailable route.
+Workers retain the selected catalog entry's pricing and long-context tiers,
+including Codex `gpt-6.1-sol`, just as a normal session selecting that model does.
 
 Use `subagent_models` first to discover exact identifiers and supported reasoning:
 

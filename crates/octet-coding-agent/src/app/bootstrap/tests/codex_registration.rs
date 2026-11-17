@@ -222,10 +222,7 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
         // Subscription pricing is reviewed only where it was observed.
         assert_eq!(
             model.spec.pricing.is_some(),
-            !matches!(
-                *model_id,
-                "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna"
-            )
+            !matches!(*model_id, "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna")
         );
         if *model_id == "gpt-6-astra" {
             assert!(model
@@ -1012,9 +1009,13 @@ fn codex_gpt_6_1_sol_bundled_catalog_contract() {
     );
     assert_eq!(codex.spec.capabilities.agent_delegation, None);
     assert!(!codex.spec.capabilities.responses_lite);
+    assert_eq!(
+        codex.spec.pricing,
+        crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-sol")
+    );
     assert!(
-        codex.spec.pricing.is_none(),
-        "OAuth must not borrow the public API quote"
+        codex.spec.pricing.is_some(),
+        "reviewed Codex Sol accounting price"
     );
 }
 
@@ -1179,7 +1180,13 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
     assert_eq!(sol_61.tiers[0].output, Some(TokenRate(15_000_000)));
     assert_eq!(sol_61.tiers[0].cache_read, Some(TokenRate(200_000)));
     assert_eq!(sol_61.tiers[0].cache_write_5m, Some(TokenRate(5_000_000)));
-    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-sol").is_none());
+    assert_eq!(
+        crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-sol"),
+        Some(sol_61)
+    );
+    assert!(
+        crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-sol-unverified").is_none()
+    );
     assert!(
         crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-sol-unverified")
             .is_none()

@@ -257,6 +257,75 @@ mod tests {
     }
 
     #[test]
+    fn codex_sol_worker_preserves_catalog_pricing_and_long_context_tier() {
+        use octet_ai::provider_auth::codex::{CodexResolver, CredentialStore};
+        use octet_ai::providers::codex::{codex_models_from_response, register_codex_models};
+
+        let models = codex_models_from_response(&serde_json::json!({"models": [{
+            "slug": "gpt-6.1-sol", "context_window": 500_000,
+            "supported_reasoning_levels": ["low", "high"]
+        }]}))
+        .unwrap();
+        let mut catalog = ModelCatalog::default();
+        register_codex_models(
+            &mut catalog,
+            Arc::new(CodexResolver::new(CredentialStore::memory())),
+            &models,
+            std::time::Duration::from_secs(5),
+            |_, model| octet_ai::ModelLimits {
+                context_window: model.context_window,
+                max_output_tokens: model.max_output_tokens,
+            },
+        )
+        .unwrap();
+        let id = ModelId("codex/gpt-6.1-sol".into());
+        let normal = catalog.resolve(&id).unwrap();
+        let mut endpoint = (*normal.endpoint).clone();
+        endpoint.auth = Auth::None;
+        let mut catalog = ModelCatalog::default();
+        catalog.register_endpoint(endpoint).unwrap();
+        catalog.register_model((*normal.spec).clone()).unwrap();
+        let normal = catalog.resolve(&id).unwrap();
+        let (_, parent) = fixture();
+        let resolver = CodingAgentModelResolver::new(catalog);
+        for requested in ["codex/gpt-6.1-sol", "gpt-6.1-sol"] {
+            let child = resolver
+                .resolve(
+                    &AgentModelSelection {
+                        provider: "codex".into(),
+                        model: requested.into(),
+                        reasoning: "high".into(),
+                    },
+                    &parent,
+                    &ReasoningConfig::Off,
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&normal.spec, &child.model.spec));
+            let pricing = child
+                .model
+                .spec
+                .pricing
+                .as_ref()
+                .expect("priced Codex worker");
+            assert_eq!(pricing.input.0, 2_000_000);
+            assert_eq!(pricing.cache_read.0, 100_000);
+            assert_eq!(pricing.tiers[0].min_input_tokens, 272_001);
+            let cost = octet_ai::pricing::cost_of(
+                pricing,
+                &octet_ai::Usage {
+                    input_tokens: 200_000,
+                    cache_read_tokens: 100_000,
+                    output_tokens: 1_000,
+                    total_tokens: 301_000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(cost.total, 835_000);
+        }
+    }
+
+    #[test]
     fn refuses_unknown_mismatched_and_incomplete_routes() {
         let (resolver, parent) = fixture();
         for (provider, model) in [

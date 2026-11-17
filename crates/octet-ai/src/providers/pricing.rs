@@ -278,6 +278,13 @@ fn legacy_model_pricing(profile: PricingProfile, model_id: &str) -> Option<Prici
 }
 
 fn subscription_pricing(model_id: &str) -> Option<Pricing> {
+    // Pi compatibility: packages/ai/catalog/providers/openai-codex.ts:15-17,52
+    // prices Codex Sol through openAiStandardCost; the rates and >272K tier are
+    // in packages/ai/catalog/families/openai.ts:7-22,35,40-42. Keep this explicit
+    // so an unrelated public API quote cannot price an unknown OAuth route.
+    if model_id == "gpt-6.1-sol" {
+        return openai_pricing(model_id);
+    }
     let (input, output, cache_read, cache_write, tier) = match model_id {
         "gpt-5.3-codex-spark" => (1_750_000, 14_000_000, 175_000, 0, None),
         "gpt-5.4" => (
