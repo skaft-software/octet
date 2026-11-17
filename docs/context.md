@@ -153,6 +153,8 @@ design](design/octet-agent.md#sessions).
   boundary exists. Provider-context hooks may append text-only user messages to
   opaque replay without dropping provider state; changes to the existing history
   or system prompt still fail closed when no authoritative projection is available.
+  Text-only assistant edits keep replayed tool-call and result IDs paired, including
+  provider IDs containing punctuation or more than 64 characters.
   Hook projections on qualified Responses routes retain recorded reasoning effort
   before retained replies and the current effort after projected history, while
   keeping the request's pinned baseline unchanged.

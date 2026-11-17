@@ -369,6 +369,7 @@ pub(super) fn map_user_input(
 pub(super) fn map_assistant_input(
     assistant: &crate::types::AssistantMessage,
     model: &crate::catalog::Model,
+    preserve_tool_call_ids: bool,
     pending_tool_calls: &mut std::collections::BTreeSet<String>,
     computer_call_ids: &mut std::collections::BTreeSet<String>,
 ) -> Vec<ResponsesInputItem> {
@@ -384,7 +385,15 @@ pub(super) fn map_assistant_input(
                 if !tool_call.async_execution {
                     pending_tool_calls.insert(tool_call.id.0.clone());
                 }
-                let call_id = crate::protocol::normalize_tool_call_id(&tool_call.id.0);
+                // Pi compatibility: openai-responses-shared.ts:363,411 uses
+                // the same identity for a replayed call and its result. Replay
+                // preserves IDs on both local and authoritative assistants;
+                // only ordinary canonical conversion normalizes both sides.
+                let call_id = if preserve_tool_call_ids {
+                    tool_call.id.0.clone()
+                } else {
+                    crate::protocol::normalize_tool_call_id(&tool_call.id.0)
+                };
                 if tool_call.name == COMPUTER_TOOL_NAME {
                     // Canonical history replays a computer call as a
                     // `computer_call` item, not as a function call the route
@@ -471,6 +480,7 @@ pub(crate) fn encode_canonical_input(
                 input.extend(map_assistant_input(
                     assistant,
                     model,
+                    false,
                     &mut pending_tool_calls,
                     &mut computer_call_ids,
                 ));
@@ -533,6 +543,7 @@ pub(crate) fn encode_replay_input(
                     map_assistant_input(
                         assistant,
                         model,
+                        true,
                         &mut pending_tool_calls,
                         &mut computer_call_ids,
                     )

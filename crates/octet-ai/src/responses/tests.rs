@@ -220,6 +220,85 @@ fn projection_replays_own_signed_reasoning_verbatim_when_assistant_text_is_edite
 }
 
 #[test]
+fn projection_pairs_replay_calls_and_results_when_assistant_text_is_edited() {
+    use crate::{
+        AssistantPart, ModelCatalog, ModelId, ToolCall, ToolCallId, ToolResult, ToolResultPart,
+        UserPart,
+    };
+    let model = ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&ModelId("gpt-6-astra".into()))
+        .unwrap();
+    for id in ["call.1".to_owned(), format!("call_{}", "x".repeat(100))] {
+        let assistant = |text: &str| {
+            Message::Assistant(AssistantMessage {
+                model: model.spec.id.clone(),
+                protocol: model.spec.protocol,
+                content: vec![
+                    AssistantPart::Text(text.into()),
+                    AssistantPart::ToolCall(ToolCall {
+                        id: ToolCallId(id.clone()),
+                        name: "read".into(),
+                        arguments_json: "{}".into(),
+                        argument_error: None,
+                        async_execution: false,
+                    }),
+                ],
+            })
+        };
+        let result = Message::User(UserMessage {
+            content: vec![UserPart::ToolResult(ToolResult {
+                tool_call_id: ToolCallId(id.clone()),
+                content: vec![ToolResultPart::Text("done".into())],
+                is_error: false,
+                added_tool_names: None,
+                tool_name: Some("read".into()),
+            })],
+        });
+        let output = ResponsesOutput::new(vec![
+            ResponsesItem::new(serde_json::json!({
+                "type":"message", "role":"assistant",
+                "content":[{"type":"output_text", "text":"original"}],
+            }))
+            .unwrap(),
+            ResponsesItem::new(serde_json::json!({
+                "type":"function_call", "id":"fc_own", "call_id":id,
+                "name":"read", "arguments":"{}", "future":true,
+            }))
+            .unwrap(),
+        ]);
+        let replay = vec![
+            ResponsesReplayItem::Output(output.clone()),
+            ResponsesReplayItem::User(match &result {
+                Message::User(user) => user.clone(),
+                _ => unreachable!(),
+            }),
+        ];
+        let original = vec![assistant("original"), result.clone()];
+        for text in ["original", "edited"] {
+            let input = encode_responses_projection(
+                &model,
+                None,
+                &[assistant(text), result.clone()],
+                &original,
+                &replay,
+            )
+            .unwrap();
+            let call = input.items()[1].as_json();
+            let result = input.items()[2].as_json();
+            assert_eq!(call["type"], "function_call");
+            assert_eq!(result["type"], "function_call_output");
+            assert_eq!(call["call_id"], result["call_id"], "{text}: {id}");
+            assert_eq!(call["call_id"], id);
+            assert_eq!(input.items()[0].as_json()["content"][0]["text"], text);
+            if text == "original" {
+                assert_eq!(&input.items()[..2], output.items());
+            }
+        }
+    }
+}
+
+#[test]
 fn projection_keeps_historical_and_current_reasoning_efforts() {
     use crate::{AssistantPart, ModelCatalog, ModelId, ReasoningEffort};
     let mut model = ModelCatalog::builtin()
