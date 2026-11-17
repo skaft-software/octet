@@ -562,6 +562,20 @@ fn video_candidates_advance_incrementally_and_reset_with_the_active_window() {
         matches!(&unchanged[0], Message::User(user) if user.content.is_empty()),
         "settled prefix must not be scanned again"
     );
+    let mut limited_model = model.clone();
+    Arc::make_mut(&mut limited_model.spec)
+        .preset
+        .image_input_limits = Some(ImageInputLimits {
+        max_width: 8,
+        max_height: 8,
+        max_bytes: 4096,
+    });
+    let (_, changed_limits) =
+        session_video_candidates(&session, &limited_model, Some(cursor)).unwrap();
+    assert!(
+        matches!(&changed_limits[0], Message::User(user) if user.content.len() == 1),
+        "changed limits must revisit historical video even for the same model id"
+    );
     session.append(video_message()).unwrap();
     let (cursor, suffix) = session_video_candidates(&session, &model, Some(cursor)).unwrap();
     assert!(matches!(&suffix[0], Message::User(user) if user.content.len() == 1));

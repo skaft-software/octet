@@ -34,6 +34,228 @@ fn request() -> Request {
     }
 }
 
+fn cached_clip() -> VideoMedia {
+    let Media::Video(video) = clip() else {
+        unreachable!()
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(32, 16)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    video.store_frames(Ok(Arc::new(
+        (0..VIDEO_FRAMES)
+            .map(|index| {
+                let Media::Image(image) =
+                    Media::image_bytes(Bytes::from(png.get_ref().clone()), mime::IMAGE_PNG)
+                else {
+                    unreachable!()
+                };
+                VideoFrame {
+                    seconds: index as f64,
+                    image,
+                }
+            })
+            .collect(),
+    )));
+    video
+}
+
+fn frame_decodes(video: &VideoMedia) -> usize {
+    let source = video.cached_frames().unwrap();
+    let cache = video.frames.model.lock().unwrap();
+    let prepared = cache
+        .as_ref()
+        .and_then(|cached| cached.outcome.as_ref().ok());
+    let mut seen = std::collections::HashSet::new();
+    source
+        .iter()
+        .chain(prepared.into_iter().flat_map(|frames| frames.iter()))
+        // In-limit images share preparation with the original sampled frames.
+        .filter(|frame| seen.insert(Arc::as_ptr(&frame.image.preparation.inner)))
+        .map(|frame| frame.image.preparation.inner.lock().unwrap().image_decodes)
+        .sum()
+}
+
+#[tokio::test]
+async fn warm_video_projection_does_not_decode_historical_frames() {
+    let mut model = model(Protocol::OpenAiResponses);
+    Arc::make_mut(&mut model.spec).preset.image_input_limits = Some(crate::ImageInputLimits {
+        max_width: 8,
+        max_height: 8,
+        max_bytes: 4096,
+    });
+    let video = cached_clip();
+    let user = UserMessage {
+        content: vec![UserPart::Media(Media::Video(video.clone()))],
+    };
+    let messages = vec![Message::User(user.clone())];
+    prepare_message_frames(&model, &messages).await;
+    let first = prepare_user_message(&model, &user).unwrap().into_owned();
+    let decodes = frame_decodes(&video);
+    prepare_message_frames(&model, &messages).await;
+    let second = prepare_user_message(&model, &user).unwrap().into_owned();
+    crate::responses::encode_canonical_responses_input(
+        &model,
+        None,
+        &messages,
+        crate::CompatibilityMode::Strict,
+    )
+    .unwrap();
+    crate::protocol::openai_responses::encode_replay_input(
+        &model,
+        None,
+        &[crate::responses::ResponsesReplayItem::User(user)],
+    )
+    .unwrap();
+    assert_eq!(
+        frame_decodes(&video),
+        decodes,
+        "a warm turn must do zero image decodes"
+    );
+    assert_eq!(decodes, VIDEO_FRAMES);
+    assert_eq!(
+        serde_json::to_value(first).unwrap(),
+        serde_json::to_value(second).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn model_frame_cache_reprepares_limits_and_retains_one_bounded_variant() {
+    let video = cached_clip();
+    let mut model = model(Protocol::OpenAiResponses);
+    let user = UserMessage {
+        content: vec![UserPart::Media(Media::Video(video.clone()))],
+    };
+    let messages = vec![Message::User(user.clone())];
+    for (index, limits) in [
+        crate::ImageInputLimits {
+            max_width: 32,
+            max_height: 16,
+            max_bytes: 4096,
+        },
+        crate::ImageInputLimits {
+            max_width: 8,
+            max_height: 16,
+            max_bytes: 4096,
+        },
+        crate::ImageInputLimits {
+            max_width: 8,
+            max_height: 4,
+            max_bytes: 4096,
+        },
+        crate::ImageInputLimits {
+            max_width: 8,
+            max_height: 4,
+            max_bytes: 2048,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        Arc::make_mut(&mut model.spec).preset.image_input_limits = Some(limits);
+        // Synchronous projections must neither decode nor use an old-limit entry.
+        assert!(
+            matches!(&prepare_user_message(&model, &user).unwrap().content[..],
+            [UserPart::Text(text)] if text.contains("frames not prepared"))
+        );
+        assert_eq!(frame_decodes(&video), index * VIDEO_FRAMES);
+        assert!(prepare_message_frames(&model, &messages).await);
+        assert!(!prepare_message_frames(&model, &messages).await);
+        assert_eq!(frame_decodes(&video), (index + 1) * VIDEO_FRAMES);
+        let projected = prepare_user_message(&model, &user).unwrap();
+        assert_eq!(
+            projected
+                .content
+                .iter()
+                .filter(|part| matches!(part, UserPart::Media(Media::Image(_))))
+                .count(),
+            VIDEO_FRAMES
+        );
+        let cache = video.frames.model.lock().unwrap();
+        let cached = cache.as_ref().unwrap();
+        assert_eq!(cached.limits, limits);
+        let prepared = cached.outcome.as_ref().unwrap();
+        assert_eq!(prepared.len(), VIDEO_FRAMES);
+        let mut bytes = 0;
+        for frame in prepared.iter() {
+            let crate::ImageSource::Inline(data) = &frame.image.source else {
+                unreachable!()
+            };
+            let image = image::load_from_memory(data).unwrap();
+            assert!(image.width() <= limits.max_width && image.height() <= limits.max_height);
+            assert!(data.len() <= limits.max_bytes);
+            bytes += data.len();
+        }
+        assert!(bytes <= VIDEO_FRAMES * crate::MAX_USER_IMAGE_BYTES);
+    }
+    // Frame identity is part of the key even if original source bytes match.
+    video.store_frames(Ok(cached_clip().sampled_frames().unwrap()));
+    assert!(video
+        .prepared_model_frames(model.spec.preset.image_input_limits)
+        .is_none());
+    assert!(prepare_message_frames(&model, &messages).await);
+    assert_eq!(frame_decodes(&video), VIDEO_FRAMES);
+}
+
+#[tokio::test]
+async fn failed_model_frame_preparation_is_cached_and_projects_a_placeholder() {
+    let video = cached_clip();
+    let mut model = model(Protocol::OpenAiResponses);
+    Arc::make_mut(&mut model.spec).preset.image_input_limits = Some(crate::ImageInputLimits {
+        max_width: 1,
+        max_height: 1,
+        max_bytes: 1,
+    });
+    let user = UserMessage {
+        content: vec![UserPart::Media(Media::Video(video.clone()))],
+    };
+    let messages = vec![Message::User(user.clone())];
+    assert!(prepare_message_frames(&model, &messages).await);
+    let decodes = frame_decodes(&video);
+    assert!(!prepare_message_frames(&model, &messages).await);
+    assert!(
+        matches!(&prepare_user_message(&model, &user).unwrap().content[..],
+        [UserPart::Text(text)] if text.contains("frame cannot fit this model's image limits") && text.contains("original retained"))
+    );
+    assert_eq!(frame_decodes(&video), decodes);
+    assert_eq!(video.sampled_frames().unwrap().len(), VIDEO_FRAMES);
+}
+
+#[tokio::test]
+async fn cancelled_model_frame_preparation_preserves_source_and_caches_failure() {
+    let video = cached_clip();
+    let limits = crate::ImageInputLimits {
+        max_width: 8,
+        max_height: 8,
+        max_bytes: 4096,
+    };
+    let permits = WORKERS.acquire_many(2).await.unwrap();
+    {
+        let preparation = video.prepare_model_frames(Some(limits));
+        tokio::pin!(preparation);
+        assert!(futures_util::poll!(&mut preparation).is_pending());
+    }
+    drop(permits);
+    assert!(video
+        .prepared_model_frames(Some(limits))
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("cancelled"));
+    assert_eq!(frame_decodes(&video), 0);
+    assert_eq!(video.sampled_frames().unwrap().len(), VIDEO_FRAMES);
+    let next_limits = crate::ImageInputLimits {
+        max_width: 4,
+        ..limits
+    };
+    let (first, second) = tokio::join!(
+        video.prepare_model_frames(Some(next_limits)),
+        video.prepare_model_frames(Some(next_limits))
+    );
+    assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
+    assert_eq!(frame_decodes(&video), VIDEO_FRAMES);
+}
+
 #[tokio::test]
 async fn video_samples_are_timestamped_bounded_cached_and_rebuilt_from_durable_bytes() {
     let Media::Video(video) = clip() else {

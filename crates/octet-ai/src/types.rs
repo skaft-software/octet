@@ -1996,6 +1996,8 @@ pub struct MediaPreparation {
 
 #[derive(Default)]
 pub(crate) struct MediaPreparationState {
+    #[cfg(test)]
+    pub(crate) image_decodes: usize,
     pub(crate) encoded: Option<(bytes::Bytes, std::sync::Arc<str>)>,
     pub(crate) files: Vec<([u8; 32], bytes::Bytes, ProviderMediaRef)>,
 }

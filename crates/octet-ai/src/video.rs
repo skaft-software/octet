@@ -3,7 +3,10 @@
 //! ImageContent defined in `packages/ai/src/types.ts:438-442` in the Pi reference.
 //! Decoding belongs here rather than in the Pi adapter: native providers and
 //! durable sessions must also work without an extension process.
-use crate::{AiError, Media, Message, Modality, Request, ToolResultPart, UserPart, VideoMedia};
+use crate::{
+    AiError, ImageInputLimits, Media, Message, Modality, Request, ToolResultPart, UserPart,
+    VideoMedia,
+};
 use bytes::Bytes;
 use std::{
     borrow::Cow,
@@ -25,6 +28,7 @@ pub const MAX_FRAME_EDGE: u32 = 768;
 /// Total encoded JPEG frame budget per video.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
+static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 const FORMATS: &str = "mov,matroska,webm,avi,mpeg,mpegts,ogg,asf,flv";
 
 /// A timestamped image derived from the original video.
@@ -43,6 +47,16 @@ pub(crate) struct FramePreparation {
     // Never held while decoding or waiting for a worker.
     outcome: Mutex<Option<(Bytes, PreparedFrames)>>,
     worker: Arc<tokio::sync::Mutex<()>>,
+    // One model-specific variant per video, replaced on limit/source changes.
+    // At most VIDEO_FRAMES * MAX_USER_IMAGE_BYTES of derived image bytes.
+    model: Mutex<Option<ModelFrames>>,
+}
+
+#[derive(Debug)]
+struct ModelFrames {
+    source: Arc<Vec<VideoFrame>>,
+    limits: ImageInputLimits,
+    outcome: PreparedFrames,
 }
 
 pub(crate) type FrameCache = Arc<FramePreparation>;
@@ -70,18 +84,32 @@ struct CancelPreparation {
     cancelled: Arc<AtomicBool>,
     completed: bool,
     deadline: Instant,
+    model: Option<(Arc<Vec<VideoFrame>>, ImageInputLimits)>,
+}
+
+impl CancelPreparation {
+    fn store(&self, result: PreparedFrames) {
+        if let Some((source, limits)) = &self.model {
+            *self.video.frames.model.lock().expect("model frame cache") = Some(ModelFrames {
+                source: Arc::clone(source),
+                limits: *limits,
+                outcome: result,
+            });
+        } else {
+            self.video.store_frames(result);
+        }
+    }
 }
 
 impl Drop for CancelPreparation {
     fn drop(&mut self) {
         if !self.completed {
             self.cancelled.store(true, Ordering::Release);
-            self.video
-                .store_frames(Err(error(if Instant::now() >= self.deadline {
-                    TIMED_OUT
-                } else {
-                    CANCELLED
-                })));
+            self.store(Err(error(if Instant::now() >= self.deadline {
+                TIMED_OUT
+            } else {
+                CANCELLED
+            })));
         }
     }
 }
@@ -134,6 +162,23 @@ impl VideoMedia {
         *self.frames.outcome.lock().expect("video frame cache") = Some((self.data.clone(), result));
     }
 
+    fn prepared_model_frames(&self, limits: Option<ImageInputLimits>) -> Option<PreparedFrames> {
+        let source = match self.prepared_frames()? {
+            Ok(source) => source,
+            Err(error) => return Some(Err(error)),
+        };
+        let Some(limits) = limits else {
+            return Some(Ok(source));
+        };
+        self.frames
+            .model
+            .lock()
+            .expect("model frame cache")
+            .as_ref()
+            .filter(|cached| cached.limits == limits && Arc::ptr_eq(&cached.source, &source))
+            .map(|cached| cached.outcome.clone())
+    }
+
     /// Already prepared frames only; presentation and context accounting never
     /// wait for decoders. Bytes changed by an embedder invalidate the cache.
     pub fn cached_frames(&self) -> Option<Arc<Vec<VideoFrame>>> {
@@ -161,7 +206,6 @@ impl VideoMedia {
         if let Some(result) = self.prepared_frames() {
             return result.map_err(Into::into);
         }
-        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
         let deadline = Instant::now() + DEADLINE;
         let result = tokio::time::timeout(DEADLINE, async {
             let source = Arc::clone(&self.frames.worker).lock_owned().await;
@@ -174,6 +218,7 @@ impl VideoMedia {
                 cancelled: Arc::clone(&cancelled),
                 completed: false,
                 deadline,
+                model: None,
             };
             let permit = WORKERS.acquire().await.expect("video workers stay open");
             let video = self.clone();
@@ -199,6 +244,78 @@ impl VideoMedia {
             worker
         })
         .await;
+        match result {
+            Ok(result) => result.map_err(Into::into),
+            Err(_) => Err(error(TIMED_OUT).into()),
+        }
+    }
+
+    /// Model-dependent validation/resize shares the decoder gate and worker bound.
+    /// Cancellation stops between bounded image decodes, preserving source frames.
+    async fn prepare_model_frames(
+        &self,
+        limits: Option<ImageInputLimits>,
+    ) -> Result<Arc<Vec<VideoFrame>>, AiError> {
+        let deadline = Instant::now() + DEADLINE;
+        let frames = self.prepare_frames().await?;
+        let Some(limits) = limits else {
+            return Ok(frames);
+        };
+        if let Some(result) = self.prepared_model_frames(Some(limits)) {
+            return result.map_err(Into::into);
+        }
+        let result =
+            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+                let source = Arc::clone(&self.frames.worker).lock_owned().await;
+                if let Some(result) = self.prepared_model_frames(Some(limits)) {
+                    return result;
+                }
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let mut guard = CancelPreparation {
+                    video: self.clone(),
+                    cancelled: Arc::clone(&cancelled),
+                    completed: false,
+                    deadline,
+                    model: Some((Arc::clone(&frames), limits)),
+                };
+                let permit = WORKERS.acquire().await.expect("video workers stay open");
+                let video = self.clone();
+                let worker = tokio::task::spawn_blocking(move || {
+                    let (_source, _permit) = (source, permit);
+                    let result = frames
+                        .iter()
+                        .map(|frame| {
+                            check_preparation(deadline, &cancelled)?;
+                            let image = crate::prepare_user_image(&frame.image, limits)
+                                .map_err(|_| error("frame cannot fit this model's image limits"))?;
+                            check_preparation(deadline, &cancelled)?;
+                            Ok(VideoFrame {
+                                seconds: frame.seconds,
+                                image,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, VideoPreparationError>>()
+                        .map(Arc::new);
+                    let mut cache = video.frames.model.lock().expect("model frame cache");
+                    if !cancelled.load(Ordering::Acquire) {
+                        *cache = Some(ModelFrames {
+                            source: frames,
+                            limits,
+                            outcome: result.clone(),
+                        });
+                    }
+                    result
+                })
+                .await;
+                let result = worker.unwrap_or_else(|_| {
+                    let result = Err(error("image worker failed; read or attach the clip again"));
+                    guard.store(result.clone());
+                    result
+                });
+                guard.completed = true;
+                result
+            })
+            .await;
         match result {
             Ok(result) => result.map_err(Into::into),
             Err(_) => Err(error(TIMED_OUT).into()),
@@ -408,14 +525,22 @@ pub async fn prepare_message_frames(model: &crate::Model, messages: &[Message]) 
             for part in &user.content {
                 match part {
                     UserPart::Media(Media::Video(video)) => {
-                        changed |= video.prepared_frames().is_none();
-                        let _ = video.prepare_frames().await;
+                        changed |= video
+                            .prepared_model_frames(model.spec.preset.image_input_limits)
+                            .is_none();
+                        let _ = video
+                            .prepare_model_frames(model.spec.preset.image_input_limits)
+                            .await;
                     }
                     UserPart::ToolResult(result) => {
                         for part in &result.content {
                             if let ToolResultPart::Media(Media::Video(video)) = part {
-                                changed |= video.prepared_frames().is_none();
-                                let _ = video.prepare_frames().await;
+                                changed |= video
+                                    .prepared_model_frames(model.spec.preset.image_input_limits)
+                                    .is_none();
+                                let _ = video
+                                    .prepare_model_frames(model.spec.preset.image_input_limits)
+                                    .await;
                             }
                         }
                     }
@@ -513,7 +638,13 @@ fn project(model: &crate::Model, video: &VideoMedia) -> Result<Vec<UserPart>, Ai
     {
         return Err(crate::UnsupportedError::Video.into());
     }
-    let frames = match video.sampled_frames() {
+    let frames = match video
+        .prepared_model_frames(model.spec.preset.image_input_limits)
+        .unwrap_or_else(|| {
+            Err(error(
+                "frames not prepared; prepare the clip for this model before encoding",
+            ))
+        }) {
         Ok(frames) => frames,
         Err(error) => {
             return Ok(vec![UserPart::Text(format!(
@@ -531,13 +662,7 @@ fn project(model: &crate::Model, video: &VideoMedia) -> Result<Vec<UserPart>, Ai
             "[video frame at {:.3}s]",
             frame.seconds
         )));
-        let image = if let Some(limits) = model.spec.preset.image_input_limits {
-            crate::prepare_user_image(&frame.image, limits)
-                .map_err(|_| error("frame cannot fit this model's image limits"))?
-        } else {
-            frame.image.clone()
-        };
-        parts.push(UserPart::Media(Media::Image(image)));
+        parts.push(UserPart::Media(Media::Image(frame.image.clone())));
     }
     Ok(parts)
 }

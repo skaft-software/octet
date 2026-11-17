@@ -68,6 +68,7 @@
 - Markdown selections copy math, displayed link destinations and unmapped painted spans while retaining mapped source syntax.
 - Delegated usage records retain the child's endpoint and model while counting settled spend exactly once across resume and model changes.
 - Codex GPT-6.1 Sol sessions and subagents retain reviewed token prices and long-context tiers in cost accounting.
+- Video frames reuse model-limit-specific prepared images across turns and replay, keeping decoding and resizing in cancellable async preparation.
 - Video preparation follows the active branch and compaction window.
 - Pi command appends commit during streaming responses, and adapter retirement leaves pending response observations isolated.
 - Markdown rows keep isolated flag letters within the requested terminal width, including one-cell viewports.

@@ -110,6 +110,10 @@ pub fn prepare_user_image(
     }
     // Validate the pixels even on the no-resize path. A valid image signature
     // and dimensions alone cannot establish that a truncated payload is safe.
+    #[cfg(test)]
+    {
+        image.preparation.inner.lock().unwrap().image_decodes += 1;
+    }
     let decoded = reader(bytes, format)
         .decode()
         .map_err(|_| ImageInputError::InvalidImage)?;

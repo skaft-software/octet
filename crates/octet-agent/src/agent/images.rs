@@ -23,6 +23,7 @@ pub(super) const MAX_IMAGE_INPUT_BYTES: usize = 20 * 1024 * 1024;
 pub(super) struct VideoPreparationCursor {
     generation: u64,
     replay: bool,
+    limits: Option<ImageInputLimits>,
     pub(super) messages: usize,
 }
 
@@ -41,7 +42,11 @@ pub(super) fn session_video_candidates(
     };
     let generation = session.context_generation();
     let start = previous
-        .filter(|cursor| cursor.generation == generation && cursor.replay == replay.is_some())
+        .filter(|cursor| {
+            cursor.generation == generation
+                && cursor.replay == replay.is_some()
+                && cursor.limits == model.spec.preset.image_input_limits
+        })
         .map_or(0, |cursor| cursor.messages.saturating_sub(1));
     let mut content = Vec::new();
     let mut add = |user: &UserMessage| {
@@ -72,6 +77,7 @@ pub(super) fn session_video_candidates(
         VideoPreparationCursor {
             generation,
             replay: replay.is_some(),
+            limits: model.spec.preset.image_input_limits,
             messages: end,
         },
         vec![Message::User(UserMessage { content })],

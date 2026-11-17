@@ -164,8 +164,12 @@ kill and reap the decoder. The decoder is not an OS sandbox.
 The **original video bytes** stay in session JSONL, including tool reads; deleting
 or replacing the source path does not affect later turns or resume. Sampled frames
 are shared in memory across turns and rebuilt from those durable bytes after a
-restart. Keep FFmpeg available for resumed frame analysis; changing decoder
-versions may change JPEG bytes. Missing decoders or invalid clips produce an
+restart. Model-specific frame validation and resizing also run in cancellable async
+preparation. Each video retains one derived variant, keyed by sampled-frame identity
+and all image limits, with at most four images of 5 MiB each. Changed limits replace
+that variant; warm projection and replay consume cached images without decoding.
+Keep FFmpeg available for resumed frame analysis; changing decoder versions may
+change JPEG bytes. Missing decoders or invalid clips produce an
 actionable preparation error before a new sampled user attachment is committed. A saved
 video whose frames cannot be prepared uses an explanatory placeholder so the
 session can continue; a read result reports the problem and retains its source.
@@ -178,17 +182,18 @@ are cached for that source in the current process, so encoding and later turns d
 not retry the decoder; read or attach the clip again to retry. Switching to a
 text-only model also derives a placeholder without erasing video.
 
-Rust embedders call `VideoMedia::prepare_frames().await` before synchronous
-lowering or encoding. `sampled_frames()` and `cached_frames()` consume local
-prepared state only, including while a decoder is running. `AiClient` prepares
-cold request videos asynchronously; the agent also prepares resumed session bytes
-from the active canonical context or route-affine Responses replay window before
-projection. Videos on abandoned branches or before a local/native compaction
+Rust embedders call `video::prepare_message_frames(&model, &messages).await` before
+synchronous lowering or encoding so sampled frames also fit the selected model's
+image limits. `VideoMedia::prepare_frames().await` prepares the source samples only;
+`sampled_frames()` and `cached_frames()` consume those local source samples,
+including while a decoder is running. `AiClient` prepares cold request videos
+asynchronously; the agent also prepares resumed session bytes from the active
+canonical context or route-affine Responses replay window before projection. Videos on abandoned branches or before a local/native compaction
 boundary stay cold. Incremental preparation inspects only the changed active
 suffix (including coalesced tool results), and resets its cursor when checkout,
-compaction or model selection changes that window. An explicit Responses input
-already owns the wire content, so the client does not decode canonical media that
-it replaces.
+compaction, model selection or image-limit changes affect that window. An explicit
+Responses input already owns the wire content, so the client does not decode
+canonical media that it replaces.
 
 For Pi compatibility, the reference defines only `ImageContent` for binary visual
 input (`packages/ai/src/types.ts:438–442`), sniffs still images
