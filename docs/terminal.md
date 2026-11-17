@@ -344,9 +344,11 @@ by that transport limit. Capture explicitly requests cell coordinates (SGR 1006)
 clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
 (1007); octet does not infer cells from pixel reports.
 
-In the semantic viewport, scrolling up pins the reader's position while output
-streams; at the live tail, the view follows new output. A centered **↓ Jump to
-bottom** button above the input returns to live output; it optionally shows
+In the semantic viewport, even one upward wheel step disengages follow-tail and
+pins the reader's position through repaints, streaming and working-row or worker
+roster height changes. There is no near-bottom snap zone. Scrolling back to the
+exact bottom resumes following new output. A centered **↓ Jump to
+bottom** button above the input also returns to live output; it optionally shows
 `1 new` or `2 new`. Click any painted button cell, not the blank space around it,
 while idle or streaming, including with worker activity visible. Pending output
 never disables the painted button or changes its hover target.

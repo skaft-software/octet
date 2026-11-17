@@ -358,13 +358,24 @@ fn capture_viewport_anchor(state: &ShellState, start: usize, end: usize) {
     {
         return;
     }
+    // Keep a visible tool's visual row instead of preferring a later text row.
+    // Choosing a later Working row instead would follow its moving tail and
+    // undo a small user scroll. Native terminal ownership keeps this in the
+    // host. Pi compatibility: packages/tui/src/tui-alt-screen.ts:1007-1018 routes
+    // wheel deltas to packages/tui/src/components/scroll-view.ts:148-160, leaving
+    // follow-end as soon as the user scrolls away from the exact bottom.
     let mut fallback = None;
     for (desired_screen_row, visual_row) in (start..end).enumerate() {
         let Some(anchor) = viewport_anchor_for_visual_row(state, visual_row, desired_screen_row)
         else {
             continue;
         };
-        if anchor.semantic {
+        if anchor.semantic
+            || matches!(
+                state.transcript.get(anchor.block_hint),
+                Some(TranscriptBlock::Tool(_) | TranscriptBlock::Shell(_))
+            )
+        {
             state.viewport_anchor.set(Some(anchor));
             return;
         }
@@ -477,8 +488,13 @@ pub(super) fn upgrade_viewport_anchor(state: &ShellState) {
         start.saturating_add(anchor.fallback_block_row)
     };
     drop(cache);
+    let available = shell_chrome(state, state.size.0, Instant::now()).transcript_rows;
+    let capacity = transcript_viewport_capacity(available, true);
     let mut fallback = None;
-    for offset in 0..usize::from(state.size.1).max(1) {
+    // Promotion must keep tool rows just like capture. Looking
+    // below the viewport can pick a hidden tail row whose screen offset is then
+    // clamped, snapping the reader down by one or two rows on the next paint.
+    for offset in 0..capacity.saturating_sub(anchor.desired_screen_row) {
         let Some(upgraded) = viewport_anchor_for_visual_row(
             state,
             row.saturating_add(offset),
@@ -486,7 +502,12 @@ pub(super) fn upgrade_viewport_anchor(state: &ShellState) {
         ) else {
             break;
         };
-        if upgraded.semantic {
+        if upgraded.semantic
+            || matches!(
+                state.transcript.get(upgraded.block_hint),
+                Some(TranscriptBlock::Tool(_) | TranscriptBlock::Shell(_))
+            )
+        {
             state.viewport_anchor.set(Some(upgraded));
             return;
         }

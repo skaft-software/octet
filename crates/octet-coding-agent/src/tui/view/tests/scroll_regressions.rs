@@ -3,6 +3,7 @@
 //! because each probe replays a full transcript through the production renderer.
 use super::support::*;
 use super::*;
+use crate::tui::keymap::InputAction;
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 16;
@@ -106,6 +107,171 @@ fn first_scroll_reveals_one_older_row_and_returns_to_live_without_resizing() {
     shell.scroll_lines(1);
     assert_eq!(render(&shell), live);
     assert!(shell.state.borrow().follow_tail);
+}
+
+fn wheel_step(shell: &mut InteractiveShell, upward: bool) {
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+
+    let action = shell.translate_input(
+        Some(Event::Mouse(MouseEvent {
+            kind: if upward {
+                MouseEventKind::ScrollUp
+            } else {
+                MouseEventKind::ScrollDown
+            },
+            column: 20,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })),
+        false,
+    );
+    let direction = if upward { -1 } else { 1 };
+    assert_eq!(action, InputAction::ScrollLines(direction));
+    shell.scroll_lines(direction);
+}
+
+fn wheel_history_shell(height: u16, threaded: bool, tool_tail: bool) -> (InteractiveShell, RunId) {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(WIDTH, height);
+    shell.capture_mouse = true;
+    shell.state.borrow_mut().application_viewport_requested = true;
+    for index in 0..100 {
+        shell.notice(format!("{HISTORY}-{index:03}"));
+    }
+    let run = shell.begin_run("openai");
+    if tool_tail {
+        let id = ToolCallId("wheel-live-tool".into());
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: "bash".into(),
+                args: serde_json::json!({"command": "audit\n".repeat(12)}),
+            },
+        );
+        shell.on_run_event(
+            run,
+            &AgentEvent::ToolProgress {
+                id,
+                progress: ToolProgress::Output {
+                    stream: octet_agent::OutputStream::Stdout,
+                    bytes: bytes::Bytes::from("retained tool output\n".repeat(16)),
+                },
+            },
+        );
+    } else {
+        shell.on_run_event(
+            run,
+            &AgentEvent::OutputDelta {
+                channel: OutputChannel::Text,
+                text: (0..40)
+                    .map(|index| format!("stream-row-{index:03}\n\n"))
+                    .collect(),
+            },
+        );
+    }
+    if threaded {
+        shell.isolate_native_test_renderer();
+    }
+    shell.render_written_test_frame();
+    (shell, run)
+}
+
+#[test]
+fn small_upward_wheel_steps_survive_repaints_near_the_tail() {
+    for threaded in [false, true] {
+        for height in [8, 10, 16, 32] {
+            for tool_tail in [false, true] {
+                let (mut shell, _) = wheel_history_shell(height, threaded, tool_tail);
+                // Small gestures stop at one, two and three rows from the tail.
+                // Each line event is followed by two paints, like the recorded snap.
+                for target in 1..=3 {
+                    wheel_step(&mut shell, true);
+                    assert_eq!(shell.state.borrow().scroll_from_bottom.get(), target);
+                    for paint in 0..2 {
+                        shell.render_written_test_frame();
+                        let state = shell.state.borrow();
+                        assert_eq!(
+                            state.scroll_from_bottom.get(), target,
+                            "threaded={threaded}, height={height}, tool_tail={tool_tail}, target={target}, paint={paint}",
+                        );
+                        assert!(!state.follow_tail);
+                    }
+                }
+                for remaining in (0..3).rev() {
+                    wheel_step(&mut shell, false);
+                    shell.render_written_test_frame();
+                    let state = shell.state.borrow();
+                    assert_eq!(state.scroll_from_bottom.get(), remaining);
+                    assert_eq!(state.follow_tail, remaining == 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn small_upward_wheel_steps_hold_position_through_streaming_and_live_heights() {
+    for height in [8, 10, 16, 32] {
+        for steps in 1..=3 {
+            let (mut shell, run) = wheel_history_shell(height, true, true);
+            shell.set_verbose_tools(true);
+            shell.render_written_test_frame();
+            for _ in 0..steps {
+                wheel_step(&mut shell, true);
+            }
+            shell.render_written_test_frame();
+            assert_eq!(shell.state.borrow().scroll_from_bottom.get(), steps);
+            let start = shell
+                .state
+                .borrow()
+                .retained_render_geometry()
+                .unwrap()
+                .visible_start;
+            for (tick, count) in [4, 1, 8, 2].into_iter().enumerate() {
+                // Text inserts before Working; reasoning changes its height.
+                // Expanded rosters grow while running and contract on settlement.
+                for event in [
+                    AgentEvent::OutputDelta {
+                        channel: OutputChannel::Text,
+                        text: format!("\n\nnewer streamed row {tick}"),
+                    },
+                    AgentEvent::OutputDelta {
+                        channel: OutputChannel::Reasoning,
+                        text: "\n\n### Inspecting the next result\n".into(),
+                    },
+                ] {
+                    shell.on_run_event(run, &event);
+                    let running = tick % 2 == 0;
+                    let status = if running { "running" } else { "succeeded" };
+                    shell.set_subagent_presentation(Some(&roster(count, status)), running);
+                    for paint in 0..2 {
+                        shell.render_written_test_frame();
+                        let state = shell.state.borrow();
+                        let geometry = state.retained_render_geometry().unwrap();
+                        // Tail growth changes the bottom-relative distance, not
+                        // the row the reader chose. Every later paint must agree.
+                        let expected = geometry.total_rows - geometry.viewport_rows - start;
+                        assert_eq!(
+                            state.scroll_from_bottom.get(),
+                            expected,
+                            "height={height}, steps={steps}, tick={tick}, paint={paint}"
+                        );
+                        assert_eq!(geometry.visible_start, start);
+                        assert!(!state.follow_tail);
+                    }
+                }
+            }
+            let distance = shell.state.borrow().scroll_from_bottom.get();
+            for remaining in (0..distance).rev() {
+                wheel_step(&mut shell, false);
+                shell.render_written_test_frame();
+                let state = shell.state.borrow();
+                assert_eq!(state.scroll_from_bottom.get(), remaining);
+                assert_eq!(state.follow_tail, remaining == 0);
+            }
+        }
+    }
 }
 
 #[test]
