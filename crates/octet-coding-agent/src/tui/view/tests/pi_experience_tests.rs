@@ -484,6 +484,154 @@ fn working_component_starts_at_the_native_spinner_column_and_clips_by_cells() {
 }
 
 #[test]
+fn working_component_preserves_native_surface_decoration() {
+    for chrome in ["card", "rail", "band"] {
+        for marker in [true, false] {
+            for width in [80, 20, 12, 160] {
+                let source = format!(
+                    "[colors]\ncontent_max_width = 96\n\
+                     [roles.\"surface.reasoning\"]\nbackground = \"#213141\"\n\
+                     [surfaces.reasoning]\nchrome = \"{chrome}\"\nnarrow_chrome = \"{chrome}\"\npadding = 1\n\
+                     narrow_padding = 1\nmax_width = 32\nalign = \"right\"\nmarker_gutter = {marker}\n"
+                );
+                let mut shell =
+                    InteractiveShell::test_shell_with_theme(test_theme_from_source(&source));
+                shell.set_size(width, 24);
+                shell.begin_run("fixture");
+                let theme = shell.theme();
+                let (native, plan) = {
+                    let state = shell.state.borrow();
+                    let block = TranscriptBlock::Reasoning(state.working_status.clone().unwrap());
+                    (
+                        shell_chrome(&state, width, Instant::now()).working,
+                        compile_surface_plan(None, &block, &theme, width),
+                    )
+                };
+                let row_index = native
+                    .iter()
+                    .position(|row| strip_terminal_sequences(row).contains("Work"))
+                    .expect("native working label, possibly clipped");
+                if chrome == "card" && width == 80 {
+                    assert_eq!(
+                        strip_terminal_sequences(&native[row_index])
+                            .matches('│')
+                            .count(),
+                        2
+                    );
+                }
+                let left = if marker {
+                    plan.frame_left.saturating_sub(2)
+                } else {
+                    plan.geometry.content_left
+                };
+                let gutter_end = if marker { plan.frame_left } else { left };
+                let content_start = plan.geometry.content_left;
+                let content_end = content_start + plan.geometry.content_width;
+                let native_row =
+                    super::super::surface_frame::emulate_row_for_test(&native[row_index], width);
+                let mut components = vec![
+                    "◟ COMPONENT".to_owned(),
+                    format!("\x1b[31m◟ COMPONENT{}\x1b[0m", "界e\u{301}".repeat(100)),
+                ];
+                if chrome == "card" {
+                    components.extend(["◟".to_owned(), String::new()]);
+                }
+                for component in components {
+                    let has_label = component.contains("COMPONENT");
+                    let has_spinner = component.contains('◟');
+                    let styled = component.starts_with('\x1b');
+                    shell.set_extension_ui(ShellExtensionUi {
+                        working: Some(ShellExtensionWorking {
+                            component_line: Some(component),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                    let rows = shell_chrome(&shell.state.borrow(), width, Instant::now()).working;
+                    assert_eq!(rows.len(), native.len());
+                    assert!(rows
+                        .iter()
+                        .all(|row| visible_width(row) <= usize::from(width)));
+                    for (index, row) in rows.iter().enumerate() {
+                        if index != row_index {
+                            assert_eq!(
+                                row, &native[index],
+                                "{chrome}/{marker}/{width}: frame row {index}"
+                            );
+                        }
+                    }
+                    let plain = strip_terminal_sequences(&rows[row_index]);
+                    if chrome == "card" {
+                        assert_eq!(
+                            plain.matches('│').count(),
+                            strip_terminal_sequences(&native[row_index])
+                                .matches('│')
+                                .count(),
+                            "{chrome}/{marker}/{width}: card borders: {plain:?}; plan={plan:?}"
+                        );
+                    }
+                    assert!(!plain.contains("Working"), "{plain:?}");
+                    if has_spinner {
+                        assert_eq!(
+                            visible_width(&plain[..plain.find('◟').unwrap()]),
+                            usize::from(left)
+                        );
+                    }
+                    let label_column = if marker {
+                        content_start
+                    } else {
+                        content_start + 2
+                    };
+                    if has_label {
+                        assert_eq!(
+                            visible_width(
+                                &plain[..plain.find('C').expect("clipped component label")]
+                            ),
+                            usize::from(label_column)
+                        );
+                    }
+                    let rendered =
+                        super::super::surface_frame::emulate_row_for_test(&rows[row_index], width);
+                    if styled {
+                        assert_eq!(
+                            rendered.screen().cell(0, label_column).unwrap().fgcolor(),
+                            vt100::Color::Idx(1)
+                        );
+                    }
+                    for column in 0..width {
+                        let expected = native_row.screen().cell(0, column).unwrap();
+                        let actual = rendered.screen().cell(0, column).unwrap();
+                        let in_gutter = (left..gutter_end).contains(&column);
+                        let in_content = (content_start..content_end).contains(&column);
+                        if !in_gutter && !in_content {
+                            assert_eq!(
+                                (actual.contents(), actual.fgcolor(), actual.bgcolor()),
+                                (expected.contents(), expected.fgcolor(), expected.bgcolor()),
+                                "{chrome}/{marker}/{width}: decoration at {column}: {plain:?}"
+                            );
+                        }
+                        if !in_gutter {
+                            // vt100 stores the paint on a wide glyph's lead cell.
+                            let painted = if actual.is_wide_continuation() {
+                                rendered.screen().cell(0, column - 1).unwrap()
+                            } else {
+                                actual
+                            };
+                            assert_eq!(
+                                painted.bgcolor(),
+                                expected.bgcolor(),
+                                "{chrome}/{marker}/{width}: fill at {column}: {:?}; plan={plan:?}",
+                                rows[row_index]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn pi_palette_keeps_exact_accent_and_explicit_default_backgrounds_after_model_changes() {
     for mut theme in themes() {
         let accent = theme.role_rgb("model_accent");

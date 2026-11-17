@@ -1,6 +1,6 @@
 //! Semantic transcript-block dispatch into focused presenters and surface framing.
 
-use sexy_tui_rs::{visible_width, Color, RichRenderer};
+use sexy_tui_rs::{slice_by_column, visible_width, Color, RichRenderer};
 
 use super::assistant_block::AssistantBlock;
 use super::bash_render::{project_bash_row, project_compact_bash_output};
@@ -745,6 +745,27 @@ pub(super) fn render_block_planned_with_rainbow(
         }
         _ => (marker, None),
     };
+    let component_gutter = if plan.marker_enabled {
+        usize::from(plan.frame_left.min(2))
+    } else {
+        0
+    };
+    if let Some(line) = component_line {
+        // Pi packages/tui/src/components/loader.ts:93-96 supplies spinner and
+        // message content, not the host's outer surface. Keep its gutter at
+        // the native spinner column and decorate the remaining content using
+        // the existing painter, including fill, padding and frame clipping.
+        lines[0] = slice_by_column(
+            line,
+            component_gutter,
+            usize::from(plan.geometry.content_width),
+            true,
+        );
+        // Clipping can drop a component's trailing reset. Close its styles
+        // before painting native padding/fill. Even an empty body then keeps
+        // its frame rather than becoming a host-owned blank breathing row.
+        lines[0].push_str("\x1b[0m");
+    }
     let mut lines = decorate_surface_with_frame(
         lines,
         &plan,
@@ -755,25 +776,26 @@ pub(super) fn render_block_planned_with_rainbow(
         marker,
     );
     if let Some(line) = component_line {
-        // Pi packages/coding-agent/src/modes/interactive/components/
-        // status-indicator.ts:24-26 embeds the Loader without Text padding.
-        // The cached row includes its spinner: terminal-owned placement starts
-        // at the native marker, and clips only after adding that offset.
-        let left = if plan.marker_enabled {
-            plan.frame_left.saturating_sub(2)
-        } else {
-            plan.geometry.content_left
-        };
-        let row = fit_line(
-            &format!("{}{line}", " ".repeat(usize::from(left))),
-            outer_width,
-        );
-        lines[plan.geometry.transition_rows + plan.geometry.leading_rows] =
-            if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
-                sexy_tui_rs::strip_terminal_sequences(&row)
-            } else {
-                row
-            };
+        let row = &mut lines[plan.geometry.transition_rows + plan.geometry.leading_rows];
+        if component_gutter > 0 {
+            let left = usize::from(plan.frame_left) - component_gutter;
+            let before = slice_by_column(row, 0, left, true);
+            let marker = slice_by_column(line, 0, component_gutter, true);
+            let after = slice_by_column(
+                row,
+                left + component_gutter,
+                usize::from(outer_width).saturating_sub(left + component_gutter),
+                true,
+            );
+            *row = format!(
+                "{before}{}{marker}{}\x1b[0m{after}",
+                " ".repeat(left.saturating_sub(visible_width(&before))),
+                " ".repeat(component_gutter.saturating_sub(visible_width(&marker))),
+            );
+        }
+        if theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
+            *row = sexy_tui_rs::strip_terminal_sequences(row);
+        }
     }
     RenderedTranscriptBlock {
         lines,

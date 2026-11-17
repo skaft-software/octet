@@ -134,6 +134,11 @@ model recoloring. Tern receives those rows as native ANSI content, not a second
 terminal renderer. Extension titles are owner-scoped terminal-safe text, not theme
 colors. Removing a mount restores the native surface.
 
+A cached Pi working indicator starts at the native spinner column. Its content
+fits inside the activity surface; cards, rails, padding and native fill remain
+around it. Clipping respects terminal cells, including wide characters, and the
+component's styles stop before native padding and borders.
+
 The built-in `pi` and imported Pi palettes default to disabling native label
 shimmer/rainbow and model recoloring. Explicit native theme overrides still win.
 Selecting a different native theme changes native chrome;
