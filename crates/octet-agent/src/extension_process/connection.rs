@@ -173,6 +173,10 @@ pub(super) type PendingRequests = Arc<StdMutex<HashMap<u64, PendingRequest>>>;
 
 pub(super) type IssuedResourceOwners = Arc<StdMutex<HashSet<ExtensionResourceOwner>>>;
 
+/// Longest a routed `command/execute` waits for request capacity held by
+/// cancelled requests the peer has not yet acknowledged.
+const COMMAND_SLOT_WAIT: Duration = Duration::from_secs(5);
+
 pub(super) const CHILD_ACTIVE: u8 = 0;
 
 pub(super) const CHILD_RESPONDING: u8 = 1;
@@ -1081,14 +1085,38 @@ impl ProcessConnection {
             let slot = if use_request_slot {
                 let slots = read_std_lock(&connection.slots).clone();
                 Some(if routed {
-                    slots.try_acquire_owned().map_err(|error| match error {
-                        tokio::sync::TryAcquireError::Closed => {
-                            ExtensionRuntimeError::Closed("request queue is closed".into())
+                    match Arc::clone(&slots).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(tokio::sync::TryAcquireError::Closed) => {
+                            return Err(ExtensionRuntimeError::Closed(
+                                "request queue is closed".into(),
+                            ));
                         }
-                        tokio::sync::TryAcquireError::NoPermits => {
-                            ExtensionRuntimeError::Protocol("session_request_quota_exceeded".into())
+                        // A user-submitted command is host-initiated, never a
+                        // re-entrant peer request, so a bounded wait cannot
+                        // deadlock. Superseded autocomplete requests keep their
+                        // slots until the peer acknowledges cancellation, and
+                        // typing a command can briefly fill every slot.
+                        Err(tokio::sync::TryAcquireError::NoPermits)
+                            if method == methods::COMMAND_EXECUTE =>
+                        {
+                            tokio::time::timeout(COMMAND_SLOT_WAIT, slots.acquire_owned())
+                                .await
+                                .map_err(|_| {
+                                    ExtensionRuntimeError::Protocol(
+                                        "session_request_quota_exceeded".into(),
+                                    )
+                                })?
+                                .map_err(|_| {
+                                    ExtensionRuntimeError::Closed("request queue is closed".into())
+                                })?
                         }
-                    })?
+                        Err(tokio::sync::TryAcquireError::NoPermits) => {
+                            return Err(ExtensionRuntimeError::Protocol(
+                                "session_request_quota_exceeded".into(),
+                            ));
+                        }
+                    }
                 } else {
                     slots.acquire_owned().await.map_err(|_| {
                         ExtensionRuntimeError::Closed("request queue is closed".into())
