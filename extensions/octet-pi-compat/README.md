@@ -82,7 +82,10 @@ again before writing. Rust revalidates those inputs and native activation/trust
 before first paint, then paints the current native draft through the declarative
 template without starting Node or issuing render RPCs. Geometry changes, invalid
 caches and explicit native theme overrides use native fallback. Opening a mount
-alone does not retire the template: both represented live placements need frames.
+alone does not retire the template: both represented live placements need frames,
+or startup must finish reconciling live chrome. The adapter publishes that boundary
+after `session_start` and its bounded presentation join, including absent/cleared
+slots, so cached zero-valued usage never becomes a permanent fallback.
 See [cached first paint](../../docs/pi-compatibility.md#cached-pi-chrome-at-first-paint).
 
 `--from-pi` also snapshots enabled Pi palettes (plus Pi dark/light) under `themes/`
@@ -1183,8 +1186,8 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1684 tests: 1651 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
-and the pinned Pi provider fixture, including startup-chrome, subagent-collision,
+**1687 tests: 1654 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+and the pinned Pi provider fixture, including startup-chrome reconciliation, subagent-collision,
 session callback-code isolation, live worker session ownership and busy append receipt regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the

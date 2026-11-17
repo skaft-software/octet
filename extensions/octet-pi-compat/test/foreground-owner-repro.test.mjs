@@ -62,7 +62,8 @@ test('valid foreign context reads its own complete history without promoting its
   assert.equal(observed.session, foreign.session_id);
   assert.equal(observed.hasUI, false);
   for (const key of ['chrome', 'notify', 'status', 'composer']) assert.match(observed[key], /not_foreground_owner/);
-  assert.equal(peer.seen.some(frame => ['ui/chrome', 'ui/close', 'composer/set', 'composer/insert'].includes(frame.method)), false);
+  assert.equal(peer.seen.some(frame => ['ui/chrome', 'ui/close', 'composer/set', 'composer/insert'].includes(frame.method)
+    && !(frame.method === 'ui/chrome' && frame.params.chrome.kind === 'reconciled' && frame.params.resource_owner.session_id === owner.session_id)), false);
   assert.equal(peer.seen.some(frame => frame.method === 'notification' && frame.params.message === 'must not escape background'), false);
   peer.notify('context/updated', { resource_owner: owner, host: { session_name: 'current-native-foreground' } });
   assert.equal((await inspect(peer)).name, 'current-native-foreground');

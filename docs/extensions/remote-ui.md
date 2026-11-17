@@ -155,6 +155,15 @@ native admission, not OS delivery. Only the host renderer encodes OSC 777; the
 terminal must support that desktop-notification protocol. Headless/plain output
 does not advertise this frontend service. No escape bytes are accepted in frames.
 
+### `ui/chrome` — live chrome reconciliation
+
+`chrome: {"kind":"reconciled"}` marks the end of live startup's chrome
+reconciliation, including absent or cleared placements. The owner-fenced marker
+retires any host-painted startup template without opening a surface or changing
+live mounts. The Pi adapter publishes it after `session_start` and its bounded
+presentation join, using the same asynchronous, 2-second delivery deadline as
+other chrome updates; a failed delivery cannot fail or hold the hook.
+
 ### `ui/chrome` — working component presentation
 
 A working component can publish its effective single-row presentation through

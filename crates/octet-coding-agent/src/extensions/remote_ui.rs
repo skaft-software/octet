@@ -30,6 +30,8 @@ pub(crate) struct Projection {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChromeState {
+    /// The live startup has reconciled its slots, including absent placements.
+    pub(crate) reconciled: bool,
     pub(crate) title: Option<String>,
     pub(crate) working: crate::tui::view::ShellExtensionWorking,
     pub(crate) hidden_thinking_label: Option<String>,
@@ -380,6 +382,7 @@ impl RemoteUi {
                         }
                         let state = &mut self.chrome.as_mut().expect("chrome lease").state;
                         match change {
+                            Chrome::Reconciled {} => state.reconciled = true,
                             Chrome::Title { title } => state.title = Some(title),
                             Chrome::WorkingMessage { message } => state.working.message = message,
                             Chrome::WorkingVisible { visible } => {

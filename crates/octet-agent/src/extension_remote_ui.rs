@@ -110,6 +110,9 @@ pub struct ExtensionRemoteUiChromeRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExtensionRemoteUiChrome {
+    /// Live startup has reconciled its chrome, including absent or cleared slots.
+    /// Retires any host-painted startup template without opening a surface.
+    Reconciled {},
     /// Synchronous native editor operation on an already admitted surface.
     /// The frontend rechecks owner, surface and optional composer mount fence.
     Editor {
@@ -1833,6 +1836,18 @@ mod tests {
             ExtensionRequestFailure::BoundsExceeded
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn chrome_reconciliation_is_a_closed_marker() {
+    let marker: ExtensionRemoteUiChrome = serde_json::from_str(r#"{"kind":"reconciled"}"#).unwrap();
+    assert_eq!(marker, ExtensionRemoteUiChrome::Reconciled {});
+    marker.validate().unwrap();
+    assert!(serde_json::from_str::<ExtensionRemoteUiChrome>(
+        r#"{"kind":"reconciled","surface_id":"not-a-mount"}"#
+    )
+    .is_err());
 }
 
 #[cfg(test)]

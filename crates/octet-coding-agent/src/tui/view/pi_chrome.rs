@@ -7,6 +7,8 @@ use octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement as Placement;
 /// Pi restores the built-in footer on clear (packages/coding-agent/src/modes/
 /// interactive/interactive-mode.ts:2623-2644); empty renders contribute no rows
 /// (packages/tui/src/tui.ts:411-422). Neither restores a prior startup rendering.
+/// The adapter's reconciliation marker also covers slots never mounted in this
+/// session: Pi starts with the built-in footer (interactive-mode.ts:665-670).
 pub(super) fn retire(
     state: &mut ShellState,
     remote: &crate::extensions::remote_ui::Projection,
@@ -20,6 +22,10 @@ pub(super) fn retire(
             .is_some_and(|mount| remote.frame(mount, state.size.0, state.size.1).is_some())
     };
     if remote.chrome_closed
+        || remote
+            .chrome
+            .as_ref()
+            .is_some_and(|chrome| chrome.reconciled)
         || ((snapshot.editor.is_none() || ready(Placement::Editor))
             && (snapshot.footer.is_none() || ready(Placement::Footer)))
     {
@@ -204,6 +210,38 @@ mod tests {
         assert!(shell.set_remote_ui(closed.clone()));
         assert!(shell.state.borrow().pi_chrome.is_none());
         assert!(!shell.set_remote_ui(closed));
+        shell.set_remote_ui(Default::default());
+        assert!(shell.state.borrow().pi_chrome.is_none());
+    }
+
+    #[test]
+    fn cached_chrome_retires_after_reconciliation_of_never_mounted_slots() {
+        let mut shell = InteractiveShell::test_shell();
+        *shell.state.borrow_mut() = cached_state();
+        shell.state.borrow_mut().editor.set_text("early draft");
+        assert!(!shell.set_remote_ui(Default::default()));
+        assert!(shell.state.borrow().pi_chrome.is_some());
+        let reconciled = crate::extensions::remote_ui::Projection {
+            chrome: Some(crate::extensions::remote_ui::ChromeState {
+                reconciled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(shell.set_remote_ui(reconciled));
+        {
+            let state = shell.state.borrow();
+            assert!(
+                state.pi_chrome.is_none(),
+                "absent live slots retire the cache"
+            );
+            let chrome = super::super::shell_chrome::shell_chrome(&state, 80, Instant::now());
+            assert!(chrome.extension_below.is_empty());
+            assert!(chrome
+                .composer
+                .iter()
+                .any(|row| row.contains("early draft")));
+        }
         shell.set_remote_ui(Default::default());
         assert!(shell.state.borrow().pi_chrome.is_none());
     }

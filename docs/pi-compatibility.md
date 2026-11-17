@@ -288,8 +288,12 @@ same hook gates described below. Once both cached placements have live frames,
 including an intentionally empty frame, the renderer reveals them together rather
 than clearing a slot when it opens. This permanently retires the template for that
 activation. Closing a live editor/footer or a failed adapter startup also retires
-it, even before the first frame. Clearing the footer restores the built-in footer;
-later renders and preference updates never restore the startup template. Turning
+it, even before the first frame. After `session_start` finishes its bounded
+presentation join, the adapter publishes live chrome reconciliation, including
+slots it never mounted or cleared before mounting. This retires any remaining
+template; absent slots use native chrome rather than cached usage placeholders.
+Clearing the footer restores the built-in footer; later renders and preference
+updates never restore the startup template. Turning
 Pi compatibility off and on starts a new activation.
 
 The private `chrome-*.json` cache sits beside the adapter's compile cache

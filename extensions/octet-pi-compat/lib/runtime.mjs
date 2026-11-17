@@ -1329,6 +1329,16 @@ export class Runtime {
         }
         await reply;
         settlementError = undefined;
+        if (store.hook === 'session_start' && this.features.has('remote_ui') && store.state?.host.has_ui !== false
+          && store.state?.alive && store.state === this.foreground) {
+          // Pi starts with its built-in footer and restores it when cleared
+          // (packages/coding-agent/src/modes/interactive/interactive-mode.ts:665-670,2638-2641).
+          // Publish after startup's bounded presentation join, even if no slot
+          // mounted. Like other chrome deliveries this cannot hold or fail a hook.
+          this.transport.request('ui/chrome', { parent_request_id: store.id, resource_owner: store.state.owner,
+            chrome: { kind: 'reconciled' } }, { signal: store.controller.signal, timeout: 2000 })
+            .catch(error => { if (!this.stopping && store.state.alive) this.backgroundError(error); });
+        }
         if (message.method === 'provider/stream') startProviderStream(this, message.params.stream_id);
       }
     } catch (error) {

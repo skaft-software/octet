@@ -1238,6 +1238,29 @@ async fn native_theme_selection_cannot_mutate_a_ceded_terminal() {
 }
 
 #[tokio::test]
+async fn live_chrome_reconciliation_publishes_without_a_mount() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut extensions, log) = fixture(&temp).await;
+    let mut frontend = Frontend::new([]);
+    command(
+        &mut extensions,
+        &mut frontend,
+        &["chrome", r#"{"kind":"reconciled"}"#],
+    )
+    .await;
+    let projection = extensions.remote_ui.projection();
+    assert!(projection.mounts.is_empty());
+    assert!(projection.chrome.unwrap().reconciled);
+    assert!(!projection.chrome_closed);
+    let reply = wire(&log)
+        .into_iter()
+        .find(|message| message["id"] == "chrome-1")
+        .unwrap();
+    assert!(reply.get("result").is_some(), "{reply}");
+    extensions.shutdown().await;
+}
+
+#[tokio::test]
 async fn held_chrome_close_and_owner_failure_publish_retirement_without_a_visible_mount() {
     for failure in ["close", "owner", "process"] {
         let temp = tempfile::tempdir().unwrap();

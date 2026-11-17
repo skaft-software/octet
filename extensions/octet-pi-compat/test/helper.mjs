@@ -69,6 +69,7 @@ export function launch(t, extensions = [join(root, 'test/fixtures/core.ts')], op
           editors.set(frame.params.surface_id, { mount_id: result.editor_mount_id, input_revision: 0 });
         }
       }
+      else if (frame.method === 'ui/chrome' && frame.params.chrome.kind === 'reconciled') result = {tools_expanded: false};
       else if (frame.method === 'ui/chrome' && frame.params.chrome.kind === 'editor') {
         try { result = nativeCall(frame.params); }
         catch (error) { send({jsonrpc: '2.0', id: frame.id, error: {code: error.code ?? -32603, message: error.message}}); }

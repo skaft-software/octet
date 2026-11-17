@@ -153,7 +153,7 @@ test('negotiated remote UI with has_ui false preserves startup and command metad
 });
 
 test('shutdown status with remote UI negotiated and has_ui false does not require a foreground UI pump', async t => {
-  const peer = await fixture(t, { skipStartupStatus: true });
+  const peer = await fixture(t, { skipStartupStatus: true, startHost: { has_ui: false } });
   const result = await peer.request('hook/run', {
     hook: 'session_end', payload: { binding: owner }, context: peer.context({ has_ui: false }),
   }).response;

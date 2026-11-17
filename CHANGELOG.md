@@ -180,6 +180,7 @@
 - Auto theme detection applies late terminal replies through ordinary input without delaying the first submission.
 - Pi compatibility restores validated composer and footer templates at first paint while the live setup loads.
 - Pi startup chrome retires permanently on live frames, including empty footers, unmounts and startup failures.
+- Pi startup templates yield to live chrome after startup reconciles absent or cleared editor and footer slots.
 - Extension slash commands run immediately during active responses, with handler failures and timeouts isolated from the running turn.
 - Subagent spawn and continuation reach inference with resource-contributing extensions while parent authority refusals identify the guard.
 - Enabled octet-subagents tools retain their names alongside Pi packages, with package-attributed collision warnings and working unrelated commands.
