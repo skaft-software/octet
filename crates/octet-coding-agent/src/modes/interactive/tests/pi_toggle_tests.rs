@@ -1,4 +1,7 @@
 //! Interactive activation returns the fleet before factory initialization.
+// Unix-only like `pi_contract_support`: the probe drives terminal input
+// through a Unix socket pair.
+#![cfg(unix)]
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
