@@ -57,7 +57,6 @@
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Terminal mouse and cursor reports with a zero coordinate are ignored as malformed instead of crashing the input decoder.
 - Pi session replacement, compaction and tree hooks isolate callback-owned error codes while preserving native refusals and explicit vetoes.
-- Pi editor painting reuses bounded native snapshots and keeps host waits outside component rendering.
 - Bash tool titles use the Pi theme's toolTitle color and shared tool-header styling.
 - Pi adapter reloads preserve session history after forced restarts and keep extension warnings actionable while responses continue.
 - Video reads keep input responsive during cancellable frame preparation and preserve completed results with their original bytes.
