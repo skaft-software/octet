@@ -818,6 +818,41 @@ impl ExecutableExtensions {
         self.apply_session_host_requests_for_owner(Some(agent), None, sessions)
     }
 
+    /// Only admitted appends enter the active Run; replacements and other
+    /// session operations retain their idle settlement boundary.
+    pub(crate) fn route_run_appends(&mut self, run: &octet_agent::Run<'_>) {
+        let mut retained = VecDeque::new();
+        while let Some(pending) = self.pending_session_requests.pop_front() {
+            match pending.operation {
+                HostRequestOperation::SessionEntry(ExtensionSessionEntryOperation::Append {
+                    entry_type,
+                    data,
+                }) if pending
+                    .process
+                    .supports_feature("session_append_receipts_v1") =>
+                {
+                    if let Err((failure, message)) = run.queue_extension_append(
+                        pending.process.clone(),
+                        pending.request_id.clone(),
+                        pending.generation,
+                        entry_type,
+                        data,
+                    ) {
+                        self.refuse_host_request(
+                            pending.process,
+                            pending.request_id,
+                            pending.generation,
+                            failure,
+                            message,
+                        );
+                    }
+                }
+                _ => retained.push_back(pending),
+            }
+        }
+        self.pending_session_requests = retained;
+    }
+
     pub(crate) fn apply_modeless_session_host_requests(
         &mut self,
         session: &mut Session,

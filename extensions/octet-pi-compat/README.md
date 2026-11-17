@@ -687,8 +687,17 @@ from live hooks, commands, shortcuts and tools then publish the actual native du
 entry into that invocation's pinned view before returning. Receipt revision,
 head, ancestry and view quotas must match; no session-leaf grant is minted.
 Immediate sessionManager getters therefore see the committed ID, parent and
-native timestamp. Older peers retain the exact entry-ID-only ACK contract.
-Adapter receipt tests do not establish native or original-package acceptance.
+native timestamp. Busy commands use the owning native Run's bounded append lane,
+not an idle-only queue. Counted receipts chain intervening native entries into the
+command's pinned view with namespace, revision, ancestry and quota checks intact.
+A waiting response hook may append afterwards only across the exact head-and-byte
+chain of command commits witnessed by that same writer; unrelated source changes
+still refuse. Dropping the Run refuses unclaimed queued appends without idle replay.
+Session replacement retains its separate idle-settlement boundary. A command that
+retires the adapter leaves pending model-response observations isolated with a
+warning rather than failing the response. Older peers retain the exact entry-ID-only
+ACK contract. Real-adapter/FauxProvider and App regressions cover this bounded
+native path, not original-package or full-Pi qualification.
 
 Negotiated `pipeline_hooks_v1` dispatches actual `before_provider_request`,
 `before_provider_headers` and `after_provider_response`. These operate on encoded
@@ -1161,9 +1170,9 @@ PI_FLEET_AGENT_DIR=/absolute/pi-agent \
 ```
 
 The recorded base adapter run, with two test files in parallel, is
-**1685 tests: 1652 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
+**1683 tests: 1650 passed, 0 failed, 33 optional skips**, exit 0, with the freshly built native editor test host
 and the pinned Pi provider fixture, including startup-chrome, subagent-collision,
-session callback-code isolation and live worker session-ownership regressions.
+session callback-code isolation, live worker session ownership and busy append receipt regressions.
 This is synthetic/native-peer evidence, not existing-setup or attended RC qualification. The candidate-truth numbers are read from the shipped
 `npm test` result; update them here when the adapter suite changes. Editor fixtures require the
 compiled native test peer above (or `OCTET_NATIVE_EDITOR_TEST_HOST` pointing to it); missing

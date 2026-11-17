@@ -4107,6 +4107,7 @@ where
             extension_menu.cancel();
             extension_collection = None;
         }
+        executable_extensions.route_run_appends(run);
         executable_extensions.refresh_frontend_pending_messages(shell);
         executable_extensions.sync_editor_autocomplete(shell);
         if shell.set_pending_controls(model_controls::queue_labels(pending_actions)) {

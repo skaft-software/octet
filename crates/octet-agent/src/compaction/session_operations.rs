@@ -178,6 +178,12 @@ pub trait SessionOperationInvocation: Send {
         Err("session operation has no append consumer".into())
     }
 
+    /// A stopped process is an unavailable observer, not a failed append.
+    /// Owner/source changes and persistence failures remain separate refusals.
+    fn process_retired(&self, _session: &Session) -> bool {
+        false
+    }
+
     /// Recheck process generation/owner even when the callback appended nothing.
     fn validate_current(&self, _session: &Session) -> Result<(), String> {
         Ok(())
@@ -212,6 +218,9 @@ pub enum SessionOperationError {
     /// An observation/interception callback failed without a host append failure.
     #[error("session operation callback failed")]
     Callback,
+    /// The callback's process stopped; model observations may skip it.
+    #[error("session observation process retired")]
+    ProcessRetired,
     /// The private append service failed; no automatic fallback or continuation.
     #[error("session operation hook failed")]
     Hook,
@@ -325,6 +334,10 @@ pub async fn run_session_operation_hooks(
     let mut selected = SessionOperationDecision::Continue;
     let mut revision = SessionSourceRevision::capture(session)?;
     for hook in hooks {
+        revision.validate(session)?;
+        while session.service_run_append() {
+            revision = SessionSourceRevision::capture(session)?;
+        }
         if cancellation.is_cancelled() {
             return Err(SessionOperationError::Cancelled);
         }
@@ -342,8 +355,18 @@ pub async fn run_session_operation_hooks(
                 biased;
                 _ = cancellation.cancelled() => return Err(SessionOperationError::Cancelled),
                 _ = tokio::time::sleep_until(deadline) => break Err(SessionOperationError::Deadline),
+                _ = session.run_append_ready() => {
+                    revision.validate(session)?;
+                    session.service_run_append();
+                    revision = SessionSourceRevision::capture(session)?;
+                },
                 live = ready => {
-                    if !live { return Err(SessionOperationError::Hook); }
+                    if !live {
+                        revision.validate(session)?;
+                        return Err(if invocation.process_retired(session) {
+                            SessionOperationError::ProcessRetired
+                        } else { SessionOperationError::Hook });
+                    }
                     revision.validate(session)?;
                     invocation.consume_next(session).map_err(|_| SessionOperationError::Hook)?;
                     // Only this known committed leaf may advance the prepared source.
@@ -352,10 +375,13 @@ pub async fn run_session_operation_hooks(
                 result = &mut future => break result.map_err(|_| SessionOperationError::Callback),
             }
         };
+        revision.validate(session)?;
+        if invocation.process_retired(session) {
+            return Err(SessionOperationError::ProcessRetired);
+        }
         invocation
             .validate_current(session)
             .map_err(|_| SessionOperationError::StaleSource)?;
-        revision.validate(session)?;
         if cancellation.is_cancelled() {
             return Err(SessionOperationError::Cancelled);
         }

@@ -101,7 +101,8 @@ function history(entries) {
 }
 
 test('identical history and branch share translation input without duplicating appended entries', () => {
-  for (const shape of ['empty', 'linear', 'forked', 'reordered']) for (const gapCount of [0, 2]) {
+  for (const shape of ['empty', 'linear', 'forked', 'reordered']) for (const gapKind of ['none', 'config', 'message']) {
+    const gapCount = gapKind === 'none' ? 0 : 2;
     const entries = shape === 'empty' ? [] : [message('root', null, 'one'), message('left', 'root', 'left')];
     if (shape === 'forked') entries.push(message('right', 'root', 'right'));
     if (shape === 'reordered') entries.reverse();
@@ -124,10 +125,23 @@ test('identical history and branch share translation input without duplicating a
       const previous_head = document.head, gap = [];
       let parent = previous_head;
       for (let i = 0; i < gapCount; i++) {
-        const entry = { id: `config-${revision}-${i}`, parent, value: { type: 'config', key: 'thinking', value: 'off' } };
+        const entry = gapKind === 'message' ? message(`message-${revision}-${i}`, parent, 'streamed prompt')
+          : { id: `config-${revision}-${i}`, parent, value: { type: 'config', key: 'thinking', value: 'off' } };
         gap.push(entry); parent = entry.id;
       }
       const next = message(`next-${revision}`, parent, 'next');
+      if (gap.length) {
+        const bad = structuredClone(gap);
+        bad[0].metadata = { extension_metadata: { foreign: { public: false, value: {} } } };
+        const before = JSON.stringify(document), bytes = transport.bytes, records = transport.records;
+        assert.throws(() => transport.append(store, { previous_head, previous_revision: revision - 1, view_revision: revision,
+          entry_id: next.id, entry: next, head: next.id, gap: bad }, null, null), /foreign private session metadata/);
+        bad[0].metadata = undefined; bad[0].parent = 'foreign-head';
+        assert.throws(() => transport.append(store, { previous_head, previous_revision: revision - 1, view_revision: revision,
+          entry_id: next.id, entry: next, head: next.id, gap: bad }, null, null), /receipt gap/);
+        assert.equal(JSON.stringify(document), before);
+        assert.deepEqual([transport.bytes, transport.records], [bytes, records]);
+      }
       transport.append(store, { previous_head, previous_revision: revision - 1, view_revision: revision,
         entry_id: next.id, entry: next, head: next.id, ...(gap.length ? { gap } : {}) }, null, null);
       const added = [...gap.map(entry => entry.id), next.id];

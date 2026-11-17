@@ -97,6 +97,7 @@ mod control;
 mod deferred;
 mod delegation_setup;
 mod error;
+pub(crate) mod extension_appends;
 mod images;
 mod live_output;
 mod model_control;
@@ -286,6 +287,9 @@ impl std::ops::DerefMut for RunSessionGuard<'_> {
 
 impl Drop for RunSessionGuard<'_> {
     fn drop(&mut self) {
+        if let Some(lane) = self.session.run_appends.take() {
+            lane.close();
+        }
         if !self.lifecycle.finished.load(Ordering::Acquire) {
             // Drop cannot report an I/O error, but attempting the append here
             // closes the old gap where a deliberate stream drop followed by a

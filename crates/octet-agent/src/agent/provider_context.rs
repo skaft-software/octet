@@ -417,6 +417,7 @@ async fn project_context_hooks(
             note_context_failure(hook.as_ref(), session, notices);
             continue;
         }
+        while session.service_run_append() {}
         let activation = hook.begin_session_wait(session, context);
         // Pi reports throwing handlers and continues (packages/coding-agent/src/
         // core/extensions/runner.ts:1096-1123). Native process retirement also
@@ -469,6 +470,7 @@ async fn project_context_hooks(
                     // successful results are still checked against the deadline below.
                     result = &mut future => break result,
                     _ = tokio::time::sleep_until(deadline) => break Err(ProviderContextHookError::Failed("context hook deadline exceeded".into())),
+                    _ = session.run_append_ready() => { session.service_run_append(); },
                     _ = ready => {
                         // Polling the hook above may itself queue an append and
                         // cancel the run in the same select iteration. Check

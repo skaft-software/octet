@@ -46,6 +46,8 @@ pub struct RequestContextEstimate {
 pub struct Run<'a> {
     pub(super) stream: Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'a>>,
     pub(super) control: RunControl,
+    pub(super) appends: extension_appends::RunAppends,
+    pub(super) append_owner: String,
     pub(super) lifecycle: Arc<RunLifecycle>,
     pub(super) context: Arc<ContextTracker>,
     pub(super) delegation: Option<DelegationBinding>,
@@ -115,6 +117,7 @@ impl Run<'_> {
 
 impl Drop for Run<'_> {
     fn drop(&mut self) {
+        self.appends.close();
         // Serialize retained-policy changes with releasing this run's ownership.
         // Checking channel closure alone leaves a setter/drop race.
         *self

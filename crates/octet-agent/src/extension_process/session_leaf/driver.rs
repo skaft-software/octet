@@ -135,7 +135,12 @@ impl SessionDriver {
                     active.consumer.revoker().revoke();
                     return Err("session driver process authority changed".into());
                 }
-                match active.consumer.consume_next(session, &active.binding) {
+                match consume_process_append(
+                    &active.lease.process,
+                    &mut active.consumer,
+                    session,
+                    &active.binding,
+                ) {
                     Ok(true) => Ok(()),
                     _ => Err("session driver append unavailable".into()),
                 }
@@ -239,6 +244,7 @@ impl SessionDriver {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err("session driver cancelled".into()),
+                _ = session.run_append_ready() => { session.service_run_append(); },
                 event = self.next() => self.service(event, session)?,
                 result = &mut future => return Ok(result),
             }

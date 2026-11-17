@@ -86,6 +86,8 @@ pub struct SessionLeafCommit {
     pub head: EntryId,
     /// Fresh grant at the known new head; absent if revoked or unavailable.
     pub successor: Option<SessionLeafGrant>,
+    /// Exact command commits made by this Run after the callback's source.
+    pub(crate) gap: Vec<crate::session::Entry>,
 }
 
 /// Static, payload-free refusal. Persistence failure is never retry authority.
@@ -143,6 +145,7 @@ struct Pending {
 struct Request {
     id: u64,
     grant: SessionLeafGrant,
+    gap: Vec<crate::session::Entry>,
     entry_type: String,
     data: Value,
 }
@@ -242,6 +245,7 @@ impl SessionLeafProducer {
         state.queue.push_back(Request {
             id,
             grant,
+            gap: Vec::new(),
             entry_type,
             data,
         });
@@ -421,9 +425,34 @@ impl SessionLeafConsumer {
         session: &mut Session,
         current: &SessionLeafBinding,
     ) -> Result<bool, SessionLeafError> {
+        self.consume_next_checked(session, current, |_, _, _| true)
+    }
+
+    /// Count a process receipt against its actual frame bound before any write.
+    pub(crate) fn consume_next_checked(
+        &mut self,
+        session: &mut Session,
+        current: &SessionLeafBinding,
+        fits: impl FnOnce(&str, &Value, &[crate::session::Entry]) -> bool,
+    ) -> Result<bool, SessionLeafError> {
         let Some(request) = self.claim_next(session, current)? else {
             return Ok(false);
         };
+        if !fits(&request.entry_type, &request.data, &request.gap) {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .expect("session leaf mutex poisoned");
+            Shared::settle(
+                &mut state,
+                request.id,
+                Err(SessionLeafError::InvalidPayload),
+            );
+            drop(state);
+            self.shared.close(SessionLeafError::InvalidPayload);
+            return Err(SessionLeafError::InvalidPayload);
+        }
         self.commit(session, request)
     }
 
@@ -437,19 +466,30 @@ impl SessionLeafConsumer {
             .state
             .lock()
             .expect("session leaf mutex poisoned");
-        let Some(request) = state.queue.pop_front() else {
+        let Some(mut request) = state.queue.pop_front() else {
             return Ok(None);
         };
         let failure = if current != self.binding.as_ref() {
             Some(SessionLeafError::StaleBinding)
         } else if !self.same_session(session) {
             Some(SessionLeafError::StaleSession)
-        } else if session.head() != request.grant.head {
-            Some(SessionLeafError::StaleHead)
         } else {
             match file_bytes(session) {
-                Ok(bytes) if bytes == request.grant.file_bytes => None,
-                Ok(_) => Some(SessionLeafError::StaleHead),
+                Ok(bytes)
+                    if session.head() == request.grant.head
+                        && bytes == request.grant.file_bytes =>
+                {
+                    None
+                }
+                Ok(_) => match session
+                    .known_run_append_gap(request.grant.head.as_ref(), request.grant.file_bytes)
+                {
+                    Some(gap) => {
+                        request.gap = gap;
+                        None
+                    }
+                    None => Some(SessionLeafError::StaleHead),
+                },
                 Err(error) => Some(error),
             }
         };
@@ -514,6 +554,7 @@ impl SessionLeafConsumer {
                         head: entry_id.clone(),
                         entry_id,
                         successor,
+                        gap: request.gap,
                     }),
                 );
                 Ok(true)
@@ -566,7 +607,7 @@ fn make_grant(
     })
 }
 
-fn payload_bytes(entry_type: &str, data: &Value) -> Result<usize, SessionLeafError> {
+pub(crate) fn payload_bytes(entry_type: &str, data: &Value) -> Result<usize, SessionLeafError> {
     if !bounded_id(entry_type, MAX_EXTENSION_ENTRY_TYPE_BYTES) {
         return Err(SessionLeafError::InvalidPayload);
     }

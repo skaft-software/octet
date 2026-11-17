@@ -256,6 +256,8 @@ fn run_drop_fences_cache_warming_before_releasing_the_event_stream() {
     // closure, just as a concurrent setter can observe before stream drop.
     let run = Run {
         stream: Box::pin(DropProbe(control.clone())),
+        appends: extension_appends::RunAppends::new(0, 0),
+        append_owner: "test-owner".into(),
         control: control.clone(),
         lifecycle: Arc::new(RunLifecycle {
             finished: AtomicBool::new(false),

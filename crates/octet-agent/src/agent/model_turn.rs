@@ -183,7 +183,9 @@ impl<'a> ModelTurnHooks<'a> {
             let Err(error) = result else { continue };
             if matches!(
                 error,
-                SessionOperationError::Callback | SessionOperationError::Deadline
+                SessionOperationError::Callback
+                    | SessionOperationError::Deadline
+                    | SessionOperationError::ProcessRetired
             ) {
                 // Pi reports a throwing observer and continues the response:
                 // packages/coding-agent/src/core/extensions/runner.ts:1096-1123.

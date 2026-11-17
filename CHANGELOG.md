@@ -56,6 +56,7 @@
 
 - Arrow keys move within recalled multiline prompts before navigating history. ([#737](https://github.com/skaft-software/octet/pull/737) by [@XelHaku](https://github.com/XelHaku))
 - Video preparation follows the active branch and compaction window.
+- Pi command appends commit during streaming responses, and adapter retirement leaves pending response observations isolated.
 - Markdown rows keep isolated flag letters within the requested terminal width, including one-cell viewports.
 - Terminal mouse and cursor reports with a zero coordinate are ignored as malformed instead of crashing the input decoder.
 - Pi session replacement, compaction and tree hooks isolate callback-owned error codes while preserving native refusals and explicit vetoes.

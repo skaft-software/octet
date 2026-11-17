@@ -324,6 +324,12 @@ impl Agent {
             })
             .collect::<Vec<_>>();
         let prepared_video_context = &mut self.prepared_video_context;
+        let appends = extension_appends::RunAppends::new(
+            custom_message_cursor,
+            self.session.usage_records().len(),
+        );
+        self.session.run_appends = Some(appends.clone());
+        let append_owner = self.resource_owner.clone();
         let session = &mut self.session;
 
         let stream = async_stream::stream! {
@@ -1106,6 +1112,7 @@ impl Agent {
                         tokio::select! {
                             biased;
                             _ = abort.wait() => break Ok(None),
+                            _ = session.run_append_ready() => { session.service_run_append(); },
                             _ = wait_network_deadline(network_deadline) => {
                                 if opening_client.request_may_have_been_sent() {
                                     let first = !session.has_uncertain_usage();
@@ -1318,6 +1325,7 @@ impl Agent {
                     let next = tokio::select! {
                         biased;
                         _ = abort.wait() => Next::Abort,
+                        _ = session.run_append_ready() => { session.service_run_append(); continue; },
                         c = control_rx.recv(), if control_open => Next::Ctl(c),
                         Some(update) = native_updates_rx.recv() => Next::Steering(update),
                         snapshot = async {
@@ -3015,6 +3023,7 @@ impl Agent {
                                             }
                                             None => control_open = false,
                                         },
+                                        _ = session.run_append_ready() => { session.service_run_append(); },
                                         event = session_driver.next() => {
                                             if let Err(error) = session_driver.service(event, session) {
                                                 break Some(Err(ToolError::new(error)));
@@ -3692,6 +3701,8 @@ impl Agent {
                 let event = AgentEvent::ExtensionObservationWarning { message };
                 notify_observers(&observers, &event); yield event;
             }
+            while session.service_run_append() {}
+            if let Some(lane) = session.run_appends.take() { lane.close(); }
             let head = session.head().unwrap_or(first_entry);
             stream_context.run_finished(&reason);
             // Row 3.5: the run span settles at the durable run boundary, after
@@ -3707,6 +3718,8 @@ impl Agent {
         Ok(Run {
             stream: Box::pin(stream),
             control,
+            appends,
+            append_owner,
             lifecycle,
             context,
             delegation: run_delegation,

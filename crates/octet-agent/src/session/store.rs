@@ -90,6 +90,8 @@ impl Session {
             tool_inference_attempts: BTreeMap::new(),
             entry_labels: BTreeMap::new(),
             context_failure_notices: BTreeSet::new(),
+            #[cfg(feature = "agent")]
+            run_appends: None,
             view_identity: SessionViewIdentity::fresh(),
         })
     }
@@ -730,6 +732,8 @@ impl Session {
             tool_inference_attempts,
             entry_labels,
             context_failure_notices: BTreeSet::new(),
+            #[cfg(feature = "agent")]
+            run_appends: None,
             view_identity: SessionViewIdentity::fresh(),
         })
     }

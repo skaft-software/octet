@@ -76,10 +76,18 @@ impl SessionOperationInvocation for ProcessSessionOperation {
 
     fn consume_next(&mut self, session: &mut Session) -> Result<(), String> {
         self.validate_current(session)?;
-        match self.consumer.consume_next(session, &self.binding) {
+        match consume_process_append(&self.process, &mut self.consumer, session, &self.binding) {
             Ok(true) => Ok(()),
             _ => Err("session operation append refused".into()),
         }
+    }
+
+    fn process_retired(&self, session: &Session) -> bool {
+        let connection = read_std_lock(&self.process.inner.connection);
+        session.resource_owner_key() == self.binding.owner.session_id
+            && (connection.closed.load(Ordering::Acquire)
+                || connection.draining.load(Ordering::Acquire)
+                || connection.generation != self.binding.owner.process_generation)
     }
 
     fn validate_current(&self, session: &Session) -> Result<(), String> {

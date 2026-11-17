@@ -162,13 +162,25 @@ test('grant-less routed append chains host config writes made after the pinned h
   assert.deepEqual(failures, []);
 });
 
-test('config gap chains are exact: broken links, foreign entries and empty or oversized gaps refuse', () => {
+test('busy append receipts chain native messages and visible custom entries into the pinned view', () => {
+  const { runtime, store, view, context, failures } = fixture(value => ({ ...withGap(value), gap: [
+    { ...hostConfig('cfg-1', null), value: { type: 'message', User: { content: [{ Text: 'live prompt' }] } } },
+    { ...hostConfig('cfg-2', 'cfg-1'), metadata: { extension_metadata: { other: { public: true, value: { entry_type: 'shared', data: {} } } } } },
+  ] }));
+  assert.equal(runtime.appendEntry('busy', {}, store), undefined);
+  assert.deepEqual(view.document.entries.map(entry => entry.id), ['cfg-1', 'cfg-2', 'native-1']);
+  assert.equal(context.sessionManager.getEntry('cfg-1').message.content[0].text, 'live prompt');
+  assert.equal(context.sessionManager.getLeafId(), 'native-1');
+  assert.deepEqual(failures, []);
+});
+
+test('native gap chains reject broken links, malformed messages, private foreign entries and empty or oversized gaps', () => {
   for (const mutate of [
     value => ({ ...withGap(value), entry: { ...value.entry, parent: 'cfg-1' } }),
     value => ({ ...withGap(value), gap: [hostConfig('cfg-1', 'foreign')] }),
     value => ({ ...withGap(value), gap: [hostConfig('cfg-1', null), hostConfig('cfg-2', null)] }),
     value => ({ ...withGap(value), gap: [{ ...hostConfig('cfg-1', null), value: { type: 'message' } }, hostConfig('cfg-2', 'cfg-1')] }),
-    value => ({ ...withGap(value), gap: [{ ...hostConfig('cfg-1', null), metadata: { extension_metadata: { other: { public: true } } } }, hostConfig('cfg-2', 'cfg-1')] }),
+    value => ({ ...withGap(value), gap: [{ ...hostConfig('cfg-1', null), metadata: { extension_metadata: { other: { public: false } } } }, hostConfig('cfg-2', 'cfg-1')] }),
     value => ({ ...value, gap: [] }),
     value => ({ ...value, gap: Array.from({ length: 17 }, (_, i) => hostConfig(`c${i}`, i ? `c${i - 1}` : null)), entry: { ...value.entry, parent: 'c16' } }),
     value => ({ ...withGap(value), entry_id: 'cfg-2', head: 'cfg-2', entry: { ...value.entry, id: 'cfg-2', parent: 'cfg-2' } }),

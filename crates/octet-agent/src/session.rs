@@ -1280,6 +1280,8 @@ pub struct Session {
     // Ephemeral notices belong to this live Session, not to the process or
     // its durable transcript. Pruned against active hooks before preparation.
     pub(crate) context_failure_notices: BTreeSet<String>,
+    #[cfg(feature = "agent")]
+    pub(crate) run_appends: Option<crate::agent::extension_appends::RunAppends>,
     /// Content identity of this live handle; see [`SessionViewIdentity`].
     view_identity: SessionViewIdentity,
 }

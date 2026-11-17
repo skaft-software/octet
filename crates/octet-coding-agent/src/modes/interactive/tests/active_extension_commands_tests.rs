@@ -5,6 +5,16 @@ use super::support::{scripted_model, text_turn, HeldApi};
 use super::*;
 
 const FACTORY: &str = r#"export default function(pi) {
+  pi.on('turn_end', () => {});
+  pi.registerCommand('append-command', { handler: async (_args, ctx) => {
+    for (let index = 0; index < 2; index++) {
+      pi.appendEntry('busy-command', { index });
+      const entry = ctx.sessionManager.getEntries().at(-1);
+      if (entry.customType !== 'busy-command' || entry.data.index !== index)
+        throw new Error('missing durable receipt');
+    }
+    ctx.ui.notify('Pi command appended during response', 'info');
+  }});
   pi.registerCommand('live-command', { handler: async (_args, ctx) => {
     ctx.ui.notify('Pi command ran during response', 'info');
   }});
@@ -118,6 +128,18 @@ async fn composer_command_during_response(command: &str, expected: &str) {
     drop(run);
     let context = format!("{:?}", app.agent.session().context().unwrap());
     assert!(!context.contains(command));
+    if command == "/append-command" {
+        let session = octet_agent::Session::open_read_only(app.agent.session().path()).unwrap();
+        let entries: Vec<_> = session
+            .entries()
+            .iter()
+            .filter_map(|entry| session.extension_entry(&entry.id, "octet-pi-compat"))
+            .filter(|entry| entry.entry_type == "busy-command")
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].data["index"], 0);
+        assert_eq!(entries[1].data["index"], 1);
+    }
     assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     app.executable_extensions.shutdown().await;
 }
@@ -130,6 +152,12 @@ async fn native_composer_extension_command_runs_during_response() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_composer_extension_command_runs_during_response() {
     composer_command_during_response("/live-command", "Pi command ran during response").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_composer_extension_command_appends_during_response() {
+    composer_command_during_response("/append-command", "Pi command appended during response")
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

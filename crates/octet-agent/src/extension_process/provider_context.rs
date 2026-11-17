@@ -158,7 +158,12 @@ impl ProviderContextSessionWait for ProcessContextWait {
             self.consumer.revoker().revoke();
             return Err("process context session authority changed".into());
         }
-        match self.consumer.consume_next(session, &self.binding) {
+        match super::session_leaf::consume_process_append(
+            &self.process,
+            &mut self.consumer,
+            session,
+            &self.binding,
+        ) {
             Ok(true) => Ok(()),
             Ok(false) => Err("process context session lane closed".into()),
             Err(_) => Err("process context session append refused".into()),

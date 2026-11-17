@@ -254,8 +254,9 @@ export class SessionTransport {
     // Validate against the view this owner actually reads (its own pinned view,
     // else its current publication), never a retired owner's lease.
     const view = this.publishedView(store), d = view?.descriptor;
-    // Host config writes since this view's head (the parent's own model or
-    // thinking selections) arrive as an exact parent chain before the entry.
+    // The sole native writer chains its intervening entries (including the
+    // running response) before the command's durable entry. Pi commits busy
+    // command appends synchronously: core/agent-session.ts:3487-3492.
     const gap = receipt.gap ?? [];
     if (!Array.isArray(gap) || gap.length > 16 || receipt.gap !== undefined && !gap.length) invalid('session append view receipt gap');
     let parent = receipt.previous_head;
@@ -263,7 +264,11 @@ export class SessionTransport {
     const addedIds = new Set();
     for (const entry of gap) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || ids?.has(entry.id) || addedIds.has(entry.id)
-          || entry.parent !== parent || !entry.value || entry.value.type !== 'config' || entry.metadata?.extension_metadata !== undefined && Object.keys(entry.metadata.extension_metadata).length) invalid('session append view receipt gap');
+          || entry.parent !== parent || !entry.value) invalid('session append view receipt gap');
+      if (entry.value.type === 'message' && (Object.hasOwn(entry.value, 'User') === Object.hasOwn(entry.value, 'Assistant')))
+        invalid('session append view receipt gap');
+      for (const [namespace, metadata] of Object.entries(entry.metadata?.extension_metadata ?? {}))
+        if (namespace !== this.runtime.namespace && metadata.public !== true) invalid('foreign private session metadata');
       addedIds.add(entry.id); parent = entry.id;
     }
     if (!d || receipt.previous_revision !== d.view_revision || receipt.previous_head !== d.head

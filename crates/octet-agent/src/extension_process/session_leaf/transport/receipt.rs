@@ -12,7 +12,7 @@ pub(in crate::extension_process) struct Receipt<'a> {
     pub previous_revision: u64,
     pub view_revision: u64,
     pub previous_head: Option<String>,
-    /// Host-written config entries (model/thinking selections) committed on
+    /// Known native entries (host config or active-Run writes) committed on
     /// this parent's branch after its pinned head, oldest first. The receipt
     /// chains `previous_head -> gap.. -> entry` so the parent's view stays
     /// exact; omitted when the pin was already current.
@@ -23,6 +23,16 @@ pub(in crate::extension_process) struct Receipt<'a> {
 pub(in crate::extension_process) fn fits(
     request: &LeafWireAppend,
     bound: &BoundLeaf,
+    max_bytes: usize,
+) -> bool {
+    fits_gap(&request.entry_type, &request.data, bound, &[], max_bytes)
+}
+
+pub(in crate::extension_process) fn fits_gap(
+    entry_type: &str,
+    data: &Value,
+    bound: &BoundLeaf,
+    gap: &[Entry],
     max_bytes: usize,
 ) -> bool {
     let entry_id = "9".repeat(20);
@@ -36,7 +46,10 @@ pub(in crate::extension_process) fn fits(
     successor.expected_head = Some(entry_id.clone());
     let entry = Entry {
         id: EntryId(entry_id.clone()),
-        parent: current.expected_head.as_ref().map(|s| EntryId(s.clone())),
+        parent: gap
+            .last()
+            .map(|entry| entry.id.clone())
+            .or_else(|| current.expected_head.as_ref().map(|s| EntryId(s.clone()))),
         timestamp_unix_ms: Some(u64::MAX),
         value: EntryValue::Config {
             model: None,
@@ -48,7 +61,7 @@ pub(in crate::extension_process) fn fits(
                 namespace.clone(),
                 ExtensionEntryMetadata {
                     public: false,
-                    value: json!({"entry_type":request.entry_type,"data":request.data}),
+                    value: json!({"entry_type":entry_type,"data":data}),
                     provenance: ExtensionMetadataProvenance {
                         extension: namespace.clone(),
                         process_generation: Some(current.owner.process_generation),
@@ -72,7 +85,14 @@ pub(in crate::extension_process) fn fits(
         previous_revision: MAX_SAFE,
         view_revision: MAX_SAFE,
         previous_head: current.expected_head,
-        gap: Vec::new(),
+        gap: gap
+            .iter()
+            .map(|entry| visible::VisibleEntry {
+                entry,
+                namespace,
+                usage: None,
+            })
+            .collect(),
     };
     // Maximum legal child ID, not merely the present ID. All escaped UTF-8
     // record fields are counted by the same serializer used for the real reply.

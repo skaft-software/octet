@@ -154,9 +154,13 @@ extension commands are available as `/<extension-owner>:<command>`.
 
 Extension slash commands submitted in the composer execute immediately while a
 response is running, as in Pi. The response keeps running if a handler fails or
-times out; a warning names the extension and command. A handler requesting a
-session replacement waits for the current response to settle before the native
-host lends it the session writer. The command is not replayed at that boundary.
+times out; a warning names the extension and command. `pi.appendEntry()` commits
+through the running response's original session writer before returning, even
+while response hooks await. Durable receipts make the appended entries available
+to the command's immediate session getters. Adapter retirement skips pending
+response observations with a warning; committed entries and handlers are not
+replayed. A handler requesting a session replacement still waits for the current
+response to settle before the native host lends it the session writer.
 Built-in native commands and prompt templates retain their existing scheduling.
 
 `pi-subagents` loads through the adapter like any other Pi package; it is not

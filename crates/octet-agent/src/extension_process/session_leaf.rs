@@ -1203,14 +1203,52 @@ fn append_receipt_fits(
     .is_ok()
 }
 
+/// Recheck the full counted receipt after any known command appends advanced
+/// the native writer while this callback was pending.
+pub(super) fn consume_process_append(
+    process: &ExtensionProcess,
+    consumer: &mut crate::session_leaf::SessionLeafConsumer,
+    session: &mut crate::Session,
+    binding: &SessionLeafBinding,
+) -> Result<bool, SessionLeafError> {
+    let connection = read_std_lock(&process.inner.connection).clone();
+    let bound = lock_std_mutex(&connection.session_leaf.bound)
+        .get(&binding.owner)
+        .cloned()
+        .ok_or(SessionLeafError::Revoked)?;
+    consumer.consume_next_checked(session, binding, |entry_type, data, gap| {
+        !owner_routes_enabled(&read_std_lock(&connection.protocol))
+            || transport::receipt::fits_gap(
+                entry_type,
+                data,
+                &bound,
+                gap,
+                connection.max_message_bytes(),
+            )
+    })
+}
+
 pub(super) fn dispatch_append_request(
     state: &ProtocolReadState,
     object: &serde_json::Map<String, serde_json::Value>,
     params: serde_json::Value,
 ) -> Result<bool, String> {
-    if lock_std_mutex(&state.session_leaf.bound).is_empty() && params.get("session_leaf").is_none()
-    {
-        return Ok(false);
+    if params.get("session_leaf").is_none() {
+        // A command has no hook grant even while the same process has a live
+        // response callback. Its real numeric parent, not the presence of a
+        // different invocation's leaf, selects the grant-less receipt path.
+        // Pi: packages/coding-agent/src/core/agent-session.ts:3487-3492.
+        let command = params
+            .get("parent_request_id")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|id| {
+                lock_std_mutex(&state.pending)
+                    .get(&id)
+                    .is_some_and(|parent| parent.method == methods::COMMAND_EXECUTE)
+            });
+        if command || lock_std_mutex(&state.session_leaf.bound).is_empty() {
+            return Ok(false);
+        }
     }
     parse_child_request_id(object, methods::SESSION_APPEND_ENTRY)?;
     validate_remote_ui_envelope(object, true)
@@ -1393,9 +1431,16 @@ pub(super) fn dispatch_append_request(
                         .expect("admitted session revision");
                     bound.view_revision.store(view_revision, Ordering::Release);
                     let entry = commit.entry.clone();
-                    let previous_head = entry.parent.as_ref().map(|id| id.0.clone());
+                    let previous_head = match commit.gap.first() {
+                        Some(first) => &first.parent,
+                        None => &entry.parent,
+                    }
+                    .as_ref()
+                    .map(|id| id.0.clone());
+                    let gap = commit.gap.clone();
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":transport::receipt::Receipt {
-                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace, usage: None }, previous_revision, view_revision, previous_head, gap: Vec::new(),
+                        result: SessionLeafAppendResult::from(commit), entry: visible::VisibleEntry { entry: &entry, namespace: &transcript_namespace, usage: None }, previous_revision, view_revision, previous_head,
+                        gap: gap.iter().map(|entry| visible::VisibleEntry { entry, namespace: &transcript_namespace, usage: None }).collect(),
                     }})
                 } else {
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":SessionLeafAppendResult::from(commit)})

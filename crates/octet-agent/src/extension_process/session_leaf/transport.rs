@@ -5,6 +5,8 @@
 use super::*;
 use serde_json::{json, Value};
 
+#[cfg(all(test, unix))]
+mod active_command_tests;
 mod append;
 #[cfg(all(test, unix))]
 mod append_tests;
