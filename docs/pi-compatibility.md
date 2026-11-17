@@ -283,7 +283,7 @@ arrive. Explicit native theme overrides also keep native first paint. Disabling
 Pi compatibility withdraws the template; a cache never grants extension authority.
 
 Offline reproduction and frame evidence: `scripts/pi-eval/first_chrome.py` (see
-[the evaluation guide](../scripts/pi-eval/README.md#first-chrome-and-early-submission)).
+"First chrome and early submission" in `scripts/pi-eval/README.md`).
 These reduced synthetic fixtures do not qualify every installed footer/editor.
 
 ## Slow or stalled extensions
