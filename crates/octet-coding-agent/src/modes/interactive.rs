@@ -73,6 +73,7 @@ use crate::tui::view::{
 };
 
 mod extension_menu;
+mod external_editor;
 mod model_controls;
 mod modeless;
 mod onboarding;
@@ -648,6 +649,7 @@ enum Idle {
     ReloadDue,
     GoalContinuation,
     CycleThinking,
+    ExternalEditor,
     /// An extension message woke the idle session; its queued follow-up is armed.
     ExtensionWake,
     Quit,
@@ -843,6 +845,7 @@ where
                         shell.render();
                     }
                     InputAction::CycleThinking => return Ok(Idle::CycleThinking),
+                    InputAction::ExternalEditor => return Ok(Idle::ExternalEditor),
                     InputAction::EditQueued => {
                         shell.edit_queued_message();
                         shell.render();
@@ -1400,6 +1403,9 @@ fn handle_cancellable_wait_input(shell: &mut InteractiveShell, event: Event) -> 
             return true;
         }
         InputAction::ClearEditor => shell.clear_editor(),
+        InputAction::ExternalEditor => {
+            shell.notice("Wait until the current operation finishes to open the external editor.")
+        }
         InputAction::Edit(action) => shell.apply_edit(action),
         InputAction::ToggleDisclosure => shell.toggle_disclosure(),
         InputAction::ToggleThinking => {
@@ -5091,6 +5097,10 @@ where
                             &mut in_flight,
                             quit_requested,
                         );
+                    }
+                    InputAction::ExternalEditor => {
+                        shell.notice("Wait until the current operation finishes to open the external editor.");
+                        shell.render();
                     }
                     InputAction::Ignore | InputAction::Submit(_) => {}
                     InputAction::SlashMenu(_) => unreachable!(
@@ -12193,6 +12203,7 @@ async fn run_interactive_without_model(
                 shell.render();
             }
             Idle::GoalContinuation => unreachable!("model-less mode has no goal deadline"),
+            Idle::ExternalEditor => external_editor::edit(shell, &boot.config).await?,
             Idle::SessionLifecycle(request) => {
                 request.respond(Err(ExtensionSessionLifecycleError::Unavailable));
             }
@@ -13809,6 +13820,7 @@ async fn run_interactive_once(
                 }
             }
             Idle::ExtensionWake => continue 'interactive,
+            Idle::ExternalEditor => external_editor::edit(&mut shell, &app.config).await?,
             Idle::Submit(mut composed) => {
                 shell.attach_next_turn(&mut composed);
                 let prompt_source = next_prompt_source;

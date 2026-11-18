@@ -16,6 +16,10 @@ import { CustomEditor } from '@earendil-works/pi-coding-agent';
 import { appendFileSync } from 'node:fs';
 class SlotEditor extends CustomEditor {
   render(width) { return [...super.render(width), 'NATIVE-SLOT-EDITOR']; }
+  handleInput(data) {
+    if (data === '\x07') this.setText('slot handled Ctrl+G');
+    else super.handleInput(data);
+  }
 }
 export default pi => {
   let editor;
@@ -634,6 +638,10 @@ async fn native_pi_custom_editor_ctrl_g_never_unmounts_the_composer_slot() {
         "Ctrl+G unmounted the composer slot: {frame}"
     );
     assert!(shell.extension_editor_owns_composer());
+    pump_until(&mut app, &mut shell, |frame| {
+        frame.contains("slot handled Ctrl+G")
+    })
+    .await;
     app.executable_extensions.shutdown().await;
 
     // A genuine full-screen extension view keeps its explicit rescue.
@@ -1076,9 +1084,12 @@ async fn native_pi_custom_editor_host_keys_precede_terminal_consumers() {
 
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("tui.input.submit".into(), vec!["alt+s".into()]);
+    overrides.insert("app.editor.external".into(), vec!["ctrl+r".into()]);
     shell.set_session_keybindings(&overrides);
     command(&mut app, &mut shell, "seed-slot").await.unwrap();
-    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x1b[115;3u");
+    // Remapping both keys must preserve their owners: Ctrl+R to the listener,
+    // Alt+S to native submit.
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x12\x1b[115;3u");
     assert!(
         matches!(idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
         .await.next_idle(&mut input).await, Idle::Submit(input) if input.display_text == "host draft"),
@@ -1108,10 +1119,28 @@ async fn native_pi_custom_editor_host_keys_precede_terminal_consumers() {
         inputs,
         [
             serde_json::json!({"input": "x"}),
-            serde_json::json!({"input": "\u{7}"})
+            serde_json::json!({"input": "\u{7}"}),
+            serde_json::json!({"input": "\u{12}"})
         ],
         "only ordinary editing reaches the consumer"
     );
+    // The same listener stays installed after the custom editor retires.
+    // The remapped external-editor binding now belongs to the native draft.
+    command(&mut app, &mut shell, "retire-editor")
+        .await
+        .unwrap();
+    pump_until(&mut app, &mut shell, |frame| {
+        !frame.contains("NATIVE-SLOT-EDITOR")
+    })
+    .await;
+    let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x12\x04");
+    assert!(matches!(
+        idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)
+            .await
+            .next_idle(&mut input)
+            .await,
+        Idle::ExternalEditor
+    ));
     let mut input = super::pi_ui_contract_tests::raw_input(&shell, b"\x04");
     assert!(matches!(
         idle_driver(&mut shell, &mut app.executable_extensions, &mut app.agent)

@@ -267,6 +267,7 @@ Key IDs in `keybindings.json` keep their existing spelling.
 | Ctrl+Up / Ctrl+Down | Jump between prompt boundaries. |
 | Ctrl+O | Show compaction, subagent activity, tool commands, tool evidence and shell output. It can't recover discarded output. |
 | Ctrl+T | Show or hide the retained thinking traces, independently of Ctrl+O. New traces follow the current choice. |
+| Ctrl+G | Edit the idle native draft in `$VISUAL` or `$EDITOR` (fallback: Nano or Notepad). A failed editor leaves the draft unchanged. |
 | PageUp / PageDown | Scroll the transcript. PageUp pins the view, PageDown returns toward live output. |
 | Up / Down | Pick a visible suggestion first, otherwise move through multiline input. At the first/last editor row, recall sent prompts and return to the exact draft, caret and paste/attachment chips—even during active work. A recalled multiline or wrapped prompt follows the same rule: arrows move between its rows and leave it only from its first or last row. History never submits. |
 | Backspace / Delete / Left / Right | Paste and attachment chips act as one object: Backspace or Delete removes the whole chip, and arrows step over it. |

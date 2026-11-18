@@ -43,6 +43,7 @@ pub enum InputAction {
     EditQueued,
     Queue(String),
     ClearEditor,
+    ExternalEditor,
     Steer(String),
     Submit(String),
     Command(String),
@@ -509,6 +510,9 @@ pub fn translate_with_bindings(
                     return InputAction::CompletePath;
                 }
                 return InputAction::Ignore;
+            }
+            if matches("app.editor.external") && press {
+                return InputAction::ExternalEditor;
             }
             if matches("app.thinking.cycle") && press {
                 return InputAction::CycleThinking;

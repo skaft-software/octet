@@ -79,7 +79,6 @@ impl InteractiveShell {
     }
 
     /// Whether a custom editor, rather than the native editor, draws the slot.
-    #[cfg(test)]
     pub(crate) fn extension_editor_owns_composer(&self) -> bool {
         self.composer_slot_mount().is_some()
     }
@@ -244,7 +243,17 @@ fn editor_takes_key(
         // in the native translator (except coordinated close/clear).
         return true;
     }
-    matches!(action, InputAction::Ignore)
+    // Pi 1.5.2 interactive-mode.js:2567 binds the external editor on the
+    // default editor; pi-tui/dist/tui.js:719-733,773-780 runs listeners before
+    // the focused component. Only a mounted editor takes this binding away
+    // from Octet's native terminal handoff.
+    let custom_editor_key = matches!(action, InputAction::ExternalEditor)
+        && state
+            .extension_ui
+            .remote
+            .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+            .is_some();
+    (custom_editor_key || matches!(action, InputAction::Ignore))
         && !HOST_RESERVED_EDITOR_KEYS
             .iter()
             .any(|id| bindings.matches(key, id))

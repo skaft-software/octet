@@ -32,6 +32,24 @@ const INTERPRETER_START_TIMEOUT: Duration = Duration::from_secs(30);
 // Escape followed quickly by Ctrl-D can instead arrive as one Alt+Ctrl-D key.
 const PICKER_ESCAPE: &[u8] = b"\x1b[27u";
 
+#[test]
+fn external_editor_round_trips_draft_and_preserves_it_on_failure() {
+    let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")));
+    octet.pty.wait_for(b"probe");
+    octet.pty.write_input(b"initial editor draft");
+    octet.pty.wait_for(b"initial editor draft");
+    octet.pty.write_input(b"\x07");
+    octet.pty.wait_for(b"edited draft from subprocess");
+    octet.pty.write_input(b"\x03");
+    octet.pty.write_input(b"keep this draft");
+    octet.pty.wait_for(b"keep this draft");
+    octet.pty.write_input(b"\x07");
+    octet.pty.wait_for(b"draft unchanged");
+    assert!(!contains_bytes(&octet.pty.output, b"discarded result"));
+    octet.pty.write_input(b"\x03");
+    octet.shutdown();
+}
+
 struct Pty {
     master: fs::File,
     slave: fs::File,
@@ -154,6 +172,9 @@ impl PtyOctet {
             install_shortcut_fixture(&home);
         }
 
+        let editor = root.path().join("editor-fixture");
+        fs::write(&editor, "#!/bin/sh\nread draft < \"$1\"\ncase \"$draft\" in\n  'keep this draft') printf 'discarded result\\n' > \"$1\"; exit 7;;\n  *) printf 'edited draft from subprocess\\n' > \"$1\";;\nesac\n").unwrap();
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o700)).unwrap();
         let pty = Pty::open();
         let stdin = duplicate_stdio(pty.slave.as_raw_fd());
         let stdout = duplicate_stdio(pty.slave.as_raw_fd());
@@ -184,6 +205,7 @@ impl PtyOctet {
             .env("COLORTERM", "truecolor")
             .env("LANG", "C.UTF-8")
             .env("OCTET_COLOR_SCHEME", "dark")
+            .env("VISUAL", editor)
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);

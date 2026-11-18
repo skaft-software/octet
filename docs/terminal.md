@@ -253,8 +253,9 @@ rejection of other terminal controls remain enforced.
 The custom editor occupies the composer slot, not the screen: Octet keeps the
 transcript, chrome, queue indicators and one native slash popup. Native, executable
 extension and Pi commands share that popup; later name collisions are owner-qualified
-(`/extension:name`). Ctrl+G returns from explicit fullscreen views only, never
-unmounting the editor or footer.
+(`/extension:name`). Ctrl+G opens the external editor for an idle native draft.
+With a Pi custom editor mounted, the key goes to terminal input listeners and
+then to that editor instead. Ctrl+G still returns from explicit fullscreen views.
 
 Native clipboard reads during active work don't block input, cancellation or run
 progress. A pending read is dropped when the run settles or is cancelled, or

@@ -7495,6 +7495,22 @@ impl InteractiveShell {
         self.sync_composer_slot_draft();
     }
 
+    /// Replace the native draft without interpreting file paths or allocating
+    /// attachment chips. Existing chip IDs still resolve to their original
+    /// payloads if the user left them in the externally edited text.
+    pub(crate) fn apply_external_editor_draft(&mut self, text: String) {
+        let mut state = self.state.borrow_mut();
+        if state.editor.text() == text || !normal_editor_focused(&state) {
+            return;
+        }
+        state.prompt_history_navigation = None;
+        state.editor.set_text(text);
+        state.slash_selection = 0;
+        state.slash_scroll = 0;
+        state.slash_popup_dismissed = false;
+        invalidate_editor_autocomplete(&mut state);
+    }
+
     /// Discard the current draft and every attachment it owns.
     pub fn clear_editor(&mut self) {
         let mut state = self.state.borrow_mut();
