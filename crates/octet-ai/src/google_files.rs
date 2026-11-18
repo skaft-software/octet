@@ -65,6 +65,23 @@ pub(crate) async fn prepare(
     // File preparation is a provider side effect: reject locally invalid
     // requests before sending recording bytes, not only at generateContent.
     crate::protocol::google::validate_for_dispatch(model, request)?;
+    // Preflight every clip before the first upload: an oversized later clip
+    // must not reject the request after an earlier clip was already sent.
+    let oversized = request.messages.iter().any(|message| {
+        let Message::User(user) = message else {
+            return false;
+        };
+        user.content.iter().any(|part| match part {
+            UserPart::Media(Media::Audio(audio)) => clip_too_large(model, audio),
+            UserPart::ToolResult(result) => result.content.iter().any(|part| {
+                matches!(part, ToolResultPart::Media(Media::Audio(audio)) if clip_too_large(model, audio))
+            }),
+            _ => false,
+        })
+    });
+    if oversized {
+        return Err(failure(model, CLIP_TOO_LARGE));
+    }
     let mut digest = Sha256::new();
     digest.update(upload.as_str());
     for (name, value) in &headers {
@@ -149,6 +166,15 @@ async fn metadata(
         .map_err(|_| failure(model, "audio file service returned invalid metadata"))
 }
 
+const CLIP_TOO_LARGE: &str =
+    "audio clip exceeds the 20 MiB safety bound; split or compress the original";
+
+/// An inline clip this route would upload but that exceeds the per-clip bound.
+fn clip_too_large(model: &Model, audio: &AudioMedia) -> bool {
+    model.spec.supports_audio_input(audio.format)
+        && matches!(&audio.payload, AudioPayload::Inline(data) if data.len() > 20 * 1024 * 1024)
+}
+
 async fn prepare_clip(
     http: &reqwest::Client,
     model: &Model,
@@ -164,11 +190,8 @@ async fn prepare_clip(
         return Ok(());
     };
     let data = data.clone();
-    if data.len() > 20 * 1024 * 1024 {
-        return Err(failure(
-            model,
-            "audio clip exceeds the 20 MiB safety bound; split or compress the original",
-        ));
+    if clip_too_large(model, audio) {
+        return Err(failure(model, CLIP_TOO_LARGE));
     }
     let cached = {
         let cache = audio

@@ -774,3 +774,46 @@ async fn google_files_proxy_preflight_precedes_credentials_and_upload() {
     );
     assert!(direct.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn google_files_rejects_an_oversized_clip_before_uploading_earlier_clips() {
+    let server = wiremock::MockServer::start().await;
+    let mut model = crate::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&crate::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
+    Arc::make_mut(&mut model.spec).capabilities.input_modalities =
+        crate::ModalitySet::none().with(crate::Modality::Audio);
+    let clip = |len| {
+        crate::UserPart::Media(crate::Media::audio_bytes(
+            bytes::Bytes::from(vec![42; len]),
+            crate::AudioFormat::Wav,
+        ))
+    };
+    let mut request = crate::test_fixtures::base_request();
+    request.messages = vec![crate::Message::User(crate::UserMessage {
+        content: vec![clip(12_000_000), clip(21 * 1024 * 1024)],
+    })];
+    let upload = url::Url::parse(&format!("{}/upload/v1beta/files", server.uri())).unwrap();
+    let options = HostRequestOptions {
+        api_key: Some(crate::Secret::from("private-key")),
+        ..Default::default()
+    };
+    let error = AiClient::new()
+        .prepare_google_files(
+            &model,
+            &mut request,
+            &upload,
+            &std::collections::BTreeMap::new(),
+            &options,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("20 MiB"), "{error}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "an earlier clip was uploaded before the request was rejected"
+    );
+}

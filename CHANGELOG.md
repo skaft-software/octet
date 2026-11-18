@@ -63,6 +63,7 @@
 - Context hooks that change only the system prompt keep compacted Responses history.
 - Native compaction right after resuming a session keeps its video frames.
 - Context estimates for Responses sessions with video count the frames actually sent.
+- Gemini audio uploads check every clip's size before sending any of them.
 
 ## [0.10.4] - 2026-11-12
 
