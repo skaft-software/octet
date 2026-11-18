@@ -1,4 +1,4 @@
-//! Pi 1.0.2 v3 JSONL vocabulary, not a guessed role-tagged transcript.
+//! Versioned Pi v3 session import at the native session persistence boundary.
 use super::SessionUserMetadata;
 use octet_agent::{
     Entry, EntryId, EntryMetadata, EntryValue, SessionRecord, UsageRecord, UsageRecordKind,
@@ -65,18 +65,24 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
                 let role = string(message, "role")?;
                 let message_data: serde_json::Map<String, Value> = message.as_object()
                     .ok_or_else(|| anyhow::anyhow!("Pi message must be an object"))?.iter()
-                    .filter(|(key, _)| key.as_str() != "content")
+                    .filter(|(key, _)| key.as_str() != "content" || role == "system")
                     .map(|(key, value)| (key.clone(), value.clone())).collect();
                 entry_metadata.tool_output = Some(octet_agent::ToolOutputDetails::try_new(Some(json!({"piMessage": message_data})), None)?);
                 match role {
+                    "system" => {
+                        retain_system_message(message)?;
+                        warnings.push("Pi system messages and tool declarations are preserved as history only. Octet composes its own system prompt and active tools.".into());
+                        empty_config()
+                    }
                     "user" => {
                         fields(message, &["role", "content", "timestamp"])?;
                         integer(message, "timestamp")?;
                         EntryValue::Message(Message::User(UserMessage { content: user_content(&message["content"])? }))
                     }
                     "assistant" => {
-                        fields(message, &["role", "content", "timestamp", "api", "provider", "model", "usage", "stopReason", "responseModel", "responseId", "providerThinkingLevel", "thinkingLevel", "diagnostics", "errorMessage", "rawStopReason", "endTurn"])?;
+                        fields(message, &["role", "content", "timestamp", "api", "provider", "model", "usage", "stopReason", "responseModel", "responseId", "providerThinkingLevel", "thinkingLevel", "diagnostics", "errorMessage", "rawStopReason", "endTurn", "durationMs"])?;
                         integer(message, "timestamp")?;
+                        retain_duration(message)?;
                         let provider = identifier(message, "provider")?;
                         let model = identifier(message, "model")?;
                         let protocol = protocol(string(message, "api")?)?;
@@ -102,8 +108,9 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
                         EntryValue::Message(Message::Assistant(AssistantMessage { content: parts, model: ModelId(format!("{provider}/{model}")), protocol }))
                     }
                     "toolResult" => {
-                        fields(message, &["role", "toolCallId", "toolName", "content", "details", "isError", "timestamp"])?;
+                        fields(message, &["role", "toolCallId", "toolName", "content", "details", "isError", "timestamp", "durationMs"])?;
                         integer(message, "timestamp")?;
+                        retain_duration(message)?;
                         let parts = user_content(&message["content"])?;
                         let content = parts.into_iter().map(|part| match part { UserPart::Text(t) => ToolResultPart::Text(t), UserPart::Media(m) => ToolResultPart::Media(m), _ => unreachable!("Pi content contains no tool results") }).collect();
                         let tool_name = string(message, "toolName")?.to_owned();
@@ -112,7 +119,7 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
                             is_error: boolean(message, "isError")?, added_tool_names: None, tool_name: Some(tool_name),
                         })] }))
                     }
-                    _ => anyhow::bail!("unsupported Pi message role at record {}: system/custom/bashExecution or other semantic messages require a compatible importer", index + 1),
+                    _ => anyhow::bail!("unsupported Pi message role at record {}: custom/bashExecution or other semantic messages require a compatible importer", index + 1),
                 }
             }
             "branch_summary" => {
@@ -226,6 +233,59 @@ pub(super) fn convert(source: Vec<Value>) -> anyhow::Result<Converted> {
     warnings.sort();
     warnings.dedup();
     Ok((out, metadata, FORMAT.into(), warnings))
+}
+
+// Pi 1.5.2 pi-ai/dist/types.d.ts:360-373 defines these inline prompt
+// updates. Retain the full update on its original entry, without allowing a
+// foreign session to install system instructions or register executable tools.
+fn retain_system_message(message: &Value) -> anyhow::Result<()> {
+    fields(
+        message,
+        &[
+            "role",
+            "content",
+            "timestamp",
+            "sections",
+            "toolsAdded",
+            "toolsRemoved",
+        ],
+    )?;
+    integer(message, "timestamp")?;
+    if !message["content"].is_string() {
+        for part in array(&message["content"], "Pi system content")? {
+            fields(part, &["type", "text"])?;
+            anyhow::ensure!(part["type"] == "text", "Pi system content must be text");
+            string(part, "text")?;
+        }
+    }
+    if let Some(sections) = message.get("sections") {
+        anyhow::ensure!(
+            sections
+                .as_object()
+                .is_some_and(|sections| sections.values().all(|v| v.is_string() || v.is_null())),
+            "Pi system sections must map names to text or null"
+        );
+    }
+    for key in ["toolsAdded", "toolsRemoved"] {
+        if let Some(tools) = message.get(key) {
+            for tool in array(tools, key)? {
+                string(tool, "name")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn retain_duration(message: &Value) -> anyhow::Result<()> {
+    if let Some(duration) = message.get("durationMs") {
+        anyhow::ensure!(
+            duration
+                .as_f64()
+                .is_some_and(|ms| ms.is_finite() && ms >= 0.0),
+            "Pi durationMs must be nonnegative"
+        );
+    }
+    Ok(())
 }
 
 fn empty_config() -> EntryValue {

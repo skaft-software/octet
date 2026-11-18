@@ -153,7 +153,11 @@ is **Octet data, not Pi output**. `/export` defaults to HTML, while an explicit
 imported. `octet sessions import PATH` or interactive `/import PATH` creates a
 new private session from supported Octet exports/native JSONL or Pi v3 JSONL.
 The source is never rewritten; unsupported or lossy semantics refuse import.
-Imported extension metadata and effect-replay claims do not grant authority.
+Pi system messages (including instructions and tool definitions) are stored as
+inert history. The imported session uses Octet's current prompt and tool setup,
+not the foreign one. Imported extension metadata and effect-replay claims do
+not grant authority. Pi Responses sessions without native replay metadata cannot
+be resumed as Octet sessions.
 Interactive import asks before making the copy/switch and preserves the draft.
 
 `/share` or `octet sessions share ID` prepares a bounded, redacted snapshot of

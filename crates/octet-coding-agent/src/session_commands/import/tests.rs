@@ -718,6 +718,46 @@ fn pi_compaction_label_info_config_and_usage_retain_context_and_provenance() {
 }
 
 #[test]
+fn imports_pi_1_5_2_generated_chat_without_adopting_its_system_prompt() {
+    // Written by Pi 1.5.2 after one OpenAI Chat turn against an SSE loopback
+    // server. Local working and installation paths were replaced with fixture paths.
+    let original = include_bytes!("fixtures/pi-1.5.2-chat.jsonl");
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    let path = root.path().canonicalize().unwrap().join("pi.jsonl");
+    std::fs::write(&path, original).unwrap();
+
+    let report = import_session(&store, &path, store.workspace().unwrap()).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("preserved as history only")));
+    let session = Session::open_read_only(report.destination).unwrap();
+    let checkpoint = &session.entries()[2];
+    assert!(matches!(
+        checkpoint.value,
+        EntryValue::Config {
+            model: None,
+            reasoning: None,
+            reasoning_mode: None
+        }
+    ));
+    assert_eq!(session.entries()[3].parent.as_ref(), Some(&checkpoint.id));
+    let saved = serde_json::to_value(checkpoint).unwrap();
+    let system = strict_json::jsonl(original).unwrap()[3]["message"].clone();
+    assert_eq!(
+        saved["metadata"]["tool_output"]["structured_content"]["piMessage"],
+        system
+    );
+    let context = session.context().unwrap();
+    assert_eq!(context.len(), 2);
+    assert!(serde_json::to_string(&context)
+        .unwrap()
+        .contains("Loopback fixture answer."));
+}
+
+#[test]
 fn unsupported_pi_semantics_fail_closed_at_import_boundary_without_publication() {
     let root = tempfile::tempdir().unwrap();
     let store = store(&root);
@@ -738,9 +778,14 @@ fn unsupported_pi_semantics_fail_closed_at_import_boundary_without_publication()
         assert_eq!(std::fs::read(&input).unwrap(), bytes);
         assert!(!store.dir().exists());
     }
+    // Valid system messages are covered by the generated fixture above;
+    // malformed system updates still must fail before publication.
     for role in ["system", "bashExecution", "custom", "future_role"] {
         let mut fixture = pi_fixture();
         fixture[2]["message"]["role"] = json!(role);
+        if role == "system" {
+            fixture[2]["message"]["sections"] = json!({"instructions": 123});
+        }
         std::fs::write(&input, encode_jsonl(&fixture).unwrap()).unwrap();
         assert!(import_session(&store, &input, store.workspace().unwrap()).is_err());
         assert!(!store.dir().exists());
