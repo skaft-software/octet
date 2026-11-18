@@ -3813,6 +3813,54 @@ fn configured_cost_limit_fails_closed_without_trusted_model_pricing() {
 }
 
 #[tokio::test]
+async fn responses_estimate_discounts_encoded_video_frames_not_source_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut session = Session::create(directory.path().join("video.jsonl")).unwrap();
+    let model = tool_media_model(
+        Protocol::OpenAiResponses,
+        octet_ai::ModalitySet::none().with(Modality::Image),
+    );
+    let InputPart::Media(video) = video_input_fixture() else {
+        unreachable!()
+    };
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Media(video)],
+        })))
+        .unwrap();
+    let context = session.context().unwrap();
+    octet_ai::video::prepare_message_frames(&model, &context).await;
+    let replay = session
+        .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
+        .unwrap()
+        .unwrap();
+    let limits = model.spec.preset.image_input_limits;
+    let Some(ResponsesReplayItem::User(user)) = replay.first() else {
+        panic!("video replay item missing")
+    };
+    let Some(UserPart::Media(Media::Video(video))) = user.content.first() else {
+        panic!("video part missing")
+    };
+    let frames = video.cached_model_frames(limits).expect("frames prepared");
+    let encoded_frames: u64 = frames
+        .iter()
+        .map(|frame| {
+            super::context_estimate::inline_media_payload_bytes(&Media::Image(frame.image.clone()))
+        })
+        .sum();
+    let (discounted, _) =
+        super::context_estimate::responses_replay_media_adjustment(&replay, limits);
+    // The serialized request carries the frames; discounting the source
+    // video's bytes instead can erase unrelated text from the estimate.
+    assert_ne!(
+        encoded_frames,
+        super::context_estimate::inline_media_payload_bytes(&Media::Video(video.clone())),
+        "fixture must distinguish frame payloads from source bytes"
+    );
+    assert_eq!(discounted, encoded_frames);
+}
+
+#[tokio::test]
 async fn native_compaction_prepares_resumed_video_before_encoding() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("video.jsonl");

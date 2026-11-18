@@ -62,6 +62,7 @@
 - A hung extension callback stops at its deadline even while the extension keeps answering health checks.
 - Context hooks that change only the system prompt keep compacted Responses history.
 - Native compaction right after resuming a session keeps its video frames.
+- Context estimates for Responses sessions with video count the frames actually sent.
 
 ## [0.10.4] - 2026-11-12
 

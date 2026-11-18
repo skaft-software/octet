@@ -325,7 +325,13 @@ impl ContextCapacityCache {
             };
             // Standalone framing is a conservative upper bound on appending
             // the same opaque output/user items to the existing wire window.
-            let delta = estimate_responses_request_tokens(&input, suffix, &[], None);
+            let delta = estimate_responses_request_tokens(
+                &input,
+                suffix,
+                &[],
+                None,
+                model.spec.preset.image_input_limits,
+            );
             self.structural_tokens = self.structural_tokens.saturating_add(delta);
             if let Some(provider) = &mut self.provider_tokens {
                 *provider = provider.saturating_add(delta);
@@ -919,7 +925,11 @@ impl CompactionContext<'_> {
                 self.cache_retention,
                 Some(self.session_id),
             )?;
-            let input_tokens = estimate_compact_request_tokens(&request, &replay);
+            let input_tokens = estimate_compact_request_tokens(
+                &request,
+                &replay,
+                self.model.spec.preset.image_input_limits,
+            );
             require_enforceable_output_cap(
                 self.session,
                 None,
@@ -2266,7 +2276,11 @@ impl Agent {
             self.cache_retention,
             Some(&self.session_id),
         )?;
-        let input_tokens = estimate_compact_request_tokens(&request, &replay);
+        let input_tokens = estimate_compact_request_tokens(
+            &request,
+            &replay,
+            self.model.spec.preset.image_input_limits,
+        );
         require_enforceable_output_cap(
             &self.session,
             None,

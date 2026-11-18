@@ -162,6 +162,15 @@ impl VideoMedia {
         *self.frames.outcome.lock().expect("video frame cache") = Some((self.data.clone(), result));
     }
 
+    /// Frames already prepared for these model image limits, exactly as the
+    /// encoder will send them. Never starts a decoder.
+    pub fn cached_model_frames(
+        &self,
+        limits: Option<ImageInputLimits>,
+    ) -> Option<Arc<Vec<VideoFrame>>> {
+        self.prepared_model_frames(limits).and_then(Result::ok)
+    }
+
     fn prepared_model_frames(&self, limits: Option<ImageInputLimits>) -> Option<PreparedFrames> {
         let source = match self.prepared_frames()? {
             Ok(source) => source,
