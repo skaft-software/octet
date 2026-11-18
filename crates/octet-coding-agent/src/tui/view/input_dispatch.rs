@@ -103,7 +103,6 @@ impl InteractiveShell {
             return false;
         }
         self.input_dispatch.wait_command = Some(WaitCommand { owner, text });
-        self.notice("queued · runs when ready");
         true
     }
 
@@ -147,8 +146,7 @@ impl InteractiveShell {
             let composed = self.drain_composed();
             if !composed.is_empty() {
                 self.input_dispatch.startup_submission = Some(composed);
-                self.notice("queued · waiting for setup");
-                self.set_run_label("Loading setup · prompt queued");
+                self.set_run_label("Loading setup");
             }
             return true;
         };
@@ -161,7 +159,6 @@ impl InteractiveShell {
                 reasoning,
                 composed,
             });
-            self.notice("queued");
         }
         true
     }
@@ -889,6 +886,8 @@ mod tests {
         shell.state.borrow_mut().startup_pending = true;
         shell.prefill_editor("first prompt".into());
         assert!(shell.queue_thinking_submission());
+        assert!(shell.state.borrow().transcript.is_empty());
+        assert_eq!(shell.state.borrow().run_label, "Loading setup");
         shell.prefill_editor("later draft".into());
         assert!(!shell.queue_thinking_submission());
         let directory = tempfile::tempdir().unwrap();
@@ -1045,6 +1044,7 @@ mod tests {
         shell.end_thinking_wait(false);
         shell.prefill_editor("ordinary draft".into());
         assert!(shell.queue_thinking_submission());
+        assert!(shell.state.borrow().transcript.is_empty());
         assert!(shell.pending().is_empty());
         assert!(shell.thinking_submission_pending());
         assert!(!shell.queue_thinking_submission());
@@ -1053,6 +1053,19 @@ mod tests {
             .unwrap();
         assert_eq!(composed.transcript_text, "ordinary draft");
         assert!(!shell.thinking_submission_pending());
+    }
+
+    #[test]
+    fn accepted_wait_command_leaves_no_transcript_notice() {
+        let mut shell = thinking_shell();
+        shell.prefill_editor("/session info".into());
+        assert!(shell.queue_wait_command("/session info".into()));
+        assert!(shell.state.borrow().transcript.is_empty());
+        assert!(shell.pending().is_empty());
+        assert_eq!(
+            shell.take_wait_command("session:route:model").as_deref(),
+            Some("/session info")
+        );
     }
 
     #[test]

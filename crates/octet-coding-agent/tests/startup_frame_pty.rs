@@ -1922,9 +1922,10 @@ fn real_octet_model_discovery_keeps_startup_editable() {
             &mut octet,
             &mut parser,
             &mut consumed,
-            "Loading setup · prompt queued",
+            "Loading setup",
             Duration::from_millis(500),
         );
+        assert!(!parser.screen().contents().contains("queued"));
         assert!(!parser.screen().contents().contains("startup draft pasted"));
         assert!(api.requests.lock().unwrap().is_empty());
         octet.pty.write_input(b"\x1b");
