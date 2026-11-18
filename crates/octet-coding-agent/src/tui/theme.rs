@@ -918,6 +918,34 @@ impl OctetTheme {
         self.inner.apply_style(style, text)
     }
 
+    pub(crate) fn transcript_scrollbar_glyph(
+        &self,
+        glyph: &str,
+        thumb: bool,
+        active: bool,
+    ) -> String {
+        let gray = |value| Color::Rgb(value, value, value);
+        let (track, idle_thumb, active_thumb) = match self.background {
+            TerminalBackground::Dark => (gray(75), gray(160), gray(200)),
+            TerminalBackground::Light => (gray(208), gray(115), gray(72)),
+            TerminalBackground::Unknown => (Color::Ansi16(8), Color::Ansi16(7), Color::Default),
+        };
+        let (role, fallback) = if thumb {
+            ("extension.pi.scrollbarThumb", idle_thumb)
+        } else {
+            ("extension.pi.scrollbarTrack", track)
+        };
+        let color = if thumb && active {
+            active_thumb
+        } else {
+            self.semantic_styles
+                .get(role)
+                .map_or(fallback, |s| s.foreground)
+        };
+        self.inner
+            .apply_style(TextStyle::plain().foreground(color), glyph)
+    }
+
     /// Search decoration uses the active theme accent and capability downgrade.
     /// Current and ordinary matches differ in attributes, not raw ANSI colours.
     pub(crate) fn transcript_search_match(&self, text: &str, current: bool) -> String {

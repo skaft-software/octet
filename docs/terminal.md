@@ -304,6 +304,9 @@ scrollbar keeps the pointer until you release it; wheel events still move the
 transcript over the track, scroll hint, and viewport edges during that press.
 Scrollbar hover, track clicks and dragging use the painted track and stay
 responsive during idle updates and streaming, without waiting for pending output.
+The thumb stays thin on hover and drag. Pressing it leaves the reading position
+unchanged until you drag; clicking the track jumps. In `auto`, the bar overlays
+card backgrounds without changing transcript wrapping. `always` reserves a gutter.
 Holding a selection drag at the top or bottom edge auto-scrolls, including
 between pointer-motion events. Wheel/trackpad scrolling during a drag extends
 the range at the pointer; scrolling after release extends the retained range

@@ -2,7 +2,7 @@
 //! sanitized rows, never raw protocol messages; decorations never enter copy.
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use sexy_tui_rs::{slice_by_column, CURSOR_MARKER};
+use sexy_tui_rs::{slice_by_column, utils::background_sgr_at_column, CURSOR_MARKER};
 use std::hash::{Hash, Hasher};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -617,10 +617,15 @@ impl ShellState {
         let maximum = super::viewport::max_scroll_for_available(length, chrome.transcript_rows);
         let mut nav = self.transcript_navigation.borrow_mut();
         let scrollbar = if nav.mode != TranscriptScrollbar::Hidden && rows > 0 && width > 1 {
-            let thumb_rows = (rows.saturating_mul(rows) / length.max(rows)).clamp(1, rows);
+            // A scrollable track with at least two rows needs room to move.
+            let cap = rows - usize::from(maximum > 0 && rows > 1);
+            let length = length.max(rows);
+            let thumb_rows =
+                ((rows.saturating_mul(rows) + length / 2) / length).clamp(cap.min(2), cap);
             let thumb_top = maximum
                 .saturating_sub(scroll)
                 .saturating_mul(rows - thumb_rows)
+                .saturating_add(maximum / 2)
                 .checked_div(maximum)
                 .unwrap_or(0);
             let visible = nav.mode == TranscriptScrollbar::Always
@@ -639,30 +644,38 @@ impl ShellState {
         } else {
             None
         };
-        // Like Pi's layout: a thin thumb, solid only while the pointer holds it.
-        let held = nav.hover || nav.drag_offset.is_some();
+        let active = nav.hover || nav.drag_offset.is_some();
         if let Some(bar) = scrollbar.filter(|bar| bar.visible) {
+            let colored = self.theme.capabilities().color != crate::tui::terminal::ColorDepth::None;
             lines.resize_with(lines.len().max(bar.rows), String::new);
             for (row, line) in lines.iter_mut().take(bar.rows).enumerate() {
-                let prefix = slice_by_column(line, 0, usize::from(bar.column), true);
-                let padding = usize::from(bar.column).saturating_sub(visible_width(&prefix));
+                let column = usize::from(bar.column);
+                let prefix = slice_by_column(line, 0, column, true);
+                let padding = column.saturating_sub(visible_width(&prefix));
                 let thumb = row >= bar.thumb_top && row < bar.thumb_top + bar.thumb_rows;
                 let glyph = match (thumb, self.theme.unicode()) {
-                    (true, true) if held => "█",
                     (true, true) => "┃",
                     (true, false) => "#",
                     (false, true) => self.theme.glyph("vertical"),
                     (false, false) if self.theme.glyph("vertical").trim().is_empty() => " ",
                     (false, false) => ".",
                 };
-                let painted = self.theme.fg(if thumb { "accent" } else { "muted" }, glyph);
-                let reset =
-                    if self.theme.capabilities().color == crate::tui::terminal::ColorDepth::None {
-                        ""
-                    } else {
-                        "\x1b[0m"
-                    };
-                *line = format!("{prefix}{reset}{}{painted}", " ".repeat(padding));
+                let painted = self.theme.transcript_scrollbar_glyph(glyph, thumb, active);
+                let background = if colored && nav.mode == TranscriptScrollbar::Auto {
+                    background_sgr_at_column(line, column).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let reset = if colored { "\x1b[0m" } else { "" };
+                let close_link = if prefix.contains("\x1b]8;") {
+                    "\x1b]8;;\x1b\\"
+                } else {
+                    ""
+                };
+                *line = format!(
+                    "{prefix}{reset}{close_link}{background}{}{painted}{reset}",
+                    " ".repeat(padding)
+                );
             }
         }
         // Native terminal ownership keeps this control and its exact painted
@@ -1172,33 +1185,39 @@ impl InteractiveShell {
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && hovered
             && (bar.visible || nav.mode == TranscriptScrollbar::Auto);
+        let mut jump_on_press = false;
         if starting {
             let row = usize::from(mouse.row);
-            nav.drag_offset = Some(
-                if row >= bar.thumb_top && row < bar.thumb_top + bar.thumb_rows {
-                    row - bar.thumb_top
-                } else {
-                    bar.thumb_rows / 2
-                },
-            );
+            let on_thumb = row >= bar.thumb_top && row < bar.thumb_top + bar.thumb_rows;
+            nav.drag_offset = Some(if on_thumb {
+                row - bar.thumb_top
+            } else {
+                bar.thumb_rows / 2
+            });
+            jump_on_press = !on_thumb;
         }
         if let Some(grab) = nav.drag_offset {
-            if starting
-                || matches!(
-                    mouse.kind,
-                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
-                )
-            {
-                let travel = bar.rows.saturating_sub(bar.thumb_rows);
+            let travel = bar.rows - bar.thumb_rows;
+            let scroll_to = (travel > 0
+                && (jump_on_press
+                    || matches!(
+                        mouse.kind,
+                        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
+                    )))
+            .then(|| {
                 let offset = usize::from(mouse.row).saturating_sub(grab).min(travel);
-                let top = (offset.saturating_mul(bar.maximum) + travel / 2)
-                    .checked_div(travel)
-                    .unwrap_or(0);
+                (offset.saturating_mul(bar.maximum) + travel / 2) / travel
+            });
+            if scroll_to.is_some() {
                 nav.activity(now);
-                drop(nav);
+            }
+            drop(nav);
+            if starting {
                 state.pending_selection_anchor = None;
                 state.selection_dragging = false;
                 state.transcript_selection = None;
+            }
+            if let Some(top) = scroll_to {
                 state.viewport_anchor.set(None);
                 state
                     .scroll_from_bottom
@@ -1494,22 +1513,52 @@ mod tests {
                     "hover ignored: threaded={threaded}, streaming={streaming}"
                 );
                 shell.render_written_test_frame();
-                assert!(shell
-                    .tui
-                    .as_ref()
-                    .unwrap()
-                    .rendered_frame()
-                    .iter()
-                    .any(|row| {
-                        strip_terminal_sequences(&slice_by_column(
-                            row,
-                            usize::from(bar.column),
-                            1,
-                            true,
-                        )) == "█"
-                    }));
+                painted_bar(&shell); // Hover keeps the same thin glyph.
             }
         }
+    }
+
+    #[test]
+    fn scrollbar_auto_preserves_card_fill_in_the_overlay_cell() {
+        let mut shell = search_shell();
+        shell.set_transcript_scrollbar(TranscriptScrollbar::Auto);
+        let now = Instant::now();
+        let state = shell.state.borrow();
+        let width = state.size.0;
+        let chrome = super::super::shell_chrome::shell_chrome(&state, width, now);
+        let mut lines = vec![format!(
+            "\x1b[48;2;12;34;56m{} \x1b[0m",
+            "x".repeat(usize::from(width - 1))
+        )];
+        state.decorate_transcript_navigation(&mut lines, width, &chrome, now);
+        let mut terminal = vt100::Parser::new(1, width, 0);
+        terminal.process(lines[0].as_bytes());
+        let edge = terminal.screen().cell(0, width - 1).unwrap();
+        assert_eq!(edge.contents(), "│");
+        assert_eq!(edge.bgcolor(), vt100::Color::Rgb(12, 34, 56));
+    }
+
+    #[test]
+    fn scrollbar_thumb_press_does_not_quantize_the_viewport() {
+        let mut shell = navigation_controls_shell(true, false);
+        shell.scroll_lines(-1);
+        shell.render_written_test_frame();
+        let bar = painted_bar(&shell);
+        let before = shell.state.borrow().scroll_from_bottom.get();
+        let row = bar.thumb_top as u16;
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Down(MouseButton::Left),
+            bar.column,
+            row
+        ));
+        assert!(burst(
+            &mut shell,
+            MouseEventKind::Up(MouseButton::Left),
+            bar.column,
+            row
+        ));
+        assert_eq!(shell.state.borrow().scroll_from_bottom.get(), before);
     }
 
     #[test]

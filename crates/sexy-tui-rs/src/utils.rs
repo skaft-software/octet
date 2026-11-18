@@ -946,6 +946,25 @@ pub fn is_punctuation_char(character: char) -> bool {
     )
 }
 
+/// Return the explicit SGR background at a visible cell, without carrying
+/// foreground, text attributes, or hyperlinks into the overlay.
+pub fn background_sgr_at_column(line: &str, column: usize) -> Option<String> {
+    let mut state = AnsiState::default();
+    let mut start = 0;
+    for token in terminal_tokens(line) {
+        match token {
+            TerminalToken::Escape(code) => state.process(code),
+            TerminalToken::Text(text) => {
+                start += visible_width(text);
+                if column < start {
+                    return state.background.map(|color| format!("\x1b[{color}m"));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Return the OSC 8 hyperlink target covering one visible cell of a rendered
 /// row, if any.
 ///
