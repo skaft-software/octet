@@ -10,9 +10,15 @@ use std::io;
 
 use super::{terminal_text::sanitize_for_terminal as safe, ShellState};
 
+/// Model-accent and solid-theme colors that determine the mark's pixels.
+type MarkColors = (Option<(u8, u8, u8)>, Option<(u8, u8, u8)>);
+
 #[derive(Default)]
 pub(super) struct Brand {
     address: Option<String>,
+    /// Color inputs of the uploaded mark. Presentation changes during streaming
+    /// re-run `prepare`; unchanged inputs must not re-encode and hash the PNG.
+    inputs: Option<MarkColors>,
 }
 
 impl Brand {
@@ -23,6 +29,7 @@ impl Brand {
     ) -> io::Result<()> {
         if !client.supports(Kind::Image) || shell.startup_card_started_at.is_none() {
             self.address = None;
+            self.inputs = None;
             return Ok(());
         }
         let adaptive = shell.theme.is_compiled_default()
@@ -36,6 +43,9 @@ impl Brand {
         let solid = (!adaptive)
             .then(|| shell.theme.role_rgb("splash"))
             .flatten();
+        if self.address.is_some() && self.inputs == Some((accent, solid)) {
+            return Ok(());
+        }
         let png = crate::tui::splash::native_png(accent, solid)?;
         let address = format!("{:x}", Sha256::digest(&png));
         if self.address.as_ref() != Some(&address) {
@@ -43,6 +53,7 @@ impl Brand {
             client.blob(&address, "image/png", &STANDARD.encode(&png))?;
             self.address = Some(address);
         }
+        self.inputs = Some((accent, solid));
         Ok(())
     }
 
@@ -233,6 +244,7 @@ mod tests {
         let shell = InteractiveShell::test_shell();
         let brand = Brand {
             address: Some("a".repeat(64)),
+            inputs: None,
         };
         for cols in [12, 20, 46, 120, 240] {
             shell.state.borrow_mut().size = (cols, 40);
@@ -411,8 +423,11 @@ mod tests {
         let output = Output::default();
         let mut client = TernClient::with_writer("test", None, &[], output.clone()).unwrap();
         let mut brand = Brand::default();
+        let encodes = || crate::tui::splash::NATIVE_PNG_ENCODES.with(std::cell::Cell::get);
+        let before = encodes();
         brand.prepare(&shell.state.borrow(), &mut client).unwrap();
         brand.prepare(&shell.state.borrow(), &mut client).unwrap();
+        assert_eq!(encodes() - before, 1, "unchanged colors re-encoded the PNG");
         let blobs = output.blobs();
         assert_eq!(blobs.len(), 1);
         assert_eq!(blobs[0].params["mime"], "image/png");

@@ -195,6 +195,11 @@ fn render_mark(
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static NATIVE_PNG_ENCODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Retained native mark at the canonical 256×128 master size. Tern 0.4.0
 /// flattens the SVG silhouette; a transparent PNG preserves all eight bars.
 /// Encode only this fixed RGBA8 raster, using the existing zlib dependency.
@@ -203,6 +208,8 @@ pub(crate) fn native_png(
     model_accent: Option<(u8, u8, u8)>,
     solid: Option<(u8, u8, u8)>,
 ) -> std::io::Result<Vec<u8>> {
+    #[cfg(test)]
+    NATIVE_PNG_ENCODES.with(|count| count.set(count.get() + 1));
     use flate2::{write::ZlibEncoder, Compression, Crc};
     use std::io::Write;
 
