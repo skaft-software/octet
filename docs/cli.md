@@ -290,6 +290,7 @@ harness exit.
 | `--prompt-template FILE-OR-DIR` | Explicit prompt source. Repeatable, applied in order. |
 | `--theme-dir FILE-OR-DIR` | Extra theme directory or TOML file. Repeated paths use normal resource precedence. [Themes](themes.md). |
 | `--skill-dir PATH` | Explicit skill root. |
+| `--no-skills` | Skip automatic skill discovery, including resources contributed by packages and extensions. Explicit `--skill-dir` paths still load. |
 | `--extension-dir PATH` | Explicit extension source. |
 | `--enable-extension NAME` | Enable and save to user config, like Enable in `/extensions`. Not trust. |
 | `--trust-extension NAME` | Trust the exact selected source for one run. Not activation. |

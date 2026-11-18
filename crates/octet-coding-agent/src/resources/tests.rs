@@ -47,6 +47,7 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
         mode: Mode::Interactive,
         resume: ResumeSelector::New,
         skill_paths: vec![],
+        no_skill_discovery: false,
         extension_paths: vec![],
         enabled_extensions: vec![],
         disabled_extensions: vec![],

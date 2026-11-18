@@ -1135,6 +1135,15 @@ pub fn validate_skill_requirements(
     }
 }
 
+fn explicit_skill_policy() -> SkillRootPolicy {
+    SkillRootPolicy {
+        trust: SkillTrust::ExplicitExternal,
+        direct_markdown: true,
+        legacy_octet: false,
+        bundled: false,
+    }
+}
+
 impl FileSystemSkillRegistry {
     /// Creates a catalog using the workspace as both repository and invocation directory.
     #[cfg(test)]
@@ -1149,6 +1158,31 @@ impl FileSystemSkillRegistry {
             additional_paths,
             workspace_trusted,
         )
+    }
+
+    /// Build the native skill catalog for one invocation. The adapter cannot
+    /// disable skills that the host discovers independently of extensions.
+    /// Pi 1.5.2 dist/core/resource-loader.js:439-442 keeps explicit paths only.
+    pub(crate) fn for_config(config: &crate::config::Config) -> Result<Self, SkillLoadError> {
+        if !config.no_skill_discovery {
+            return Self::new_with_invocation(
+                config.workspace.clone(),
+                config.invocation_cwd.clone(),
+                config.skill_paths.clone(),
+                config.workspace_trusted,
+            );
+        }
+        let mut candidates = Vec::new();
+        let mut diagnostics = Vec::new();
+        for path in &config.skill_paths {
+            scan_skill_root(
+                &config.invocation_cwd.join(path),
+                explicit_skill_policy(),
+                &mut candidates,
+                &mut diagnostics,
+            );
+        }
+        Self::from_candidates(candidates, diagnostics, config.workspace_trusted)
     }
 
     /// Creates a catalog from all Pi, Agent Skills, and legacy octet roots.
@@ -1267,15 +1301,7 @@ impl FileSystemSkillRegistry {
             } else {
                 invocation_cwd.join(path)
             };
-            roots.push((
-                path,
-                SkillRootPolicy {
-                    trust: SkillTrust::ExplicitExternal,
-                    direct_markdown: true,
-                    legacy_octet: false,
-                    bundled: false,
-                },
-            ));
+            roots.push((path, explicit_skill_policy()));
         }
 
         let mut candidates = Vec::new();

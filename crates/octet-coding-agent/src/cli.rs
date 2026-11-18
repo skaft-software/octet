@@ -510,9 +510,7 @@ pub struct Cli {
     /// spawn error, because the editor only reports "agent failed to start".
     #[arg(long)]
     pub no_themes: bool,
-    /// Accepted from Pi's CLI surface and does nothing here: skills are only
-    /// loaded from explicit `--skill-dir` paths and workspace resources, and
-    /// `--no-tools` already removes the skill tools.
+    /// Skip skill discovery except for explicit --skill-dir paths.
     #[arg(long)]
     pub no_skills: bool,
     /// Explicitly enable command execution (overrides a disabling user setting).
@@ -2461,6 +2459,7 @@ fn build_config_with_global_path_and_diagnostics(
         mode,
         resume,
         skill_paths: cli.skill_dirs,
+        no_skill_discovery: cli.no_skills,
         extension_paths: cli.extension_dirs,
         enabled_extensions,
         disabled_extensions,

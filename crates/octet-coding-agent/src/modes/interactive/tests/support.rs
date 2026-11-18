@@ -52,6 +52,7 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         mode: Mode::Interactive,
         resume: ResumeSelector::New,
         skill_paths: vec![],
+        no_skill_discovery: false,
         extension_paths: vec![],
         enabled_extensions: vec![],
         disabled_extensions: vec![],

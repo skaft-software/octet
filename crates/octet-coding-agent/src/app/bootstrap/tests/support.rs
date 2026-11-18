@@ -48,6 +48,7 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
         resume: ResumeSelector::New,
         mouse: crate::config::MouseMode::Auto,
         skill_paths: vec![],
+        no_skill_discovery: false,
         extension_paths: vec![],
         enabled_extensions: vec![],
         disabled_extensions: vec![],

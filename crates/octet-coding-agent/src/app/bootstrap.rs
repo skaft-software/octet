@@ -8205,12 +8205,7 @@ fn build_app_with_consumer(
     }
     provider_runtime.bind_native_provider_catalog(&catalog, &client);
 
-    let skills: Arc<dyn SkillRegistry> = Arc::new(FileSystemSkillRegistry::new_with_invocation(
-        config.workspace.clone(),
-        config.invocation_cwd.clone(),
-        config.skill_paths.clone(),
-        config.workspace_trusted,
-    )?);
+    let skills: Arc<dyn SkillRegistry> = Arc::new(FileSystemSkillRegistry::for_config(&config)?);
     system.push_str(&format_skills_for_prompt(&skills.descriptors()));
     let prompts = Arc::new(PromptRegistry::discover(
         &config.workspace,
@@ -8812,12 +8807,7 @@ fn rebuild_app_with_start_reason(
     let goal_session_id = terminal_goal_session_id(&session)?;
     let goal_driver = GoalDriver::new(goal_store.clone(), goal_session_id.clone());
 
-    let skills: Arc<dyn SkillRegistry> = Arc::new(FileSystemSkillRegistry::new_with_invocation(
-        config.workspace.clone(),
-        config.invocation_cwd.clone(),
-        config.skill_paths.clone(),
-        config.workspace_trusted,
-    )?);
+    let skills: Arc<dyn SkillRegistry> = Arc::new(FileSystemSkillRegistry::for_config(&config)?);
     system.push_str(&format_skills_for_prompt(&skills.descriptors()));
     let prompts = Arc::new(PromptRegistry::discover(
         &config.workspace,

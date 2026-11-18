@@ -340,6 +340,9 @@ impl ResourceLoader {
                     PathKind::Context,
                 ),
             ] {
+                if base.no_skill_discovery && matches!(kind, PathKind::Skill) {
+                    continue;
+                }
                 for path in paths {
                     match admit_path(Path::new(path), base, explicit, kind, &user_global) {
                         Ok(path) if !target.contains(&path) => {
@@ -397,14 +400,9 @@ impl ResourceLoader {
             .prompt_paths
             .extend(base.prompt_paths.iter().cloned());
         config.theme_paths.extend(base.theme_paths.iter().cloned());
-        let skills = Arc::new(
-            crate::resources::FileSystemSkillRegistry::new_with_invocation(
-                config.workspace.clone(),
-                config.invocation_cwd.clone(),
-                config.skill_paths.clone(),
-                config.workspace_trusted,
-            )?,
-        );
+        let skills = Arc::new(crate::resources::FileSystemSkillRegistry::for_config(
+            &config,
+        )?);
         diagnostics.extend(
             skills
                 .diagnostics()

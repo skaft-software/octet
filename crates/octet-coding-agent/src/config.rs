@@ -650,6 +650,8 @@ pub struct Config {
     pub resume: ResumeSelector,
     /// Additional directory paths to scan for agent skills.
     pub skill_paths: Vec<PathBuf>,
+    /// Skip implicit and contributed skill roots; only explicit paths are loaded.
+    pub no_skill_discovery: bool,
     /// Explicit executable-extension directories, in precedence order.
     pub extension_paths: Vec<PathBuf>,
     /// Executable extensions selected for activation.

@@ -158,6 +158,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         },
         resume: ResumeSelector::New,
         skill_paths: request.skill_paths.clone(),
+        no_skill_discovery: false,
         extension_paths: request.extension_paths.clone(),
         enabled_extensions: request.enabled_extensions.clone(),
         // A host request states activation directly; there is no user config

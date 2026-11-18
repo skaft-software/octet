@@ -6,6 +6,7 @@
 
 - Preserve the terminal's cursor shape and blink settings in both fullscreen and inline modes.
 - Import Pi 1.5 chat sessions with system messages and turn timings without reusing foreign instructions or tool definitions.
+- `--no-skills` skips automatic skill discovery while still loading paths explicitly passed with `--skill-dir`.
 
 ## [0.10.5] - 2026-11-19
 

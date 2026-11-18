@@ -14,6 +14,49 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[test]
+fn no_skills_suppresses_discovery_but_keeps_explicit_roots() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let project = fixture.workspace.join(".octet/skills/implicit-probe");
+    let explicit = fixture.workspace.join("explicit-probe");
+    for (dir, id) in [(&project, "implicit-probe"), (&explicit, "explicit-probe")] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {id}\ndescription: Test skill.\n---\nFixture skill.\n"),
+        )
+        .unwrap();
+    }
+    for (no_skills, implicit_visible) in [(false, true), (true, false)] {
+        let mut args = vec![
+            "--workspace-trusted",
+            "--mode",
+            "rpc",
+            "--model",
+            "custom/probe",
+            "--skill-dir",
+            explicit.to_str().unwrap(),
+        ];
+        if no_skills {
+            args.push("--no-skills");
+        }
+        let output = fixture.run_with_stdin(&args, "{\"type\":\"get_commands\"}\n");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("skill:explicit-probe"), "{stdout}");
+        assert_eq!(
+            stdout.contains("skill:implicit-probe"),
+            implicit_visible,
+            "{stdout}"
+        );
+    }
+}
+
 const ASSISTANT_TEXT: &str = "fixture response done";
 
 const SSE_BODY: &str = concat!(

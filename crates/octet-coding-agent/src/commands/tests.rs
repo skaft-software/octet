@@ -864,6 +864,7 @@ fn app_for_status() -> (tempfile::TempDir, App) {
         mode: Mode::Interactive,
         resume: ResumeSelector::New,
         skill_paths: vec![],
+        no_skill_discovery: false,
         extension_paths: vec![],
         enabled_extensions: vec![],
         disabled_extensions: vec![],

@@ -57,6 +57,7 @@ pub(in crate::extensions) fn executable_extension_config(
         mode: crate::config::Mode::Interactive,
         resume: crate::config::ResumeSelector::New,
         skill_paths: vec![],
+        no_skill_discovery: false,
         extension_paths: vec![extension_root.to_owned()],
         enabled_extensions: vec![name.to_owned()],
         disabled_extensions: vec![],

@@ -44,22 +44,17 @@ pub(super) fn rescan(
                     Err(())
                 }
             }),
-        "resource:skills" => crate::resources::FileSystemSkillRegistry::new_with_invocation(
-            config.workspace.clone(),
-            config.invocation_cwd.clone(),
-            config.skill_paths.clone(),
-            config.workspace_trusted,
-        )
-        .map_err(|_| ())
-        .and_then(|registry| {
-            // This executes the ordinary bounded/no-follow discovery parser,
-            // not a directory-count stand-in and not extension code.
-            if registry.diagnostics().is_empty() {
-                Ok(())
-            } else {
-                Err(())
-            }
-        }),
+        "resource:skills" => crate::resources::FileSystemSkillRegistry::for_config(config)
+            .map_err(|_| ())
+            .and_then(|registry| {
+                // This executes the ordinary bounded/no-follow discovery parser,
+                // not a directory-count stand-in and not extension code.
+                if registry.diagnostics().is_empty() {
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            }),
         _ => Err(()),
     };
     match result {

@@ -47,12 +47,7 @@ impl ModelessExtensions {
         host.set_tool_policy(move |name| tool_config.tool_available(name));
         host.finalize_tool_surface();
         let skills: Arc<dyn SkillRegistry> = Arc::new(
-            crate::resources::FileSystemSkillRegistry::new_with_invocation(
-                config.workspace.clone(),
-                config.invocation_cwd.clone(),
-                config.skill_paths.clone(),
-                config.workspace_trusted,
-            )?,
+            crate::resources::FileSystemSkillRegistry::for_config(config)?,
         );
         let prompts = Arc::new(crate::prompts::PromptRegistry::discover(
             &config.workspace,
