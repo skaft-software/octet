@@ -68,6 +68,14 @@ impl Progress {
         }
         self.sequence = snapshot.sequence;
         let now = Instant::now();
+        // A callback past its deadline keeps reporting `remaining_ms: 0`, so a
+        // fresh `now + grace` on every probe answer would never expire. Keep the
+        // earliest deadline already established for the same callback.
+        let known: HashMap<u64, Instant> = self
+            .callbacks
+            .iter()
+            .filter_map(|(callback, deadline)| deadline.map(|deadline| (callback.id, deadline)))
+            .collect();
         self.callbacks = snapshot
             .callbacks
             .into_iter()
@@ -75,7 +83,8 @@ impl Progress {
                 let deadline = (!callback.interrupted)
                     .then_some(callback.remaining_ms)
                     .flatten()
-                    .map(|ms| now + Duration::from_millis(ms) + SETTLEMENT_GRACE);
+                    .map(|ms| now + Duration::from_millis(ms) + SETTLEMENT_GRACE)
+                    .map(|fresh| known.get(&callback.id).map_or(fresh, |&old| old.min(fresh)));
                 (callback, deadline)
             })
             .collect();
@@ -187,6 +196,32 @@ impl ProcessConnection {
 mod tests {
     use super::super::tests::trusted_descriptor;
     use super::*;
+
+    #[test]
+    fn repeated_snapshots_do_not_renew_an_expired_callback_deadline() {
+        let snapshot = |sequence| {
+            serde_json::json!({
+                "sequence": sequence,
+                "last_dispatched_at_ms": null,
+                "last_completed_at_ms": null,
+                "callbacks": [{
+                    "id": 7, "request_id": 1, "kind": "command", "extension": "hung",
+                    "interrupted": false, "remaining_ms": 0
+                }],
+            })
+        };
+        let mut progress = Progress::default();
+        progress.install(snapshot(1)).unwrap();
+        // A hung dispatcher keeps answering probes faster than the grace period.
+        for sequence in 2..6 {
+            std::thread::sleep(PROBE_INTERVAL / 2);
+            progress.install(snapshot(sequence)).unwrap();
+        }
+        assert!(
+            progress.overdue().is_some(),
+            "probe answers renewed the deadline"
+        );
+    }
 
     async fn adapter(
         source: &str,

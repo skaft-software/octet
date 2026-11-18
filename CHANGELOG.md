@@ -59,6 +59,7 @@
 - Live timers show whole seconds again (`28s`, `1m49s`).
 - Codemode keeps runners ready between scripts and reports actionable errors.
 - Model labels show full IDs consistently across the footer, picker, splash and session views.
+- A hung extension callback stops at its deadline even while the extension keeps answering health checks.
 
 ## [0.10.4] - 2026-11-12
 
