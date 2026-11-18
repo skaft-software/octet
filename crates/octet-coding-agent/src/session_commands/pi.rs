@@ -352,7 +352,7 @@ fn protocol(api: &str) -> anyhow::Result<Protocol> {
         "google-generative-ai" | "google-vertex" => Protocol::GoogleGenerativeAi,
         "mistral-conversations" => Protocol::MistralConversations,
         "pi-messages" => Protocol::PiMessages,
-        _ => anyhow::bail!("unsupported Pi assistant API: Responses/custom APIs require native replay metadata; no Chat substitution"),
+        _ => anyhow::bail!("unsupported Pi assistant API: Responses/custom APIs require native replay metadata; use `octet sessions import PATH --transcript-only OUTPUT.html` to archive without replay"),
     })
 }
 fn user_content(v: &Value) -> anyhow::Result<Vec<UserPart>> {

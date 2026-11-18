@@ -160,6 +160,52 @@ fn rpc_clear_queue_reports_only_removed_input() {
     assert!(api.requests.lock().unwrap().is_empty());
 }
 
+#[test]
+fn pi_transcript_only_import_archives_responses_without_replay_state() {
+    let fixture = Fixture::new(None);
+    let source = fixture.workspace.join("pi.jsonl");
+    let html = fixture.workspace.join("transcript.html");
+    let original = include_str!("../src/session_commands/import/fixtures/pi-1.5.2-chat.jsonl")
+        .replace("openai-completions", "openai-responses")
+        .replace("\"text\":\"Loopback fixture answer.\"", "\"text\":\"Loopback fixture answer. sk-syntheticsecret123456 <script>fake()</script>\",\"textSignature\":\"OPAQUE_ONLY\"");
+    std::fs::write(&source, &original).unwrap();
+    let strict = fixture.run(&["sessions", "import", source.to_str().unwrap()]);
+    assert!(
+        !strict.status.success(),
+        "strict import must not claim Responses replay"
+    );
+    let args = [
+        "sessions",
+        "import",
+        source.to_str().unwrap(),
+        "--transcript-only",
+        html.to_str().unwrap(),
+    ];
+    let archived = fixture.run(&args);
+    assert!(
+        archived.status.success(),
+        "{}",
+        String::from_utf8_lossy(&archived.stderr)
+    );
+    let text = std::fs::read_to_string(&html).unwrap();
+    assert!(
+        text.contains("Loopback fixture answer.") && text.contains("Loopback migration fixture.")
+    );
+    assert!(text.contains("not resumable") && !text.contains("<script>"));
+    assert!(!text.contains("sk-syntheticsecret123456") && !text.contains("OPAQUE_ONLY"));
+    assert!(
+        !text.contains("toolsAdded"),
+        "omit foreign tool declarations"
+    );
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+    assert!(
+        !fixture.run(&args).status.success(),
+        "never overwrite the archive"
+    );
+    let sessions = fixture.run(&["sessions", "list"]);
+    assert!(!String::from_utf8_lossy(&sessions.stdout).contains("import-"));
+}
+
 const ASSISTANT_TEXT: &str = "fixture response done";
 
 const SSE_BODY: &str = concat!(

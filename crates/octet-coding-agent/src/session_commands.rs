@@ -20,6 +20,7 @@ use crate::session_tree::render_session_tree;
 
 mod import;
 mod pi;
+mod pi_archive;
 mod share;
 mod strict_json;
 pub(crate) use import::{import_session, SessionImportReport};
@@ -72,8 +73,13 @@ pub enum SessionCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Import a portable Octet package or Pi v3 JSONL as a NEW session.
-    Import { path: PathBuf },
+    /// Import a session, or archive Pi v3 transcript text without replay.
+    Import {
+        path: PathBuf,
+        /// Write a private view-only HTML archive instead of creating a session.
+        #[arg(long, value_name = "OUTPUT.html")]
+        transcript_only: Option<PathBuf>,
+    },
     /// Prepare a redacted snapshot and confirm publishing an unlisted GitHub gist.
     Share {
         id: String,
@@ -138,7 +144,23 @@ pub fn run(command: SessionCommand, config: &Config) -> anyhow::Result<()> {
             matches!(format, ExportFormat::Html)
                 .then_some(config.theme.as_deref().unwrap_or("dark")),
         ),
-        SessionCommand::Import { path } => {
+        SessionCommand::Import {
+            path,
+            transcript_only,
+        } => {
+            if let Some(output) = transcript_only {
+                let destination = pi_archive::archive(
+                    &path,
+                    &output,
+                    &config.invocation_cwd,
+                    config.theme.as_deref().unwrap_or("dark"),
+                )?;
+                crate::output::stdout_line(format!(
+                    "Archived Pi transcript to {} (view only; no resumable session created).",
+                    destination.display()
+                ));
+                return Ok(());
+            }
             let report: SessionImportReport =
                 import_session(&store, &path, &config.invocation_cwd)?;
             crate::output::stdout_line(format!(

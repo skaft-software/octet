@@ -157,7 +157,12 @@ Pi system messages (including instructions and tool definitions) are stored as
 inert history. The imported session uses Octet's current prompt and tool setup,
 not the foreign one. Imported extension metadata and effect-replay claims do
 not grant authority. Pi Responses sessions without native replay metadata cannot
-be resumed as Octet sessions.
+be resumed as Octet sessions. For a view-only copy, run `octet sessions import
+PATH --transcript-only OUTPUT.html`. This writes a private, redacted HTML archive
+of prompts, replies, text tool results and summaries, with the retained branch
+links. It omits reasoning, system prompts, tool arguments, media, usage and
+replay state. No session is created and the source is unchanged. Review the
+archive before sharing; redaction does not guarantee secret-free prose.
 Interactive import asks before making the copy/switch and preserves the draft.
 
 `/share` or `octet sessions share ID` prepares a bounded, redacted snapshot of
