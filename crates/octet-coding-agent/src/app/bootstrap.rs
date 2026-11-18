@@ -5990,7 +5990,8 @@ use octet_ai::providers::codex::CODEX_MODEL_CACHE_VERSION;
 // not octet's package version. Sending an older version causes the backend to
 // filter out models that require a contemporary Codex client: it withheld
 // GPT-6.1 Sol from 0.156.1 although the bundled catalog lists a 0.153.0
-// minimum, while Codex 0.159.2 listed it for the same account.
+// minimum, while Codex 0.159.2 listed it for the same account. GPT-6.2 Sol and
+// Astra likewise appear for 0.169.0 but not 0.159.2.
 #[cfg(test)]
 use octet_ai::providers::codex::CODEX_MODELS_CLIENT_VERSION;
 

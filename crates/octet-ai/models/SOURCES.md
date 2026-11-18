@@ -703,7 +703,9 @@ WebSocket preference, text/image input, and minimum client 0.153.0. The live
 backend nevertheless withheld 6.1 Sol from compatibility version 0.156.1, while
 Codex 0.159.2 listed it for the same account (manual QA, 2026-09-30). octet
 therefore sends 0.159.2, and cache schema 10 refreshes inventories fetched as
-0.156.1. As for Astra, **online account inventory** establishes Lite/V2;
+0.156.1. On 2026-11-18 the backend listed GPT-6.2 Sol and Astra to Codex
+0.169.0 but not to 0.159.2 for the same account (manual QA), so octet sends
+0.169.0 and cache schema 13 refreshes inventories fetched as 0.159.2. As for Astra, **online account inventory** establishes Lite/V2;
 Ultra maps to `max` wire effort only alongside V2 delegation, while an offline
 or unreachable inventory keeps the conservative low-through-max fallback. The
 current fallback instead uses the documented 500K Sol default (see below); live

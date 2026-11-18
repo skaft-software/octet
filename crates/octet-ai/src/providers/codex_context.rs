@@ -116,7 +116,7 @@ pub fn codex_context_session_note(model_id: &str, window: &CodexContextWindow) -
 /// remaining fallbacks follow the bundled catalog (see models/SOURCES.md).
 /// Authenticated inventory, including smaller windows, overrides these values.
 pub fn fallback_context_windows(model_id: &str) -> (u64, u64) {
-    if matches!(model_id, "gpt-6.1-sol" | "gpt-6.1-terra") {
+    if matches!(model_id, "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6.2-sol") {
         (500_000, CODEX_ASTRA_MAX_CONTEXT_WINDOW)
     } else if codex_gpt_6_model(model_id)
         || model_id.starts_with("gpt-5.6-")

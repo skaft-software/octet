@@ -257,7 +257,7 @@ Account-advertised input/output modalities and exact thinking choices/defaults
 survive discovery and its normalized cache, including newly named models such as
 Terra when an account actually advertises them. Explicit text-only, false or
 malformed input assertions do not inherit the historical vision-family fallback.
-Cache schema 12 also invalidates older context-policy records. Only
+Cache schema 13 also invalidates older context-policy records. Only
 media implemented by the selected codec become usable: Codex Responses accepts
 advertised images/PDFs, not audio input or generated media. Unknown reasoning
 assertions do not receive guessed thinking levels. None of this borrows direct
@@ -267,7 +267,8 @@ cost is an API-equivalent estimate at the vendor's public price, shown as `$… 
 <details>
 <summary>Discovery version, GPT-6 account contracts and pricing</summary>
 
-Codex discovery sends compatibility version **`0.159.2`**. GPT-6 Sol and Luna
+Codex discovery sends compatibility version **`0.169.0`**; GPT-6.2 Sol and
+Astra are listed only from 0.169.0. GPT-6 Sol and Luna
 need at least `0.155.0`: older query versions filter them out on the server,
 even when the account has access. Read-only checks on 2026-09-23 confirmed that
 changing only this query version from `0.153.2`/`0.154.0` to `0.156.1` returned
@@ -298,7 +299,7 @@ provider maximum without a cost-cliff acknowledgement or local plan gate.
 
 The bundled Sol catalog also lists low through Ultra, Lite/V2 and priority 1.
 Offline fallback strips dynamic Ultra/V2, retaining low through max, default low.
-Discovery sends compatibility version 0.159.2; cache schema 12 refreshes older
+Discovery sends compatibility version 0.169.0; cache schema 13 refreshes older
 context-policy records while retaining account/plan binding and freshness checks.
 
 OpenAI's [pricing guide](https://developers.openai.com/codex/pricing) states that

@@ -407,9 +407,9 @@ closed.
 
 ## OpenAI Codex discovery and Ultra
 
-Authenticated Codex discovery sends compatibility client version `0.159.2` and
+Authenticated Codex discovery sends compatibility client version `0.169.0` and
 parses the provider's string/object reasoning levels, `use_responses_lite`, and
-`multi_agent_version: "v2"`. Cache schema version 12 invalidates old context-policy
+`multi_agent_version: "v2"`. Cache schema version 13 invalidates old context-policy
 records and retains the provider default and maximum separately from the effective
 budget. Registration uses the default unless a validated operator override is
 present; neither a flat 272K cap nor a Pro-plan maximum selection applies.

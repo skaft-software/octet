@@ -67,9 +67,11 @@ pub struct CodexInventory {
     pub skipped: Vec<String>,
 }
 
-pub const CODEX_MODEL_CACHE_VERSION: u8 = 12;
+pub const CODEX_MODEL_CACHE_VERSION: u8 = 13;
 pub const CODEX_MODEL_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
-pub const CODEX_MODELS_CLIENT_VERSION: &str = "0.159.2";
+// The backend lists models only to clients at or above their minimum version:
+// GPT-6.2 Sol and Astra are returned to Codex CLI 0.169.0, not to 0.159.2.
+pub const CODEX_MODELS_CLIENT_VERSION: &str = "0.169.0";
 pub fn deserialize_required_agent_delegation<'de, D>(
     deserializer: D,
 ) -> Result<Option<AgentDelegation>, D::Error>
