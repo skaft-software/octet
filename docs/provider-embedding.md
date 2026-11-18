@@ -44,8 +44,9 @@ headers, or use an OpenAI API key to replace a subscription route.
    budget), then resolve the exact catalog ID, such as `codex/gpt-6-luna` **only
    when present**. Missing selection is an error; there is no provider/model or
    billing-lane substitution. Binding preserves the declared Codex Responses
-   runtime, headers, capabilities, context defaults/maxima and unknown pricing.
-   Public OpenAI prices/capabilities do not qualify subscription routes.
+   runtime, headers, capabilities and context defaults/maxima. Pricing is an
+   API-equivalent estimate from the vendor's public list price; public OpenAI
+   capabilities still do not qualify subscription routes.
 4. Submit one canonical `Request` with `AiClient`. Use exact advertised reasoning
    values/defaults. Inspect terminal `StopReason`, usage and optional cost; a
    refusal, truncation or unknown incomplete reason is not ordinary completion.

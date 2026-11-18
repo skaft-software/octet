@@ -589,6 +589,7 @@ fn copy_presentation(source: &ShellState, target: &mut ShellState) {
         run_context_estimate,
         telemetry_model,
         price_display,
+        subscription_cost,
         reasoning,
         run_label,
         extension_loading_status,

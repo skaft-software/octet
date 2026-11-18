@@ -2045,6 +2045,9 @@ pub(crate) struct ShellState {
     /// `None` is deliberately neutral for legacy records with no attribution.
     pub(crate) telemetry_model: Option<String>,
     pub(crate) price_display: PriceDisplay,
+    /// The active model is subscription-priced: its cost is an API-equivalent
+    /// estimate, shown with a "(sub)" marker as Pi does.
+    pub(crate) subscription_cost: bool,
     pub(crate) latest_compaction_summary: Option<String>,
     pub(crate) reasoning: String,
     /// The foreground session's validated, user-assigned name, independent of
@@ -2444,6 +2447,7 @@ impl ShellState {
             run_context_estimate: Default::default(),
             telemetry_model: Default::default(),
             price_display: Default::default(),
+            subscription_cost: Default::default(),
             latest_compaction_summary: Default::default(),
             reasoning: Default::default(),
             session_name: Default::default(),
@@ -9552,6 +9556,7 @@ impl InteractiveShell {
         state.model_display = metadata.name;
         state.provider = model.spec.endpoint.0.clone();
         state.price_display = price_display;
+        state.subscription_cost = crate::providers::subscription_endpoint(&model.spec.endpoint.0);
         state.prompt_color = Some(prompt_color);
         welcome_card::restart_welcome_animation(&mut state);
         if state.model_lab == Some(lab) {

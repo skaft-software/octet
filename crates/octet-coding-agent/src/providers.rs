@@ -53,6 +53,12 @@ pub(crate) use contract::{
 #[cfg(test)]
 pub(crate) use contract::{OPENAI, OPENCODE, OPENCODE_GO, OPENROUTER};
 pub(crate) use pricing::pricing_for;
+
+/// Whether `endpoint` belongs to a subscription-priced provider, including the
+/// host-owned Copilot routes, so its cost is shown as an API-equivalent estimate.
+pub(crate) fn subscription_endpoint(endpoint: &str) -> bool {
+    pricing::subscription_endpoint(endpoint) || copilot::owns_endpoint(endpoint)
+}
 pub(crate) use vertex::resolve_vertex_configuration;
 
 #[cfg(test)]

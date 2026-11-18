@@ -261,7 +261,8 @@ Cache schema 12 also invalidates older context-policy records. Only
 media implemented by the selected codec become usable: Codex Responses accepts
 advertised images/PDFs, not audio input or generated media. Unknown reasoning
 assertions do not receive guessed thinking levels. None of this borrows direct
-OpenAI API capabilities, availability or pricing for a subscription route.
+OpenAI API capabilities or availability for a subscription route. Subscription
+cost is an API-equivalent estimate at the vendor's public price, shown as `$… (sub)`.
 
 <details>
 <summary>Discovery version, GPT-6 account contracts and pricing</summary>

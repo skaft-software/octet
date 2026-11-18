@@ -219,11 +219,8 @@ fn codex_models_require_a_usable_credential_and_include_astra_fallback() {
             crate::codex_context::fallback_context_windows(model_id).0
         );
         assert_eq!(model.spec.limits.max_output_tokens, 128_000);
-        // Subscription pricing is reviewed only where it was observed.
-        assert_eq!(
-            model.spec.pricing.is_some(),
-            !matches!(*model_id, "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna")
-        );
+        // Every bundled subscription model shows an API-equivalent cost.
+        assert!(model.spec.pricing.is_some(), "{model_id}");
         if *model_id == "gpt-6-astra" {
             assert!(model
                 .spec
@@ -1152,7 +1149,7 @@ fn codex_reasoning_updates_need_positive_fresh_account_metadata() {
 }
 
 #[test]
-fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
+fn gpt6_subscription_routes_price_at_api_equivalent_rates_without_alias_rates() {
     for (id, input) in [("gpt-6-sol", 2_000_000), ("gpt-6-luna", 100_000)] {
         let public = crate::providers::pricing_for(&crate::providers::OPENAI, id).unwrap();
         assert_eq!(public.input.0, input);
@@ -1162,12 +1159,16 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
         assert_eq!(public.tiers[0].min_input_tokens, 272_001);
         assert_eq!(public.tiers[0].input.unwrap().0, input * 2);
         assert_eq!(public.tiers[0].output.unwrap().0, input * 15 / 2);
-        assert!(crate::providers::pricing_for(&crate::providers::CODEX, id).is_none());
-        assert!(crate::providers::pricing_for(
-            &crate::providers::OPENAI,
-            &format!("{id}-unverified")
-        )
-        .is_none());
+        // A subscription route shows what the same tokens cost at API prices.
+        assert_eq!(
+            crate::providers::pricing_for(&crate::providers::CODEX, id),
+            Some(public)
+        );
+        for declaration in [&crate::providers::OPENAI, &crate::providers::CODEX] {
+            assert!(
+                crate::providers::pricing_for(declaration, &format!("{id}-unverified")).is_none()
+            );
+        }
     }
     let sol_61 = crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-sol").unwrap();
     assert_eq!(sol_61.input, TokenRate(2_000_000));
@@ -1197,7 +1198,10 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
         .resolve(&ModelId("gpt-6.1-terra".into()))
         .unwrap();
     assert_eq!(Some(&terra), builtin.spec.pricing.as_ref());
-    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-terra").is_none());
+    assert_eq!(
+        crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6.1-terra").as_ref(),
+        Some(&terra)
+    );
     for alias in [
         "gpt-6.1-terra-pro",
         "openai/gpt-6.1-terra",
@@ -1205,13 +1209,29 @@ fn gpt6_public_prices_do_not_invent_subscription_or_alias_rates() {
     ] {
         assert!(crate::providers::pricing_for(&crate::providers::OPENAI, alias).is_none());
     }
-    // Reviewed subscription prices still apply to explicitly allowlisted models,
-    // but even a known public API quote must not price an unreviewed OAuth route.
+    // Reviewed subscription prices still take precedence for allowlisted models.
     let astra = crate::providers::pricing_for(&crate::providers::CODEX, "gpt-6-astra").unwrap();
     assert_eq!(astra.input, TokenRate(10_000_000));
     assert_eq!(astra.output, TokenRate(50_000_000));
-    assert!(crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-4o-mini").is_some());
-    assert!(crate::providers::pricing_for(&crate::providers::CODEX, "gpt-4o-mini").is_none());
+    assert_eq!(
+        crate::providers::pricing_for(&crate::providers::CODEX, "gpt-4o-mini"),
+        crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-4o-mini")
+    );
+    // GPT-6.2 follows the models.dev OpenAI record, including the >272K tier.
+    for (id, input, output, tier_input) in [
+        ("gpt-6.2-sol", 2_000_000, 10_000_000, 4_000_000),
+        ("gpt-6.2-astra", 8_000_000, 40_000_000, 16_000_000),
+    ] {
+        let public = crate::providers::pricing_for(&crate::providers::OPENAI, id).unwrap();
+        assert_eq!(public.input, TokenRate(input));
+        assert_eq!(public.output, TokenRate(output));
+        assert_eq!(public.tiers[0].min_input_tokens, 272_001);
+        assert_eq!(public.tiers[0].input, Some(TokenRate(tier_input)));
+        assert_eq!(
+            crate::providers::pricing_for(&crate::providers::CODEX, id),
+            Some(public)
+        );
+    }
 }
 
 #[test]
@@ -1569,7 +1589,10 @@ fn codex_terra_catalog_contract_survives_discovery_and_fallback() {
                 .unwrap();
             assert_eq!(model.spec.limits.context_window, 500_000);
             assert_eq!(model.spec.limits.max_output_tokens, 128_000);
-            assert!(model.spec.pricing.is_none());
+            assert_eq!(
+                model.spec.pricing,
+                crate::providers::pricing_for(&crate::providers::OPENAI, "gpt-6.1-terra")
+            );
             let options = model
                 .spec
                 .capabilities

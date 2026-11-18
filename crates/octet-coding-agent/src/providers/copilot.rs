@@ -102,6 +102,14 @@ const COPILOT_DECLARATION: ProviderDeclaration = ProviderDeclaration {
     pricing: PricingProfile::Subscription,
 };
 
+/// Whether `endpoint` is one of the subscription-priced Copilot routes.
+pub(crate) fn owns_endpoint(endpoint: &str) -> bool {
+    COPILOT_DECLARATION
+        .routes
+        .iter()
+        .any(|route| route.endpoint_id == endpoint)
+}
+
 /// Bounded, credential-free outcome of a GitHub Copilot host operation.
 ///
 /// The enum intentionally does not carry a provider response body or host

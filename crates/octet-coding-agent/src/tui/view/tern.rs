@@ -1624,9 +1624,25 @@ fn composer(shell: &ShellState) -> Node {
                 .set("wrap", "none")
                 .set(
                     "text",
-                    format!("${}.{:06}", cost / 1_000_000, cost % 1_000_000),
+                    format!(
+                        "${}.{:06}{}",
+                        cost / 1_000_000,
+                        cost % 1_000_000,
+                        if shell.subscription_cost {
+                            " (sub)"
+                        } else {
+                            ""
+                        }
+                    ),
                 )
-                .set("title", "Session cost"),
+                .set(
+                    "title",
+                    if shell.subscription_cost {
+                        "Session cost at API prices (subscription)"
+                    } else {
+                        "Session cost"
+                    },
+                ),
         ));
     }
     let submit_binding = if running {

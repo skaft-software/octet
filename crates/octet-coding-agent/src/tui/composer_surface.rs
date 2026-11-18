@@ -1058,6 +1058,15 @@ fn render_status_footer_with_gap(
     // the provider API is the source of truth. `usage_uncertain` stays a durable
     // state fact (surfaced by `/telemetry` and the non-TUI channels) and never
     // rewrites the footer cost as a subtotal or a `+ ?` marker.
+    // Pi compatibility: packages/coding-agent/src/modes/interactive/components/
+    // footer.ts:190-194 marks a subscription model's API-equivalent cost.
+    let cost = cost.map(|cost| {
+        if state.subscription_cost {
+            format!("{cost} (sub)")
+        } else {
+            cost
+        }
+    });
     if let Some(cost) = cost {
         segments.push(StatusFooterSegment::new(FooterKind::Cost, vec![cost]));
     }
@@ -1848,6 +1857,29 @@ mod tests {
         ));
         assert!(footer.contains("$0"), "{footer:?}");
         assert!(!footer.contains("subtotal"), "{footer:?}");
+    }
+
+    #[test]
+    fn footer_marks_subscription_cost_as_api_equivalent() {
+        for (subscription, expected) in [(true, "$0.123 (sub)"), (false, "$0.123")] {
+            let mut state = crate::tui::view::ShellState::default();
+            state.theme = crate::tui::theme::test_theme();
+            state.price_display = crate::presentation::PriceDisplay::Priced;
+            state.session_cost_microdollars = Some(123_456);
+            state.subscription_cost = subscription;
+            let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
+                &state,
+                120,
+                Instant::now(),
+            ));
+            assert!(footer.contains(expected), "{footer:?}");
+            assert_eq!(footer.contains("(sub)"), subscription, "{footer:?}");
+        }
+        assert!(crate::providers::subscription_endpoint("openai-codex"));
+        assert!(crate::providers::subscription_endpoint(
+            "github-copilot-chat"
+        ));
+        assert!(!crate::providers::subscription_endpoint("openai"));
     }
 
     #[test]

@@ -93,6 +93,16 @@ fn openai_pricing(model_id: &str) -> Option<Pricing> {
             (1_000_000, 5_000_000, 50_000, 1_250_000),
             Some((2_000_000, 7_500_000, 100_000, 2_500_000)),
         ),
+        // GPT-6.2 rates and the >272K tier follow the models.dev `openai`
+        // record refreshed 2026-11-18 (released 2026-11-17).
+        "gpt-6.2-sol" => (
+            (2_000_000, 10_000_000, 100_000, 2_500_000),
+            Some((4_000_000, 15_000_000, 200_000, 5_000_000)),
+        ),
+        "gpt-6.2-astra" => (
+            (8_000_000, 40_000_000, 400_000, 10_000_000),
+            Some((16_000_000, 60_000_000, 800_000, 20_000_000)),
+        ),
         "gpt-6-luna" => (
             (100_000, 500_000, 10_000, 125_000),
             Some((200_000, 750_000, 20_000, 250_000)),
@@ -365,18 +375,75 @@ fn subscription_pricing(model_id: &str) -> Option<Pricing> {
     })
 }
 
+/// The public API vendor whose list price is a subscription model's
+/// API-equivalent cost. Subscription routes map to their upstream vendor;
+/// multi-vendor subscriptions such as Copilot map by model family.
+fn api_equivalent_vendor(provider_id: &str, model_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "codex" => return Some("openai"),
+        "xai-subscription" => return Some("xai"),
+        "kimi-coding-subscription" => return Some("moonshotai"),
+        _ => {}
+    }
+    let model = model_id.to_ascii_lowercase();
+    if model.starts_with("gpt-") || ["o1", "o3", "o4"].iter().any(|p| model.starts_with(p)) {
+        Some("openai")
+    } else if model.starts_with("claude-") {
+        Some("anthropic")
+    } else if model.starts_with("gemini-") {
+        Some("google")
+    } else if model.starts_with("grok-") {
+        Some("xai")
+    } else if model.starts_with("kimi-") {
+        Some("moonshotai")
+    } else {
+        None
+    }
+}
+
+/// API-equivalent pricing for a subscription model: what the same tokens cost
+/// at the vendor's public API list price. Octet-owned vendor tables keep their
+/// long-context tiers; the checked-in models.dev snapshot covers the rest.
+/// Pi compatibility: packages/coding-agent/src/modes/interactive/components/
+/// footer.ts:190-194 shows this cost with a "(sub)" marker.
+fn api_equivalent_pricing(provider_id: &str, model_id: &str) -> Option<Pricing> {
+    let vendor = api_equivalent_vendor(provider_id, model_id)?;
+    let owned = match vendor {
+        "openai" => openai_pricing(model_id),
+        "anthropic" => anthropic_pricing(model_id),
+        "google" => google_pricing(model_id),
+        _ => None,
+    };
+    owned.or_else(|| crate::model_metadata::model_pricing(vendor, model_id))
+}
+
 /// Return trusted pricing for a provider/model route.
 ///
 /// Provider-specific overrides preserve octet's special cases (for example
 /// OpenAI long-context tiers). The checked-in models.dev snapshot fills in
 /// newly released and discovered routes, so discovery can provide trusted
 /// pricing without another hand-maintained model match arm. Subscription
-/// inventory is account-scoped and never inherits public API quotes: only the
-/// reviewed subscription allowlist can establish a price.
+/// inventory is never billed per token: the reviewed subscription allowlist
+/// comes first, then the upstream vendor's public API price as an
+/// API-equivalent estimate that frontends label as subscription cost.
 pub fn pricing_for(provider: &ProviderDeclaration, model_id: &str) -> Option<Pricing> {
     let reviewed = legacy_model_pricing(provider.pricing, model_id);
     if provider.pricing == PricingProfile::Subscription {
-        return reviewed;
+        return reviewed.or_else(|| api_equivalent_pricing(provider.id, model_id));
     }
     reviewed.or_else(|| crate::model_metadata::model_pricing(provider.id, model_id))
+}
+
+/// Whether `endpoint` belongs to a generated subscription-priced provider, so
+/// its displayed cost is an API-equivalent estimate rather than a bill.
+pub fn subscription_endpoint(endpoint: &str) -> bool {
+    super::contract::ALL_PROVIDER_DECLARATIONS
+        .iter()
+        .filter(|declaration| declaration.pricing == PricingProfile::Subscription)
+        .any(|declaration| {
+            declaration
+                .routes
+                .iter()
+                .any(|route| route.endpoint_id == endpoint)
+        })
 }

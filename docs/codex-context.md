@@ -87,10 +87,11 @@ Output budgeting never exceeds the effective window; Astra retains its separate
 
 A large context window alone does **not** create an unknown-usage exposure.
 Token receipts, genuinely unknown attempts and unpriced usage remain separate
-accounting facts. Codex cost accounting is unchanged: the reviewed subscription
-allowlist keeps its rates and long-context tiers, models without a reviewed rate
-stay unpriced, and a public API quote never automatically prices an OAuth route.
-Published credit rates are not converted into an invented per-token USD tariff.
+accounting facts. Subscription cost is an API-equivalent estimate, marked
+`(sub)` in the footer: what the same tokens would cost at the vendor's public API
+price. The reviewed subscription allowlist keeps its rates and long-context
+tiers; other models use the OpenAI API list price. It is not a subscription
+charge, and published credit rates are not converted into a per-token tariff.
 Historical usage and uncertainty records are not rewritten or cleared.
 
 Using the provider default is silent. An explicit override that changes it gets
@@ -161,7 +162,7 @@ else is deferred to `Bootstrap::enrich_catalog`.
   overrides across 272K without consent, lower/upper bound validation, output
   budgeting, parsing and truthful override notes.
 - Bootstrap tests: live/cache/fallback registration, all-plan default behavior,
-  old-cache invalidation and subscription/API pricing separation.
+  old-cache invalidation and API-equivalent subscription pricing.
 - CLI and interactive tests: obsolete flag removal, minimum validation,
   live-limit menus and no surcharge/uncertainty copy.
 - `octet-ai` tests: optional source-limit metadata round trip and validation.
