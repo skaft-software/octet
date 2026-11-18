@@ -60,6 +60,7 @@
 - Codemode keeps runners ready between scripts and reports actionable errors.
 - Model labels show full IDs consistently across the footer, picker, splash and session views.
 - A hung extension callback stops at its deadline even while the extension keeps answering health checks.
+- Context hooks that change only the system prompt keep compacted Responses history.
 
 ## [0.10.4] - 2026-11-12
 

@@ -562,8 +562,17 @@ async fn project_context_hooks(
         {
             let prefix_len = accepted_before_hook.messages.len();
             let suffix = request.messages.get(prefix_len..);
+            // A native checkpoint carries no instructions: the codec refreshes
+            // `instructions` from the request's system for compacted input, so a
+            // system-only change keeps the checkpointed replay. Without one, the
+            // system lives inside the encoded items and must be re-encoded.
+            let compacted = accepted_before_hook
+                .responses
+                .as_ref()
+                .and_then(|options| options.input.as_ref())
+                .is_some_and(ResponsesInput::contains_compaction);
             let unchanged_prefix = suffix.is_some()
-                && accepted_before_hook.system == request.system
+                && (compacted || accepted_before_hook.system == request.system)
                 && same_messages(
                     &accepted_before_hook.messages,
                     &request.messages[..prefix_len],
