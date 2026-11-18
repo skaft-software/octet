@@ -15,7 +15,10 @@ pub(super) fn take_source_mapping_work() -> usize {
 }
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+
+/// An open fenced block: info string, body and its buffered text events.
+type OpenFence = (String, String, Vec<(String, Range<usize>)>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -79,6 +82,8 @@ impl SourceMap {
             link: None,
         }];
         let mut cursor = 0;
+        // An open fenced block: info string, body and its buffered text events.
+        let mut fence: Option<OpenFence> = None;
         let (protected, math) = sexy_tui_rs::rich_text::markdown::protect_math(source);
         for (event, range) in Parser::new_ext(
             &protected,
@@ -88,6 +93,9 @@ impl SourceMap {
         {
             match event {
                 Event::Start(tag) => {
+                    if let Tag::CodeBlock(CodeBlockKind::Fenced(info)) = &tag {
+                        fence = Some((info.to_string(), String::new(), Vec::new()));
+                    }
                     let kind = match tag {
                         Tag::Emphasis
                         | Tag::Strong
@@ -111,8 +119,45 @@ impl SourceMap {
                         link,
                     });
                 }
-                Event::End(_) => {
+                Event::End(end) => {
                     let mut frame = stack.pop().expect("balanced Markdown tags");
+                    if let (TagEnd::CodeBlock, Some((info, body, texts))) = (end, fence.take()) {
+                        // A diagram fence paints rendered art, not its source.
+                        // Map those rows to this fence as one unit; searching
+                        // ahead for the source text would claim an identical
+                        // literal block later in the message.
+                        let painted =
+                            sexy_tui_rs::rich_text::markdown::rendered_diagram_fence(&info, &body)
+                                .map(|rendered| rendered.trim_end_matches(['\n', '\r']).to_owned())
+                                .filter(|rendered| !rendered.is_empty())
+                                .and_then(|rendered| {
+                                    plain[cursor..]
+                                        .find(&rendered)
+                                        .map(|at| (cursor + at, rendered.len()))
+                                });
+                        if let Some((start, len)) = painted {
+                            cursor = start + len;
+                            frame.children.push(Node {
+                                kind: Kind::Inline,
+                                plain: start..cursor,
+                                source: trim_line_end(source, frame.source.clone()),
+                                children: Vec::new(),
+                                units: Vec::new(),
+                            });
+                        } else {
+                            for (text, range) in texts {
+                                append_text(
+                                    &mut frame.children,
+                                    source,
+                                    plain,
+                                    &mut cursor,
+                                    &text,
+                                    range,
+                                    false,
+                                );
+                            }
+                        }
+                    }
                     let mut start = frame
                         .children
                         .first()
@@ -190,6 +235,11 @@ impl SourceMap {
                         children: frame.children,
                         units: Vec::new(),
                     });
+                }
+                Event::Text(text) if fence.is_some() => {
+                    let (_, body, texts) = fence.as_mut().expect("open fence");
+                    body.push_str(&text);
+                    texts.push((text.into_string(), range));
                 }
                 Event::Text(text)
                     if math

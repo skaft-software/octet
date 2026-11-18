@@ -503,3 +503,24 @@ fn markdown_source_copy_pointer_work_is_independent_of_message_size() {
             .with(|copy| assert_eq!(copy.borrow().as_deref(), Some("**token**")));
     }
 }
+
+#[test]
+fn markdown_source_copy_literal_fence_after_identical_rendered_diagram_keeps_its_own_source() {
+    // The LaTeX fence renders as an equation, so its source text is not painted
+    // where it sits; the identical literal fence below must still own its rows.
+    let source = "```latex\n\\frac{a}{b}\n```\n\n```text\n\\frac{a}{b}\n```";
+    let mut shell = fixture(source);
+    let line = cell(&shell, "\\frac{a}{b}", 0);
+    select(
+        &mut shell,
+        (line.0, line.1 + 1),
+        (line.0, line.1 + 11),
+        "frac{a}{b}",
+    );
+    select(
+        &mut shell,
+        line,
+        (line.0, line.1 + 11),
+        "```text\n\\frac{a}{b}\n```",
+    );
+}

@@ -64,6 +64,7 @@
 - Native compaction right after resuming a session keeps its video frames.
 - Context estimates for Responses sessions with video count the frames actually sent.
 - Gemini audio uploads check every clip's size before sending any of them.
+- Copying a code block after an identical LaTeX or Mermaid diagram copies that block's own source.
 
 ## [0.10.4] - 2026-11-12
 

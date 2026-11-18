@@ -41,6 +41,13 @@ pub use super::latex::markdown::{protect as protect_math, MathToken};
 /// (`mermaid::MAX_MERMAID_*`).
 pub const MAX_DIAGRAM_FENCE_BYTES: usize = 16 * 1024;
 
+/// The text a completed fence paints instead of its source when it renders as
+/// a diagram, or `None` when it stays a code block. Copy provenance uses this
+/// to map the painted rows back to the fence that produced them.
+pub fn rendered_diagram_fence(info: &str, code: &str) -> Option<String> {
+    render_diagram_fence(info, code).ok().flatten()
+}
+
 /// Render a completed fence into diagram text when its info string explicitly
 /// names a supported diagram language. `None` keeps the original code block —
 /// for every other language, for oversized bodies, and whenever the renderer
