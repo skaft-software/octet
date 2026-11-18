@@ -3813,6 +3813,57 @@ fn configured_cost_limit_fails_closed_without_trusted_model_pricing() {
 }
 
 #[tokio::test]
+async fn native_compaction_prepares_resumed_video_before_encoding() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("video.jsonl");
+    let model = tool_media_model(
+        Protocol::OpenAiResponses,
+        octet_ai::ModalitySet::none().with(Modality::Image),
+    );
+    let InputPart::Media(video) = video_input_fixture() else {
+        unreachable!()
+    };
+    Session::create(&path)
+        .unwrap()
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Media(video)],
+        })))
+        .unwrap();
+    // Resume: frame caches are process-local and start empty.
+    let mut agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model: model.clone(),
+        session: Session::open(&path).unwrap(),
+        system: "system".into(),
+        sandbox: SandboxConfig::new(directory.path()),
+        effect_broker: EffectBroker::default(),
+        extensions: ExtensionHost::new(),
+        max_turns: Some(1),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    // Stop before the network; preparation must already have happened.
+    agent.set_max_session_cost_microdollars(Some(0));
+    let _ = agent.compact_responses_native().await;
+    let replay = agent
+        .session()
+        .responses_replay_snapshot(&model.endpoint.id, &model.spec.id)
+        .unwrap()
+        .unwrap();
+    let encoded = serde_json::to_string(
+        &octet_ai::responses::encode_responses_replay(&model, None, &replay).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !encoded.contains("frames not prepared"),
+        "native compaction encoded an unprepared resumed video"
+    );
+}
+
+#[tokio::test]
 async fn native_compaction_honors_the_session_cost_limit_before_network() {
     let directory = tempfile::tempdir().unwrap();
     let mut session = Session::create(directory.path().join("session.jsonl")).unwrap();

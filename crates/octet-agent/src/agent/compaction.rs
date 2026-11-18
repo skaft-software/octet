@@ -2237,6 +2237,14 @@ impl Agent {
                     .into(),
             ));
         }
+        // Frame caches are process-local: after resume, encode would checkpoint a
+        // "frames not prepared" placeholder instead of the video. Prepare this
+        // window's clips exactly as the turn loop does before its first request.
+        if self.model.spec.supports_video_input() && !self.model.spec.supports_native_video() {
+            let (_, candidates) =
+                super::images::session_video_candidates(&self.session, &self.model, None)?;
+            octet_ai::video::prepare_message_frames(&self.model, &candidates).await;
+        }
         let input = octet_ai::responses::encode_responses_replay(&self.model, None, &replay)?;
         let active_system = self.system.clone();
         let instructions = (!active_system.is_empty()).then_some(active_system.as_str());
