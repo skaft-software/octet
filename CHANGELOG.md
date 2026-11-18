@@ -6,6 +6,10 @@
 
 - Settings can show tool-call and thinking durations. They default to Off in Octet and On in Pi themes.
 
+### Changed
+
+- Faster clicks on the terminal splash quicken the rainbow and the eyes' blink; both ease back to rest when clicks slow or stop.
+
 ## [0.10.5] - 2026-11-17
 
 ### Added

@@ -93,17 +93,18 @@ resize, not draft edits. The terminal background remains unchanged.
 User-customized ANSI16 palettes can still affect actual contrast.
 
 The compact native mark stays static until clicked, with its canonical glyphs,
-colours and footprint unchanged at rest. A click raises only the two short bars:
-a quick eased squeeze, then a softer second blink, each holding closed for
+colours and footprint unchanged at rest. A single click raises only the two short
+bars: a quick eased squeeze, then a softer second blink, each holding closed for
 80 ms and reopening more slowly. The right eye trails the left by 80 ms.
 Partial-height blocks soften the motion within the existing upper eye cells;
-the baseline and other six bars never move. Rapid clicks let the expression
-finish rather than restarting it mid-stroke. There are no idle blinks.
-The existing 2.2-second highlight
-sweep accompanies it. Rapid clicks build a left-to-right rainbow cycle; faster
-clicks increase colour intensity and cycling speed (at most three revolutions per
-second). Hue position is continuous across clicks, then slows and fades back to
-the normal palette; explicitly themed splash colours keep their hue. This is
+the baseline and other six bars never move. Quicker clicks turn the pair of blinks
+into a flutter without restarting either eye mid-blink. As clicks slow or stop,
+the eyes ease back to their normal tempo and finish the current pair. There are
+no idle blinks.
+The existing 2.2-second highlight sweep accompanies it. Faster clicks also spin
+a left-to-right rainbow faster (at most three revolutions per second). The
+rainbow blends in without jumping in hue or intensity at a click, then slows and
+fades back to the normal palette; explicitly themed splash colours keep their hue. This is
 truecolor, animation-enabled decoration only. The existing scheduler owns the click reaction
 clock; there is no idle animation timer. Painted-frame geometry fences clicks; hidden,
 replaced, resized or historical marks stop animating. Terminal-owned uncaptured

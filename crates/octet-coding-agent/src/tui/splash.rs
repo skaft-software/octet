@@ -45,8 +45,7 @@ pub(crate) fn render_reaction(
     theme: &OctetTheme,
     elapsed: f32,
     blink_elapsed: f32,
-    strength: f32,
-    phase: f32,
+    rainbow: (f32, f32),
     model_accent: Option<(u8, u8, u8)>,
     solid_color: Option<(u8, u8, u8)>,
 ) -> Vec<String> {
@@ -57,7 +56,7 @@ pub(crate) fn render_reaction(
         elapsed,
         model_accent,
         solid_color,
-        (strength, phase + rainbow_travel(elapsed, strength)),
+        rainbow,
         Some(blink_elapsed),
     )
 }
@@ -65,8 +64,17 @@ pub(crate) fn render_reaction(
 /// Integrated, decelerating hue travel in six-stop rainbow units. Keep the
 /// phase across clicks so accelerating never jumps back to the first colour.
 pub(crate) fn rainbow_travel(elapsed: f32, strength: f32) -> f32 {
+    1.5 * elapsed.min(DURATION) + 16.5 * strength * coasting_travel(elapsed)
+}
+
+/// Speed up the existing two-blink stroke by up to 60%, then ease back.
+pub(crate) fn blink_travel(elapsed: f32, strength: f32) -> f32 {
+    elapsed + 0.60 * strength * coasting_travel(elapsed)
+}
+
+fn coasting_travel(elapsed: f32) -> f32 {
     let t = elapsed.min(DURATION);
-    1.5 * t + 16.5 * strength * (t - t * t / (2.0 * DURATION))
+    t * (1.0 - t / (2.0 * DURATION))
 }
 
 /// A quick squeeze followed by a softer second blink. Smoothstep gives each
@@ -174,11 +182,7 @@ fn render_mark(
                     let phase = (column as f32 * 0.75 - rainbow.1).rem_euclid(6.0);
                     let index = phase as usize;
                     let hue = mix(RAINBOW[index], RAINBOW[(index + 1) % 6], phase.fract());
-                    color = mix(
-                        color,
-                        hue,
-                        rainbow.0 * (1.0 - elapsed / DURATION).clamp(0.0, 1.0),
-                    );
+                    color = mix(color, hue, rainbow.0);
                 }
                 let eye = if theme.unicode() {
                     [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][level]
@@ -589,7 +593,7 @@ mod reaction_tests {
     fn rainbow_moves_right_accelerates_with_energy_and_coasts_down() {
         let theme = crate::tui::theme::test_theme();
         let colors = |phase| {
-            render_reaction(&theme, 0.0, 0.0, 1.0, phase, None, None)[1]
+            render_reaction(&theme, 0.0, 0.0, (1.0, phase), None, None)[1]
                 .split("\x1b[38;2;")
                 .skip(1)
                 .map(|part| part.split('m').next().unwrap().to_owned())
@@ -624,7 +628,12 @@ mod reaction_tests {
         for elapsed in [0.0, BLINK_DURATION, 1.2] {
             assert_eq!(
                 plain(render_reaction(
-                    &theme, elapsed, elapsed, 0.0, 0.0, None, None
+                    &theme,
+                    elapsed,
+                    elapsed,
+                    (0.0, 0.0),
+                    None,
+                    None
                 )),
                 [" ██ ████", "████████"]
             );
@@ -632,7 +641,12 @@ mod reaction_tests {
         for ms in 0..=1000 {
             let elapsed = ms as f32 / 1000.0;
             let rows = plain(render_reaction(
-                &theme, elapsed, elapsed, 0.0, 0.0, None, None,
+                &theme,
+                elapsed,
+                elapsed,
+                (0.0, 0.0),
+                None,
+                None,
             ));
             assert_eq!(rows[0].chars().count(), 8);
             assert_eq!(rows[1], "████████");
@@ -646,20 +660,24 @@ mod reaction_tests {
                     &theme,
                     elapsed,
                     elapsed - 0.08,
-                    0.0,
-                    0.0,
+                    (0.0, 0.0),
                     None,
                     None,
                 ));
                 assert_eq!(upper[3], earlier[0].chars().next().unwrap());
             }
         }
-        let half = plain(render_reaction(&theme, 0.08, 0.08, 0.0, 0.0, None, None));
+        let half = plain(render_reaction(&theme, 0.08, 0.08, (0.0, 0.0), None, None));
         assert_eq!(half, ["▄██ ████", "████████"]);
         for elapsed in [0.16, 0.62] {
             assert_eq!(
                 plain(render_reaction(
-                    &theme, elapsed, elapsed, 0.0, 0.0, None, None
+                    &theme,
+                    elapsed,
+                    elapsed,
+                    (0.0, 0.0),
+                    None,
+                    None
                 ))[0]
                     .chars()
                     .next(),
@@ -668,17 +686,17 @@ mod reaction_tests {
         }
         let normal = render_logo(&theme, 8, 2, DURATION, None, None);
         assert_eq!(
-            render_reaction(&theme, DURATION, DURATION, 1.0, 0.0, None, None),
+            render_reaction(&theme, DURATION, DURATION, (0.0, 0.0), None, None),
             normal
         );
-        let sweep = render_reaction(&theme, 0.4, 0.4, 0.0, 0.0, None, None);
-        let rainbow = render_reaction(&theme, 0.4, 0.4, 1.0, 0.0, None, None);
+        let sweep = render_reaction(&theme, 0.4, 0.4, (0.0, 0.0), None, None);
+        let rainbow = render_reaction(&theme, 0.4, 0.4, (0.7, 0.0), None, None);
         assert_ne!(sweep, rainbow);
         assert_eq!(plain(sweep), plain(rainbow));
         let solid = Some((217, 119, 87));
         assert_eq!(
-            render_reaction(&theme, 0.4, 0.4, 0.0, 0.0, None, solid),
-            render_reaction(&theme, 0.4, 0.4, 1.0, 0.0, None, solid)
+            render_reaction(&theme, 0.4, 0.4, (0.0, 0.0), None, solid),
+            render_reaction(&theme, 0.4, 0.4, (0.7, 0.0), None, solid)
         );
     }
 }

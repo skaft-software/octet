@@ -66,7 +66,7 @@ fn default_welcome_omits_duplicate_help_across_layouts() {
     let state = shell.state.borrow();
     for width in [24, 36, 37, 80] {
         for budget in [3, 7, 10] {
-            let rows = render_welcome_content(&state, width, budget).join("\n");
+            let rows = render_welcome_content(&state, width, budget, Instant::now()).join("\n");
             assert!(!rows.contains("Ctrl+C"));
             assert!(!rows.contains("what's new"));
         }
@@ -120,7 +120,7 @@ fn placeholder_geometry_matches_materialized_rows() {
                     for budget in 0..=10 {
                         assert_eq!(
                             welcome_content_rows(&state, content_width, budget),
-                            render_welcome_content(&state, content_width, budget).len(),
+                            render_welcome_content(&state, content_width, budget, Instant::now()).len(),
                             "theme={theme_index} width={width} budget={budget} safe={safe_mode} no_model={no_model}",
                         );
                     }
@@ -128,7 +128,7 @@ fn placeholder_geometry_matches_materialized_rows() {
                 state.overlay = Some(crate::tui::view::ShellOverlay::Text("overlay".into()));
                 for budget in [0, 1, 6, 7, 8, 10] {
                     assert_eq!(welcome_content_rows(&state, 80, budget), 0);
-                    assert!(render_welcome_content(&state, 80, budget).is_empty());
+                    assert!(render_welcome_content(&state, 80, budget, Instant::now()).is_empty());
                 }
                 state.overlay = None;
             }
@@ -314,7 +314,7 @@ fn welcome_exit_hint_includes_ctrl_c_across_layouts() {
     ] {
         let shell = InteractiveShell::test_shell_with_theme(theme);
         for (width, budget) in [(24, 3), (24, 7), (80, 10), (160, 10)] {
-            let rows = render_welcome_content(&shell.state.borrow(), width, budget);
+            let rows = render_welcome_content(&shell.state.borrow(), width, budget, Instant::now());
             let plain = strip_terminal_sequences(&rows.join("\n"));
             assert_eq!(
                 plain.contains("Ctrl+C / Ctrl+D to exit"),
@@ -461,7 +461,7 @@ fn narrow_welcome_stacks_before_permissions_or_exit_help_would_clip() {
         for safe_mode in [false, true] {
             shell.state.borrow_mut().safe_mode = safe_mode;
             for width in 24..=80 {
-                let rows = render_welcome_content(&shell.state.borrow(), width, 10);
+                let rows = render_welcome_content(&shell.state.borrow(), width, 10, Instant::now());
                 let plain = strip_terminal_sequences(&rows.join("\n"));
                 let access = if safe_mode {
                     "safe mode"
@@ -499,7 +499,8 @@ fn tiny_welcome_sheds_permission_prefix_before_access_text() {
                     "full access"
                 };
                 for width in access.len() as u16..24 {
-                    let rows = render_welcome_content(&shell.state.borrow(), width, 10);
+                    let rows =
+                        render_welcome_content(&shell.state.borrow(), width, 10, Instant::now());
                     let plain = strip_terminal_sequences(&rows.join("\n"));
                     assert!(plain.contains(access), "width={width}: {plain}");
                     assert!(rows
@@ -526,7 +527,8 @@ fn compact_themes_keep_welcome_within_row_budget() {
         );
         for width in [24, 36, 37, 38, 39, 40, 48, 80] {
             for budget in 0..=10 {
-                let rows = render_welcome_content(&shell.state.borrow(), width, budget);
+                let rows =
+                    render_welcome_content(&shell.state.borrow(), width, budget, Instant::now());
                 assert!(
                     rows.len() <= budget,
                     "width={width}, budget={budget}: {rows:?}"
@@ -892,35 +894,28 @@ fn click_reaction_is_local_bounded_and_stops() {
     for n in 1..20 {
         let previous = state.welcome_reaction.unwrap();
         let next_time = now + std::time::Duration::from_millis(n * 50);
-        let expected_phase = (previous.phase
-            + crate::tui::splash::rainbow_travel(
-                next_time.duration_since(previous.started).as_secs_f32(),
-                previous.strength,
-            ))
-        .rem_euclid(6.0);
-        assert!(click_mark(
-            &mut state,
-            x,
-            y,
-            now + std::time::Duration::from_millis(n * 50)
-        ));
-        assert!((state.welcome_reaction.unwrap().phase - expected_phase).abs() < 0.0001);
-        let blink_started = state.welcome_reaction.unwrap().blink_started;
-        if next_time
-            .duration_since(previous.blink_started)
-            .as_secs_f32()
-            < crate::tui::splash::BLINK_DURATION
-        {
-            assert_eq!(
-                blink_started, previous.blink_started,
-                "rapid clicks must not freeze the face"
-            );
+        let gap = next_time.duration_since(previous.started).as_secs_f32();
+        assert!(click_mark(&mut state, x, y, next_time));
+        let next = state.welcome_reaction.unwrap();
+        assert_eq!(next.rainbow_phase(0.0), previous.rainbow_phase(gap));
+        assert_eq!(next.rainbow_mix(0.0), previous.rainbow_mix(gap));
+        let blink_phase = previous.blink_time(gap);
+        let expected = if blink_phase < splash::BLINK_DURATION {
+            blink_phase
         } else {
-            assert_eq!(blink_started, next_time);
-        }
+            0.0
+        };
+        assert_eq!(
+            next.blink_time(0.0),
+            expected,
+            "don't reset a blink halfway through"
+        );
     }
-    assert!(state.welcome_reaction.unwrap().strength > 0.9);
-    assert!(state.welcome_reaction.unwrap().strength <= 1.0);
+    let reaction = state.welcome_reaction.unwrap();
+    assert_eq!(reaction.strength, 1.0);
+    assert!((0.5..=0.7).contains(&reaction.rainbow_mix(0.16)));
+    assert!(reaction.rainbow_mix(1.0) < reaction.rainbow_mix(0.16));
+    assert_eq!(reaction.rainbow_mix(splash::DURATION), 0.0);
     advance_reaction(&mut state, now + std::time::Duration::from_secs(4));
     assert!(state.welcome_reaction.is_none());
     assert!(click_mark(&mut state, x, y, now));
@@ -928,6 +923,88 @@ fn click_reaction_is_local_bounded_and_stops() {
     assert!(!click_mark(&mut state, x, y, now));
     advance_reaction(&mut state, now);
     assert!(state.welcome_reaction.is_none());
+}
+
+#[test]
+fn splash_rainbow_follows_click_cadence_in_both_directions() {
+    use std::time::Duration;
+
+    let shell = splash_session("fresh");
+    let (x, y) = paint_mark(&shell);
+    let mut now = Instant::now();
+    let mut state = shell.state.borrow_mut();
+    assert!(click_mark(&mut state, x, y, now));
+    let mut strength = 0.0;
+    for (gap, faster) in [
+        (320, true),
+        (240, true),
+        (160, true),
+        (80, true),
+        (160, false),
+        (320, false),
+    ] {
+        now += Duration::from_millis(gap);
+        assert!(click_mark(&mut state, x, y, now));
+        let next = state.welcome_reaction.unwrap().strength;
+        assert!(
+            if faster {
+                next > strength
+            } else {
+                next < strength
+            },
+            "at {gap} ms: {strength} -> {next}"
+        );
+        strength = next;
+    }
+}
+
+#[test]
+fn splash_eyes_flutter_faster_then_settle() {
+    use std::time::Duration;
+
+    let shell = splash_session("fresh");
+    let (x, y) = paint_mark(&shell);
+    let start = Instant::now();
+    let mut state = shell.state.borrow_mut();
+    let resting = render_welcome_card(&state, 80, 10, start);
+    let left_eye = |card: &[String]| {
+        strip_terminal_sequences(&card[usize::from(y)])
+            .chars()
+            .nth(usize::from(x))
+            .unwrap()
+    };
+    assert_eq!(left_eye(&resting), ' ');
+    let mut blinks = [0; 3];
+    let mut closed = false;
+    // Sample the production 40 ms frame cadence: quick clicks, slower clicks,
+    // then no clicks. The final interval is long enough to finish the reaction.
+    for ms in (0..=7200).step_by(40) {
+        let now = start + Duration::from_millis(ms);
+        let interval = if ms < 2400 {
+            0
+        } else if ms < 4800 {
+            1
+        } else {
+            2
+        };
+        if (interval == 0 && ms % 80 == 0) || (interval == 1 && ms % 400 == 0) {
+            assert!(click_mark(&mut state, x, y, now));
+        }
+        let card = render_welcome_card(&state, 80, 10, now);
+        let eye_closed = left_eye(&card) == '█';
+        if eye_closed && !closed {
+            blinks[interval] += 1;
+        }
+        closed = eye_closed;
+    }
+    assert!(
+        blinks[0] >= blinks[1] + 2 && blinks[1] > blinks[2],
+        "blinks: {blinks:?}"
+    );
+    assert_eq!(
+        render_welcome_card(&state, 80, 10, start + Duration::from_millis(7200)),
+        resting
+    );
 }
 
 #[test]
@@ -1064,7 +1141,7 @@ fn assert_splash_double_click_mark(mode: &str) {
         let mut state = shell.state.borrow_mut();
         let reaction = state.welcome_reaction.as_mut().expect("live mark reacts");
         reaction.started = Instant::now() - std::time::Duration::from_millis(140);
-        reaction.blink_started = reaction.started;
+        reaction.blink_phase = 0.0;
         state.invalidate_transcript();
         drop(state);
         shell.render_written_test_frame();

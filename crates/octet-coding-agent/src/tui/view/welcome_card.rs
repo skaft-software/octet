@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use super::{fit_line, ShellState, TranscriptBlock};
-use crate::tui::layout::PresentationLayout;
+use crate::tui::{layout::PresentationLayout, splash};
 
 // Fixed semantic text columns, not overall card heights. The materializer's
 // arrays use these sizes so geometry cannot drift from their row cardinality.
@@ -31,9 +31,56 @@ fn changelog_hint(state: &ShellState, width: u16) -> String {
 #[derive(Clone, Copy)]
 pub(super) struct MarkReaction {
     started: Instant,
-    blink_started: Instant,
     strength: f32,
     phase: f32,
+    start_mix: f32,
+    blink_phase: f32,
+}
+
+impl MarkReaction {
+    fn clicked(previous: Option<Self>, now: Instant) -> Self {
+        let mut next = Self {
+            started: now,
+            strength: 0.0,
+            phase: 0.0,
+            start_mix: 0.0,
+            blink_phase: 0.0,
+        };
+        if let Some(previous) = previous {
+            let gap = now.duration_since(previous.started).as_secs_f32();
+            if gap < splash::DURATION {
+                // Measure the latest cadence instead of accumulating energy: a slower
+                // click can turn both clocks down, even after a sustained fast burst.
+                next.strength = ((0.60 - gap) / (0.60 - 0.08)).clamp(0.0, 1.0);
+                next.phase = previous.rainbow_phase(gap);
+                next.start_mix = previous.rainbow_mix(gap);
+                let blink_phase = previous.blink_time(gap);
+                // Change tempo without interrupting either eye. A fresh pair can
+                // start only once both eyes have reopened.
+                if blink_phase < splash::BLINK_DURATION {
+                    next.blink_phase = blink_phase;
+                }
+            }
+        }
+        next
+    }
+
+    fn rainbow_phase(self, elapsed: f32) -> f32 {
+        (self.phase + splash::rainbow_travel(elapsed, self.strength)).rem_euclid(6.0)
+    }
+
+    fn rainbow_mix(self, elapsed: f32) -> f32 {
+        // Ease toward the new blend over 120 ms, keeping some of the base palette
+        // even at full speed. With no further clicks it fades entirely.
+        let t = (elapsed / 0.12).min(1.0);
+        let ease = t * t * (3.0 - 2.0 * t);
+        let mix = self.start_mix + (0.70 * self.strength - self.start_mix) * ease;
+        mix * (1.0 - elapsed / splash::DURATION).max(0.0)
+    }
+
+    fn blink_time(self, elapsed: f32) -> f32 {
+        self.blink_phase + splash::blink_travel(elapsed, self.strength)
+    }
 }
 
 /// Only a visible native compact mark owns this interaction. Remote headers
@@ -108,33 +155,7 @@ pub(super) fn click_mark(state: &mut ShellState, column: u16, row: u16, now: Ins
     if !interactive_mark(state) {
         return true;
     }
-    let strength = state.welcome_reaction.map_or(0.0, |previous| {
-        let gap = now.duration_since(previous.started).as_secs_f32();
-        (previous.strength * (1.0 - gap / 0.8).max(0.0) + (1.0 - gap / 0.6).max(0.0) * 0.45)
-            .min(1.0)
-    });
-    let phase = state.welcome_reaction.map_or(0.0, |previous| {
-        (previous.phase
-            + crate::tui::splash::rainbow_travel(
-                now.duration_since(previous.started).as_secs_f32(),
-                previous.strength,
-            ))
-        .rem_euclid(6.0)
-    });
-    // Let an in-flight expression finish even while clicks rev the rainbow.
-    let blink_started = state
-        .welcome_reaction
-        .filter(|previous| {
-            now.duration_since(previous.blink_started).as_secs_f32()
-                < crate::tui::splash::BLINK_DURATION
-        })
-        .map_or(now, |previous| previous.blink_started);
-    state.welcome_reaction = Some(MarkReaction {
-        started: now,
-        blink_started,
-        strength,
-        phase,
-    });
+    state.welcome_reaction = Some(MarkReaction::clicked(state.welcome_reaction, now));
     state.invalidate_transcript();
     true
 }
@@ -150,7 +171,7 @@ pub(super) fn reaction_active(state: &ShellState) -> bool {
 pub(super) fn advance_reaction(state: &mut ShellState, now: Instant) {
     if let Some(reaction) = state.welcome_reaction {
         if !reaction_active(state)
-            || now.duration_since(reaction.started).as_secs_f32() >= crate::tui::splash::DURATION
+            || now.duration_since(reaction.started).as_secs_f32() >= splash::DURATION
         {
             state.welcome_reaction = None;
         }
@@ -185,14 +206,14 @@ pub(super) fn render_welcome_card(
     state: &ShellState,
     width: u16,
     max_rows: usize,
-    _now: Instant,
+    now: Instant,
 ) -> Vec<String> {
     if state.startup_card_started_at.is_none() {
         return Vec::new();
     }
     let layout = PresentationLayout::new(&state.theme, width);
     let inset = " ".repeat(usize::from(layout.inset));
-    render_welcome_content(state, layout.content_width, max_rows)
+    render_welcome_content(state, layout.content_width, max_rows, now)
         .into_iter()
         .map(|line| {
             if line.is_empty() {
@@ -351,7 +372,12 @@ fn welcome_row_budget_for_composer(state: &ShellState, width: u16, composer_rows
         .min(10)
 }
 
-fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Vec<String> {
+fn render_welcome_content(
+    state: &ShellState,
+    width: u16,
+    max_rows: usize,
+    now: Instant,
+) -> Vec<String> {
     #[cfg(test)]
     WELCOME_MATERIALIZATIONS.set(WELCOME_MATERIALIZATIONS.get() + 1);
     if state.overlay.is_some() || max_rows == 0 {
@@ -407,9 +433,6 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
     // geometry with `splash_compact = true`. Everything else keeps the
     // larger file-theme presentation.
     let (rows, logo_width, text_width) = splash_geometry(state, width);
-    // Startup identity is static unless its visible mark was clicked.
-    // Historical prefixes never acquire a decorative clock.
-    let elapsed = crate::tui::splash::DURATION;
     // A theme can also keep the default's model-adaptive splash with
     // `splash_model_adaptive = true`. It owns the whole splash: the byte-mark
     // follows the active model family and the text falls back to the same
@@ -427,27 +450,32 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
     let splash_color = (!model_adaptive_splash)
         .then(|| state.theme.role_rgb("splash"))
         .flatten();
-    let mut logo = crate::tui::splash::render_logo(
-        &state.theme,
-        logo_width,
-        rows,
-        elapsed,
-        adaptive_accent,
-        splash_color,
-    );
-    if interactive_mark(state) {
-        if let Some(reaction) = state.welcome_reaction {
-            logo = crate::tui::splash::render_reaction(
+    // Startup identity is static unless its visible mark was clicked.
+    // Historical prefixes never acquire a decorative clock.
+    let mut logo =
+        if let Some(reaction) = state.welcome_reaction.filter(|_| interactive_mark(state)) {
+            let elapsed = now.duration_since(reaction.started).as_secs_f32();
+            splash::render_reaction(
                 &state.theme,
-                reaction.started.elapsed().as_secs_f32(),
-                reaction.blink_started.elapsed().as_secs_f32(),
-                reaction.strength,
-                reaction.phase,
+                elapsed,
+                reaction.blink_time(elapsed),
+                (
+                    reaction.rainbow_mix(elapsed),
+                    reaction.rainbow_phase(elapsed),
+                ),
                 adaptive_accent,
                 splash_color,
-            );
-        }
-    }
+            )
+        } else {
+            splash::render_logo(
+                &state.theme,
+                logo_width,
+                rows,
+                splash::DURATION,
+                adaptive_accent,
+                splash_color,
+            )
+        };
     let splash_text = |text: &str| {
         splash_color
             .map(|_| state.theme.fg("splash", text))
@@ -480,11 +508,11 @@ fn render_welcome_content(state: &ShellState, width: u16, max_rows: usize) -> Ve
             let logo = if rows == 2 {
                 logo
             } else {
-                crate::tui::splash::render_logo(
+                splash::render_logo(
                     &state.theme,
                     8,
                     2,
-                    elapsed,
+                    splash::DURATION,
                     adaptive_accent,
                     splash_color,
                 )

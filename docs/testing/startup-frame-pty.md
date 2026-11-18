@@ -223,14 +223,15 @@ settlement, stale resize geometry, reduced motion, lower colour capabilities,
 and preservation of explicitly themed hues. These are terminal-byte/VT checks,
 not attended visual acceptance.
 
-Blinks ease through partial-height blocks in the two upper eye cells: a quick
-squeeze and a softer second blink, each holding closed for 80 ms before a
-slower reopening. The right eye trails the left by 80 ms. Unit tests check that
-exact offset, fixed baseline and six full-height bars, canonical rest geometry,
-and uninterrupted blink timing across rapid clicks. Blinking is click-only:
-the welcome does not schedule idle animation or redraw while waiting for input.
+Blinks ease through partial-height blocks in the two upper eye cells. On a single
+click the right eye trails the left by 80 ms, and each eye holds closed for 80 ms
+before a slower reopening. Unit tests check the exact single-click shape and
+offset, fixed baseline and six full-height bars, and canonical rest geometry.
+At the renderer's 40 ms cadence, faster clicks produce more blinks, slower clicks
+reduce the rate, and in-flight blinks finish without resetting on a click.
+Blinking is click-only: the welcome does not schedule idle animation.
 
 Rainbow regressions check left-to-right colour travel, seamless wrapping,
-phase continuity between clicks, faster cycling at higher click energy, and
-smooth deceleration after release. Cycling speed is bounded at three revolutions
-per second; no frame queue or physics runtime is used.
+continuity of hue and blend across clicks, faster cycling at higher click cadence,
+and deceleration as clicks slow or stop. Cycling speed is bounded at three
+revolutions per second; no frame queue or physics runtime is used.
