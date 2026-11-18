@@ -11,6 +11,7 @@
 - Scrolled transcripts show a clickable Jump to bottom button with a count of new output.
 - Local video goes to image-capable models as four timestamped frames; Gemini receives video natively.
 - Rust embedders can use octet's provider, tool and extension-host crates on their own, as described in the provider embedding guide.
+- GPT-6.2 Sol and GPT-6.2 Astra are available on OpenAI and Codex, with their API prices and long-context tier.
 
 ### Changed
 

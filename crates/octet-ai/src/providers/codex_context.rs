@@ -18,7 +18,13 @@ pub const CODEX_CONTEXT_OVERRIDE_ENV: &str = "OCTET_CODEX_CONTEXT_WINDOW";
 pub fn codex_gpt_6_model(model_id: &str) -> bool {
     matches!(
         model_id,
-        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna"
+        "gpt-6-astra"
+            | "gpt-6-sol"
+            | "gpt-6.1-sol"
+            | "gpt-6.1-terra"
+            | "gpt-6-luna"
+            | "gpt-6.2-sol"
+            | "gpt-6.2-astra"
     )
 }
 
