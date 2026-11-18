@@ -117,6 +117,27 @@ pub(super) fn finish_preparation(
                     entrypoint.env.insert(name.into(), value.clone());
                 }
             }
+            // Pi Claude Code's provider resolves only these local executable and
+            // configuration selectors. Keep them in the reviewed adapter
+            // process; neither the native provider runtime nor tools inherit them.
+            for name in [
+                "PI_CLAUDE_CODE_COMMAND",
+                "PI_CLAUDE_CODE_CONFIG_DIR",
+                "PI_CLAUDE_CODE_POWERSHELL",
+                "CLAUDE_CONFIG_DIR",
+            ] {
+                if let Some(value) = descriptor
+                    .manifest
+                    .entrypoint
+                    .env
+                    .get(name)
+                    .cloned()
+                    .or_else(|| std::env::var(name).ok())
+                    .filter(|value| !value.is_empty())
+                {
+                    entrypoint.env.insert(name.into(), value);
+                }
+            }
             descriptor.manifest.entrypoint = entrypoint;
             descriptor.manifest.contributes = manifest.contributes;
             descriptor.manifest.capabilities = manifest.capabilities;
@@ -282,6 +303,11 @@ mod tests {
             .entrypoint
             .env
             .insert("UNRELATED".into(), "not-forwarded".into());
+        descriptor
+            .manifest
+            .entrypoint
+            .env
+            .insert("PI_CLAUDE_CODE_COMMAND".into(), "/reviewed/fixture".into());
         let mut prepared = descriptor.manifest.clone();
         prepared.entrypoint.env.clear();
         prepared
@@ -306,6 +332,10 @@ mod tests {
             &selected.to_string_lossy()
         );
         assert!(!descriptor.manifest.entrypoint.env.contains_key("UNRELATED"));
+        assert_eq!(
+            descriptor.manifest.entrypoint.env["PI_CLAUDE_CODE_COMMAND"],
+            "/reviewed/fixture"
+        );
         assert_eq!(
             settings_binding(&descriptor, selected.parent().unwrap(), false)
                 .unwrap()

@@ -226,7 +226,9 @@
         "surface": "authority"
       },
       "createProvider": {
-        "surface": "authority"
+        "surface": "inert",
+        "route": "models.js",
+        "source": "installed"
       },
       "declarationsEqual": {
         "surface": "inert",

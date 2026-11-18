@@ -43,8 +43,8 @@ fn provider_preflight_config_excludes_non_provider_extensions() {
     std::fs::write(
         provider.join(EXTENSION_MANIFEST_FILENAME),
         r#"name = "provider"
-version = "0.3.0"
-api_version = "0.3"
+version = "0.4.0"
+api_version = "0.4"
 
 [entrypoint]
 command = "must-not-run"

@@ -84,7 +84,8 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
     const [role, body] = variant(message, 'canonical message');
     if (role === 'Assistant') {
       record(body, ['content', 'model', 'protocol'], 'canonical assistant');
-      if (!apis[body.protocol]) unsupported(`context protocol ${body.protocol}`);
+      const api = body.protocol === 'extension_stream' ? 'extension-stream' : apis[body.protocol];
+      if (!api) unsupported(`context protocol ${body.protocol}`);
       const content = array(body.content, 'assistant content').map(part => {
         const [kind, value] = variant(part, 'assistant part');
         if (kind === 'Text') return { type: 'text', text: text(value) };
@@ -158,7 +159,7 @@ export function canonicalToPi(messages, calls = new Map(), { observation = false
       });
       // Canonical messages carry neither timestamps nor provider usage. Do not
       // fabricate those facts or assign the current route to historical output.
-      output.push({ role: 'assistant', model: name(body.model), api: apis[body.protocol], content });
+      output.push({ role: 'assistant', model: name(body.model), api, content });
     } else if (role === 'User') {
       record(body, ['content'], 'canonical user');
       let content = [];

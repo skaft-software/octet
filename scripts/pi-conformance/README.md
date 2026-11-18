@@ -58,6 +58,25 @@ Environment: `E2E_OCTET` (default `target/release/octet`), `E2E_NODE_BIN`,
 `E2E_TMP`, `E2E_WIRE=<prefix>` (fixture wire trace), `E2E_CPUS` (optional Linux CPU
 set, applied to the correct executable on both hosts).
 
+## Claude Code process provider smoke
+
+With the adapter dependencies installed, an Octet candidate binary, Pi 1.5.2's
+installed package directory, and the unmodified `pi-claude-code` checkout at
+`d5b5e04c314d3452d357174d16d10dda34daa2d2`:
+
+```sh
+python3 -B scripts/pi-conformance/claude-code.py \
+  --octet /absolute/path/to/octet \
+  --pi-install /absolute/path/to/pi/releases/1.5.2 \
+  --package /absolute/path/to/pi-claude-code \
+  --out /absolute/new/evidence
+```
+
+Uses a fake CLI and temporary profiles. Checks status without inference,
+model selection by provider/model, plain text, native tool execution and the
+follow-up request, and signed and redacted thinking without replay-signature
+persistence. It does not test live authentication or account model discovery.
+
 ## Evidence format (schema 1)
 
 - `run.json`: source HEAD/dirty flag, binary SHA-256, platform/runtime versions,

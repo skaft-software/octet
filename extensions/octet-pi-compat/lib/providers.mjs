@@ -45,7 +45,9 @@ const extensionStreamApis = new Map();
 const extensionStreamKey = (provider, id) => JSON.stringify([provider, id]);
 export function modelView(view, runtime) {
   if (!view) return undefined;
-  const declared = runtime && providers(runtime).committed.get(view.provider)?.models?.find(model => model.pi.id === view.id)?.pi;
+  const entry = runtime && providers(runtime).committed.get(view.provider);
+  const declared = entry?.models?.find(model => model.pi.id === view.id)?.pi;
+  if (entry?.custom && declared && view.api === 'extension-stream') return structuredClone(declared);
   const api = view.api === 'extension-stream' ? extensionStreamApis.get(extensionStreamKey(view.provider, view.id)) ?? view.api : view.api;
   return {
     id: view.id, ...(view.name ? { name: view.name } : {}), api,
@@ -191,7 +193,8 @@ function providerBaseUrl(value) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) unsupported('provider baseUrl', 'credential/query/fragment URLs cannot enter host facts');
   return baseUrl;
 }
-function declaration(name, config, factory, inherited = false) {
+function declaration(name, config, factory, mode = 'legacy') {
+  const inherited = mode === 'inherited';
   bounded(name, 'provider name', 64);
   if (!/^[a-z][a-z0-9_-]*$/.test(name)) unsupported('provider name', 'native provider names must be lowercase ASCII identifiers');
   fields(config, ['baseUrl', 'apiKey', 'api', 'models', 'streamSimple'], 'registerProvider config');
@@ -201,9 +204,14 @@ function declaration(name, config, factory, inherited = false) {
   // brings its own streamSimple: the stream is the extension's, and the host
   // carries it only as an extension-owned route.
   const ownStream = typeof config.streamSimple === 'function' && !inherited;
-  const protocolFor = api => protocols[api] ?? (ownStream && typeof api === 'string' && /^[a-z][a-z0-9._-]{0,63}$/.test(api) ? 'extension_stream' : undefined);
+  const protocolFor = api => Object.hasOwn(protocols, api) ? protocols[api] : (ownStream && typeof api === 'string' && /^[a-z][a-z0-9._-]{0,63}$/.test(api) ? 'extension_stream' : undefined);
   if (config.api !== undefined && !protocolFor(config.api)) unsupported(`provider API ${config.api}`);
-  const baseUrl = providerBaseUrl(config.baseUrl);
+  // Pi 1.5.2 pi-ai/dist/models.js:576-584 dispatches the registered
+  // implementation by its own API. Its private process endpoint is not a
+  // URL the host should resolve or publish in model facts.
+  const processMarker = `process://${name}`;
+  const localBaseUrl = (value, api) => mode === 'object' && protocolFor(api) === 'extension_stream' && value === processMarker ? value : providerBaseUrl(value);
+  const baseUrl = localBaseUrl(config.baseUrl, config.api);
   if (config.apiKey !== undefined) bounded(config.apiKey, 'explicit provider key', 16384, { controls: true });
   if (config.models === undefined) return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, inherited: true };
   if (typeof config.streamSimple !== 'function') unsupported('registerProvider', 'a custom streamSimple is required for explicit models');
@@ -219,20 +227,20 @@ function declaration(name, config, factory, inherited = false) {
       for (const value of Object.values(map)) if (value !== null) bounded(value, 'model thinkingLevelMap value', 256);
       model.thinkingLevelMap = map;
     }
-    const modelBaseUrl = providerBaseUrl(model.baseUrl ?? baseUrl);
-    bounded(model.id, 'model id', inherited ? 256 : 64); if (!model.id) invalid('empty model id'); if (ids.has(model.id)) invalid('duplicate provider model id'); ids.add(model.id);
+    const modelBaseUrl = localBaseUrl(model.baseUrl ?? baseUrl, model.api ?? config.api);
+    bounded(model.id, 'model id', mode === 'legacy' ? 64 : 256); if (!model.id) invalid('empty model id'); if (ids.has(model.id)) invalid('duplicate provider model id'); ids.add(model.id);
     bounded(model.name, 'model name', 128);
     const api = model.api ?? config.api;
     if (!protocolFor(api)) unsupported(`provider API ${api}`, 'only negotiated native provider identities or extension-owned streams are representable');
-    if (!protocols[api]) extensionStreamApis.set(extensionStreamKey(name, model.id), api);
+    if (mode === 'legacy' && protocolFor(api) === 'extension_stream') extensionStreamApis.set(extensionStreamKey(name, model.id), api);
     if (typeof model.reasoning !== 'boolean') invalid('model reasoning must be boolean');
     if (!Array.isArray(model.input) || !model.input.includes('text') || model.input.length > 2 || new Set(model.input).size !== model.input.length || model.input.some(x => !['text', 'image'].includes(x))) invalid('model input must be text and optionally image');
     if (![model.contextWindow, model.maxTokens].every(x => Number.isSafeInteger(x) && x > 0) || model.maxTokens > model.contextWindow) invalid('model token limits');
-    const pricing = inherited && model.cost == null ? null : providerPricing(model.cost);
+    const pricing = mode !== 'legacy' && model.cost == null ? null : providerPricing(model.cost);
     const reasoningOptions = model.reasoning && model.thinkingLevelMap !== undefined ? { values: getSupportedThinkingLevels(model), default: null } : undefined;
     if (reasoningOptions?.values.length === 0) unsupported('model thinkingLevelMap', 'no selectable reasoning level');
     return { pi: { ...plainJSON(model, 'provider model'), api, provider: name, baseUrl: modelBaseUrl }, wire: { id: `m-${createHash('sha256').update(model.id).digest('hex').slice(0, 32)}`, api_name: model.id, display_name: model.name, protocol: protocolFor(api), context_window: model.contextWindow, max_output_tokens: model.maxTokens,
-      capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: modelBaseUrl, input: [...model.input], pricing,
+      capabilities: { tools: true, parallel_tool_calls: true, structured_output: false, reasoning: model.reasoning }, pi_metadata: { base_url: modelBaseUrl === processMarker ? '' : modelBaseUrl, input: [...model.input], pricing,
         ...(reasoningOptions === undefined ? {} : { reasoning_options: reasoningOptions }) } } };
   });
   return { name, factory, config, stream: config.streamSimple, apiKey: config.apiKey, models,
@@ -256,7 +264,7 @@ async function commit(runtime, entry) {
     const models = result.models.filter(model => !entry.nativeModelIds || entry.nativeModelIds.has(model.id)).map(({ provider, baseUrl, ...model }) => model);
     if (models.some(model => model.api === 'google-generative-ai')) runtime.require('provider_google_generative_ai_v1');
     if (models.length) {
-      const inherited = declaration(entry.name, { ...entry.config, models, streamSimple: entry.stream ?? nativeProviderDelegate }, entry.factory, true);
+      const inherited = declaration(entry.name, { ...entry.config, models, streamSimple: entry.stream ?? nativeProviderDelegate }, entry.factory, 'inherited');
       entry = { ...entry, ...inherited, inherited: true, config: entry.config, native: entry.native };
       for (const model of entry.wire.models) model.pi_metadata.inherit_provider = entry.name;
     } else {
@@ -371,7 +379,7 @@ export function startProviderRegistration(runtime) {
     await runtime.transport.notify('providers/complete', {});
   }).catch(error => runtime.backgroundError(error));
 }
-function requestContext(request, runtime) {
+function requestContext(request, runtime, entry, model) {
   if ((request.tool_choice !== 'auto' && !(request.tool_choice === 'none' && !request.tools?.length)) || request.stop?.length || request.responses != null || request.output_format?.type !== 'text' || (request.reasoning_mode !== undefined && request.reasoning_mode !== 'standard')) unsupported('provider request', 'tool constraints, stop sequences, Responses replay and structured output are not supported by streamSimple');
   const tools = (request.tools || []).map(tool => {
     if (tool.async || tool.constrained_sampling != null) unsupported('provider tool', 'async/constrained sampling cannot be dropped');
@@ -386,7 +394,16 @@ function requestContext(request, runtime) {
   // ride in a leading system message). Use the pinned pure helper, not an
   // installed runtime. Projection is O(B + M + T) time/space for payload bytes,
   // messages and tools; normalization adds only O(M) message references.
-  return normalizeContext({ systemPrompt: request.system ?? undefined, messages: canonicalToPi(request.messages), ...(tools.length ? { tools } : {}) });
+  const messages = canonicalToPi(request.messages);
+  if (model.wire.protocol === 'extension_stream') {
+    const route = `${entry.name}/${model.wire.id}`;
+    for (const message of messages) if (message.role === 'assistant' && message.api === 'extension-stream' && message.model === route) {
+      // Resolve only the currently admitted route; don't label somebody
+      // else's history as this provider's response.
+      Object.assign(message, { provider: entry.name, api: model.pi.api, model: model.pi.id });
+    }
+  }
+  return normalizeContext({ systemPrompt: request.system ?? undefined, messages, ...(tools.length ? { tools } : {}) });
 }
 // Pure parser from Pi 1.0.2 core/http-dispatcher.ts (MIT; ../LICENSE.pi).
 // O(S) time/space for a string of S characters, O(1) for a numeric value.
@@ -460,7 +477,7 @@ export async function prepareProviderStream(runtime, params, store) {
     runtime.require('provider_request_hooks_v1');
   }
   const preparedAt = traceEnabled ? performance.now() : 0;
-  const context = requestContext(params.request, runtime), controller = new AbortController();
+  const context = requestContext(params.request, runtime, entry, model), controller = new AbortController();
   // Pi's agent passes no maxTokens to provider streams; the model's own limit
   // applies inside the package's code exactly as under Pi.
   const options = { signal: controller.signal, apiKey: entry.apiKey, maxTokens: undefined,
@@ -490,6 +507,13 @@ export function startProviderStream(runtime, id) {
     job.controller.signal.throwIfAborted();
     const blocks = new Map(); let started = false, finished = false;
     let model = structuredClone(job.model.pi);
+    // Opaque state from a process-owned custom API never enters host history.
+    // Pi's reasoning block can still be represented as visible text; the
+    // redacted block has no visible delta. Keep the strict native/HTTP checks.
+    const localProcess = job.entry.custom && job.model.wire.protocol === 'extension_stream' && model.baseUrl === `process://${job.entry.name}`;
+    const rejectsOpaque = (part, index) => (part.thinkingSignature || part.textSignature || part.redacted)
+      && !(localProcess && part.type === 'thinking' && !part.textSignature)
+      && !isDeepStrictEqual(part, job.nativeMessage?.content[index]);
     if (job.entry.custom) {
       const signal = AbortSignal.any([job.controller.signal, job.entry.controller.signal]);
       const resolution = await resolveCustomProviderAuth(job.entry, job.options, signal);
@@ -521,7 +545,7 @@ export function startProviderStream(runtime, id) {
         const next = await Promise.race([iterator.next(), abort]);
         if (next.done) invalid('provider stream missing terminal event');
         const event = next.value;
-        if (event.partial?.content?.some((part, index) => (part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider opaque replay signatures');
+        if (event.partial?.content?.some(rejectsOpaque)) unsupported('provider opaque replay signatures');
         if (event.type === 'error') throw rpcError(-32002, 'custom provider returned an error');
         if (event.type === 'start') {
           if (started) invalid('duplicate provider start'); started = true; await emit('started', {}); continue;
@@ -533,8 +557,10 @@ export function startProviderStream(runtime, id) {
           if (!Array.isArray(message?.content) || message.content.length !== blocks.size) invalid('provider final content differs from stream');
           for (let index = 0; index < message.content.length; index++) {
             const part = message.content[index], block = blocks.get(index);
-            if (!block || ((part.thinkingSignature || part.textSignature || part.redacted) && !isDeepStrictEqual(part, job.nativeMessage?.content[index]))) unsupported('provider final content/signatures');
-            if (block.kind === 'toolcall' ? !isDeepStrictEqual(part, block.final) : part.type !== (block.kind === 'thinking' ? 'thinking' : 'text') || (part.text ?? part.thinking) !== block.text) invalid('provider final content differs from stream');
+            if (!block || rejectsOpaque(part, index)) unsupported('provider final content/signatures');
+            if (block.kind === 'toolcall' ? !isDeepStrictEqual(part, block.final) : part.type !== (block.kind === 'thinking' ? 'thinking' : 'text')
+              || (part.text ?? part.thinking) !== (block.redactedText ?? block.text)
+              || (localProcess && block.redacted !== (part.redacted === true))) invalid('provider final content differs from stream');
           }
           const usage = message.usage;
           for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']) if (!Number.isSafeInteger(usage?.[key]) || usage[key] < 0) invalid('provider usage');
@@ -548,18 +574,28 @@ export function startProviderStream(runtime, id) {
         const [, kind, phase] = match, index = event.contentIndex, native = { text: 'text', thinking: 'reasoning', toolcall: 'tool_call' }[kind];
         if (phase === 'start') {
           if (blocks.has(index)) invalid('duplicate provider content block');
-          const block = { kind, text: '', ended: false }; blocks.set(index, block);
           const part = event.partial?.content?.[index];
+          const block = { kind, text: '', ended: false, redacted: Boolean(localProcess && kind === 'thinking' && part?.redacted === true) };
+          blocks.set(index, block);
           await emit(`${native}_start`, { index, ...(kind === 'toolcall' ? { id: toolCallId(part?.id), name: identifier(part?.name, 'tool name') } : {}) });
         } else {
           const block = blocks.get(index); if (!block || block.kind !== kind || block.ended) invalid('unbalanced provider content event');
-          if (phase === 'delta') { const delta = bounded(event.delta, 'provider delta', 131072, { controls: true }); block.text += delta; bounded(block.text, 'provider block', 786432, { controls: true }); await emit(kind === 'toolcall' ? 'tool_call_args_delta' : `${native}_delta`, { index, delta }); }
+          if (phase === 'delta') {
+            if (block.redacted) invalid('redacted provider thinking cannot contain visible deltas');
+            const delta = bounded(event.delta, 'provider delta', 131072, { controls: true });
+            block.text += delta;
+            bounded(block.text, 'provider block', 786432, { controls: true });
+            await emit(kind === 'toolcall' ? 'tool_call_args_delta' : `${native}_delta`, { index, delta });
+          }
           else {
             if (kind === 'toolcall') {
               const final = plainJSON(event.toolCall, 'provider tool call');
               const args = JSON.parse(block.text || '{}');
               if (!isDeepStrictEqual(args, final.arguments)) invalid('provider final tool arguments differ from deltas');
               block.final = final;
+            } else if (block.redacted) {
+              block.redactedText = bounded(event.content, 'redacted thinking marker', 128);
+              await emit('reasoning_delta', { index, delta: '[Reasoning redacted]' });
             } else if (event.content !== block.text) invalid('provider final text differs from deltas');
             block.ended = true; await emit(`${native}_end`, { index });
           }

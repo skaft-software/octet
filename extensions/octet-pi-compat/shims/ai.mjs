@@ -88,7 +88,16 @@ export const ANTHROPIC_WORKSPACE_ID_ENV = 'ANTHROPIC_WORKSPACE_ID';
 export const azureOpenAIResponsesApi = refused('pi-ai.azureOpenAIResponsesApi');
 export const bedrockConverseStreamApi = refused('pi-ai.bedrockConverseStreamApi');
 export const createModels = refused('pi-ai.createModels');
-export const createProvider = refused('pi-ai.createProvider');
+// Pi 1.5.2 pi-ai/dist/models.js:549-630 composes the caller's own
+// definitions and callbacks. This does not supply a model runtime or auth.
+const composeProvider = helper('ai', 'createProvider');
+const refuseProviderRuntime = refused('pi-ai.createProvider');
+export const createProvider = input => {
+  // Only compose caller-supplied stream implementations and model data.
+  // Do not supply a registry, builtin API implementation, or credential store.
+  if (!input || typeof input.id !== 'string' || !Array.isArray(input.models) || !input.auth || !input.api) return refuseProviderRuntime();
+  return composeProvider(input);
+};
 export const defaultProviderAuthContext = refused('pi-ai.defaultProviderAuthContext');
 export const findEnvKeys = helper('ai', 'findEnvKeys');
 export const generateImages = refused('pi-ai.generateImages');

@@ -678,9 +678,15 @@ pub(crate) fn validate_request(
                 for part in &assistant.content {
                     match part {
                         AssistantPart::Reasoning(rp) => {
-                            if protocol != Protocol::OpenAiChat
-                                && protocol != Protocol::GoogleGenerativeAi
-                                && rp.state.is_none()
+                            // Extension-owned streams may emit visible thinking,
+                            // but cannot confer opaque replay authority. That
+                            // text must not block the next tool-result request.
+                            if !matches!(
+                                protocol,
+                                Protocol::OpenAiChat
+                                    | Protocol::GoogleGenerativeAi
+                                    | Protocol::ExtensionStream
+                            ) && rp.state.is_none()
                             {
                                 if mode == CompatibilityMode::Strict {
                                     return Err(AiError::Unsupported(

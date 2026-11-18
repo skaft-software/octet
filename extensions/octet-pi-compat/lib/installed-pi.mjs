@@ -60,7 +60,7 @@ const DENIED = {
     ['copyToClipboard', 'the clipboard and terminal are Octet-owned'],
   ],
   ai: [
-    ['createModels createProvider defaultProviderAuthContext envApiKeyAuth lazyApi lazyOAuth lazyStream retryAssistantCall InMemoryCredentialStore InMemoryModelsStore',
+    ['createModels defaultProviderAuthContext envApiKeyAuth lazyApi lazyOAuth lazyStream retryAssistantCall InMemoryCredentialStore InMemoryModelsStore',
       'Pi provider runtimes would make model calls with the user\'s credentials outside Octet-owned inference'],
   ],
   tui: [

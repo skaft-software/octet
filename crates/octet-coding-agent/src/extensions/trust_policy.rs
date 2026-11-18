@@ -68,7 +68,7 @@ pub(super) fn extension_policy(
 }
 
 /// Returns a copy of the product configuration narrowed to extensions that can
-/// statically negotiate API 0.3 provider catalogs.
+/// advertise a supported provider catalog before selecting a session model.
 ///
 /// Provider discovery is the only reason bootstrap may activate an extension
 /// before the final session/model exists. Keep that exceptional process set
@@ -94,8 +94,12 @@ pub(crate) fn provider_preflight_config(config: &Config) -> Config {
         .into_values()
         .filter(|descriptor| {
             descriptor.activation.enabled
-                && descriptor.manifest.api_version == EXTENSION_API_VERSION_0_3
                 && descriptor.manifest.contributes.providers
+                && matches!(
+                    descriptor.manifest.api_version.as_str(),
+                    EXTENSION_API_VERSION_0_3
+                        | octet_agent::extension_process::EXTENSION_API_VERSION_0_4
+                )
         })
         .map(|descriptor| descriptor.manifest.name)
         .collect::<BTreeSet<_>>();

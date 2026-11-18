@@ -668,7 +668,12 @@ export class Runtime {
     const metadata = this.metadata(), declared = params.contributes || {};
     this.admittedHooks = new Set(declared.hooks || []);
     if (metadata.argument_completions?.length) this.require('autocomplete');
-    if (metadata.hooks.includes('resources_discover')) this.require('resource_paths_v1');
+    // A provider-only preflight has no resource consumer. It omits the
+    // mirror's synthesized hook, not any extension's reviewed hook. Keep
+    // comparing the full capture below; trim only the admitted wire surface.
+    const hooks = this.mirrorPiSetup && !this.features.has('resource_paths_v1') && !this.admittedHooks.has('resources_discover')
+      ? metadata.hooks.filter(hook => hook !== 'resources_discover') : metadata.hooks;
+    if (hooks.includes('resources_discover')) this.require('resource_paths_v1');
     if (metadata.hooks.some(hook => hook === 'provider_context' || sessionOperationHooks.includes(hook) || modelTurnHooks.includes(hook))) this.require('session_entries');
     if (metadata.hooks.some(hook => pipelineHooks.includes(hook))) this.require('pipeline_hooks_v1');
     if (metadata.events.includes('before_agent_start')) this.require('before_prompt_state_v1');
@@ -681,7 +686,7 @@ export class Runtime {
     // beyond the reviewed declarations may appear.
     const skipped = this.loadFailures?.length > 0 || this.reviewedFactoriesOmitted === true;
     if (skipped && !isDeepStrictEqual([...metadata.commands.map(command => command.name)].sort(), [...(declared.commands || [])].sort())) this.require('runtime_commands');
-    for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', metadata.hooks], ['tool_renderers', metadata.tool_renderers]]) {
+    for (const [kind, names] of [['tools', metadata.tools.map(t => t.name)], ['commands', metadata.commands.map(c => c.name)], ['hooks', hooks], ['tool_renderers', metadata.tool_renderers]]) {
       if (kind === 'tools' && this.features.has('dynamic_tools')) continue;
       if (kind === 'commands' && this.features.has('runtime_commands')) continue;
       if (kind === 'tool_renderers' && this.features.has('dynamic_tool_renderers')) continue;

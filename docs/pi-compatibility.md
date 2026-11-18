@@ -75,6 +75,20 @@ your setup still loads. One that is slow is cut off after a few seconds and
 named too (see [Slow or stalled extensions](#slow-or-stalled-extensions)). The
 sections below are for a frozen, reviewed snapshot instead of the live mirror.
 
+### Claude Code provider package
+
+The `pi-claude-code` package can register its bundled models and stream through
+the installed CLI. Keep the package enabled in Pi and enable the Octet adapter;
+no Octet login or credential import is needed. Run `/claude-code-status` to
+check whether the CLI is available and signed in. The adapter can pass
+`PI_CLAUDE_CODE_COMMAND` and the package's local config-directory/PowerShell
+selectors to the reviewed worker. The CLI still owns authentication.
+
+The picker uses the package's fallback models, not account discovery. It does
+not prove the CLI is signed in or a particular model is available. Visible
+thinking and tool results can stream, but opaque thinking signatures are not
+stored or replayed by Octet. Redacted thinking is shown as a placeholder.
+
 <a id="explicit-local-setup"></a>
 
 ## Bring your Pi extensions

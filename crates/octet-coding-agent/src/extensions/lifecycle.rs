@@ -226,6 +226,21 @@ impl ExecutableExtensions {
         } else {
             pi_mirror::prepare(&mut descriptors, config, &mut diagnostics)
         };
+        // The captured mirror's resource hook is synthetic. Provider-only
+        // preflight has no resource owner and must not declare that hook.
+        if pi_mirror_directory.is_some()
+            && resource_consumer == crate::app::resource_paths::ResourceConsumerCapability::Disabled
+        {
+            for descriptor in &mut descriptors {
+                if descriptor.manifest.name == "octet-pi-compat" {
+                    descriptor
+                        .manifest
+                        .contributes
+                        .hooks
+                        .retain(|hook| *hook != ExtensionHook::ResourcesDiscover);
+                }
+            }
+        }
         let mut needs_host_authority = false;
         // A surface that never starts extension processes gets no grant hints:
         // no grant could change the outcome there.
@@ -1150,6 +1165,15 @@ impl ExecutableExtensions {
                 self.pending_session_hook_starts.push((process, owner));
             }
         }
+    }
+
+    /// Wait only when choosing a model actually depends on a provider extension.
+    pub(crate) fn await_startup_provider_catalog(&self) -> anyhow::Result<()> {
+        block_on_runtime(
+            self.provider_runtime
+                .await_initial_registrations_async(&self.processes),
+        )?;
+        Ok(())
     }
 
     /// Projects the current registry snapshot into this App's local catalog.

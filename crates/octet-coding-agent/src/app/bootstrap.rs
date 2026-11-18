@@ -214,6 +214,10 @@ impl Bootstrap {
                 crate::extensions::ExtensionStartupTiming::Synchronous,
             )?
         };
+        extensions.await_startup_provider_catalog()?;
+        for notice in extensions.startup_failure_notices() {
+            crate::output::stderr_line(format!("warning: {notice}"));
+        }
         // Populate a throwaway copy now so callers can validate/select the
         // projected models. `build_app` repeats this against its owned catalog.
         let mut catalog = self.catalog.clone();
@@ -7681,6 +7685,7 @@ pub async fn resolve_launch_interactive(
         boot.preflight_extension_providers()?;
     }
     let catalog = boot.catalog_with_extension_providers();
+    let model = model.map(|id| resolve_launch_extension_alias(&catalog, id));
     let no_configured_model = !boot.config.model_explicit && catalog.models().next().is_none();
     let pick_model = should_pick_interactive_model(&boot.config, &catalog, model.as_ref());
     let model = if no_configured_model {
@@ -7715,6 +7720,29 @@ pub async fn resolve_launch_interactive(
         reasoning,
         reasoning_mode,
     })
+}
+
+/// Resolve provider/model aliases against already-admitted extension routes.
+fn resolve_launch_extension_alias(catalog: &ModelCatalog, id: ModelId) -> ModelId {
+    if catalog.resolve(&id).is_ok() {
+        return id;
+    }
+    let Some((provider, api_name)) = id.0.split_once('/') else {
+        return id;
+    };
+    let mut matching = catalog.models().filter(|model| {
+        model.endpoint.0.starts_with("extension-provider-")
+            && model
+                .id
+                .0
+                .split_once('/')
+                .is_some_and(|(owner, _)| owner == provider)
+            && model.api_name == api_name
+    });
+    match (matching.next(), matching.next()) {
+        (Some(model), None) => model.id.clone(),
+        _ => id,
+    }
 }
 
 /// Resolve a print launch without opening an interactive picker.
@@ -7776,6 +7804,7 @@ pub fn resolve_launch_print(boot: &Bootstrap, stamp: &str) -> anyhow::Result<Lau
             "{diagnosis}; pass --model <id>, resume a session with model provenance, or set model in .octet/config.toml{available}"
         )
     })?;
+    let model = resolve_launch_extension_alias(&catalog, model);
     if catalog.resolve(&model).is_err() {
         let mut available = catalog
             .models()
@@ -8193,6 +8222,16 @@ fn build_app_with_consumer(
     // the final extension fleet starts after it is torn down and sees the real
     // selected session/model state.
     let bootstrap_model = catalog.resolve(&launch.model)?;
+    let extension_model_required = bootstrap_model
+        .endpoint
+        .id
+        .0
+        .starts_with("extension-provider-");
+    let extension_startup_timing = if extension_model_required {
+        crate::extensions::ExtensionStartupTiming::Synchronous
+    } else {
+        extension_startup_timing
+    };
     let bootstrap_reasoning = normalize_reasoning_for_model(&launch.reasoning, &bootstrap_model)?;
     let requested_reasoning_mode = launch.reasoning_mode;
     let mut prepared_session = prepared_session.into_inner();
@@ -8232,6 +8271,9 @@ fn build_app_with_consumer(
         &mut readiness,
         &mut codex_context_notes,
     )?;
+    if extension_model_required {
+        executable_extensions.await_startup_provider_catalog()?;
+    }
     executable_extensions.synchronize_provider_catalog(&mut catalog, &client);
     let model = catalog.resolve(&launch.model)?;
     // Keep the original persisted/explicit choice until the diagnostic boundary;

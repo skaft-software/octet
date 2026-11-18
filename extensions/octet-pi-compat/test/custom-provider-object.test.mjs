@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { registerProvider, unregisterProvider, checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream, modelRegistry } from '../lib/providers.mjs';
+import { registerProvider, unregisterProvider, checkpointFactoryProviders, validateProviderInitialization, startProviderRegistration, prepareProviderStream, startProviderStream, cancelProviderStream, currentModel, scopedModels, modelRegistry } from '../lib/providers.mjs';
 import { customProviderModels, getCustomProviderApiKey, getCustomProviderAuth, hasCustomProvider, providerState } from '../lib/custom-provider.mjs';
 import { nativeProviderDelegate, nativeProviderModels, isNativeProviderFacade } from '../lib/native-provider.mjs';
 import { envApiKeyAuth } from '../shims/pi-1.0.2/ai/auth.mjs';
@@ -83,6 +83,87 @@ test('undefined metadata stays process-local and per-model endpoint/API are reta
   await value.initialize();
   const models = value.frames[0].params.models;
   assert.deepEqual(models.map(model => [model.protocol, model.pi_metadata.base_url]), [['openai_chat', 'https://custom.invalid/v1'], ['openai_responses', 'https://second.invalid/v1']]);
+});
+
+const processModel = (overrides = {}) => ({ ...row(), api: 'owned-process', baseUrl: 'process://coralbricks', ...overrides });
+
+test('custom object process streams keep their API and endpoint in the worker only', async () => {
+  const value = fixture(), observed = deferred();
+  const object = provider({ baseUrl: 'process://coralbricks', models: [processModel()],
+    streamSimple(model, context, options) {
+      assert.equal(this, object);
+      observed.resolve({ model, options });
+      return emptyStream();
+    },
+  });
+  registerProvider(value.runtime, 0, object);
+  await value.initialize();
+  const frames = value.frames;
+  const [model] = frames.find(frame => frame.method === 'providers/register').params.models;
+  assert.equal(model.protocol, 'extension_stream');
+  assert.equal(model.pi_metadata.base_url, '');
+  assert.equal(model.pi_metadata.inherit_provider, undefined);
+  assert.deepEqual(frames[0].params.provider.auth, { kind: 'none' });
+  assert.doesNotMatch(JSON.stringify(frames), /process:\/\/|owned-process|extension-owned-key/);
+  const view = { id: model.api_name, provider: 'coralbricks', api: 'extension-stream',
+    base_url: '', input: ['text', 'image'], reasoning: true, context_window: 8192, max_tokens: 1024 };
+  const host = { model_view: view, pi_models: { scoped_models: [{ model: view }] } };
+  for (const selected of [currentModel(host, value.runtime), scopedModels(host, value.runtime)[0].model]) {
+    assert.equal(selected.api, 'owned-process');
+    assert.equal(selected.baseUrl, 'process://coralbricks');
+  }
+  await prepare(value);
+  startProviderStream(value.runtime, 'stream-1');
+  await value.flush();
+  const { model: local, options } = await observed.promise;
+  assert.equal(local.api, 'owned-process');
+  assert.equal(local.baseUrl, 'process://coralbricks');
+  assert.equal(options.apiKey, 'extension-owned-key');
+  assert.ok(frames.some(frame => frame.params.kind === 'finished'));
+});
+
+test('process endpoint admission cannot weaken HTTP or native-route validation', () => {
+  for (const spec of [
+    { api: 'openai-completions' },
+    { baseUrl: 'process://another-provider' },
+    { baseUrl: 'process://coralbricks/path' },
+    { baseUrl: 'process://coralbricks?auth=secret' },
+    { baseUrl: 'process://coralbricks#secret' },
+    { baseUrl: 'process://secret@coralbricks' },
+    { baseUrl: 'https://secret@custom.invalid/v1' },
+  ]) {
+    const { runtime } = fixture();
+    assert.throws(() => registerProvider(runtime, 0, provider({ models: [processModel(spec)] })), /provider baseUrl/);
+  }
+});
+
+test('process thinking projects visible text without granting opaque replay', async () => {
+  const value = fixture();
+  const signed = { type: 'thinking', thinking: 'visible', thinkingSignature: 'opaque-only' };
+  const redacted = { type: 'thinking', thinking: '[Reasoning redacted]', thinkingSignature: 'opaque-redacted-only', redacted: true };
+  const object = provider({ models: [processModel()], async *streamSimple(_, context) {
+    assert.equal(context.messages.find(message => message.role === 'assistant').api, 'owned-process');
+    yield { type: 'start', partial: { content: [] } };
+    yield { type: 'thinking_start', contentIndex: 0, partial: { content: [signed] } };
+    yield { type: 'thinking_delta', contentIndex: 0, delta: 'visible' };
+    yield { type: 'thinking_end', contentIndex: 0, content: 'visible', partial: { content: [signed] } };
+    yield { type: 'thinking_start', contentIndex: 1, partial: { content: [signed, redacted] } };
+    yield { type: 'thinking_end', contentIndex: 1, content: redacted.thinking };
+    yield { type: 'done', reason: 'stop', message: { content: [signed, redacted],
+      usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3 } } };
+  } });
+  registerProvider(value.runtime, 0, object);
+  await value.initialize();
+  const [model] = value.frames[0].params.models;
+  const messages = [{ Assistant: { content: [{ Text: 'previous answer' }], model: `coralbricks/${model.id}`, protocol: 'extension_stream' } }];
+  await prepareProviderStream(value.runtime, { stream_id: 'stream-1', provider_id: 'coralbricks', model_id: model.id,
+    request: { ...request(), messages } }, value.store);
+  startProviderStream(value.runtime, 'stream-1');
+  await value.flush();
+  assert.ok(value.frames.some(frame => frame.params.kind === 'finished'));
+  assert.deepEqual(value.frames.filter(frame => frame.params.kind === 'reasoning_delta').map(frame => frame.params.payload.delta),
+    ['visible', '[Reasoning redacted]']);
+  assert.doesNotMatch(JSON.stringify(value.frames), /opaque-only|opaque-redacted-only|thinkingSignature/);
 });
 
 test('matching a builtin provider ID alone cannot grant host inheritance or credentials', async () => {

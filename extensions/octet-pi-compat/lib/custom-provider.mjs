@@ -28,8 +28,8 @@ export function snapshotCustomProvider(provider, factory, declare) {
     return copy;
   });
   const entries = snapshots.map(model => {
-    const projected = Object.fromEntries(['id', 'name', 'api', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
-    const entry = declare(provider.id, { baseUrl: model.baseUrl ?? provider.baseUrl, api: model.api, models: [projected], streamSimple: provider.streamSimple.bind(provider) }, factory, true);
+    const projected = Object.fromEntries(['id', 'name', 'api', 'reasoning', 'thinkingLevelMap', 'input', 'cost', 'contextWindow', 'maxTokens'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
+    const entry = declare(provider.id, { baseUrl: model.baseUrl ?? provider.baseUrl, api: model.api, models: [projected], streamSimple: provider.streamSimple.bind(provider) }, factory, 'object');
     const pi = { ...model, baseUrl: model.baseUrl ?? provider.baseUrl ?? '' };
     const profile = customOpenAiChatProfile(pi);
     if (profile) entry.models[0].wire.pi_metadata.custom_openai_chat = profile;
