@@ -563,9 +563,9 @@ fn inline_screenshot_without_cell_report_uses_a_readable_bounded_reservation() {
     }
 }
 
-/// Pastes and attachments appear in the composer as ordinary text. The cursor
-/// and every editing key act on their characters one at a time; only a chip
-/// that is still intact when the draft is submitted resolves to its payload.
+/// Pastes and attachments appear in the composer as chips. An intact chip is
+/// one object: deletion removes it whole and keyboard motion steps over it.
+/// Only a chip still intact when the draft is submitted resolves to its payload.
 fn chip_shell_with(paste: &str) -> (InteractiveShell, String) {
     let mut shell = InteractiveShell::test_shell();
     shell.set_input_modalities(
@@ -592,60 +592,54 @@ fn chip_fixtures(dir: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
-fn shell_backspace_edits_paste_and_attachment_chips_one_character_at_a_time() {
+fn shell_backspace_removes_paste_and_attachment_chips_whole() {
     let dir = tempfile::tempdir().unwrap();
     for paste in chip_fixtures(dir.path()) {
         for interior in [false, true] {
             let (mut shell, chip) = chip_shell_with(&paste);
             if interior {
-                for _ in 0..3 {
-                    shell.apply_edit(EditAction::Left);
-                }
+                // A cursor placed inside the chip still deletes all of it.
+                shell.state.borrow_mut().editor.set_cursor("keep [".len());
             }
-            let cursor = shell.state.borrow().editor.cursor();
             shell.apply_edit(EditAction::Backspace);
-            let edited = shell.pending().to_owned();
-            assert_eq!(edited.len(), format!("keep {chip}").len() - 1, "{edited}");
-            assert_eq!(shell.state.borrow().editor.cursor(), cursor - 1);
-            // The chip is now literal text: its payload is not attached, and
-            // nothing else the user typed is lost.
+            assert_eq!(shell.pending(), "keep ", "{chip}");
+            assert_eq!(shell.state.borrow().editor.cursor(), "keep ".len());
+            // The removed chip's payload is not attached, and nothing else the
+            // user typed is lost.
             let composed = shell.drain_composed();
-            assert_eq!(composed.display_text, edited);
-            assert!(composed.attachments.is_empty(), "{edited}");
-            assert!(
-                matches!(composed.parts.as_slice(), [octet_agent::InputPart::Text(text)] if text == &edited),
-                "{:?}",
-                composed.parts
-            );
+            assert!(composed.attachments.is_empty(), "{chip}");
             assert!(!composed.transcript_text.contains("EDITED-PASTE-PAYLOAD"));
         }
     }
 }
 
 #[test]
-fn deleting_or_typing_inside_a_chip_edits_its_text_too() {
+fn keyboard_motion_steps_over_chips_and_delete_removes_them_whole() {
     let dir = tempfile::tempdir().unwrap();
     for paste in chip_fixtures(dir.path()) {
         let (mut shell, chip) = chip_shell_with(&paste);
         shell.apply_edit(EditAction::Home);
-        for _ in 0.."keep [".len() {
+        for _ in 0.."keep ".len() {
             shell.apply_edit(EditAction::Right);
         }
+        // One Right crosses the whole chip; typing there keeps it intact.
+        shell.apply_edit(EditAction::Right);
         shell.apply_edit(EditAction::Paste("X".into()));
-        assert_eq!(shell.pending(), format!("keep [X{}", &chip[1..]));
+        assert_eq!(shell.pending(), format!("keep {chip}X"));
+        shell.apply_edit(EditAction::Left);
+        shell.apply_edit(EditAction::Left);
+        assert_eq!(shell.state.borrow().editor.cursor(), "keep ".len());
         shell.apply_edit(EditAction::Delete);
-        shell.apply_edit(EditAction::Delete);
-        let edited = shell.pending().to_owned();
-        assert_eq!(edited.len(), format!("keep {chip}").len() - 1, "{edited}");
+        assert_eq!(shell.pending(), "keep X");
         assert!(shell.drain_composed().attachments.is_empty());
     }
 }
 
 #[test]
-fn an_intact_chip_still_resolves_and_undo_restores_an_edited_one() {
+fn an_intact_chip_still_resolves_and_undo_restores_a_deleted_one() {
     let (mut shell, chip) = chip_shell_with(&"RESTORED-PASTE-PAYLOAD\n".repeat(20));
     shell.apply_edit(EditAction::Backspace);
-    assert_eq!(shell.pending(), format!("keep {}", &chip[..chip.len() - 1]));
+    assert_eq!(shell.pending(), "keep ");
     shell.apply_edit(EditAction::Undo);
     assert_eq!(shell.pending(), format!("keep {chip}"));
     let composed = shell.drain_composed();

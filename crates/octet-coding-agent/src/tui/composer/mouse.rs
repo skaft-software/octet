@@ -42,6 +42,24 @@ pub(crate) struct ComposerPress {
     pub(crate) anchor: Option<usize>,
 }
 
+/// Byte spans of intact attachment/paste placeholders in `text`, in order.
+/// Each is one object: deletion removes it whole and arrows step over it.
+pub(crate) fn chip_spans(
+    text: &str,
+    ledger: &super::AttachmentLedger,
+) -> Vec<std::ops::Range<usize>> {
+    let mut spans: Vec<_> = ledger
+        .entries
+        .iter()
+        .flat_map(|entry| {
+            text.match_indices(entry.chip.as_str())
+                .map(|(start, chip)| start..start + chip.len())
+        })
+        .collect();
+    spans.sort_by_key(|span| span.start);
+    spans
+}
+
 /// Snap an intact attachment/paste placeholder to its nearest visible boundary.
 /// Ordinary text and edited (no longer intact) chips remain grapheme-addressable.
 pub(crate) fn atomic_cursor(text: &str, ledger: &super::AttachmentLedger, cursor: usize) -> usize {

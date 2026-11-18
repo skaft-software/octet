@@ -65,6 +65,7 @@
 - Context estimates for Responses sessions with video count the frames actually sent.
 - Gemini audio uploads check every clip's size before sending any of them.
 - Copying a code block after an identical LaTeX or Mermaid diagram copies that block's own source.
+- Paste and attachment chips delete as one object, and arrow keys step over them.
 
 ## [0.10.4] - 2026-11-12
 

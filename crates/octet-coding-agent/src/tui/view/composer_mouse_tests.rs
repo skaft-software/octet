@@ -565,3 +565,34 @@ fn composer_click_inside_wrapped_placeholder_remains_atomic() {
         );
     }
 }
+
+#[test]
+fn paste_chips_delete_whole_and_arrows_step_over_them() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(100, 30);
+    shell.apply_edit(EditAction::Char('a'));
+    let large = (0..40).map(|n| format!("line {n}\n")).collect::<String>();
+    shell.apply_edit(EditAction::Paste(large));
+    shell.apply_edit(EditAction::Char('b'));
+    let text = shell.state.borrow().editor.text().to_owned();
+    let chip_start = 1;
+    let chip_end = text.len() - 1;
+    assert!(
+        text[chip_start..chip_end].starts_with("[Pasted text #"),
+        "{text}"
+    );
+    // Left from after the chip lands before it in one step, then back over it.
+    shell.apply_edit(EditAction::Left);
+    assert_eq!(shell.state.borrow().editor.cursor(), chip_end);
+    shell.apply_edit(EditAction::Left);
+    assert_eq!(shell.state.borrow().editor.cursor(), chip_start);
+    shell.apply_edit(EditAction::Right);
+    assert_eq!(shell.state.borrow().editor.cursor(), chip_end);
+    // One Backspace removes the whole chip, never a single letter of it.
+    shell.apply_edit(EditAction::Backspace);
+    assert_eq!(shell.state.borrow().editor.text(), "ab");
+    assert_eq!(shell.state.borrow().editor.cursor(), 1);
+    // Undo restores the chip as one unit.
+    shell.apply_edit(EditAction::Undo);
+    assert_eq!(shell.state.borrow().editor.text(), text);
+}
