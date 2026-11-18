@@ -51,12 +51,21 @@ def render(changelog: Path, version: str) -> str:
     return f"# octet {version}\n\n" + content
 
 
+CREDIT = re.compile(r"by \[@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\]\(https://github\.com/\1\)")
+
+
 def render_github(markdown: str) -> str:
     """Render generated notes for GitHub, which already displays title and date."""
     # render() always prefixes the verbatim section with an H1 and a blank line.
     # Drop those and the section's version/date heading, not any release content.
-    body = markdown.split("\n", 3)[3].lstrip("\n")
-    return re.sub(r"(?m)^### ", "## ", body)
+    body = re.sub(r"(?m)^### ", "## ", markdown.split("\n", 3)[3].lstrip("\n"))
+    # GitHub lists release contributors only for plain @mentions, not for
+    # mentions inside link text. Thank every credited author once, in order.
+    contributors = list(dict.fromkeys(CREDIT.findall(body)))
+    if contributors:
+        body = body.rstrip("\n") + "\n\nThank you to this release's contributors: " + \
+            " ".join(f"@{login}" for login in contributors) + "\n"
+    return body
 
 
 def artifact(changelog: Path, version: str, commit: str) -> dict:

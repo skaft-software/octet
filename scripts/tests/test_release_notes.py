@@ -52,6 +52,18 @@ class ReleaseNotesTests(unittest.TestCase):
                          "## Changed\n\n- A change.\n\n" + content)
         self.assertFalse((self.root / "docs/releases/v0.10.4.md").exists())
 
+    def test_github_body_thanks_each_credited_contributor_once_with_plain_mentions(self):
+        credit = lambda n, user: (f" ([#{n}](https://github.com/skaft-software/octet/pull/{n})"
+                                  f" by [@{user}](https://github.com/{user}))")
+        self.changelog.write_text(CHANGELOG.replace(
+            "- Unicode stays: π.\n",
+            "- One." + credit(1, "b-user") + "\n- Two." + credit(2, "a2") + "\n- Three." + credit(3, "b-user") + "\n"))
+        body = notes.render_github(notes.render(self.changelog, "0.10.4"))
+        self.assertTrue(body.endswith("\n\nThank you to this release's contributors: @b-user @a2\n"), body)
+        # Notes without credited lines gain no thanks line.
+        self.changelog.write_text(CHANGELOG)
+        self.assertNotIn("Thank you", notes.render_github(notes.render(self.changelog, "0.10.4")))
+
     def test_sync_and_check_are_current_version_only_even_for_old_generated_pages(self):
         old = []
         for directory in (Path("docs/releases"), notes.BUNDLED):
