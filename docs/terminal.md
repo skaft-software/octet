@@ -446,6 +446,10 @@ for every trace in the transcript and for new ones. It is separate from
 Ctrl+O, which owns tool and shell output. In native Tern, each key also resets
 only its own mode's section clicks, preserving the other mode's disclosure.
 
+**Tool call and thinking durations** in Settings controls the settled
+`• Thought for …` marker and tool-card timing. When off, a collapsed trace
+adds no timing row; Ctrl+T still reveals its retained text.
+
 Each run owns one independent status slot below the transcript and above the
 composer. `Working (<elapsed> · Esc to interrupt)` stays there while reasoning,
 text and tools grow above it, including between provider turns. A Pi extension's

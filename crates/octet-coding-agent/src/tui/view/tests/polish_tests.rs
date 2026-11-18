@@ -152,7 +152,8 @@ fn polish_output_window_keeps_two_head_and_two_nonblank_tail_rows() {
 
 #[test]
 fn polish_completed_tool_cards_end_with_one_recorded_duration() {
-    let theme = crate::tui::theme::test_theme();
+    let mut theme = crate::tui::theme::test_theme();
+    theme.set_duration_preference(Some(true));
     let renderer = theme.rich_renderer();
     for name in [
         "read",
@@ -207,7 +208,7 @@ fn polish_tool_duration_theme_is_shared_by_non_shell_cards() {
         ("  ", "Read  a.rs"),
     ] {
         let theme = crate::tui::theme::test_theme_from_source(&format!(
-            "[tokens]\ntool_duration = {template:?}\n"
+            "[tokens]\nshow_durations = true\ntool_duration = {template:?}\n"
         ));
         let rows = transcript_render::render_tool(
             &panel,
@@ -219,7 +220,8 @@ fn polish_tool_duration_theme_is_shared_by_non_shell_cards() {
         );
         assert_eq!(screen_dump(&rows.lines, 100), expected);
     }
-    let theme = crate::tui::theme::test_theme();
+    let mut theme = crate::tui::theme::test_theme();
+    theme.set_duration_preference(Some(true));
     for (finished, duration) in [(false, panel.duration), (true, None)] {
         panel.finished = finished;
         panel.duration = duration;

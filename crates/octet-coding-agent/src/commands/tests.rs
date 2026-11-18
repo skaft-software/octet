@@ -247,6 +247,22 @@ fn settings_and_scoped_models_parse_exactly_and_reject_malformed_forms() {
         Command::Settings(SettingsCommand::Images(Some(false)))
     );
     assert_eq!(
+        parse("/settings durations"),
+        Command::Settings(SettingsCommand::Durations(None))
+    );
+    assert_eq!(
+        parse("/settings durations on"),
+        Command::Settings(SettingsCommand::Durations(Some(true)))
+    );
+    assert_eq!(
+        parse("/settings durations off"),
+        Command::Settings(SettingsCommand::Durations(Some(false)))
+    );
+    assert!(matches!(
+        parse("/settings durations maybe"),
+        Command::Unknown(_)
+    ));
+    assert_eq!(
         parse("/settings default model"),
         Command::Settings(SettingsCommand::DefaultModel(None))
     );
@@ -834,6 +850,7 @@ fn app_for_status() -> (tempfile::TempDir, App) {
         plain: false,
         tern: crate::config::TernMode::Auto,
         show_images: false,
+        show_durations: None,
         session_dir: directory.path().join("sessions"),
         compaction: CompactionPolicy::default(),
         max_cost_microdollars: None,

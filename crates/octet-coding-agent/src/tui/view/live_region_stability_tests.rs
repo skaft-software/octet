@@ -334,6 +334,11 @@ fn bash_completion_paints_final_geometry_atomically() {
             for (output_rows, exit) in [(0, 0), (1, 0), (20, 0), (1, 7), (20, 7)] {
                 for continuation in ["text", "reasoning", "tool"] {
                     let (mut shell, component) = fixture(width, height, isolated);
+                    shell
+                        .state
+                        .borrow_mut()
+                        .theme
+                        .set_duration_preference(Some(true));
                     let id = ToolCallId("bash-fixture".into());
                     shell.on_agent_event(&AgentEvent::ToolStarted {
                         id: id.clone(),

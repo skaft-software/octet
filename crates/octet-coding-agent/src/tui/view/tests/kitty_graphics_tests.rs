@@ -214,6 +214,11 @@ fn kitty_graphics_native_idle_scroll_and_fast_wheel_bursts() {
 #[test]
 fn kitty_graphics_native_timed_image_read_scroll_and_crop() {
     let mut shell = InteractiveShell::test_shell();
+    shell
+        .state
+        .borrow_mut()
+        .theme
+        .set_duration_preference(Some(true));
     let mut probe = attach(&mut shell);
     seed(&mut shell);
     for block in &mut shell.state.borrow_mut().transcript {

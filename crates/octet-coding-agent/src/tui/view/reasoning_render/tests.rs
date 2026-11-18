@@ -1832,6 +1832,26 @@ fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_the
 }
 
 #[test]
+fn settled_thinking_duration_follows_preference_without_hiding_the_trace() {
+    let mut theme = theme::test_theme();
+    let mut reasoning = AssistantBlock::streaming_reasoning("retained private trace");
+    reasoning.finish_reasoning();
+    reasoning.reasoning_elapsed = Some(Duration::from_secs(10));
+    let renderer = theme.reasoning_renderer();
+    assert!(render_reasoning(&reasoning, &renderer, &theme, 80).is_empty());
+    theme.set_duration_preference(Some(true));
+    let settled = render_reasoning(&reasoning, &renderer, &theme, 80);
+    assert_eq!(
+        strip_terminal_sequences(&settled.join("\n")),
+        "Thought for 10s"
+    );
+    theme.set_duration_preference(Some(false));
+    reasoning.reasoning_expanded = true;
+    let expanded = render_reasoning(&reasoning, &renderer, &theme, 80);
+    assert!(strip_terminal_sequences(&expanded.join("\n")).contains("retained private trace"));
+}
+
+#[test]
 fn shortcut_labels_match_between_reasoning_layouts() {
     for unicode in [false, true] {
         for custom in [false, true] {

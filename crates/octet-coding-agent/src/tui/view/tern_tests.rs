@@ -356,6 +356,41 @@ fn assistant_replies_are_unboxed_prose_with_a_direct_retained_markdown_leaf() {
 }
 
 #[test]
+fn settled_reasoning_duration_is_optional_in_native_transcript() {
+    let (shell, _, _) = setup(2);
+    let mut state = shell.state.borrow_mut();
+    let mut reasoning = AssistantBlock::streaming_reasoning("retained trace");
+    reasoning.reasoning_elapsed = Some(Duration::from_secs(10));
+    reasoning.finish_reasoning();
+    let block = TranscriptBlock::Reasoning(Box::new(reasoning));
+    let images = super::super::tern_images::NativeImages::default();
+    let collapsed = HashMap::new();
+    assert!(block_node(1, &block, &state, &images, &collapsed, None).is_none());
+    state.theme.set_duration_preference(Some(true));
+    let node = block_node(1, &block, &state, &images, &collapsed, None).unwrap();
+    assert!(serde_json::to_string(&node)
+        .unwrap()
+        .contains("Thought for 10s"));
+    state.theme.set_duration_preference(Some(false));
+    let TranscriptBlock::Reasoning(mut reasoning) = block else {
+        unreachable!()
+    };
+    reasoning.reasoning_expanded = true;
+    let node = block_node(
+        1,
+        &TranscriptBlock::Reasoning(reasoning),
+        &state,
+        &images,
+        &collapsed,
+        None,
+    )
+    .unwrap();
+    let text = serde_json::to_string(&node).unwrap();
+    assert!(text.contains("retained trace"));
+    assert!(!text.contains("Thought for"));
+}
+
+#[test]
 fn reasoning_projection_keeps_native_layout_and_tightened_markdown() {
     let (shell, mut surface, _) = setup(2);
     shell
@@ -782,6 +817,12 @@ fn native_thinking_toggle_preserves_tool_clicks_and_overrides_reasoning_clicks()
     use octet_ai::ToolCallId;
 
     let (mut shell, mut surface, _) = setup(32);
+    // Use visible collapsed rows to exercise independent section clicks.
+    shell
+        .state
+        .borrow_mut()
+        .theme
+        .set_duration_preference(Some(true));
     let (thinking_id, tool_id) = {
         let mut state = shell.state.borrow_mut();
         state.push_block(TranscriptBlock::Reasoning(Box::new(
@@ -1242,6 +1283,11 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     use super::super::{summarize_tool, ToolPanel};
     use octet_ai::ToolCallId;
     let (shell, mut surface, output) = setup(2);
+    shell
+        .state
+        .borrow_mut()
+        .theme
+        .set_duration_preference(Some(true));
     let command = format!("printf '%s\\n' '{}'\necho done", "λ🙂 ".repeat(100));
     let args = json!({"command":command});
     let index = shell

@@ -579,6 +579,8 @@ struct ConfigLayer {
     tern: Option<String>,
     plain: Option<bool>,
     show_images: Option<bool>,
+    // User display preference; projects do not override it.
+    show_durations: Option<bool>,
     /// User-level `/scoped-models` pattern list. Interactive cycling scope
     /// only; headless modes never consume it and a trusted project layer may
     /// not override it.
@@ -648,6 +650,7 @@ impl ConfigLayer {
         override_some!(tern);
         override_some!(plain);
         override_some!(show_images);
+        override_some!(show_durations);
         override_some!(models);
         override_some!(allow_external_paths);
         override_some!(allow_edit);
@@ -799,6 +802,7 @@ impl ConfigLayer {
         project.tui_mode = None;
         project.cache_warming = None;
         project.show_cache_miss_notices = None;
+        project.show_durations = None;
         tighten_effect_policy(&mut self.effect_policy, project.effect_policy.take());
         self.merge(project);
         self.trusted_extensions = trusted_extensions;
@@ -1207,6 +1211,13 @@ pub fn persist_show_images(enabled: bool) -> anyhow::Result<()> {
         anyhow::anyhow!("cannot persist image display: user home directory is unavailable")
     })?;
     persist_bool_key_to_path("show_images", enabled, &path)
+}
+
+pub(crate) fn persist_show_durations(enabled: bool) -> anyhow::Result<()> {
+    let path = global_config_path().ok_or_else(|| {
+        anyhow::anyhow!("cannot persist duration display: user home directory is unavailable")
+    })?;
+    persist_bool_key_to_path("show_durations", enabled, &path)
 }
 
 /// Persist an already-applied idle selection in one atomic transaction. A
@@ -1882,6 +1893,7 @@ fn environment_layer() -> anyhow::Result<ConfigLayer> {
         models: None,
         plain: env_parse("OCTET_PLAIN")?,
         show_images: env_parse("OCTET_SHOW_IMAGES")?,
+        show_durations: None,
         allow_external_paths: env_parse("OCTET_ALLOW_EXTERNAL_PATHS")?,
         allow_edit: env_parse("OCTET_ALLOW_EDIT")?,
         allow_write: env_parse("OCTET_ALLOW_WRITE")?,
@@ -2423,6 +2435,7 @@ fn build_config_with_global_path_and_diagnostics(
         plain: cli.plain || values.plain.unwrap_or(false),
         tern,
         show_images: cli.show_images || values.show_images.unwrap_or(false),
+        show_durations: values.show_durations,
         session_dir: cli
             .session_dir
             .or(values.session_dir)

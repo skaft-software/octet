@@ -580,6 +580,7 @@ pub enum PendingIdleAction {
     /// Display is already changed; only config synchronization/persistence waits.
     SyncTheme(String),
     SyncImages(bool),
+    SyncDurations(bool),
     /// The screen and preference already changed. Retain each exact write until
     /// the idle reload owner can acknowledge it; receipt chains never coalesce.
     AcknowledgeTuiPreference(crate::reload::AppliedConfigWrite),
@@ -625,6 +626,10 @@ pub fn push_pending_action(queue: &mut VecDeque<PendingIdleAction>, action: Pend
             | (
                 Some(PendingIdleAction::SyncImages(_)),
                 PendingIdleAction::SyncImages(_)
+            )
+            | (
+                Some(PendingIdleAction::SyncDurations(_)),
+                PendingIdleAction::SyncDurations(_)
             )
     );
     if same_kind {
@@ -2706,6 +2711,7 @@ fn active_command_needs_idle_slot(command: &Command) -> bool {
             sub,
             commands::SettingsCommand::Theme(Some(_))
                 | commands::SettingsCommand::Images(Some(_))
+                | commands::SettingsCommand::Durations(Some(_))
                 | commands::SettingsCommand::TuiMode(Some(_))
         ),
         Command::ScopedModels(sub) => !matches!(sub, commands::ScopedModelsCommand::Show),
@@ -3285,6 +3291,7 @@ where
                     let show_images = shell.runtime_config().map_or(inspection.settings.show_images, |config| config.show_images);
                     shell.open_panel(settings_menu::root_panel(
                         show_images,
+                        shell.shows_durations(),
                         crate::cli::tui_mode(),
                         settings_menu::QueueModes::saved(),
                     ));
@@ -3301,6 +3308,8 @@ where
                     let mut text = commands::settings_text(&settings);
                     text.push('\n');
                     text.push_str(&tui_mode_report());
+                    text.push('\n');
+                    text.push_str(&duration_report(shell));
                     shell.show_report_facts(
                         "Settings",
                         "Effective display, launch, and session settings",
@@ -3325,6 +3334,13 @@ where
                     shell.set_runtime_config(config);
                     push_pending_action(queue, PendingIdleAction::SyncImages(enabled));
                     shell.notice("image display updated; preference saves at the next idle boundary");
+                }
+                commands::SettingsCommand::Durations(None) => shell.notice(duration_report(shell)),
+                commands::SettingsCommand::Durations(Some(enabled)) => {
+                    let mut config = shell.runtime_config().cloned().context("display configuration is unavailable")?;
+                    config.show_durations = Some(enabled);
+                    shell.set_runtime_config(config);
+                    push_pending_action(queue, PendingIdleAction::SyncDurations(enabled));
                 }
                 // Preferences apply the moment they are issued, mid-run or idle:
                 // they are written now, and a delivery mode also reaches the
@@ -8968,6 +8984,7 @@ async fn apply_pending_actions(
             app.config.theme = config.theme.clone();
             app.config.theme_explicit = config.theme_explicit;
             app.config.show_images = config.show_images;
+            app.config.show_durations = config.show_durations;
         }
         // Commands already ran during streaming. Only their remaining callbacks
         // cross this boundary: Run held the sole mutable Agent/session writer,
@@ -9251,6 +9268,15 @@ async fn apply_pending_actions(
                     ));
                 } else {
                     shell.notice("image display preference saved at the idle boundary");
+                }
+            }
+            PendingIdleAction::SyncDurations(enabled) => {
+                if let Err(error) =
+                    save_duration_preference(&mut app.executable_extensions, enabled).await
+                {
+                    shell.error(format!(
+                        "duration display changed, but the preference was not saved: {error}"
+                    ));
                 }
             }
             PendingIdleAction::Pi(sub) => {
@@ -10116,14 +10142,18 @@ fn open_settings_destination(
 ) -> bool {
     use commands::SettingsCommand as Sub;
     let panel = match sub {
-        Sub::Menu => {
-            settings_menu::root_panel(show_images, tui_mode, settings_menu::QueueModes::saved())
-        }
+        Sub::Menu => settings_menu::root_panel(
+            show_images,
+            shell.shows_durations(),
+            tui_mode,
+            settings_menu::QueueModes::saved(),
+        ),
         Sub::TuiMode(None) => settings_menu::tui_mode_panel(tui_mode),
         Sub::QueueMode(kind, None) => {
             settings_menu::queue_mode_panel(*kind, crate::cli::queue_mode(*kind))
         }
         Sub::Images(None) => settings_menu::images_panel(show_images),
+        Sub::Durations(None) => settings_menu::durations_panel(shell.shows_durations()),
         Sub::DefaultModel(None) => {
             let presentation = pickers::model_picker_presentation(catalog);
             let choices = presentation
@@ -10140,6 +10170,23 @@ fn open_settings_destination(
     };
     shell.open_panel(panel);
     true
+}
+
+fn duration_report(shell: &InteractiveShell) -> String {
+    format!(
+        "Tool call and thinking durations: {}",
+        if shell.shows_durations() { "on" } else { "off" }
+    )
+}
+
+async fn save_duration_preference(
+    extensions: &mut crate::extensions::ExecutableExtensions,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    persist_configuration(Some(extensions), || {
+        crate::cli::persist_show_durations(enabled)
+    })
+    .await
 }
 
 async fn settings_menu_interactively(
@@ -10481,6 +10528,8 @@ async fn apply_settings_command(
             let mut text = commands::settings_text(&commands::SettingsSurface::capture(app));
             text.push('\n');
             text.push_str(&tui_mode_report());
+            text.push('\n');
+            text.push_str(&duration_report(shell));
             shell.show_report_facts(
                 "Settings",
                 "Effective display, launch, and session settings",
@@ -10534,6 +10583,15 @@ async fn apply_settings_command(
                 "inline tool-result images {}",
                 if enabled { "enabled" } else { "disabled" }
             ));
+        }
+        Sub::Durations(None) => shell.notice(duration_report(shell)),
+        Sub::Durations(Some(enabled)) => {
+            if let Err(error) = save_duration_preference(&mut app.executable_extensions, enabled).await {
+                shell.error(format!("failed to save the duration display preference: {error}"));
+                return Ok(());
+            }
+            app.config.show_durations = Some(enabled);
+            shell.set_runtime_config(app.config.clone());
         }
         Sub::DefaultModel(id) => match id {
             None => shell.notice(format!(

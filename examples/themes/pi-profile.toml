@@ -7,6 +7,7 @@ event_marker_gutter = 3
 thinking_spinner = true
 activity_shimmer = false
 thinking_expanded = true
+show_durations = true
 splash_compact = true
 prompt_rail_model_adaptive = false
 splash_model_adaptive = false

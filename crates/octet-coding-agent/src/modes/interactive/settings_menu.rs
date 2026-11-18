@@ -2,7 +2,7 @@
 //!
 //! Open `root_panel` for `SettingsCommand::Menu`. A confirmed
 //! `PanelAction::SelectSettings` index is already the original, unfiltered index.
-//! In that menu-result path only, `Images(None)`, `DefaultModel(None)`,
+//! In that menu-result path only, `Images(None)`, `Durations(None)`, `DefaultModel(None)`,
 //! `DefaultReasoning(None)`, and `TuiMode(None)` open their child panels rather than invoking the
 //! explicit slash-command report/toggle behavior. `Theme(None)` opens the existing
 //! theme picker, `Menu` is Back, and `Show` opens the existing diagnostic report.
@@ -83,8 +83,16 @@ fn queue_title(kind: QueueKind) -> &'static str {
     }
 }
 
-/// Root destinations. `show_images` is effective display state, not a saved default.
-pub(super) fn root_panel(show_images: bool, tui_mode: TuiMode, queues: QueueModes) -> Panel {
+const DURATIONS_TITLE: &str = "Tool call and thinking durations";
+const DURATIONS_DESCRIPTION: &str = "Show how long completed tool calls and thinking took";
+
+/// Root destinations. Display values are effective state, not saved defaults.
+pub(super) fn root_panel(
+    show_images: bool,
+    show_durations: bool,
+    tui_mode: TuiMode,
+    queues: QueueModes,
+) -> Panel {
     panel(
         OrdinarySurfaceMetadata::with_purpose(
             "Settings",
@@ -126,6 +134,11 @@ pub(super) fn root_panel(show_images: bool, tui_mode: TuiMode, queues: QueueMode
                 ),
                 "Display only; not upload or attachment consent".into(),
                 SettingsCommand::Images(None),
+            ),
+            (
+                format!("{DURATIONS_TITLE} ({})", if show_durations { "On" } else { "Off" }),
+                DURATIONS_DESCRIPTION.into(),
+                SettingsCommand::Durations(None),
             ),
             (
                 "Default model for new sessions".into(),
@@ -217,6 +230,29 @@ pub(super) fn queue_mode_panel(kind: QueueKind, current: QueueDeliveryMode) -> P
 
 /// Explicit On/Off values plus Back; no toggle is inferred at confirmation time.
 pub(super) fn images_panel(show_images: bool) -> Panel {
+    display_panel(
+        "Inline tool-result images",
+        "Inline tool-result display only; not upload or attachment consent",
+        show_images,
+        SettingsCommand::Images,
+    )
+}
+
+pub(super) fn durations_panel(show_durations: bool) -> Panel {
+    display_panel(
+        DURATIONS_TITLE,
+        DURATIONS_DESCRIPTION,
+        show_durations,
+        SettingsCommand::Durations,
+    )
+}
+
+fn display_panel(
+    title: &str,
+    description: &str,
+    current: bool,
+    command: fn(Option<bool>) -> SettingsCommand,
+) -> Panel {
     let rows = [true, false]
         .into_iter()
         .map(|enabled| {
@@ -224,25 +260,18 @@ pub(super) fn images_panel(show_images: bool) -> Panel {
                 format!(
                     "{}{}",
                     if enabled { "On" } else { "Off" },
-                    if enabled == show_images {
-                        " (current)"
-                    } else {
-                        ""
-                    },
+                    if enabled == current { " (current)" } else { "" },
                 ),
-                "Inline tool-result display only; not upload or attachment consent".into(),
-                SettingsCommand::Images(Some(enabled)),
+                description.into(),
+                command(Some(enabled)),
             )
         })
         .chain(std::iter::once(back()))
         .collect();
     panel(
-        OrdinarySurfaceMetadata::with_purpose(
-            "Inline tool-result images",
-            "Choose display behavior on compatible terminals",
-        ),
+        OrdinarySurfaceMetadata::with_purpose(title, description),
         rows,
-        usize::from(!show_images),
+        usize::from(!current),
     )
 }
 
@@ -343,6 +372,7 @@ mod tests {
     fn root_has_only_the_approved_destinations_and_no_inferred_defaults() {
         let (items, commands, selected) = parts(root_panel(
             false,
+            false,
             TuiMode::Fullscreen,
             QueueModes::default(),
         ));
@@ -354,6 +384,7 @@ mod tests {
                 "Steering mode (one-at-a-time)",
                 "Follow-up mode (one-at-a-time)",
                 "Inline tool-result images (Off)",
+                "Tool call and thinking durations (Off)",
                 "Default model for new sessions",
                 "Default reasoning for new sessions",
                 "Show effective settings",
@@ -367,6 +398,7 @@ mod tests {
                 SettingsCommand::QueueMode(QueueKind::Steering, None),
                 SettingsCommand::QueueMode(QueueKind::FollowUp, None),
                 SettingsCommand::Images(None),
+                SettingsCommand::Durations(None),
                 SettingsCommand::DefaultModel(None),
                 SettingsCommand::DefaultReasoning(None),
                 SettingsCommand::Show,
@@ -374,7 +406,13 @@ mod tests {
         );
         assert_eq!(selected, 0);
         assert_eq!(
-            parts(root_panel(true, TuiMode::Fullscreen, QueueModes::default())).0[4],
+            parts(root_panel(
+                true,
+                false,
+                TuiMode::Fullscreen,
+                QueueModes::default()
+            ))
+            .0[4],
             "Inline tool-result images (On)"
         );
     }
@@ -396,7 +434,7 @@ mod tests {
             steering: QueueDeliveryMode::All,
             follow_up: QueueDeliveryMode::OneAtATime,
         };
-        let items = parts(root_panel(false, TuiMode::Fullscreen, modes)).0;
+        let items = parts(root_panel(false, false, TuiMode::Fullscreen, modes)).0;
         assert_eq!(items[2], "Steering mode (all)");
         assert_eq!(items[3], "Follow-up mode (one-at-a-time)");
     }
@@ -421,6 +459,26 @@ mod tests {
             assert_eq!(
                 confirm(&mut shell).1,
                 SettingsCommand::Images(Some(enabled))
+            );
+        }
+    }
+
+    #[test]
+    fn durations_menu_shows_effective_value_and_maps_explicit_choices() {
+        let mut shell = InteractiveShell::test_shell();
+        for enabled in [false, true] {
+            let (items, _, _) = parts(root_panel(
+                false,
+                enabled,
+                TuiMode::Fullscreen,
+                QueueModes::default(),
+            ));
+            assert!(items.iter().any(|item| item
+                == &format!("{DURATIONS_TITLE} ({})", if enabled { "On" } else { "Off" })));
+            shell.open_panel(durations_panel(enabled));
+            assert_eq!(
+                confirm(&mut shell).1,
+                SettingsCommand::Durations(Some(enabled))
             );
         }
     }
@@ -466,6 +524,7 @@ mod tests {
         for panel in [
             tui_mode_panel(TuiMode::Fullscreen),
             images_panel(false),
+            durations_panel(false),
             default_model_panel(&[]),
             default_reasoning_panel(&[ThinkingLevel::High]),
         ] {
@@ -474,6 +533,7 @@ mod tests {
             filter(&mut shell, "back");
             assert_eq!(confirm(&mut shell).1, SettingsCommand::Menu);
             shell.open_panel(root_panel(
+                false,
                 false,
                 TuiMode::Fullscreen,
                 QueueModes::default(),
@@ -507,6 +567,7 @@ mod tests {
     fn no_filter_matches_keeps_the_menu_open_until_cancelled() {
         let mut shell = InteractiveShell::test_shell();
         shell.open_panel(root_panel(
+            false,
             false,
             TuiMode::Fullscreen,
             QueueModes::default(),

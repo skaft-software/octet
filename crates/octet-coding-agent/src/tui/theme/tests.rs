@@ -5,6 +5,18 @@
 //! their head at once. Everything else here is evidence that those two hold.
 
 use super::*;
+
+#[test]
+fn duration_preference_overrides_profile_defaults() {
+    let mut default = test_theme();
+    let mut pi = test_theme_from_source("[metadata]\nprofile = 'pi'\n");
+    assert!(!default.shows_durations());
+    assert!(pi.shows_durations());
+    default.set_duration_preference(Some(true));
+    pi.set_duration_preference(Some(false));
+    assert!(default.shows_durations());
+    assert!(!pi.shows_durations());
+}
 use crate::config::{CompactionPolicy, Mode, ResumeSelector, SandboxPolicy};
 
 #[test]
@@ -62,6 +74,7 @@ fn config(workspace: PathBuf) -> Config {
         plain: false,
         tern: crate::config::TernMode::Auto,
         show_images: false,
+        show_durations: None,
         session_dir: PathBuf::from("sessions"),
         compaction: CompactionPolicy::default(),
         max_cost_microdollars: None,

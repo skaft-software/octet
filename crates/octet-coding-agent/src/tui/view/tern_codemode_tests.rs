@@ -117,7 +117,11 @@ fn native_progress_phase_replacements_keep_one_nonwrapping_node() {
 #[test]
 fn native_tools_share_one_header_and_read_has_only_one_path() {
     let (shell, mut surface, _) = setup(3);
-    shell.state.borrow_mut().workspace = Some("/tmp/native-fixture".into());
+    {
+        let mut state = shell.state.borrow_mut();
+        state.workspace = Some("/tmp/native-fixture".into());
+        state.theme.set_duration_preference(Some(true));
+    }
     for (name, args) in [
         ("read", json!({"path":"src/main.rs"})),
         ("bash", json!({"command":"cargo test"})),

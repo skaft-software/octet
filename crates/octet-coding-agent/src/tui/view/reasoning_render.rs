@@ -1,5 +1,5 @@
 use sexy_tui_rs::{strip_terminal_sequences, visible_width, Color, RichRenderer};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -1144,6 +1144,15 @@ fn format_activity_duration(seconds: u64) -> String {
     }
 }
 
+pub(super) fn format_thought_duration(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds == 0 {
+        format!("{}ms", (elapsed.as_micros() + 500) / 1_000)
+    } else {
+        format_activity_duration(seconds)
+    }
+}
+
 fn activity_status_line(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
@@ -1156,6 +1165,9 @@ fn activity_status_line(
         return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
     }
     if reasoning.finished {
+        if !theme.shows_durations() {
+            return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
+        }
         // The owning run remains interruptible. Keep the same metadata shape
         // so completion cannot pull a separate disclosure hint inline.
         let elapsed =
@@ -1202,12 +1214,22 @@ pub(super) fn collapsed_reasoning_lines_sized(
     rainbow_strength: u16,
     width: u16,
 ) -> Vec<String> {
-    if reasoning.finished && !reasoning.preserve_reasoning_summary {
+    if reasoning.finished && (theme.shows_durations() || !reasoning.preserve_reasoning_summary) {
+        if reasoning.text.is_empty() {
+            return Vec::new();
+        }
+        if let Some(label) = &reasoning.hidden_thinking_label {
+            return vec![theme.fg("muted", label)];
+        }
         return reasoning
-            .hidden_thinking_label
-            .as_ref()
-            .filter(|_| !reasoning.text.is_empty())
-            .map_or_else(Vec::new, |label| vec![theme.fg("muted", label)]);
+            .reasoning_elapsed
+            .filter(|_| theme.shows_durations())
+            .map_or_else(Vec::new, |elapsed| {
+                vec![subdued_text(
+                    theme,
+                    &format!("Thought for {}", format_thought_duration(elapsed)),
+                )]
+            });
     }
     // Pi replaces the current indicator on retry (packages/coding-agent/src/modes/
     // interactive/interactive-mode.ts:2413-2417,3805-3813). Working-only overrides

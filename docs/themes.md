@@ -208,9 +208,14 @@ quiet_tool_summaries = true
 thinking_expanded = false
 ```
 
-## Tool duration
+## Tool call and thinking durations
 
-Every completed native tool card shows `Took 1.3s` as its last nested result row
+The [Settings menu](commands.md#settings-menu) controls durations for completed
+tool calls and thinking. Octet defaults to Off and the Pi profile defaults to
+On. Native themes can set `[colors] show_durations`; an explicit user preference
+wins. The live run timer and run outcome are independent.
+
+When enabled, a completed native tool card shows `Took 1.3s` as its last nested result row
 when recorded timing is available, including after resume. This includes shell,
 read, edit, write, Codemode and extension tool cards; output preview budgets do
 not hide the duration.

@@ -142,6 +142,7 @@ pub(crate) fn host_config(request: &RunRequest) -> anyhow::Result<Config> {
         // negotiate a native surface with.
         tern: crate::config::TernMode::Off,
         show_images: false,
+        show_durations: None,
         session_dir,
         compaction: CompactionPolicy::default(),
         max_cost_microdollars: request.max_cost_microdollars,

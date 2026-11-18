@@ -38,6 +38,7 @@ pub(in crate::modes::interactive) fn terminal_theme_test_config(workspace: PathB
         plain: false,
         tern: crate::config::TernMode::Auto,
         show_images: false,
+        show_durations: None,
         session_dir: PathBuf::from("sessions"),
         compaction: CompactionPolicy::default(),
         max_cost_microdollars: None,

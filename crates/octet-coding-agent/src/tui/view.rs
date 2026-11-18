@@ -6806,6 +6806,10 @@ impl InteractiveShell {
         self::panel_render::document_content_width(&self.state.borrow().theme, width)
     }
 
+    pub(crate) fn shows_durations(&self) -> bool {
+        self.state.borrow().theme.shows_durations()
+    }
+
     pub(crate) fn runtime_config(&self) -> Option<&Config> {
         self.runtime_config.as_ref()
     }
@@ -6828,6 +6832,11 @@ impl InteractiveShell {
         state.safe_mode = config.effect_policy != octet_agent::EffectPolicy::UnsafeHost;
         state.max_session_cost_microdollars = config.max_cost_microdollars;
         state.show_cache_miss_notices = config.show_cache_miss_notices;
+        if state.theme.duration_preference() != config.show_durations {
+            state.theme.set_duration_preference(config.show_durations);
+            state.theme_epoch = state.theme_epoch.wrapping_add(1);
+            state.invalidate_transcript_layout();
+        }
         drop(state);
         self.set_show_images(show_images);
         self.runtime_config = Some(config);
@@ -9590,8 +9599,10 @@ impl InteractiveShell {
             }
             if let Some((red, green, blue)) = auto_background {
                 let background = crate::tui::theme::background_from_terminal_rgb(red, green, blue);
+                let duration_preference = state.theme.duration_preference();
                 state.theme =
                     crate::tui::theme::default_theme_for(background, state.theme.capabilities());
+                state.theme.set_duration_preference(duration_preference);
                 if let Some(lab) = state.model_lab {
                     crate::tui::theme::apply_model_lab(&mut state.theme, lab);
                 }
@@ -9630,6 +9641,7 @@ impl InteractiveShell {
         }
         state.seal_activity_group();
         state.pending_activity_groups.clear();
+        theme.set_duration_preference(state.theme.duration_preference());
         state.theme = theme;
         state.theme_epoch = state.theme_epoch.wrapping_add(1);
         state.invalidate_rich_text();

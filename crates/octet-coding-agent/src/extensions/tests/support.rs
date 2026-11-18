@@ -43,6 +43,7 @@ pub(in crate::extensions) fn executable_extension_config(
         plain: false,
         tern: crate::config::TernMode::Auto,
         show_images: false,
+        show_durations: None,
         session_dir: workspace.join("sessions"),
         compaction: crate::config::CompactionPolicy::default(),
         max_cost_microdollars: None,

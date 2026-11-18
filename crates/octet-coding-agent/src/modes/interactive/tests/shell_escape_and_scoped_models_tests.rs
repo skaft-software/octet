@@ -215,6 +215,29 @@ async fn settings_and_scoped_models_render_mid_run_and_queue_mutations() {
     ));
     assert!(shell.runtime_config().unwrap().show_images);
 
+    // Explicit values override the current theme, without taking ownership of
+    // the active run, and only the save waits for the idle application owner.
+    let pi = crate::tui::theme::test_theme_from_source("[metadata]\nprofile = 'pi'\n");
+    shell.set_theme(pi.clone());
+    assert!(shell.shows_durations());
+    let (queue, quit) = run_active_command(
+        &mut shell,
+        Command::Settings(commands::SettingsCommand::Durations(Some(false))),
+        &inspection,
+    )
+    .await;
+    assert!(!quit);
+    assert!(matches!(
+        queue.back(),
+        Some(PendingIdleAction::SyncDurations(false))
+    ));
+    assert!(!shell.shows_durations());
+    shell.set_theme(pi);
+    assert!(
+        !shell.shows_durations(),
+        "a theme swap must retain explicit Off"
+    );
+
     let (queue, quit) = run_active_command(
         &mut shell,
         Command::ScopedModels(commands::ScopedModelsCommand::Show),

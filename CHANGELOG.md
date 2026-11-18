@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Settings can show tool-call and thinking durations. They default to Off in Octet and On in Pi themes.
+
 ## [0.10.5] - 2026-11-17
 
 ### Added
@@ -19,7 +23,7 @@
 - The splash is a compact two-line mark with the version, access mode and `/changelog`.
 - Composer overflow counts sit in the border, leaving more room for your draft.
 - Codex uses provider-default context windows, keeping the 500K windows of GPT-6.1 Sol and Terra.
-- Completed tool cards show their duration on one row; themes can restyle or hide it.
+- Completed tool calls and thinking can show their durations; the Settings preference overrides the theme default.
 - Extension slash commands and shortcuts run immediately during a response.
 - Large tool-call batches run in bounded concurrent waves.
 - Recorded audio is prepared once and reused across turns; large Gemini clips upload through the Files API.

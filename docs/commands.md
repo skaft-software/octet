@@ -65,7 +65,7 @@ control](design/octet-agent.md#commit-and-cancellation-invariants).
 | `/skill:NAME [arguments]` | Expand a skill as a user prompt when sent, not as a local slash command. During a run, Enter or Ctrl+S queues it, so it expands at the next idle prompt. |
 | `/extensions [install\|status\|reload]` | Enable, disable and configure extensions (below), or show or reload extension state. `/extensions install` downloads and installs every missing first-party bundle with live progress; installed bundles stay off until you enable them. Menu changes and installs wait for idle during a run. |
 | `/subagents [list\|status\|inspect\|wait\|reattach\|stop\|open-all]` | Browse and control this session's workers when octet-subagents is ready. Bare `/subagents`, `list` and `status` open the live roster, including during a run; `/subagents stop <name-or-id\|all>` requests owner-bound interruption immediately. Other operations wait for idle. |
-| `/settings [show\|theme\|tui fullscreen/inline\|steering one-at-a-time/all\|follow-up one-at-a-time/all\|images on/off\|default model/reasoning\|transport\|padding]` | Open the settings menu, or use an explicit subcommand. `/settings show` reports effective settings. Defaults, theme, terminal screen, steering and follow-up modes and images persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
+| `/settings [show\|theme\|tui fullscreen/inline\|steering one-at-a-time/all\|follow-up one-at-a-time/all\|images on/off\|durations on/off\|default model/reasoning\|transport\|padding]` | Open the settings menu, or use an explicit subcommand. `/settings show` reports effective settings. Defaults, theme, terminal screen, steering and follow-up modes, images and durations persist through the shared config writer. Transport and editor padding are reported facts, and project trust is deliberately not a persisted setting. |
 | `/scoped-models [all\|clear\|enable\|disable\|toggle\|move]` | Manage the ordered model-cycling scope. Changes apply to Ctrl+P at once and persist as an exact ordered pattern list (`models` in the user config). `move <id> <up\|down\|top\|bottom>` reorders it. |
 | `/help [command]` | Help for a command. |
 | `/exit` | Exit octet. |
@@ -149,7 +149,7 @@ model input, and reading a report never approves an effect.
 Bare `/settings` opens a filterable menu immediately, including during active
 work. Choose **Theme**, **Terminal screen** (fullscreen, the default, or
 inline), **Steering mode**, **Follow-up mode**, **Inline tool-result images
-(On/Off)**, **Default model for new sessions**, **Default reasoning for new
+(On/Off)**, **Tool call and thinking durations**, **Default model for new sessions**, **Default reasoning for new
 sessions**, or **Show effective settings**. Up and Down select, typing filters, and Enter opens or applies the
 highlighted choice. Child menus offer **Back**; Escape closes the menu without
 changing a preference.
@@ -162,6 +162,11 @@ switch the active session: use `/model` or `/thinking` for that. The menu does n
 label the current session or launch selection as a saved default. Selected
 changes use the same safe display or deferred settings dispatch as explicit
 commands; opening and browsing the menu does not interrupt active work.
+
+**Tool call and thinking durations** is off by default in Octet and on in the
+Pi theme. Selecting On or Off (or running `/settings durations on` or
+`/settings durations off`) saves an explicit preference across theme changes.
+Ctrl+T can still show the thinking trace with durations off.
 
 **Steering mode** and **Follow-up mode** are Pi's `steeringMode` and
 `followUpMode` (config keys `steering_mode` and `follow_up_mode`). Both default to

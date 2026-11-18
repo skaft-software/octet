@@ -71,6 +71,7 @@ const CONFIG_KEYS: &[&str] = &[
     "mouse",
     "plain",
     "show_images",
+    "show_durations",
     "models",
     "allow_external_paths",
     "allow_edit",

@@ -31,6 +31,7 @@ pub(super) fn config(directory: &std::path::Path, model: Option<&str>) -> Config
         plain: false,
         tern: crate::config::TernMode::Auto,
         show_images: false,
+        show_durations: None,
         session_dir: directory.join("sessions"),
         compaction: CompactionPolicy::default(),
         max_cost_microdollars: None,

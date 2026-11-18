@@ -2990,6 +2990,32 @@ fn persist_extension_activation_rejects_a_non_array_without_rewriting() {
 // --- persist_bool_key_to_path / remove_key_from_path ---
 
 #[test]
+fn duration_preference_preserves_explicit_off_and_ignores_project_overrides() {
+    let directory = cwd();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "theme = 'pi'\n").unwrap();
+    assert_eq!(
+        read_layer(&path, ConfigSourceKind::Global)
+            .unwrap()
+            .values
+            .show_durations,
+        None
+    );
+    for enabled in [true, false] {
+        persist_bool_key_to_path("show_durations", enabled, &path).unwrap();
+        let loaded = read_layer(&path, ConfigSourceKind::Global).unwrap();
+        assert!(loaded.diagnostics.is_empty());
+        let mut values = loaded.values;
+        values.merge_project(ConfigLayer {
+            show_durations: Some(!enabled),
+            ..ConfigLayer::default()
+        });
+        assert_eq!(values.show_durations, Some(enabled));
+        assert_eq!(values.theme.as_deref(), Some("pi"));
+    }
+}
+
+#[test]
 fn bool_settings_persist_as_toml_booleans_and_removable_keys_disappear() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");

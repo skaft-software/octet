@@ -628,6 +628,8 @@ pub struct Config {
     /// Opt in to bounded inline image placement for interactive tool results.
     /// Plain, print, and noninteractive frontends always remain payload-free.
     pub show_images: bool,
+    /// Completed tool and thinking durations. `None` follows the active theme.
+    pub show_durations: Option<bool>,
     pub session_dir: PathBuf,
     pub compaction: CompactionPolicy,
     /// Optional cumulative session spend limit in microdollars.

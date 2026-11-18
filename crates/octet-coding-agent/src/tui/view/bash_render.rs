@@ -413,16 +413,39 @@ mod tests {
     use crate::tui::theme::{test_theme, test_theme_with};
 
     #[test]
+    fn tool_duration_is_hidden_by_default_without_hiding_output() {
+        let mut panel = panel(
+            "true",
+            "exit=0 duration=99s\nstdout: 1 line\nfixture output",
+        );
+        panel.duration = Some(std::time::Duration::from_millis(1250));
+        let theme = test_theme();
+        let rows = super::super::transcript_render::render_tool(
+            &panel,
+            &theme,
+            &theme.rich_renderer(),
+            80,
+            true,
+            "tool_output",
+        );
+        let text = plain_rows(&rows.lines).join("\n");
+        assert!(text.contains("fixture output"), "{text}");
+        assert!(!text.contains("Took"), "{text}");
+    }
+
+    #[test]
     fn shell_duration_is_themeable_final_only_and_copy_safe() {
         let mut panel = panel("true", "exit=0 duration=99s\n(no output)");
         panel.duration = Some(std::time::Duration::from_millis(1250));
+        let mut theme = test_theme();
+        theme.set_duration_preference(Some(true));
         for expanded in [false, true] {
             for is_error in [false, true] {
                 panel.is_error = is_error;
                 let rows = super::super::transcript_render::render_tool(
                     &panel,
-                    &test_theme(),
-                    &test_theme().rich_renderer(),
+                    &theme,
+                    &theme.rich_renderer(),
                     80,
                     expanded,
                     "tool_output",
@@ -438,7 +461,7 @@ mod tests {
             ("  ", ""),
         ] {
             let theme = crate::tui::theme::test_theme_from_source(&format!(
-                "[tokens]\ntool_duration = {template:?}\n"
+                "[tokens]\nshow_durations = true\ntool_duration = {template:?}\n"
             ));
             let rows = super::super::transcript_render::render_tool(
                 &panel,
@@ -461,8 +484,8 @@ mod tests {
             panel.duration = duration;
             let rows = super::super::transcript_render::render_tool(
                 &panel,
-                &test_theme(),
-                &test_theme().rich_renderer(),
+                &theme,
+                &theme.rich_renderer(),
                 80,
                 false,
                 "tool_output",

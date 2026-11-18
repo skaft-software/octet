@@ -401,6 +401,7 @@ pub struct OctetTheme {
     ascii_glyphs: BTreeMap<String, String>,
     surfaces: BTreeMap<String, ThemeSurface>,
     layout: ThemeLayout,
+    duration_preference: Option<bool>,
     metadata: ThemeMetadata,
     source: ThemeSource,
     // Already validated, bounded source; native palettes resolve both variants
@@ -664,6 +665,7 @@ impl OctetTheme {
             ascii_glyphs: default_ascii_glyphs(),
             surfaces: default_surfaces(),
             layout: ThemeLayout::default(),
+            duration_preference: None,
             metadata: ThemeMetadata {
                 name: "octet Default".to_owned(),
                 description: "Terminal-neutral compiled theme".to_owned(),
@@ -702,6 +704,7 @@ impl OctetTheme {
     /// Pi's generated theme consumes them; other themes retain their own colors.
     pub(crate) fn with_terminal_colors(mut self, colors: TerminalThemeColors) -> Self {
         if matches!(self.source, ThemeSource::CompiledPi) && colors != self.terminal_colors {
+            let duration_preference = self.duration_preference;
             self = pi_theme_with_colors(
                 self.capabilities,
                 self.background,
@@ -710,9 +713,23 @@ impl OctetTheme {
                 colors.palette,
             )
             .expect("compiled Pi recipe must remain valid");
+            self.duration_preference = duration_preference;
         }
         self.terminal_colors = colors;
         self
+    }
+
+    pub(crate) fn set_duration_preference(&mut self, preference: Option<bool>) {
+        self.duration_preference = preference;
+    }
+
+    pub(crate) fn duration_preference(&self) -> Option<bool> {
+        self.duration_preference
+    }
+
+    pub(crate) fn shows_durations(&self) -> bool {
+        self.duration_preference
+            .unwrap_or_else(|| self.resolve::<bool>("show_durations").unwrap_or(false))
     }
 
     pub fn capabilities(&self) -> TerminalCapabilities {
@@ -1007,7 +1024,7 @@ impl OctetTheme {
         if capabilities.color != ColorDepth::None {
             capabilities.color = ColorDepth::TrueColor;
         }
-        if matches!(self.source, ThemeSource::CompiledPi) {
+        let mut theme = if matches!(self.source, ThemeSource::CompiledPi) {
             let same_profile =
                 self.background == background && self.terminal_colors.background.is_some();
             let (foreground, canvas) = if same_profile {
@@ -1020,25 +1037,27 @@ impl OctetTheme {
             } else {
                 (Some((229, 229, 231)), Some((0, 0, 0)))
             };
-            return pi_theme_with_colors(
+            pi_theme_with_colors(
                 capabilities,
                 background,
                 foreground,
                 canvas,
                 self.terminal_colors.palette,
-            );
-        }
-        let Some(source) = &self.native_source else {
-            return Ok(default_theme_for(background, capabilities));
+            )?
+        } else if let Some(source) = &self.native_source {
+            load_theme_source_for(
+                source,
+                "native theme snapshot",
+                self.source.clone(),
+                &self.metadata.name,
+                capabilities,
+                background,
+            )?
+        } else {
+            default_theme_for(background, capabilities)
         };
-        load_theme_source_for(
-            source,
-            "native theme snapshot",
-            self.source.clone(),
-            &self.metadata.name,
-            capabilities,
-            background,
-        )
+        theme.set_duration_preference(self.duration_preference);
+        Ok(theme)
     }
 
     pub fn fg(&self, token: &str, text: &str) -> String {

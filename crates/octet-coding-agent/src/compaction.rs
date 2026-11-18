@@ -538,6 +538,7 @@ pub(crate) mod tests {
             plain: false,
             tern: crate::config::TernMode::Auto,
             show_images: false,
+            show_durations: None,
             session_dir: directory.path().join("sessions"),
             compaction: CompactionPolicy::default(),
             max_cost_microdollars: None,

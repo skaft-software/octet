@@ -164,6 +164,8 @@ pub enum SettingsCommand {
     Theme(Option<String>),
     /// Enable, disable, or report inline tool-result image placement.
     Images(Option<bool>),
+    /// Enable, disable, or report completed tool and thinking durations.
+    Durations(Option<bool>),
     /// Set, or report, the persisted default model for new sessions.
     DefaultModel(Option<String>),
     /// Set, or report, the persisted default reasoning level.
@@ -453,7 +455,7 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     ),
     slash!(
         "settings",
-        "/settings [show|theme|images on/off|tui fullscreen/inline|default model/reasoning|transport|padding]",
+        "/settings [show|theme|images on/off|durations on/off|tui fullscreen/inline|default model/reasoning|transport|padding]",
         "open settings or change display and default preferences",
         true
     ),
@@ -947,6 +949,11 @@ pub fn parse(input: &str) -> Command {
             ["images"] => Command::Settings(SettingsCommand::Images(None)),
             ["images", value] => match parse_on_off(value) {
                 Some(enabled) => Command::Settings(SettingsCommand::Images(Some(enabled))),
+                None => Command::Unknown(input.to_owned()),
+            },
+            ["durations"] => Command::Settings(SettingsCommand::Durations(None)),
+            ["durations", value] => match parse_on_off(value) {
+                Some(enabled) => Command::Settings(SettingsCommand::Durations(Some(enabled))),
                 None => Command::Unknown(input.to_owned()),
             },
             ["tui"] => Command::Settings(SettingsCommand::TuiMode(None)),

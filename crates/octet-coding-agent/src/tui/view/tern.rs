@@ -837,6 +837,7 @@ fn project(
                                 images,
                                 shell.workspace.as_deref(),
                                 collapsed,
+                                shell.theme.shows_durations(),
                             );
                             header.c = Some(Vec::new());
                             header.p = Some(
@@ -1114,6 +1115,17 @@ fn block_node(
             )],
         )),
         TranscriptBlock::Reasoning(block) if block.text.trim().is_empty() => None,
+        TranscriptBlock::Reasoning(block)
+            if block.finished
+                && !shell.theme.shows_durations()
+                && shell.extension_ui.hidden_thinking_label.is_none()
+                && collapsed
+                    .get(&id(identity, "reasoning"))
+                    .copied()
+                    .unwrap_or(!block.reasoning_expanded) =>
+        {
+            None
+        }
         TranscriptBlock::Reasoning(block) => Some(Node::with_children(
             id(identity, "reasoning.group"),
             Kind::Col,
@@ -1134,10 +1146,20 @@ fn block_node(
                             {
                                 label.clone()
                             } else if block.finished {
-                                block.reasoning_elapsed.map_or_else(
-                                    || "Thoughts".into(),
-                                    |elapsed| format!("Thought for {}", format_duration(elapsed)),
-                                )
+                                block
+                                    .reasoning_elapsed
+                                    .filter(|_| shell.theme.shows_durations())
+                                    .map_or_else(
+                                        || "Thoughts".into(),
+                                        |elapsed| {
+                                            format!(
+                                                "Thought for {}",
+                                                super::reasoning_render::format_thought_duration(
+                                                    elapsed
+                                                )
+                                            )
+                                        },
+                                    )
                             } else {
                                 "Thinking".into()
                             },
@@ -1177,6 +1199,7 @@ fn block_node(
             images,
             shell.workspace.as_deref(),
             collapsed,
+            shell.theme.shows_durations(),
         )),
         TranscriptBlock::Shell(output) => Some(shell_node(identity, output, shell.verbose_tools)),
         TranscriptBlock::Notice(text) => Some(text_node(identity, text, "muted")),
@@ -1826,6 +1849,7 @@ fn tool_node(
     images: &super::tern_images::NativeImages,
     workspace: Option<&std::path::Path>,
     collapsed_overrides: &HashMap<String, bool>,
+    show_durations: bool,
 ) -> Node {
     let (target, target_kind) = tool_target(panel);
     let href = (target_kind == "path")
@@ -1849,7 +1873,7 @@ fn tool_node(
         "done"
     };
     let mut meta = Vec::new();
-    if let Some(duration) = panel.duration {
+    if let Some(duration) = panel.duration.filter(|_| panel.finished && show_durations) {
         meta.push(Text::Plain(format_duration(duration)));
     }
     if panel.finished

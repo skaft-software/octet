@@ -33,6 +33,7 @@ fn config(workspace: PathBuf, cwd: PathBuf) -> Config {
         plain: false,
         tern: crate::config::TernMode::Auto,
         show_images: false,
+        show_durations: None,
         session_dir: PathBuf::from("sessions"),
         compaction: CompactionPolicy::default(),
         max_cost_microdollars: None,

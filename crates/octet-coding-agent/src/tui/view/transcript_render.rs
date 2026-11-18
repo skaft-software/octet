@@ -311,7 +311,10 @@ pub(super) fn render_tool(
     // here rather than supplied by the optional adapter. Pi compatibility source:
     // packages/coding-agent/src/core/tools/render-utils.ts:142-163 prefers the
     // recorded final duration; renderers/bash.ts:91 puts it after result output.
-    if let Some(duration) = panel.duration.filter(|_| panel.finished) {
+    if let Some(duration) = panel
+        .duration
+        .filter(|_| panel.finished && theme.shows_durations())
+    {
         let template = theme
             .resolve::<String>("tool_duration")
             .unwrap_or_else(|| "Took {duration}".into());
