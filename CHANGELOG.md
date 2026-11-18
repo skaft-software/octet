@@ -67,6 +67,7 @@
 - Copying a code block after an identical LaTeX or Mermaid diagram copies that block's own source.
 - Paste and attachment chips delete as one object, and arrow keys step over them.
 - Tern sessions encode the welcome mark once instead of on every streamed update.
+- Hidden output, compaction and thinking rows share one hint style: (Ctrl+O to expand) and (Ctrl+T to expand).
 
 ## [0.10.4] - 2026-11-12
 

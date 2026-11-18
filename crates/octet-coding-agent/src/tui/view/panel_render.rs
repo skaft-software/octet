@@ -444,11 +444,7 @@ fn render_hidden_subagent_groups(
         .map(|(label, count)| format!("{count} {label}"))
         .collect::<Vec<_>>()
         .join(separator);
-    let hint = if unicode {
-        format!("hidden{separator}Ctrl+T shows all")
-    } else {
-        "hidden | Ctrl+T shows all".to_owned()
-    };
+    let hint = "hidden (Ctrl+T to expand)".to_owned();
     let text = if summary.is_empty() {
         hint
     } else {

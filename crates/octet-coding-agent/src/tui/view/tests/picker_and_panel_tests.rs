@@ -675,7 +675,7 @@ fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
     assert!(plain.contains("2 Done"), "{plain}");
     assert!(plain.contains("2 Failed"), "{plain}");
     assert!(plain.contains("2 Stopped"), "{plain}");
-    assert!(plain.contains("Ctrl+T shows all"), "{plain}");
+    assert!(plain.contains("hidden (Ctrl+T to expand)"), "{plain}");
     // Bounded: the panel never renders past its row allowance.
     assert!(rows.len() <= 36, "{} panel rows", rows.len());
 
@@ -694,7 +694,7 @@ fn subagent_panel_groups_states_and_collapses_finished_workers_by_default() {
     assert!(plain.contains("Done · 2"), "{plain}");
     assert!(plain.contains("Failed · 2"), "{plain}");
     assert!(plain.contains("Stopped · 2"), "{plain}");
-    assert!(!plain.contains("Ctrl+T shows all"), "{plain}");
+    assert!(!plain.contains("hidden (Ctrl+T to expand)"), "{plain}");
 
     // Collapsing again still lets a typed filter reach a hidden worker.
     assert!(shell

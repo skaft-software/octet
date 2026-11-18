@@ -42,7 +42,7 @@ fn codemode_native_source_and_output_preview_expand_without_replacing_nodes() {
         assert_eq!(shown.k, Kind::Code);
         let preview = shown.p.as_ref().unwrap().as_map()["text"].as_str().unwrap();
         assert!(preview.contains("Script completed"));
-        assert!(preview.contains("Ctrl+O for full output"));
+        assert!(preview.contains("output preview (Ctrl+O to expand)"));
         assert!(preview.chars().count() < 700);
         let root = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
         let root_props = root.p.as_ref().unwrap().as_map();

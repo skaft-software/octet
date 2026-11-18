@@ -404,7 +404,7 @@ fn ctrl_o_expands_and_collapses_the_inline_compaction_summary() {
         collapsed.contains("12,000 input tokens summarized"),
         "{collapsed}"
     );
-    assert!(collapsed.contains("Ctrl+O to view"), "{collapsed}");
+    assert!(collapsed.contains("(Ctrl+O to expand)"), "{collapsed}");
     assert!(!collapsed.contains("summary sentinel"), "{collapsed}");
 
     shell.toggle_disclosure();
@@ -421,7 +421,7 @@ fn ctrl_o_expands_and_collapses_the_inline_compaction_summary() {
         "{collapsed_again}"
     );
     assert!(
-        collapsed_again.contains("Ctrl+O to view"),
+        collapsed_again.contains("(Ctrl+O to expand)"),
         "{collapsed_again}"
     );
 }
@@ -648,7 +648,7 @@ fn compaction_disclosure_preserves_native_presentation() {
         process_vt100_with_saved_line_clear(&mut terminal, &collapse, HEIGHT, WIDTH, 512);
         terminal.set_scrollback(0);
         let collapsed = terminal.screen().contents();
-        assert!(collapsed.contains("Ctrl+O to view"), "{collapsed}");
+        assert!(collapsed.contains("(Ctrl+O to expand)"), "{collapsed}");
         assert!(!collapsed.contains("compaction-detail-"), "{collapsed}");
         assert!(
             collapsed

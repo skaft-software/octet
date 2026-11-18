@@ -188,6 +188,10 @@ pub(super) fn tool_input_preview(
     rows
 }
 
+/// The one disclosure hint for output hidden behind Ctrl+O, worded like the
+/// thinking row's `(Ctrl+T to expand)`.
+pub(super) const OUTPUT_EXPAND_HINT: &str = "(Ctrl+O to expand)";
+
 /// UI-hidden retained rows always advertise the same disclosure key. Capture
 /// loss has separate wording because disclosure cannot recover discarded bytes.
 // Pi compatibility reference: packages/coding-agent/src/core/tools/renderers/
@@ -199,9 +203,8 @@ pub(super) fn tool_omission_hint(
     available: usize,
 ) -> String {
     let ellipsis = if theme.unicode() { "…" } else { "..." };
-    let separator = super::semantic_separator(theme);
     let unit = super::plural(hidden, "row", "rows");
-    let long = format!("{ellipsis} {hidden} {kind} {unit} hidden{separator}Ctrl+O");
+    let long = format!("{ellipsis} {hidden} {kind} {unit} hidden {OUTPUT_EXPAND_HINT}");
     if visible_width(&long) <= available {
         long
     } else {
@@ -369,9 +372,11 @@ pub(super) fn project_diff(
         // Structured diffs retain a coherent prefix: splitting wrapped hunks
         // can separate an addition/removal marker from its continuation rows.
         projected.retain_rows(&(0..COMPACT_DIFF_LINES).collect::<Vec<_>>());
-        let separator = super::semantic_separator(theme);
         projected.decoration(fit_line(
-            &subdued_text(theme, &format!("{output_indent}{hint}{separator}Ctrl+O")),
+            &subdued_text(
+                theme,
+                &format!("{output_indent}{hint} {OUTPUT_EXPAND_HINT}"),
+            ),
             width,
         ));
     }

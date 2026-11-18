@@ -63,7 +63,7 @@ fn polish_count_nouns_share_one_rule() {
         let dump = screen_dump(&rows, 100);
         assert_eq!(
             dump.lines().last().unwrap(),
-            format!("… {hidden} command {unit} hidden · Ctrl+O")
+            format!("… {hidden} command {unit} hidden (Ctrl+O to expand)")
         );
     }
 }
@@ -122,7 +122,7 @@ fn polish_tool_omissions_share_hidden_word_and_shortcut() {
     let dump = screen_dump(&rows, 100);
     assert_eq!(
         dump.lines().nth(2).unwrap(),
-        "… 4 output rows hidden · Ctrl+O"
+        "… 4 output rows hidden (Ctrl+O to expand)"
     );
 }
 
@@ -144,7 +144,7 @@ fn polish_output_window_keeps_two_head_and_two_nonblank_tail_rows() {
         };
         assert_eq!(
             screen_dump(&rows, 100),
-            "line 1\nline 2\n… 4 output rows hidden · Ctrl+O\nline 7\nline 8",
+            "line 1\nline 2\n… 4 output rows hidden (Ctrl+O to expand)\nline 7\nline 8",
             "{name}"
         );
     }
@@ -324,5 +324,5 @@ fn polish_structured_diff_preview_retains_a_coherent_prefix() {
         .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(dump, "@@ -0,0 +1,16 @@\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n7 lines hidden · Ctrl+O");
+    assert_eq!(dump, "@@ -0,0 +1,16 @@\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n7 lines hidden (Ctrl+O to expand)");
 }

@@ -638,11 +638,11 @@ pub(super) fn render_block_planned_with_rainbow(
             let continuation = " ".repeat(visible_width(&prefix));
             let expanded = compaction.expanded || verbose_tools;
             let action = if expanded {
-                "Ctrl+O to collapse"
+                "(Ctrl+O to collapse)"
             } else {
-                "Ctrl+O to view"
+                super::tool_render::OUTPUT_EXPAND_HINT
             };
-            let label = format!("{} · ({action})", sanitize_for_terminal(&compaction.label));
+            let label = format!("{} {action}", sanitize_for_terminal(&compaction.label));
             let mut lines = wrap_hanging(&label, &prefix, &continuation, width);
             if expanded {
                 let summary = AssistantBlock::finalized(compaction.summary.clone());
