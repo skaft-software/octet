@@ -9,6 +9,7 @@
 - `--no-skills` skips automatic skill discovery while still loading paths explicitly passed with `--skill-dir`.
 - Use bundled `pi-claude-code` models, streamed thinking, and tool results through a reviewed Pi setup, without importing credentials.
 - Ctrl+G opens the idle draft in your external editor and keeps the draft on failure.
+- RPC can list forkable prompts, fork or clone the session, export redacted HTML, and clear queued steering and follow-ups.
 
 ## [0.10.5] - 2026-11-19
 

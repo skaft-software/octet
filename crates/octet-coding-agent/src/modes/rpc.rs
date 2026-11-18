@@ -26,7 +26,7 @@ mod wire;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use octet_agent::{
@@ -275,6 +275,7 @@ struct QueuedInput {
     text: String,
     input: UserInput,
     message: Value,
+    receipt: Arc<Mutex<Option<octet_agent::SteeringReceipt>>>,
 }
 
 #[derive(Default)]
@@ -294,6 +295,30 @@ impl QueueState {
             "steering": self.steering.iter().map(|queued| queued.text.as_str()).collect::<Vec<_>>(),
             "followUp": self.follow_up.iter().map(|queued| queued.text.as_str()).collect::<Vec<_>>()
         })
+    }
+
+    // Pi 1.5.2 dist/core/agent-session.js:2046 clears both pending lists
+    // and returns their original text. Only the native run knows whether an
+    // input has started delivery; its recall receipt arbitrates that race.
+    fn clear(&mut self, active: bool) -> Value {
+        fn remove(queue: &mut VecDeque<QueuedInput>, active: bool) -> Vec<String> {
+            let mut removed = Vec::new();
+            queue.retain(|queued| {
+                let can_remove = !active
+                    || queued
+                        .receipt
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .is_none_or(octet_agent::SteeringReceipt::try_retract);
+                if can_remove {
+                    removed.push(queued.text.clone());
+                }
+                !can_remove
+            });
+            removed
+        }
+        json!({"steering": remove(&mut self.steering, active), "followUp": remove(&mut self.follow_up, active)})
     }
 
     fn take_steering(&mut self, count: usize) -> Vec<QueuedInput> {
@@ -805,6 +830,7 @@ fn queued_input(
         text: raw.to_owned(),
         message: user_input_value(&display_input),
         input,
+        receipt: Default::default(),
     })
 }
 
@@ -829,8 +855,16 @@ impl RpcAdmission {
     #[allow(clippy::result_large_err)]
     async fn send(&self, control: &RunControl) -> Result<(), AgentError> {
         match &self.request {
-            RpcControlRequest::Steer(queued) => control.steer(queued.input.clone()).await,
-            RpcControlRequest::FollowUp(queued) => control.follow_up(queued.input.clone()).await,
+            RpcControlRequest::Steer(queued) | RpcControlRequest::FollowUp(queued) => {
+                let (prepared, receipt) = control.prepare_steer(queued.input.clone())?;
+                if matches!(self.request, RpcControlRequest::Steer(_)) {
+                    control.steer_retractable(prepared).await?;
+                } else {
+                    control.follow_up_retractable(prepared).await?;
+                }
+                *queued.receipt.lock().unwrap_or_else(|e| e.into_inner()) = Some(receipt);
+                Ok(())
+            }
             RpcControlRequest::SteeringMode(mode) => {
                 control.set_steering_mode(queue_mode(mode)).await
             }
@@ -911,6 +945,10 @@ fn active_input(
                     control.abort();
                 }
                 output.success(id.as_deref(), &kind, None)?;
+            }
+            "clear_queue" => {
+                output.success(id.as_deref(), &kind, Some(queue.clear(true)))?;
+                output.send(queue.event())?;
             }
             "steer" | "follow_up" => {
                 let raw = required_string(&command, "message")?;
@@ -1149,6 +1187,10 @@ async fn drive_run(
     // admission: a prompt must not silently become a new idle run. Only the
     // existing lifecycle-command branch may defer work to the idle boundary.
     for command in waiting {
+        if command_type(&command) == Some("clear_queue") {
+            deferred.push_back(command);
+            continue;
+        }
         if let Some(admission) = active_input(
             command,
             &control,
@@ -1624,16 +1666,118 @@ async fn handle_idle_command(
             }
             output.success(id.as_deref(), &kind, None)?;
         }
-        "export_html" | "fork" | "clone" | "get_fork_messages" => {
-            output.error(
-                id.as_deref(),
-                &kind,
-                format!("Command {kind:?} is not supported by octet RPC mode"),
-            )?;
+        // Pi 1.5.2 dist/modes/rpc/rpc-mode.js:492-523: returned
+        // export path, fork text, cancellation and prompt picker shapes.
+        "export_html" => {
+            let destination = match command.get("outputPath") {
+                None => None,
+                Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
+                _ => respond_error!("outputPath must be a non-empty string"),
+            };
+            let path = match crate::session_commands::export_active_html(
+                &app.sessions,
+                app.agent.session(),
+                destination,
+                &app.config.invocation_cwd,
+                app.config.theme.as_deref().unwrap_or("dark"),
+            ) {
+                Ok(path) => path,
+                Err(error) => respond_error!(error),
+            };
+            output.success(id.as_deref(), &kind, Some(json!({"path": path})))?;
+        }
+        "get_fork_messages" => {
+            let messages = super::interactive::active_fork_messages(app.agent.session())
+                .into_iter()
+                .filter(|entry| !entry.whole_conversation)
+                .map(|entry| json!({"entryId": entry.entry_id, "text": entry.text}))
+                .collect::<Vec<_>>();
+            output.success(id.as_deref(), &kind, Some(json!({"messages": messages})))?;
+        }
+        "fork" | "clone" => {
+            let entry = if kind == "fork" {
+                match required_string(&command, "entryId") {
+                    Ok(id) => Some(id),
+                    Err(error) => respond_error!(error),
+                }
+            } else {
+                None
+            };
+            let result = match fork_rpc_session(&mut app, entry).await {
+                Ok(result) => result,
+                Err(error) => respond_error!(error),
+            };
+            output.success(id.as_deref(), &kind, Some(result))?;
         }
         _ => output.error(id.as_deref(), &kind, format!("Unknown command: {kind}"))?,
     }
     Ok(app)
+}
+
+async fn fork_rpc_session(app: &mut App, entry: Option<&str>) -> anyhow::Result<Value> {
+    use super::interactive::{
+        active_fork_messages, fork_active_session, park_workers_for_replacement,
+        replace_extension_active_session,
+    };
+    use octet_agent::extension_process::ExtensionHook;
+    let source = app.agent.session();
+    let (selected, checkpoint, text) = if let Some(id) = entry {
+        let prompt = active_fork_messages(source)
+            .into_iter()
+            .find(|prompt| !prompt.whole_conversation && prompt.entry_id == id)
+            .ok_or_else(|| anyhow::anyhow!("fork source must be a user prompt in this session"))?;
+        let id = octet_agent::EntryId(prompt.entry_id);
+        let parent = source
+            .entry(&id)
+            .expect("fork prompt refers to an entry")
+            .parent
+            .clone();
+        (id, parent, Some(prompt.text))
+    } else {
+        let head = source
+            .head()
+            .ok_or_else(|| anyhow::anyhow!("no current entry to clone"))?;
+        (head.clone(), Some(head), None)
+    };
+    let source_path = source.path().to_owned();
+    let owner = source.resource_owner_key();
+    let cancelled = app.executable_extensions.lifecycle_snapshot().before_session_change(
+        &owner, ExtensionHook::SessionBeforeFork,
+        json!({"entryId": selected.0, "position": if entry.is_some() { "before" } else { "at" }}),
+    ).await?;
+    if cancelled {
+        return Ok(json!({"cancelled": true}));
+    }
+    park_workers_for_replacement(app, "session fork")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let destination = app.sessions.new_path(&crate::modes::timestamp());
+    let opened = (|| {
+        fork_active_session(
+            &app.sessions,
+            &source_path,
+            destination.clone(),
+            checkpoint.as_ref(),
+        )?;
+        let mut prepared = None;
+        crate::app::bootstrap::open_launch_session(
+            &mut prepared,
+            crate::app::bootstrap::SessionSelection::Forked(destination),
+        )
+    })();
+    let session = match opened {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = app.agent.reattach_delegated_workers();
+            return Err(error);
+        }
+    };
+    replace_extension_active_session(app, session, "fork")?;
+    if let Some(text) = text {
+        Ok(json!({"text": text, "cancelled": false}))
+    } else {
+        Ok(json!({"cancelled": false}))
+    }
 }
 
 /// Run the strict LF-delimited JSONL RPC frontend until stdin closes.
@@ -1847,9 +1991,23 @@ async fn run_rpc_loop_inner(
             continue;
         }
 
+        if kind == "clear_queue" {
+            output.success(command_id(&command), &kind, Some(queue.clear(false)))?;
+            output.send(queue.event())?;
+            continue;
+        }
+
         if kind != "prompt" {
+            let old_session = matches!(kind.as_str(), "fork" | "clone")
+                .then(|| app.agent.session().path().to_owned());
             app =
                 handle_idle_command(app, command, &mut output, &mut settings, queue.len()).await?;
+            if old_session.is_some_and(|path| path != app.agent.session().path()) && queue.len() > 0
+            {
+                // A new owner must not replay inputs queued under the old one.
+                queue.clear(false);
+                output.send(queue.event())?;
+            }
             continue;
         }
 

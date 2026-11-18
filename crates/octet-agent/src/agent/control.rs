@@ -61,6 +61,41 @@ impl ReservedInput {
     }
 }
 
+/// Retained follow-ups can be recalled from another frontend task. Reap
+/// tombstones on admission and before testing a delivery boundary; recalled
+/// entries no longer hold budget and must not grow the deque or start a turn.
+#[derive(Default)]
+pub(super) struct PendingFollowUps(VecDeque<ReservedInput>);
+
+impl PendingFollowUps {
+    pub(super) fn push_back(&mut self, input: ReservedInput) {
+        self.0.retain(ReservedInput::is_pending);
+        if input.is_pending() {
+            self.0.push_back(input);
+        }
+    }
+
+    pub(super) fn is_empty(&mut self) -> bool {
+        self.0.retain(ReservedInput::is_pending);
+        self.0.is_empty()
+    }
+
+    pub(super) fn drain(
+        &mut self,
+        _: std::ops::RangeFull,
+    ) -> impl Iterator<Item = ReservedInput> + '_ {
+        self.0.drain(..)
+    }
+
+    pub(super) fn pop_front(&mut self) -> Option<ReservedInput> {
+        self.0.pop_front()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// A single-use steering submission with a receipt available before sending.
 ///
 /// Create with [`Self::new`], keep the receipt in the frontend, and move this
@@ -491,6 +526,22 @@ impl RunControl {
     /// admission drops its input and releases its reservations. Submitting an
     /// input reserved by a different run returns [`AgentError::RunEnded`].
     pub async fn steer_retractable(&self, prepared: PreparedSteering) -> Result<(), AgentError> {
+        self.send_retractable(prepared, Control::Steer).await
+    }
+
+    /// Queues a follow-up with the same one-shot recall as a steering input.
+    pub async fn follow_up_retractable(
+        &self,
+        prepared: PreparedSteering,
+    ) -> Result<(), AgentError> {
+        self.send_retractable(prepared, Control::FollowUp).await
+    }
+
+    async fn send_retractable(
+        &self,
+        prepared: PreparedSteering,
+        wrap: fn(ReservedInput) -> Control,
+    ) -> Result<(), AgentError> {
         if prepared
             .owner
             .as_ref()
@@ -534,7 +585,7 @@ impl RunControl {
         if !*admission {
             return Err(AgentError::RunEnded);
         }
-        permit.send(Control::Steer(ReservedInput::Retractable(prepared)));
+        permit.send(wrap(ReservedInput::Retractable(prepared)));
         Ok(())
     }
 

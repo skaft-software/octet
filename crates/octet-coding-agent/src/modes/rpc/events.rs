@@ -356,6 +356,7 @@ impl EventTranslator {
                 message: user_value(&text),
                 input: UserInput::from(text.clone()),
                 text,
+                receipt: Default::default(),
             }));
         }
         for queued in delivered {

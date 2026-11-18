@@ -338,7 +338,9 @@ fn provider_app_with(directory: &Path, extensions: &[(&str, &str)]) -> App {
     config.enabled_extensions = names.clone();
     config.invocation_trusted_extensions = names;
     let boot = bootstrap(config).unwrap();
-    boot.preflight_extension_providers().unwrap();
+    // Follow real launch: preflight only if the requested route is missing.
+    // A builtin startup followed by an in-place model switch must not start
+    // an extra API 0.4 provider process before the real session exists.
     let launch = resolve_launch_print(&boot, "provider-rebind").unwrap();
     let mut app = build_app(boot, launch, "system".into()).unwrap();
     if v04 {

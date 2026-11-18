@@ -62,8 +62,15 @@ RPC isn't a terminal UI. Its messages use `type` fields, not the native host's
 `hello` envelope, and `--mode rpc` can't be combined with `--print`. It's
 independent of [native-host protocol 1](sdk.md) and [extension API
 0.4](extensions/API-0.4-REFERENCE.md). The framing is Pi-compatible, but that
-doesn't mean every Pi command or feature works, and it hasn't been tested
-against a pinned Pi release.
+doesn't mean every Pi command or feature works.
+
+`get_fork_messages` lists prompts from the session tree. `fork` creates a
+new session before the selected prompt and returns its text; `clone` copies
+through the current leaf. Both wait until the current turn settles and honor
+session-change vetoes. `export_html` writes a redacted HTML export, refuses an
+existing destination, and returns its path. `clear_queue` returns the original
+text of removed steering and follow-up messages; it can't undo an input that
+has already started committing to the session.
 
 A finished tool's `tool_execution_end` result and its `toolResult` message carry
 Pi's `details`: a Pi-compatible tool's own details, otherwise an extension tool's

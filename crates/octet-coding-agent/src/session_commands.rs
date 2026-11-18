@@ -451,7 +451,16 @@ fn build_export_package(
     include_secrets: bool,
 ) -> anyhow::Result<(Value, usize, bool)> {
     let path = store.path_by_id(id)?;
-    let opened_path = crate::session_store::absolute_read_path(&path)?;
+    build_export_package_at(store, id, &path, include_secrets)
+}
+
+fn build_export_package_at(
+    store: &SessionStore,
+    id: &str,
+    path: &Path,
+    include_secrets: bool,
+) -> anyhow::Result<(Value, usize, bool)> {
+    let opened_path = crate::session_store::absolute_read_path(path)?;
     let bytes =
         octet_agent::secure_fs::read_regular_file_bounded(&opened_path, MAX_SESSION_FILE_BYTES)?;
     let (mut records, ignored_torn_tail) = parse_export_records(&bytes)?;
@@ -502,6 +511,27 @@ fn build_export_package(
     }
     package["redaction_count"] = Value::from(redaction_count);
     Ok((package, redaction_count, ignored_torn_tail))
+}
+
+/// Export the authoritative session open in the RPC process, including
+/// sessions explicitly opened by path outside the workspace catalog.
+pub(crate) fn export_active_html(
+    store: &SessionStore,
+    session: &Session,
+    output: Option<PathBuf>,
+    cwd: &Path,
+    theme: &str,
+) -> anyhow::Result<PathBuf> {
+    let id = session
+        .path()
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .ok_or_else(|| anyhow::anyhow!("current session has no valid id"))?;
+    let (package, _, _) = build_export_package_at(store, id, session.path(), false)?;
+    let destination = cwd.join(output.unwrap_or_else(|| PathBuf::from(format!("{id}.html"))));
+    let bytes = crate::modes::export_html::render(&package, theme)?;
+    write_export(&destination, &bytes, false)?;
+    Ok(destination)
 }
 
 fn write_export(destination: &Path, payload: &[u8], force: bool) -> anyhow::Result<()> {

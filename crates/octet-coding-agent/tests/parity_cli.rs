@@ -57,6 +57,109 @@ fn no_skills_suppresses_discovery_but_keeps_explicit_roots() {
     }
 }
 
+#[test]
+fn rpc_session_commands_export_and_branch_without_spending_tokens() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let source = fixture.workspace.join("pi.jsonl");
+    std::fs::write(
+        &source,
+        include_bytes!("../src/session_commands/import/fixtures/pi-1.5.2-chat.jsonl"),
+    )
+    .unwrap();
+    let output_path = fixture.workspace.join("export.html");
+    let commands = [
+        serde_json::json!({"id":"before","type":"get_state"}),
+        serde_json::json!({"id":"messages","type":"get_fork_messages"}),
+        serde_json::json!({"id":"export","type":"export_html","outputPath":output_path}),
+        serde_json::json!({"id":"clone","type":"clone"}),
+        serde_json::json!({"id":"after","type":"get_state"}),
+        serde_json::json!({"id":"bad","type":"fork","entryId":"missing"}),
+        serde_json::json!({"id":"fork","type":"fork","entryId":"aa126e86"}),
+        serde_json::json!({"id":"forked","type":"get_messages"}),
+    ];
+    let input = commands
+        .iter()
+        .map(|value| format!("{value}\n"))
+        .collect::<String>();
+    let output = fixture.run_with_stdin(
+        &[
+            "--mode",
+            "rpc",
+            "--session",
+            source.to_str().unwrap(),
+            "--model",
+            "custom/probe",
+        ],
+        &input,
+    );
+    let records: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let response = |id: &str| records.iter().find(|record| record["id"] == id).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for id in ["messages", "export", "clone", "after", "fork", "forked"] {
+        assert_eq!(response(id)["success"], true, "{}", response(id));
+    }
+    assert_eq!(
+        response("messages")["data"]["messages"][0]["entryId"],
+        "aa126e86"
+    );
+    assert!(std::fs::read_to_string(output_path)
+        .unwrap()
+        .contains("Loopback fixture answer."));
+    assert_ne!(
+        response("before")["data"]["sessionId"],
+        response("after")["data"]["sessionId"]
+    );
+    assert_eq!(response("bad")["success"], false);
+    assert_eq!(
+        response("fork")["data"]["text"],
+        "Loopback migration fixture."
+    );
+    assert_eq!(
+        response("forked")["data"]["messages"],
+        serde_json::json!([])
+    );
+    assert!(api.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn rpc_clear_queue_reports_only_removed_input() {
+    let api = LoopbackApi::start();
+    let fixture = Fixture::new(Some(&api.url));
+    let output = fixture.run_with_stdin(&["--mode","rpc","--model","custom/probe"],
+        "{\"type\":\"steer\",\"message\":\"old steering\"}\n{\"type\":\"follow_up\",\"message\":\"old follow-up\"}\n{\"type\":\"clear_queue\",\"id\":\"clear\"}\n{\"type\":\"get_state\",\"id\":\"state\"}\n");
+    let records: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let clear = records
+        .iter()
+        .find(|record| record["id"] == "clear")
+        .unwrap();
+    assert_eq!(clear["success"], true, "{clear}");
+    assert_eq!(
+        clear["data"],
+        serde_json::json!({"steering":["old steering"],"followUp":["old follow-up"]})
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record["id"] == "state")
+            .unwrap()["data"]["pendingMessageCount"],
+        0
+    );
+    assert!(api.requests.lock().unwrap().is_empty());
+}
+
 const ASSISTANT_TEXT: &str = "fixture response done";
 
 const SSE_BODY: &str = concat!(

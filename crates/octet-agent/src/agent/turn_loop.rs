@@ -447,7 +447,7 @@ impl Agent {
             let mut pending_reasoning = None;
             let mut pending_steer: Vec<ReservedInput> = Vec::new();
             let mut pending_context: Vec<ReservedInput> = Vec::new();
-            let mut followups: VecDeque<ReservedInput> = VecDeque::new();
+            let mut followups = super::control::PendingFollowUps::default();
             // Preserve octet's historical defaults; frontends that expose queue
             // modes can update either mode through RunControl.
             let mut steering_mode = QueueDeliveryMode::All;

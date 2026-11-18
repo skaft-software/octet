@@ -5973,7 +5973,7 @@ async fn park_workers_for_reload(app: &App) -> Result<(), String> {
     park_workers_for_replacement(app, "reload").await
 }
 
-async fn park_workers_for_replacement(app: &App, operation: &str) -> Result<(), String> {
+pub(super) async fn park_workers_for_replacement(app: &App, operation: &str) -> Result<(), String> {
     if app.agent.active_delegated_worker_count() == 0 {
         return Ok(());
     }
@@ -8086,7 +8086,7 @@ where
     .await
 }
 
-fn replace_extension_active_session(
+pub(super) fn replace_extension_active_session(
     app: &mut App,
     session: Session,
     reason: &'static str,
@@ -8813,7 +8813,7 @@ async fn pick_session_path(
     session_picker(shell, input, &sessions, store, current_session_path).await
 }
 
-fn active_fork_messages(session: &Session) -> Vec<crate::tui::view::ForkMessage> {
+pub(super) fn active_fork_messages(session: &Session) -> Vec<crate::tui::view::ForkMessage> {
     // Pi offers user boundaries from the entire durable tree, not just the
     // active ancestry. Forking an abandoned prompt still creates a new file.
     let mut messages = session
@@ -8865,7 +8865,7 @@ fn active_fork_messages(session: &Session) -> Vec<crate::tui::view::ForkMessage>
     messages
 }
 
-fn fork_active_session(
+pub(super) fn fork_active_session(
     sessions: &crate::session_store::SessionStore,
     source_path: &std::path::Path,
     destination: std::path::PathBuf,

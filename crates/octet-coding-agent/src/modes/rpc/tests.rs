@@ -630,6 +630,7 @@ fn rpc_test_queued(text: String) -> QueuedInput {
         message: user_input_value(&input),
         input,
         text,
+        receipt: Default::default(),
     }
 }
 
@@ -777,6 +778,18 @@ async fn rpc_liveness_sustained_active_controls_and_abort_settle() {
             }
             tokio::task::yield_now().await;
         }
+        tx.send(RpcInput::Value(
+            json!({"type": "clear_queue", "id": "clear"}),
+        ))
+        .await
+        .unwrap();
+        while !producer_capture
+            .frames()
+            .iter()
+            .any(|frame| frame["id"] == "clear")
+        {
+            tokio::task::yield_now().await;
+        }
         tx.send(RpcInput::Value(json!({"type": "abort", "id": "abort"})))
             .await
             .unwrap();
@@ -820,6 +833,23 @@ async fn rpc_liveness_sustained_active_controls_and_abort_settle() {
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0]["success"], true);
     }
+    let clear = frames.iter().find(|frame| frame["id"] == "clear").unwrap();
+    assert_eq!(clear["success"], true);
+    assert_eq!(
+        clear["data"]["steering"],
+        json!((2..128)
+            .step_by(4)
+            .map(|i| format!("steer-{i}"))
+            .collect::<Vec<_>>())
+    );
+    assert_eq!(
+        clear["data"]["followUp"],
+        json!((3..128)
+            .step_by(4)
+            .map(|i| format!("follow-{i}"))
+            .collect::<Vec<_>>())
+    );
+    assert_eq!(queue.len(), 0);
     assert!(frames
         .iter()
         .any(|frame| frame["id"] == "abort" && frame["success"] == true));
