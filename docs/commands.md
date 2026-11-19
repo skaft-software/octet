@@ -309,4 +309,6 @@ picker's Ctrl+F separately searches bounded session text. Ctrl+Shift+B cycles
 the hidden, auto and always transcript scrollbar modes for this shell, which
 isn't a saved preference or an alternate-screen switch.
 
-The model picker also matches model and provider names when `-`, `_`, `.`, `/`, or `:` separators are omitted from a filter term.
+The model picker shows provider names as group headings rather than repeating
+them on each model row. The filter still searches provider names and IDs, and
+matches model and provider names when `-`, `_`, `.`, `/`, or `:` separators are omitted.

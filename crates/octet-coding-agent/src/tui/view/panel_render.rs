@@ -7,6 +7,7 @@
 //! model lives in [`search_filter`]; the two pickers that list `SessionMeta`
 //! rather than a homogeneous list of strings live in [`session_picker`].
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -489,9 +490,9 @@ fn select_list_uses_stacked_rows(
         })
 }
 
-fn panel_label_width(
+fn panel_label_width<'a>(
     state: &ShellState,
-    items: &[String],
+    label: impl Fn(usize) -> Cow<'a, str>,
     descriptions: &[Option<String>],
     filtered: &[usize],
     width: u16,
@@ -499,7 +500,7 @@ fn panel_label_width(
     let content_width = usize::from(PresentationLayout::new(&state.theme, width).content_width);
     let max_label = filtered
         .iter()
-        .map(|index| visible_width(&panel_cell(&items[*index], state.theme.unicode())))
+        .map(|index| visible_width(&panel_cell(&label(*index), state.theme.unicode())))
         .max()
         .unwrap_or(0);
     let has_description = filtered.iter().any(|index| {
@@ -1035,8 +1036,23 @@ fn render_panel_output_with_limit(
                     .filter(|_| max_body >= row_height.saturating_add(1));
                 let window =
                     grouped_panel_window(*selected, &filtered, providers, row_height, max_body);
+                let row_label = |index: usize| {
+                    let item = items[index].as_str();
+                    // Endpoint IDs remain in the searchable item. Drop the
+                    // suffix only when the provider heading is painted.
+                    if let PanelAction::SelectGroupedModel { details, .. } = action {
+                        if let Some(detail) = details.get(index).filter(|_| providers.is_some()) {
+                            return if item.ends_with(" (current)") {
+                                Cow::Owned(format!("{} (current)", detail.name))
+                            } else {
+                                Cow::Borrowed(detail.name.as_str())
+                            };
+                        }
+                    }
+                    Cow::Borrowed(item)
+                };
                 let label_width = (!confirmation && !stacked)
-                    .then(|| panel_label_width(state, items, descriptions, &filtered, width))
+                    .then(|| panel_label_width(state, row_label, descriptions, &filtered, width))
                     .flatten();
                 let mut previous_provider: Option<&str> = None;
                 let mut previous_group: Option<usize> = None;
@@ -1068,7 +1084,7 @@ fn render_panel_output_with_limit(
                     let is_selected = position == *selected;
                     let item_render = render_panel_item(
                         state,
-                        &items[index],
+                        &row_label(index),
                         (!confirmation)
                             .then(|| descriptions.get(index).and_then(|value| value.as_deref()))
                             .flatten(),
@@ -1575,6 +1591,41 @@ mod grouped_model_tests {
                 + provider_heading_count(&filtered, action.model_provider_groups(), window.clone())
                 <= 3
         );
+    }
+
+    #[test]
+    fn grouped_model_rows_omit_the_provider_suffix_but_still_search_it() {
+        let catalog = octet_ai::ModelCatalog::builtin().unwrap();
+        let mut picker = crate::tui::pickers::model_picker_presentation(&catalog);
+        let index = picker
+            .ids
+            .iter()
+            .position(|id| id.0 == "gpt-6-astra")
+            .unwrap();
+        picker.labels[index].push_str(" (current)");
+        let mut shell = super::super::InteractiveShell::test_shell();
+        shell.set_size(120, 24);
+        shell.open_panel(Panel::SelectList {
+            surface: OrdinarySurfaceMetadata::new("Select model"),
+            items: picker.labels,
+            descriptions: picker.descriptions,
+            selected: 0,
+            filter: "[openai] gpt-6-astra".into(),
+            action: PanelAction::SelectGroupedModel {
+                models: picker.ids,
+                providers: picker.providers,
+                details: picker.details,
+                scope: None,
+            },
+        });
+        let state = shell.state.borrow();
+        let plain = sexy_tui_rs::strip_terminal_sequences(
+            &render_panel_with_limit(&state, 120, 16).join("\n"),
+        );
+        assert!(plain.lines().any(|line| line.trim() == "OpenAI"), "{plain}");
+        assert!(plain.contains("› gpt-6-astra (current)"), "{plain}");
+        assert!(!plain.contains("gpt-6-astra [openai]"), "{plain}");
+        assert!(plain.contains("out $50/M"), "{plain}");
     }
 
     #[test]
