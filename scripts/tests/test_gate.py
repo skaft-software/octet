@@ -122,7 +122,7 @@ else:
                             self.assertIn("--profile ci-test --locked --no-fail-fast", line)
 
     def test_scratch_honors_tmpdir_and_keeps_test_paths_under_home(self):
-        with tempfile.TemporaryDirectory(prefix="octet-gate-parent-") as directory:
+        with tempfile.TemporaryDirectory(prefix="octet-gate-parent's-") as directory:
             result = self.shell('''
 export TMPDIR="$1"
 cargo() { printf 'PATHS:%s|%s|%s\\n' "$HOME" "$TMPDIR" "$RUNNER_TEMP"; }

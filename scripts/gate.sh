@@ -155,13 +155,12 @@ main() {
     export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-1.89.0}
     export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
     export OCTET_PTY_TRACE=1 PYTHONDONTWRITEBYTECODE=1
-    local scratch
-    scratch=$(mktemp -d "${TMPDIR:-/tmp}/octet-gate.XXXXXXXX") || return 2
-    # The EXIT trap runs after this function returns.
-    trap "rm -rf -- '$scratch'" EXIT
+    gate_scratch=$(mktemp -d "${TMPDIR:-/tmp}/octet-gate.XXXXXXXX") || return 2
+    # The EXIT trap runs after this function returns; read the path as data then.
+    trap 'rm -rf -- "$gate_scratch"' EXIT
     # Keep temporary workspaces below HOME so workspace discovery stops before
     # any surrounding home-level dotfiles repository, even on disk-backed TMPDIR.
-    export HOME=$scratch TMPDIR=$scratch/tmp RUNNER_TEMP=$scratch/runner
+    export HOME=$gate_scratch TMPDIR=$gate_scratch/tmp RUNNER_TEMP=$gate_scratch/runner
     mkdir -p "$HOME" "$TMPDIR" "$RUNNER_TEMP" || return 2
     # Tests that run cargo/rustc with a scrubbed environment resolve rustup from
     # HOME, as on a CI runner; keep the real toolchains visible from the scratch HOME.
