@@ -6243,35 +6243,10 @@ impl InteractiveShell {
                         .apply(EditAction::Paste(inserted), geometry.text_width());
                 }
                 action => {
-                    // Attachment and paste chips are single objects: delete
-                    // them whole and step over them, never edit their letters.
-                    let cursor = state.editor.cursor();
                     let spans = composer::mouse::chip_spans(state.editor.text(), &state.ledger);
-                    let around = |touches: fn(&std::ops::Range<usize>, usize) -> bool| {
-                        spans.iter().find(|span| touches(span, cursor)).cloned()
-                    };
-                    let handled = match &action {
-                        EditAction::Backspace => {
-                            around(|span, at| span.start < at && at <= span.end)
-                                .map(|span| state.editor.edit_range(span.clone(), "", span.start))
-                        }
-                        EditAction::Delete => around(|span, at| span.start <= at && at < span.end)
-                            .map(|span| state.editor.edit_range(span.clone(), "", span.start)),
-                        EditAction::Left => around(|span, at| span.start < at && at <= span.end)
-                            .map(|span| {
-                                state.editor.set_cursor(span.start);
-                                true
-                            }),
-                        EditAction::Right => around(|span, at| span.start <= at && at < span.end)
-                            .map(|span| {
-                                state.editor.set_cursor(span.end);
-                                true
-                            }),
-                        _ => None,
-                    };
-                    if handled.is_none() {
-                        state.editor.apply(action, geometry.text_width());
-                    }
+                    state
+                        .editor
+                        .apply_with_atomic_ranges(action, geometry.text_width(), &spans);
                 }
             }
         }

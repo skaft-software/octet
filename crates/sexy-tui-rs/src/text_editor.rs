@@ -78,6 +78,20 @@ pub enum TextEditAction {
     Redo,
 }
 
+fn atomic_target(target: usize, ranges: &[Range<usize>], forward: bool) -> usize {
+    ranges
+        .iter()
+        .find(|range| range.start < target && target < range.end)
+        .map_or(
+            target,
+            |range| if forward { range.end } else { range.start },
+        )
+}
+
+fn atomic_edit_range(range: Range<usize>, atomic: &[Range<usize>]) -> Range<usize> {
+    atomic_target(range.start, atomic, false)..atomic_target(range.end, atomic, true)
+}
+
 /// One visual row in a [`TextEditorLayout`].
 ///
 /// `end` includes source whitespace consumed at a soft wrap while
@@ -676,26 +690,37 @@ impl TextEditor {
     /// consult it; it is accepted for every action so input loops have one API.
     /// Returns whether the buffer or cursor changed.
     pub fn apply(&mut self, action: TextEditAction, wrap_width: usize) -> bool {
+        self.apply_with_atomic_ranges(action, wrap_width, &[])
+    }
+
+    /// Apply an edit with caller-supplied, nonoverlapping grapheme ranges that
+    /// navigation may not enter and deletion may not split.
+    pub fn apply_with_atomic_ranges(
+        &mut self,
+        action: TextEditAction,
+        wrap_width: usize,
+        atomic: &[Range<usize>],
+    ) -> bool {
         match action {
             TextEditAction::Char(character) => self.insert_character(character),
             TextEditAction::Paste(text) => self.insert_atomic(&Self::normalize_paste(&text)),
-            TextEditAction::Backspace => self.backspace(),
-            TextEditAction::Delete => self.delete(),
+            TextEditAction::Backspace => self.backspace(atomic),
+            TextEditAction::Delete => self.delete(atomic),
             TextEditAction::Newline => self.insert_atomic("\n"),
-            TextEditAction::Left => self.move_left(),
-            TextEditAction::Right => self.move_right(),
+            TextEditAction::Left => self.move_left(atomic),
+            TextEditAction::Right => self.move_right(atomic),
             TextEditAction::Up => self.move_vertical(VerticalDirection::Up, wrap_width),
             TextEditAction::Down => self.move_vertical(VerticalDirection::Down, wrap_width),
             TextEditAction::Home => self.move_to_visual_edge(false, wrap_width),
             TextEditAction::End => self.move_to_visual_edge(true, wrap_width),
-            TextEditAction::WordLeft => self.move_word(false),
-            TextEditAction::WordRight => self.move_word(true),
-            TextEditAction::JumpForward(character) => self.jump_to_char(character, true),
-            TextEditAction::JumpBackward(character) => self.jump_to_char(character, false),
-            TextEditAction::DeleteWordBackward => self.delete_word(false),
-            TextEditAction::DeleteWordForward => self.delete_word(true),
-            TextEditAction::DeleteToLineStart => self.delete_to_line_edge(false),
-            TextEditAction::DeleteToLineEnd => self.delete_to_line_edge(true),
+            TextEditAction::WordLeft => self.move_word(false, atomic),
+            TextEditAction::WordRight => self.move_word(true, atomic),
+            TextEditAction::JumpForward(character) => self.jump_to_char(character, true, atomic),
+            TextEditAction::JumpBackward(character) => self.jump_to_char(character, false, atomic),
+            TextEditAction::DeleteWordBackward => self.delete_word(false, atomic),
+            TextEditAction::DeleteWordForward => self.delete_word(true, atomic),
+            TextEditAction::DeleteToLineStart => self.delete_to_line_edge(false, atomic),
+            TextEditAction::DeleteToLineEnd => self.delete_to_line_edge(true, atomic),
             TextEditAction::Yank => self.yank(),
             TextEditAction::YankPop => self.yank_pop(),
             TextEditAction::Undo => self.undo(),
@@ -841,51 +866,55 @@ impl TextEditor {
         true
     }
 
-    fn backspace(&mut self) -> bool {
+    fn backspace(&mut self, atomic: &[Range<usize>]) -> bool {
         if self.cursor == 0 {
             return false;
         }
         self.push_undo();
         self.last_action = None;
         let previous = previous_grapheme_boundary(&self.text, self.cursor);
-        self.text.replace_range(previous..self.cursor, "");
-        self.finish_after_edit(previous, true);
+        let range = atomic_edit_range(previous..self.cursor, atomic);
+        let anchor = range.start;
+        self.text.replace_range(range, "");
+        self.finish_after_edit(anchor, true);
         true
     }
 
-    fn delete(&mut self) -> bool {
+    fn delete(&mut self, atomic: &[Range<usize>]) -> bool {
         if self.cursor == self.text.len() {
             return false;
         }
         self.push_undo();
         self.last_action = None;
         let next = next_grapheme_boundary(&self.text, self.cursor);
-        self.text.replace_range(self.cursor..next, "");
-        self.finish_after_edit(self.cursor, true);
+        let range = atomic_edit_range(self.cursor..next, atomic);
+        let anchor = range.start;
+        self.text.replace_range(range, "");
+        self.finish_after_edit(anchor, true);
         true
     }
 
-    fn move_left(&mut self) -> bool {
+    fn move_left(&mut self, atomic: &[Range<usize>]) -> bool {
         if self.cursor == 0 {
             return false;
         }
         let cursor = previous_grapheme_boundary(&self.text, self.cursor);
-        self.finish_after_boundary_motion(cursor);
+        self.finish_after_boundary_motion(atomic_target(cursor, atomic, false));
         true
     }
 
-    fn move_right(&mut self) -> bool {
+    fn move_right(&mut self, atomic: &[Range<usize>]) -> bool {
         if self.cursor == self.text.len() {
             return false;
         }
         let cursor = next_grapheme_boundary(&self.text, self.cursor);
-        self.finish_after_boundary_motion(cursor);
+        self.finish_after_boundary_motion(atomic_target(cursor, atomic, true));
         true
     }
 
     /// Move one word forward or backward within the logical line, spilling to
     /// the adjacent line boundary at either end.
-    fn move_word(&mut self, forward: bool) -> bool {
+    fn move_word(&mut self, forward: bool, atomic: &[Range<usize>]) -> bool {
         let (line_start, line_end) = logical_line_bounds(&self.text, self.cursor);
         let target = if forward {
             if self.cursor >= line_end {
@@ -909,7 +938,7 @@ impl TextEditor {
         if target == self.cursor {
             return false;
         }
-        self.finish_after_motion(target);
+        self.finish_after_motion(atomic_target(target, atomic, forward));
         true
     }
 
@@ -918,7 +947,7 @@ impl TextEditor {
     /// The search is case-sensitive, spans the whole buffer, and never lands on
     /// the character currently under the cursor. A missing match leaves the
     /// cursor where it is.
-    fn jump_to_char(&mut self, character: char, forward: bool) -> bool {
+    fn jump_to_char(&mut self, character: char, forward: bool, atomic: &[Range<usize>]) -> bool {
         let needle = character.to_string();
         let target = if forward {
             let start = next_grapheme_boundary(&self.text, self.cursor);
@@ -934,7 +963,7 @@ impl TextEditor {
         if target == self.cursor {
             return false;
         }
-        self.finish_after_motion(target);
+        self.finish_after_motion(atomic_target(target, atomic, forward));
         true
     }
 
@@ -976,7 +1005,7 @@ impl TextEditor {
     }
 
     /// Kill one word backward or forward, accumulating consecutive kills.
-    fn delete_word(&mut self, forward: bool) -> bool {
+    fn delete_word(&mut self, forward: bool, atomic: &[Range<usize>]) -> bool {
         let (line_start, line_end) = match self.kill_at_line_edge(forward) {
             LineEdge::Joined => return true,
             LineEdge::Blocked => return false,
@@ -999,6 +1028,7 @@ impl TextEditor {
         } else {
             target..self.cursor
         };
+        let range = atomic_edit_range(range, atomic);
         let anchor = range.start;
         let deleted = self.text[range.clone()].to_owned();
         self.kill_ring.push(&deleted, !forward, was_kill);
@@ -1009,7 +1039,7 @@ impl TextEditor {
     }
 
     /// Kill from the line edge to the cursor, merging lines at an edge.
-    fn delete_to_line_edge(&mut self, forward: bool) -> bool {
+    fn delete_to_line_edge(&mut self, forward: bool, atomic: &[Range<usize>]) -> bool {
         let (line_start, line_end) = match self.kill_at_line_edge(forward) {
             LineEdge::Joined => return true,
             LineEdge::Blocked => return false,
@@ -1021,6 +1051,7 @@ impl TextEditor {
         } else {
             line_start..self.cursor
         };
+        let range = atomic_edit_range(range, atomic);
         let anchor = range.start;
         let deleted = self.text[range.clone()].to_owned();
         self.push_undo();
