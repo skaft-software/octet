@@ -1886,3 +1886,35 @@ fn pi_codemode_uses_separate_source_calls_and_output_previews() {
     assert!(expanded.text.contains("zeta"));
     assert!(!expanded.text.contains("Wall time"));
 }
+
+#[test]
+fn pi_codemode_copy_preserves_first_line_indent() {
+    let theme = themes().remove(0);
+    let args = serde_json::json!({"code": "text('fixture')"});
+    let output = "    first()\n    second()";
+    let panel = ToolPanel::new(
+        ToolCallId("fixture".into()),
+        "codemode".into(),
+        args.to_string(),
+        summarize_tool("codemode", &args),
+        format!("Script completed\nWall time 0.6 seconds\nOutput:\n{output}\n"),
+        true,
+        false,
+        None,
+        None,
+    );
+    let rendered = super::super::transcript_render::render_tool(
+        &panel,
+        &theme,
+        &theme.rich_renderer(),
+        100,
+        true,
+        "surface.tool.success",
+    );
+    assert!(
+        rendered.text.ends_with(output),
+        "expanded copy field = {:?}",
+        rendered.text
+    );
+    assert!(!rendered.text.contains("Wall time"));
+}

@@ -1414,3 +1414,49 @@ fn tool_layout_copy_cache_follows_revision_reflow_theme_and_disclosure() {
         old = next;
     }
 }
+
+#[test]
+fn selected_codemode_output_preserves_indentation() {
+    use super::super::InteractiveShell;
+    use crate::tui::terminal::{ColorDepth, TerminalCapabilities};
+    use crate::tui::theme::{compiled_theme_for_selector, TerminalBackground};
+    let body = "    first()\n    second()";
+    let mut selections = Vec::new();
+    for name in ["default", "pi"] {
+        let mut shell = InteractiveShell::test_shell_with_theme(
+            compiled_theme_for_selector(
+                name,
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                TerminalBackground::Dark,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        shell.set_size(100, 30);
+        shell.state.borrow_mut().application_viewport_requested = true;
+        let panel = selection_panel(
+            "codemode",
+            serde_json::json!({"code":"text('fixture')"}),
+            format!("Script completed\nWall time 0.6 seconds\nOutput:\n{body}"),
+        );
+        shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Tool(Box::new(panel)));
+        shell.set_verbose_tools(true);
+        let _frame = selection_frame(&mut shell, false);
+        shell.select_all_transcript();
+        let selected = shell.selected_plain_text().unwrap();
+        selections.push(selected);
+    }
+    assert!(
+        selections[0].ends_with(body),
+        "unexpected native control: {:?}",
+        selections[0]
+    );
+    assert!(
+        selections[1].ends_with(body),
+        "expected literal output in Pi semantic selection, got {:?}",
+        selections[1]
+    );
+}

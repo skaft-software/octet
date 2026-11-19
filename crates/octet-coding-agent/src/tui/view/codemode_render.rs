@@ -382,7 +382,9 @@ fn project_pi_output(
     } else {
         &text[repeated_failure_status_len(panel, &text)..]
     }
-    .trim();
+    // Drop only blank framing; leading spaces are literal output.
+    .trim_start_matches(['\r', '\n'])
+    .trim_end();
     let role = if panel.is_error {
         "error"
     } else {

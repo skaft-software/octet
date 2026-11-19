@@ -90,6 +90,7 @@
 - A permanent provider rejection behind a gateway 503 stops without a second request.
 - Saved video replayed to text-only models is sized as the placeholder actually sent.
 - Context checks count refreshed system instructions alongside compacted Responses history.
+- Copying expanded Pi Codemode output keeps the leading indentation of every line.
 
 ## [0.10.4] - 2026-11-12
 
