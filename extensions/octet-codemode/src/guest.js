@@ -9,7 +9,7 @@ const Buffer = {byteLength(value) {
  let bytes = 0; for (const c of value) {const n = c.codePointAt(0);
  bytes += n < 128 ? 1 : n < 2048 ? 2 : n < 65536 ? 3 : 4;} return bytes;
 }};
-@@MODULES@@
+/*@@MODULES@@*/
 const context = validateContext(parse(contextJson));
 const source = sourceJson;
 const {globals, samples} = discovery(context.tools);

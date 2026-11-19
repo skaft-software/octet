@@ -68,10 +68,12 @@ pub fn prelude() -> &'static str {
                     .map(|(source, _)| source.len())
                     .sum::<usize>(),
         );
+        // Markers are JavaScript comments (`/*@@NAME@@*/`), so the template
+        // itself stays parseable JavaScript; the whole comment is replaced.
         let mut rest = template;
-        while let Some((before, after)) = rest.split_once("@@") {
+        while let Some((before, after)) = rest.split_once("/*@@") {
             output.push_str(before);
-            let (marker, after) = after.split_once("@@").expect("fixed template delimiter");
+            let (marker, after) = after.split_once("@@*/").expect("fixed template delimiter");
             match marker {
                 "MODULES" => {
                     for (source, exports) in MODULES {
@@ -105,6 +107,8 @@ mod tests {
         let prelude = prelude();
         let (context_json, source) = script(&context, data).unwrap();
         assert!(!prelude.contains("@@"));
+        assert!(!prelude.contains("/*@@"));
+        assert!(include_str!("guest.js").contains("\n/*@@MODULES@@*/\n"));
         assert_eq!(context_json, context.to_string());
         assert_eq!(source, data);
         assert!(!prelude
