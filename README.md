@@ -19,7 +19,15 @@ Rust core · any-language extensions · hears audio, uses your computer</p>
 </div>
 
 <p align="center">
-  <img src="docs/assets/octet/readme/terminal.png" alt="octet running a coding session in the terminal" width="860">
+  <img src="docs/assets/octet/readme/terminal.png" alt="octet drawing its own architecture as a Mermaid diagram in the terminal" width="860">
+</p>
+
+<p align="center">
+  <img src="docs/assets/octet/readme/terminal-cards.png" alt="The same session in the built-in Cards theme" width="280">
+  <img src="docs/assets/octet/readme/terminal-still.png" alt="The same session in the built-in Still theme" width="280">
+  <img src="docs/assets/octet/readme/terminal-dark.png" alt="The same session in the built-in Dark theme" width="280">
+  <br>
+  <sub>The same session in the built-in Cards, Still and Dark themes. Switch with <code>/theme</code>; see <a href="docs/themes.md">themes</a>.</sub>
 </p>
 
 octet reads code, edits files, runs tests and manages sessions from your terminal. One native
