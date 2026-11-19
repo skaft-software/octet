@@ -310,10 +310,6 @@ where
             shell.render();
             return Ok(None);
         }
-        // Mouse events pass through to the shell for transcript scrolling.
-        if matches!(event, Event::Mouse(_)) {
-            continue;
-        }
         if let Some((result, _action)) = shell.panel_input(&event) {
             shell.render();
             return Ok(match result {
@@ -321,6 +317,9 @@ where
                 PanelResult::Cancel => None,
                 PanelResult::Select(_) => None,
             });
+        }
+        if matches!(event, Event::Mouse(_)) {
+            continue;
         }
         let next_highlighted = shell.highlighted_panel_index();
         if next_highlighted != highlighted {
@@ -1722,9 +1721,6 @@ where
             shell.render();
             return Ok(None);
         }
-        if matches!(event, Event::Mouse(_)) {
-            continue;
-        }
         if let Some((result, action)) = shell.panel_input(&event) {
             shell.render();
             let selected = match (result, action) {
@@ -1740,7 +1736,9 @@ where
             }
             return Ok(selected);
         }
-        shell.render();
+        if !matches!(event, Event::Mouse(_)) {
+            shell.render();
+        }
     }
 }
 

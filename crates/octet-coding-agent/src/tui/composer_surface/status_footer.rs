@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use octet_ai::{secure_fs::read_regular_file_bounded, Usage};
 use sexy_tui_rs::{truncate_to_width, visible_width};
 
-use super::{fit_line, footer_workspace, ShellState};
+use super::{fit_line, footer_workspace, FooterControl, FooterSpan, ShellState};
 use crate::tui::view::sanitize_ordinary_surface_cell;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,7 +63,7 @@ pub(super) fn show_workspace(state: &ShellState, width: u16) -> bool {
     width >= 12 && state.size.1 >= 7 && layout.show_footer && !layout.show_header
 }
 
-pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
+pub(super) fn render(state: &ShellState, width: u16) -> (Vec<String>, Vec<FooterSpan>) {
     let theme = &state.theme;
     let layout = theme.layout_for_width(width);
     let identity = layout.show_footer && !layout.show_header;
@@ -72,7 +72,7 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
     let ellipsis = if unicode { "…" } else { "..." };
     let inset = usize::from(layout.composer_padding).min(usize::from(width.saturating_sub(1)) / 2);
     let available = usize::from(width) - 2 * inset;
-    let inset = " ".repeat(inset);
+    let padding = " ".repeat(inset);
     let cell = |text: &str| sanitize_ordinary_surface_cell(text, unicode);
     let mut rows = Vec::with_capacity(2);
     if show_workspace(state, width) {
@@ -89,7 +89,7 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
         }
         rows.push(fit_line(
             &format!(
-                "{inset}{}",
+                "{padding}{}",
                 theme.fg("dim", &truncate_to_width(&line, available, Some(ellipsis)))
             ),
             width,
@@ -97,6 +97,8 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
     }
     let active = state.run.is_active();
     let mut parts = Vec::new();
+    let mut spans = Vec::new();
+    let mut context_width = None;
     if layout.show_status_line {
         let usage = state.footer_usage;
         let tags = if unicode {
@@ -155,6 +157,7 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
                 ""
             };
             let text = format!("{approx}{percent:.1}%/{}{auto}", tokens(limit));
+            context_width = Some(visible_width(&text));
             parts.push(if percent > 90.0 {
                 theme.fg("error", &text)
             } else if percent > 70.0 {
@@ -164,7 +167,16 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
             });
         }
     }
-    let left = truncate_to_width(&parts.join(" "), available, Some(ellipsis));
+    let left = parts.join(" ");
+    let left_width = visible_width(&left);
+    if let Some(context_width) = context_width.filter(|_| left_width <= available) {
+        spans.push(FooterSpan::new(
+            FooterControl::Context,
+            inset + left_width - context_width,
+            inset + left_width,
+        ));
+    }
+    let left = truncate_to_width(&left, available, Some(ellipsis));
     let remaining =
         available.saturating_sub(visible_width(&left) + if left.is_empty() { 0 } else { 2 });
     let right = if identity {
@@ -187,13 +199,14 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
             &state.reasoning
         };
         let mut full = cell(if model.is_empty() { "no-model" } else { model });
+        let effort = cell(if effort == "off" {
+            "thinking off"
+        } else {
+            effort
+        });
         if !effort.is_empty() {
             full.push_str(separator);
-            full.push_str(&cell(if effort == "off" {
-                "thinking off"
-            } else {
-                effort
-            }));
+            full.push_str(&effort);
         }
         let provider = if active {
             state.run_provider.as_deref().unwrap_or(&state.provider)
@@ -206,7 +219,21 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
                 full = candidate;
             }
         }
-        if visible_width(&full) <= remaining {
+        let full_width = visible_width(&full);
+        if full_width <= remaining {
+            let end = inset + available;
+            let model_end = if effort.is_empty() {
+                end
+            } else {
+                let effort_start = end - visible_width(&effort);
+                spans.push(FooterSpan::new(FooterControl::Thinking, effort_start, end));
+                effort_start - visible_width(separator)
+            };
+            spans.push(FooterSpan::new(
+                FooterControl::Model,
+                end - full_width,
+                model_end,
+            ));
             theme.fg("dim", &full)
         } else {
             String::new()
@@ -220,10 +247,10 @@ pub(super) fn render(state: &ShellState, width: u16) -> Vec<String> {
         available - visible_width(&left) - visible_width(&right)
     };
     rows.push(fit_line(
-        &format!("{inset}{left}{}{right}", " ".repeat(gap)),
+        &format!("{padding}{left}{}{right}", " ".repeat(gap)),
         width,
     ));
-    rows
+    (rows, spans)
 }
 
 #[cfg(test)]
@@ -253,7 +280,7 @@ mod tests {
             cache_read_tokens: 124_000,
             ..Usage::default()
         });
-        let rows = render(&state, 100);
+        let (rows, spans) = render(&state, 100);
         assert_eq!(rows.len(), 2);
         assert_eq!(
             strip_terminal_sequences(&rows[0]).trim(),
@@ -268,15 +295,27 @@ mod tests {
             stats.trim_end().ends_with("fixture-model • medium"),
             "{stats}"
         );
+        for (control, label) in [
+            (FooterControl::Context, "4.7%/500k (auto)"),
+            (FooterControl::Model, "fixture-model"),
+            (FooterControl::Thinking, "medium"),
+        ] {
+            let start = visible_width(&stats[..stats.find(label).unwrap()]);
+            let span = spans.iter().find(|span| span.control == control).unwrap();
+            assert_eq!(span.columns, start..start + visible_width(label));
+        }
         for width in 1..=100 {
-            let rows = render(&state, width);
+            let (rows, spans) = render(&state, width);
+            assert!(spans
+                .iter()
+                .all(|span| span.columns.end <= usize::from(width)));
             assert!(rows
                 .iter()
                 .all(|row| visible_width(row) <= usize::from(width)));
             assert_eq!(rows.len(), if width < 12 { 1 } else { 2 });
         }
         state.size.1 = 5;
-        assert_eq!(render(&state, 100).len(), 1);
+        assert_eq!(render(&state, 100).0.len(), 1);
     }
 
     #[test]

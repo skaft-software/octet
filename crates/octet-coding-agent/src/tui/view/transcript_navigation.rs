@@ -910,6 +910,7 @@ impl InteractiveShell {
                     | MouseEventKind::Moved
             )
         ) {
+            self.cancel_footer_press();
             // Revoke stale click targets before other input owners consume the
             // event, but keep an active composer selection through wheel input.
             // Native terminal gesture ownership cannot live in the adapter.

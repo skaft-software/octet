@@ -1,9 +1,12 @@
 //! Stateful product input policy. Exclusive panels and tool prompts keep their
 //! own input owner; editor prefixes never escape into those surfaces.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 
-use super::*;
+use super::{renderer_geometry::GeometryFence, *};
+use crate::tui::composer_surface::FooterControl;
 use crate::tui::keymap::{self, keybindings::KeybindingsManager, InputAction};
 
 pub(super) struct InputDispatch {
@@ -12,12 +15,26 @@ pub(super) struct InputDispatch {
     models: Vec<String>,
     cycle_target: Option<String>,
     generated_command: bool,
+    footer_press: Option<FooterPress>,
     thinking_cycle: Option<ThinkingCycle>,
     thinking_wait: bool,
     thinking_submission: Option<ThinkingSubmission>,
     // One Enter before the first session/route exists. Bound once at launch.
     startup_submission: Option<ComposedInput>,
     wait_command: Option<WaitCommand>,
+}
+
+struct FooterPress {
+    control: FooterControl,
+    cell: (u16, u16),
+    fence: GeometryFence,
+    dragged: bool,
+}
+
+enum FooterGesture {
+    Ignored,
+    Consumed,
+    Click(FooterControl),
 }
 
 /// One typed slash command captured during a cancellable wait (startup
@@ -54,6 +71,7 @@ impl InputDispatch {
             models: Vec::new(),
             cycle_target: None,
             generated_command: false,
+            footer_press: None,
             thinking_cycle: None,
             thinking_wait: false,
             thinking_submission: None,
@@ -289,7 +307,114 @@ impl InteractiveShell {
 
     pub(super) fn reset_input_interaction(&mut self) {
         self.input_dispatch.jump_forward = None;
+        self.cancel_footer_press();
         self.state.borrow_mut().pending_screen_press = None;
+    }
+
+    pub(super) fn cancel_footer_press(&mut self) {
+        self.input_dispatch.footer_press = None;
+    }
+
+    fn footer_gesture(&mut self, event: &Event, only: Option<FooterControl>) -> FooterGesture {
+        let Event::Mouse(mouse) = event else {
+            self.cancel_footer_press();
+            return FooterGesture::Ignored;
+        };
+        if !self.capture_mouse {
+            return FooterGesture::Ignored;
+        }
+        let state = self.state.borrow();
+        let cell = (mouse.row, mouse.column);
+        let target = || {
+            if state.startup_pending || state.tool_input_prompt.is_some() {
+                return None;
+            }
+            state
+                .composer_pointer_geometry()?
+                .footer_control_at(cell.0, cell.1)
+                .filter(|control| only.is_none_or(|allowed| *control == allowed))
+        };
+        let press = &mut self.input_dispatch.footer_press;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
+                *press = target().map(|control| FooterPress {
+                    control,
+                    cell,
+                    fence: GeometryFence::capture(&state),
+                    dragged: false,
+                });
+                if press.is_some() {
+                    FooterGesture::Consumed
+                } else {
+                    FooterGesture::Ignored
+                }
+            }
+            MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(press) = press.as_mut() else {
+                    return FooterGesture::Ignored;
+                };
+                press.dragged |= cell != press.cell || !mouse.modifiers.is_empty();
+                FooterGesture::Consumed
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(press) = press.take() else {
+                    return FooterGesture::Ignored;
+                };
+                if !press.dragged
+                    && cell == press.cell
+                    && mouse.modifiers.is_empty()
+                    && press.fence.composer_current(&state)
+                    && target() == Some(press.control)
+                {
+                    FooterGesture::Click(press.control)
+                } else {
+                    FooterGesture::Consumed
+                }
+            }
+            _ => {
+                *press = None;
+                FooterGesture::Ignored
+            }
+        }
+    }
+
+    pub(super) fn footer_panel_cancel(&mut self, event: &Event) -> Option<PanelAction> {
+        let control = match self.state.borrow().panel.as_ref()? {
+            Panel::SelectList {
+                action: PanelAction::SelectGroupedModel { .. },
+                ..
+            } => FooterControl::Model,
+            Panel::SelectList {
+                action: PanelAction::SelectThinking(_),
+                ..
+            } => FooterControl::Thinking,
+            _ => return None,
+        };
+        if !matches!(
+            self.footer_gesture(event, Some(control)),
+            FooterGesture::Click(_)
+        ) {
+            return None;
+        }
+        match self.state.borrow().panel.as_ref()? {
+            Panel::SelectList { action, .. } => Some(action.clone()),
+            _ => unreachable!("footer targets a select-list panel"),
+        }
+    }
+
+    pub(crate) fn footer_report_cancel(&mut self, event: &Event) -> bool {
+        let context = matches!(
+            self.state.borrow().overlay.as_ref(),
+            Some(ShellOverlay::Report(ReportOverlay {
+                body: ReportBody::Context(_),
+                ..
+            }))
+        );
+        context
+            && matches!(
+                self.footer_gesture(event, Some(FooterControl::Context)),
+                FooterGesture::Click(_)
+            )
     }
 
     /// Only assistant semantic text is copied, never hidden reasoning, tools,
@@ -546,6 +671,23 @@ impl InteractiveShell {
                 None => InputAction::Closed,
                 _ => InputAction::Ignore,
             };
+        }
+        if let Some(event) = event.as_ref() {
+            match self.footer_gesture(event, None) {
+                FooterGesture::Ignored => {}
+                FooterGesture::Consumed => return InputAction::Ignore,
+                FooterGesture::Click(control) => {
+                    self.input_dispatch.generated_command = true;
+                    return InputAction::Command(
+                        match control {
+                            FooterControl::Model => "/model",
+                            FooterControl::Thinking => "/thinking",
+                            FooterControl::Context => "/context",
+                        }
+                        .into(),
+                    );
+                }
+            }
         }
         let popup = self.slash_popup_open();
         if let Some(Event::Key(key)) = event.as_ref() {

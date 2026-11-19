@@ -387,6 +387,7 @@ fn render_topline(state: &super::view::ShellState, width: u16, now: Instant) -> 
     // Fit the footer into the space between the rule ends first. Clipping a
     // full-width footer afterward would chop the workspace's rightmost tail.
     let metadata = render_status_footer_with_gap(state, available as u16, now, Some(border))
+        .0
         .trim()
         .to_owned();
     let remainder = usize::from(width).saturating_sub(visible_width(&metadata) + 3);
@@ -977,28 +978,27 @@ pub(crate) fn format_microdollars(microdollars: u64) -> String {
     format!("${rounded_whole}.{fraction}")
 }
 
-fn push_narrower_variant(variants: &mut Vec<String>, candidate: String) {
-    if candidate.is_empty() || variants.iter().any(|variant| variant == &candidate) {
-        return;
-    }
-    if variants
-        .last()
-        .is_none_or(|previous| visible_width(&candidate) < visible_width(previous))
-    {
-        variants.push(candidate);
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FooterControl {
+    Model,
+    Thinking,
+    Context,
 }
 
-fn identity_variants(full_model: &str, thinking: &str, separator: &str) -> Vec<String> {
-    let mut variants = Vec::new();
-    if !thinking.is_empty() && !thinking.eq_ignore_ascii_case("off") {
-        push_narrower_variant(&mut variants, format!("{full_model}{separator}{thinking}"));
+/// Painted columns on the last row of the stock composer (the status row).
+#[derive(Clone, Debug)]
+pub(crate) struct FooterSpan {
+    pub(crate) control: FooterControl,
+    pub(crate) columns: std::ops::Range<usize>,
+}
+
+impl FooterSpan {
+    fn new(control: FooterControl, start: usize, end: usize) -> Self {
+        Self {
+            control,
+            columns: start..end,
+        }
     }
-    push_narrower_variant(&mut variants, full_model.to_owned());
-    if variants.is_empty() {
-        variants.push(full_model.to_owned());
-    }
-    variants
 }
 
 /// Present the host workspace without filesystem lookups. Clip from the left
@@ -1056,8 +1056,9 @@ fn context_percent(used: u64, limit: u64) -> u64 {
 /// accounting stays in `/status`, `/cost`, and `/cache`; default chrome keeps
 /// identity, context pressure and durable session spend together on the left,
 /// with the workspace right-aligned when space permits.
+#[cfg(test)]
 fn render_status_footer(state: &super::view::ShellState, width: u16, now: Instant) -> String {
-    render_status_footer_with_gap(state, width, now, None)
+    render_status_footer_with_gap(state, width, now, None).0
 }
 
 fn render_status_footer_with_gap(
@@ -1065,11 +1066,11 @@ fn render_status_footer_with_gap(
     width: u16,
     _now: Instant,
     gap_rule: Option<(u8, u8, u8)>,
-) -> String {
+) -> (String, Vec<FooterSpan>) {
     let theme_layout = state.theme.layout_for_width(width);
     let total_width = usize::from(width);
     if total_width == 0 {
-        return String::new();
+        return (String::new(), Vec::new());
     }
     // The footer is metadata, so it begins on the shared primary-text column
     // rather than on the full-width surface edge used by rules and cards.
@@ -1123,19 +1124,23 @@ fn render_status_footer_with_gap(
     .trim();
     // Pi compatibility: footer.ts:220-255 keeps the full ID, dropping only
     // the optional provider when space is tight. Themes share this policy.
-    let mut variants = identity_variants(
-        &full_model,
-        effort,
-        super::view::semantic_separator(&state.theme),
-    );
+    let mut variants = Vec::with_capacity(3);
+    if !effort.is_empty() && (gap_rule.is_none() || !effort.eq_ignore_ascii_case("off")) {
+        variants.push(format!("{full_model}{separator}{effort}"));
+    }
+    variants.push(full_model.clone());
     let provider = if active {
         state.run_provider.as_deref().unwrap_or(&state.provider)
     } else {
         &state.provider
     };
-    if state.model_labels.provider_count() > 1 && !provider.is_empty() {
-        variants.insert(0, format!("({provider}) {}", variants[0]));
-    }
+    let provider_prefix = if state.model_labels.provider_count() > 1 && !provider.is_empty() {
+        let prefix = format!("({provider}) ");
+        variants.insert(0, format!("{prefix}{}", variants[0]));
+        prefix
+    } else {
+        String::new()
+    };
     let mut segments = vec![StatusFooterSegment::new(FooterKind::Identity, variants)];
 
     let base_context = if active {
@@ -1253,13 +1258,43 @@ fn render_status_footer_with_gap(
         _ => state.theme.fg("muted", segment.segment.text()),
     };
 
-    let left_text = segments
+    let mut left_text = String::new();
+    let mut column = left_inset;
+    let mut spans = Vec::new();
+    for segment in segments
         .iter()
         .filter(|segment| segment.segment.is_visible())
-        .map(style_segment)
-        .collect::<Vec<_>>()
-        .join(&state.theme.fg("muted", separator));
-    let left_width = status_footer_width(&segments, gap);
+    {
+        if !left_text.is_empty() {
+            left_text.push_str(&state.theme.fg("muted", separator));
+            column += gap;
+        }
+        let text = segment.segment.text();
+        let end = column + visible_width(text);
+        if gap_rule.is_none() {
+            match segment.kind {
+                FooterKind::Identity => {
+                    let model_only = text == full_model
+                        || text.strip_prefix(&provider_prefix) == Some(&full_model);
+                    let model_end = if model_only {
+                        end
+                    } else {
+                        let effort_start = end - visible_width(effort);
+                        spans.push(FooterSpan::new(FooterControl::Thinking, effort_start, end));
+                        effort_start - gap
+                    };
+                    spans.push(FooterSpan::new(FooterControl::Model, column, model_end));
+                }
+                FooterKind::Context => {
+                    spans.push(FooterSpan::new(FooterControl::Context, column, end))
+                }
+                FooterKind::Cost => {}
+            }
+        }
+        left_text.push_str(&style_segment(segment));
+        column = end;
+    }
+    let left_width = column - left_inset;
     // The directory is secondary: shorten or omit it before compromising any
     // left-hand metadata. Keep the same two-cell right inset as the composer.
     let cwd = if !left_text.is_empty() && theme_layout.show_footer && !theme_layout.show_header {
@@ -1296,7 +1331,10 @@ fn render_status_footer_with_gap(
         );
         format!("{left_text}{gap}{}", state.theme.fg("muted", &cwd))
     };
-    fit_line(&format!("{}{body}", " ".repeat(left_inset)), width)
+    (
+        fit_line(&format!("{}{body}", " ".repeat(left_inset)), width),
+        spans,
+    )
 }
 
 pub(crate) fn status_footer_rows(state: &ShellState, width: u16) -> usize {
@@ -1319,33 +1357,33 @@ pub(super) fn uses_two_line_footer(state: &ShellState) -> bool {
     state.theme.layout().status_footer == StatusFooterLayout::TwoLine
 }
 
-fn append_status_footer(
-    lines: &mut Vec<String>,
-    state: &super::view::ShellState,
-    width: u16,
-    now: Instant,
-) {
-    if status_footer_rows(state, width) == 0 {
-        return;
-    }
-    if uses_two_line_footer(state) {
-        lines.extend(status_footer::render(state, width));
-    } else {
-        lines.push(render_status_footer(state, width, now));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
 /// Render the full composer surface: a top rule, content rows, a bottom rule,
 /// then a status footer line.
-pub fn render_composer_surface(
-    state: &super::view::ShellState,
+pub fn render_composer_surface(state: &ShellState, width: u16, now: Instant) -> Vec<String> {
+    render_composer_with_footer(state, width, now).0
+}
+
+pub(crate) fn render_composer_with_footer(
+    state: &ShellState,
     width: u16,
     now: Instant,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<FooterSpan>) {
+    let mut lines = render_composer_body(state, width, now);
+    let spans = if status_footer_rows(state, width) == 0 {
+        Vec::new()
+    } else if uses_two_line_footer(state) {
+        let (rows, spans) = status_footer::render(state, width);
+        lines.extend(rows);
+        spans
+    } else {
+        let (row, spans) = render_status_footer_with_gap(state, width, now, None);
+        lines.push(row);
+        spans
+    };
+    (lines, spans)
+}
+
+fn render_composer_body(state: &ShellState, width: u16, now: Instant) -> Vec<String> {
     let w = usize::from(width);
     let geometry = composer_editor_geometry(state, width);
 
@@ -1354,7 +1392,7 @@ pub fn render_composer_surface(
         // trusted cursor token first so the terminal backend can still place
         // its hardware cursor on a non-empty focused draft at widths 1 and 2.
         let cursor_marker = composer_cursor_marker(state);
-        let mut lines = if cursor_marker.is_empty() || !state.theme.layout().composer_show_prompt {
+        return if cursor_marker.is_empty() || !state.theme.layout().composer_show_prompt {
             let editor = state.composer_editor_projection(geometry);
             render_plain_content(state, width, geometry, &editor)
         } else {
@@ -1365,8 +1403,6 @@ pub fn render_composer_surface(
             );
             vec![fit_line(&format!("{cursor_marker}{prompt}"), width)]
         };
-        append_status_footer(&mut lines, state, width, now);
-        return lines;
     }
 
     // One borrowed projection drives height calculation and painting. This
@@ -1379,22 +1415,8 @@ pub fn render_composer_surface(
         return render_compact(state, width, now, content_rows, geometry, &editor);
     }
 
-    let mut lines = Vec::with_capacity(content_rows + 4);
-
     // Unified inset frame with stable octet-owned focus rules.
-    lines.append(&mut render_composer_box(
-        state,
-        width,
-        now,
-        content_rows,
-        geometry,
-        &editor,
-    ));
-
-    // Stable semantic footer/status surface.
-    append_status_footer(&mut lines, state, width, now);
-
-    lines
+    render_composer_box(state, width, now, content_rows, geometry, &editor)
 }
 
 /// Narrow-terminal fallback: no box, just model line + prompt.
@@ -1423,7 +1445,6 @@ fn render_compact(
             &format!("{padding}{}{cursor_marker}", composer_prefix(state, true)),
             width,
         ));
-        append_status_footer(&mut lines, state, width, now);
         return lines;
     }
 
@@ -1450,7 +1471,6 @@ fn render_compact(
         );
         lines.push(fit_line(&format!("{prefix}{row}"), width));
     }
-    append_status_footer(&mut lines, state, width, now);
     lines
 }
 

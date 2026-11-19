@@ -178,6 +178,138 @@ fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
     assert!(capture.termios_restored);
 }
 
+#[test]
+fn footer_clicks_toggle_the_builtin_pickers_and_context_report() {
+    let _lock = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (columns, rows) = (INITIAL_COLUMNS, INITIAL_ROWS);
+    let model = "qwen-3.8-27b";
+    let binary = Path::new(env!("CARGO_BIN_EXE_octet"));
+    for (mode, live) in [
+        (MouseMode::Default, false),
+        (MouseMode::App, false),
+        (MouseMode::Default, true),
+        (MouseMode::Off, false),
+    ] {
+        let api = live.then(HeldChatApi::start);
+        let mut octet = PtyOctet::spawn_at_with_appearance_and_mode(
+            binary,
+            mode,
+            api.as_ref().map(|api| api.url.as_str()),
+            (true, false),
+            (columns, rows),
+            (2, false, false),
+            (
+                StartupFixture::Model(model),
+                (mode == MouseMode::App).then_some(false),
+            ),
+        );
+        let mut parser = vt100::Parser::new(rows, columns, 1024);
+        let mut consumed = 0;
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            model,
+            STARTUP_TIMEOUT,
+        );
+        if let Some(api) = &api {
+            octet.pty.write_input(b"hold the response\r");
+            api.wait_for_request(&mut octet, 1);
+        }
+        let draft = "footer-draft";
+        octet.pty.write_input(draft.as_bytes());
+        await_screen(
+            &mut octet,
+            &mut parser,
+            &mut consumed,
+            draft,
+            STARTUP_TIMEOUT,
+        );
+        settle(&mut octet, &mut parser, &mut consumed);
+        let footer = (0..rows)
+            .rev()
+            .find_map(|row| {
+                let text = row_text(&parser, row, columns);
+                text.contains(model).then_some((row, text))
+            })
+            .expect("built-in status footer");
+        let (row, text) = footer;
+        let at = |needle| {
+            let start = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} not in {text:?}"));
+            sexy_tui_rs::visible_width(&text[..start]) as u16
+        };
+        let model_col = at(model);
+        let click = |octet: &mut PtyOctet, column, row| {
+            octet.pty.write_input(&sgr(0, column, row, false));
+            octet.pty.write_input(&sgr(0, column, row, true));
+        };
+        // Neither a drag that comes back nor a click in the left inset opens a picker.
+        octet.pty.write_input(&sgr(0, model_col, row, false));
+        octet.pty.write_input(&sgr(32, model_col + 1, row, false));
+        octet.pty.write_input(&sgr(0, model_col, row, true));
+        click(&mut octet, 0, row);
+        settle(&mut octet, &mut parser, &mut consumed);
+        assert!(!parser.screen().contents().contains("Select model"));
+
+        for (label, title) in [
+            (model, "Select model"),
+            ("off", "Select thinking level"),
+            ("%/", "Review the estimated request context"),
+        ] {
+            let column = at(label);
+            click(&mut octet, column, row);
+            if mode != MouseMode::Off {
+                await_screen(
+                    &mut octet,
+                    &mut parser,
+                    &mut consumed,
+                    title,
+                    STARTUP_TIMEOUT,
+                );
+                settle(&mut octet, &mut parser, &mut consumed);
+                // A different footer control must not dismiss the focused surface.
+                click(
+                    &mut octet,
+                    if column == model_col {
+                        at("off")
+                    } else {
+                        model_col
+                    },
+                    row,
+                );
+                settle(&mut octet, &mut parser, &mut consumed);
+                assert!(parser.screen().contents().contains(title));
+                click(&mut octet, column, row);
+            }
+            settle(&mut octet, &mut parser, &mut consumed);
+            let screen = parser.screen().contents();
+            assert!(
+                !screen.contains(title),
+                "{title} should be closed: {screen}"
+            );
+            assert!(screen.contains(draft), "draft was not preserved: {screen}");
+        }
+        if let Some(api) = &api {
+            api.release.send(()).unwrap();
+            await_screen(
+                &mut octet,
+                &mut parser,
+                &mut consumed,
+                "fixture response done",
+                STARTUP_TIMEOUT,
+            );
+            assert_eq!(api.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        assert!(capture.termios_restored);
+    }
+}
+
 /// Exercise all four ordinary fullscreen gestures through the real process,
 /// without manually enabling the semantic viewport in a test shell.
 fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consumed: &mut usize) {

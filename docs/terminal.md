@@ -293,6 +293,11 @@ If native rendering fails, the ANSI fallback restores the requested mouse policy
 `--tern off` uses the ordinary ANSI policy even inside Tern. Native pickers and
 report overlays do not change the ordinary ANSI launch default.
 
+With mouse capture on, click the model, thinking level, or context meter in the
+built-in footer to open the same surface as `/model`, `/thinking`, or `/context`.
+Click the same label again to close it without changing anything. Your draft stays
+in the composer. Only labels that fit and are visible are clickable.
+
 With capture on (the fullscreen default, or `--mouse app`), wheel/touchpad events scroll the transcript by
 one row per terminal line event (Alt/Option: fifteen); bursts accumulate without
 changing composer history. Each event keeps that fixed step: the terminal converts

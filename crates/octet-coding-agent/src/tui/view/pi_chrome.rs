@@ -74,6 +74,7 @@ pub(super) fn apply(
         return false;
     }
     let original = chrome.composer.len() + chrome.extension_below.len();
+    chrome.footer_spans.clear();
     if let Some(editor) = &snapshot.editor {
         let cells = usize::from(width).saturating_sub(editor.padding * 2).max(1);
         let projection = ComposerEditorProjection::new(

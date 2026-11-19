@@ -8890,6 +8890,12 @@ impl InteractiveShell {
         &mut self,
         event: &crossterm::event::Event,
     ) -> Option<(PanelResult, PanelAction)> {
+        if matches!(event, crossterm::event::Event::Mouse(_)) {
+            let action = self.footer_panel_cancel(event)?;
+            self.close_panel();
+            return Some((PanelResult::Cancel, action));
+        }
+        self.cancel_footer_press();
         let normalized = self.panel_event(event);
         let event = &normalized;
         let mut state = self.state.borrow_mut();

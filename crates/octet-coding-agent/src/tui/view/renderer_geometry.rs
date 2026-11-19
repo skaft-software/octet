@@ -2,6 +2,7 @@
 //! can use prepared layout; pointer input and approvals require a written frame.
 //! Input reads these rows rather than invoking transcript layout.
 use super::{transcript_cache::SurfaceGeometry, ShellState, TranscriptViewport};
+use crate::tui::composer_surface::{FooterControl, FooterSpan};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,7 +17,7 @@ pub(super) struct GeometryFence {
     resize_epoch: u64,
     content_width: u16,
     verbose: bool,
-    overlay: bool,
+    overlay: Option<u64>,
     search: bool,
     scroll: usize,
     follow_tail: bool,
@@ -45,7 +46,7 @@ impl GeometryFence {
             resize_epoch: state.resize_epoch,
             content_width: state.transcript_content_width(state.size.0),
             verbose: state.verbose_tools,
-            overlay: state.overlay.is_some(),
+            overlay: state.overlay.as_ref().map(|_| state.overlay_epoch),
             search: state.transcript_search_active(),
             scroll: state.scroll_from_bottom.get(),
             follow_tail: state.follow_tail,
@@ -254,6 +255,7 @@ pub(super) struct RenderedGeometry {
     pub(super) navigation_frame: Option<super::transcript_navigation::NavigationFrame>,
     pub(super) composer: Arc<crate::tui::composer::mouse::ComposerMouseGeometry>,
     pub(super) completions: Vec<super::composer_pointer::CompletionHit>,
+    footer: Option<(usize, Vec<FooterSpan>)>,
     pub(super) welcome_mark: Option<(u16, usize)>,
     pub(super) welcome_rows: usize,
     /// The exact scroll-driven range highlighted in this written viewport.
@@ -338,34 +340,25 @@ impl RenderedGeometry {
                 .map(String::len)
                 .sum::<usize>();
         });
+        let composer_start = chrome.composer_start();
+        let composer_end = composer_start + chrome.composer.len();
         Self {
             completions: super::composer_pointer::completion_hits(
                 state,
-                chrome.transcript_rows
-                    + chrome.header.len()
-                    + chrome.error.len()
-                    + chrome.pending.len()
-                    + chrome.panel.len()
-                    + chrome.extension_above.len()
-                    + chrome.subagents.len()
-                    + chrome.working.len()
-                    + chrome.composer.len(),
+                composer_end,
                 chrome.suggestions.len(),
                 fence.input,
             ),
             fence,
             composer: Arc::new(crate::tui::composer_surface::composer_mouse_geometry(
                 state,
-                chrome.transcript_rows
-                    + chrome.header.len()
-                    + chrome.error.len()
-                    + chrome.pending.len()
-                    + chrome.panel.len()
-                    + chrome.extension_above.len()
-                    + chrome.subagents.len()
-                    + chrome.working.len(),
+                composer_start,
                 chrome.composer.len(),
             )),
+            footer: (application_viewport
+                && !chrome.footer_spans.is_empty()
+                && composer_end <= usize::from(state.size.1))
+            .then(|| (composer_end - 1, chrome.footer_spans)),
             panel: PanelRenderReceipt::capture(state, &chrome.panel),
             report: ReportRenderReceipt::capture(state),
             navigation_frame: state.transcript_navigation.borrow().rendered_frame(),
@@ -399,6 +392,17 @@ impl RenderedGeometry {
                 })
                 .collect(),
         }
+    }
+
+    pub(super) fn footer_control_at(&self, row: u16, column: u16) -> Option<FooterControl> {
+        let (footer_row, spans) = self.footer.as_ref()?;
+        if usize::from(row) != *footer_row {
+            return None;
+        }
+        spans
+            .iter()
+            .find(|span| span.columns.contains(&usize::from(column)))
+            .map(|span| span.control)
     }
 
     pub(super) fn accepted_scroll_feedback(&mut self, scroll: usize) {
@@ -454,7 +458,7 @@ impl RenderedGeometry {
             && self.fence.size == state.size
             && self.fence.resize_epoch == state.resize_epoch
             && self.fence.verbose == state.verbose_tools
-            && !self.fence.overlay
+            && self.fence.overlay.is_none()
             && state.overlay.is_none()
             && self.fence.content_width == state.transcript_content_width(state.size.0)
     }

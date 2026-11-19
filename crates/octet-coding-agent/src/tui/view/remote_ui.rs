@@ -84,6 +84,7 @@ fn composed_chrome(
             working_bottom_padding: false,
             extension_above: Vec::new(),
             composer: Vec::new(),
+            footer_spans: Vec::new(),
             extension_below: Vec::new(),
             panel: Vec::new(),
             pending: Vec::new(),
@@ -129,6 +130,8 @@ fn composed_chrome(
     }
     if footer.is_none() {
         chrome.composer.extend(builtin_footer);
+    } else {
+        chrome.footer_spans.clear();
     }
     // Keep installed widgets adjacent to their corresponding editor region.
     for mount in &remote.mounts {

@@ -727,8 +727,9 @@ where
                     }
                 }
                 if shell.has_overlay() {
+                    let footer_cancel = shell.footer_report_cancel(&event);
                     match event {
-                        Event::Mouse(_) => continue,
+                        Event::Mouse(_) if !footer_cancel => continue,
                         Event::Resize(columns, rows) => {
                             shell.set_size(columns, rows);
                             shell.render();
@@ -4626,8 +4627,9 @@ where
                     continue;
                 }
                 if shell.has_overlay() {
+                    let footer_cancel = shell.footer_report_cancel(&event);
                     match event {
-                        Event::Mouse(_) => continue,
+                        Event::Mouse(_) if !footer_cancel => continue,
                         Event::Resize(columns, rows) => {
                             shell.set_size(columns, rows);
                             shell.render();

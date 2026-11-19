@@ -2,6 +2,8 @@ use std::time::Instant;
 
 use sexy_tui_rs::visible_width;
 
+use crate::tui::composer_surface::FooterSpan;
+
 use super::input_overlays::{render_input_suggestions, render_pending_steering};
 use super::panel_render::render_panel_with_limit;
 
@@ -19,6 +21,7 @@ pub(super) struct ShellChrome {
     pub(super) working_bottom_padding: bool,
     pub(super) extension_above: Vec<String>,
     pub(super) composer: Vec<String>,
+    pub(super) footer_spans: Vec<FooterSpan>,
     pub(super) extension_below: Vec<String>,
     pub(super) panel: Vec<String>,
     pub(super) pending: Vec<String>,
@@ -29,6 +32,17 @@ pub(super) struct ShellChrome {
 }
 
 impl ShellChrome {
+    pub(super) fn composer_start(&self) -> usize {
+        self.transcript_rows
+            + self.working.len()
+            + self.header.len()
+            + self.error.len()
+            + self.panel.len()
+            + self.extension_above.len()
+            + self.subagents.len()
+            + self.pending.len()
+    }
+
     /// Allocate decoration only after the editor, panels and other controls fit.
     /// The first spare row belongs to the summary, so Working and Thinking have
     /// the same height. Keep room for history and the viewport navigation row.
@@ -224,7 +238,7 @@ fn shell_chrome_with_composer_rows(
         let mut composer = if state.tool_input_prompt.is_some()
             || (state.panel.is_none() && state.overlay.is_none())
         {
-            let mut lines = render_chrome_composer(state, width, now);
+            let (mut lines, _) = render_chrome_composer(state, width, now);
             composer_rows = lines.len();
             let footer_rows = crate::tui::composer_surface::status_footer_rows(state, width);
             let footer_start = lines.len().saturating_sub(footer_rows);
@@ -260,6 +274,7 @@ fn shell_chrome_with_composer_rows(
                 working_bottom_padding: false,
                 error,
                 composer,
+                footer_spans: Vec::new(),
                 transcript_rows: remaining.saturating_sub(panel.len()),
                 panel,
                 extension_above: Vec::new(),
@@ -275,7 +290,7 @@ fn shell_chrome_with_composer_rows(
     // Render the integrated composer surface with its ordinary status row.
     // Autocomplete can claim that row below once we know it has real matches.
     let footer_rows = crate::tui::composer_surface::status_footer_rows(state, width);
-    let mut composer = render_chrome_composer(state, width, now);
+    let (mut composer, mut footer_spans) = render_chrome_composer(state, width, now);
     let composer_rows = composer.len();
     let mut working = render_working_status(state, width);
     // Keep rows for history as well as live activity on very short terminals.
@@ -283,6 +298,7 @@ fn shell_chrome_with_composer_rows(
     if state.transcript_search_active() {
         // The query, not a tall hidden draft/error, owns the only cursor.
         composer.truncate(rows.saturating_sub(header.len() + working.len() + 2));
+        footer_spans.clear();
         error.truncate(rows.saturating_sub(header.len() + working.len() + composer.len() + 2));
     }
     let (mut extension_above, mut extension_below) = if state.panel.is_none() {
@@ -354,6 +370,7 @@ fn shell_chrome_with_composer_rows(
     let suggestions = render_input_suggestions(state, width, suggestion_limit);
     if !suggestions.is_empty() {
         composer.truncate(composer.len().saturating_sub(footer_rows));
+        footer_spans.clear();
         remaining = remaining.saturating_add(footer_rows);
     }
     remaining = remaining.saturating_sub(suggestions.len());
@@ -375,6 +392,7 @@ fn shell_chrome_with_composer_rows(
             working_bottom_padding: false,
             extension_above,
             composer,
+            footer_spans,
             extension_below,
             panel,
             pending,
@@ -465,12 +483,17 @@ thread_local! {
     static CHROME_COMPOSER_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn render_chrome_composer(state: &ShellState, width: u16, now: Instant) -> Vec<String> {
+fn render_chrome_composer(
+    state: &ShellState,
+    width: u16,
+    now: Instant,
+) -> (Vec<String>, Vec<FooterSpan>) {
     #[cfg(test)]
     CHROME_COMPOSER_RENDERS.set(CHROME_COMPOSER_RENDERS.get() + 1);
-    let mut lines = crate::tui::composer_surface::render_composer_surface(state, width, now);
+    let (mut lines, spans) =
+        crate::tui::composer_surface::render_composer_with_footer(state, width, now);
     if !state.startup_pending {
-        return lines;
+        return (lines, spans);
     }
 
     // Keep the real editor projection and ready geometry, but do not paint a
@@ -516,7 +539,7 @@ fn render_chrome_composer(state: &ShellState, width: u16, now: Instant) -> Vec<S
             .collect::<Vec<_>>()
             .join(sexy_tui_rs::CURSOR_MARKER);
     }
-    lines
+    (lines, Vec::new())
 }
 
 /// Before launch readiness, setup is a transient surface in either mouse mode.
