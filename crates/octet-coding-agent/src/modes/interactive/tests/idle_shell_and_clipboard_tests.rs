@@ -469,7 +469,7 @@ async fn assert_ready_wheel_publication(count: usize) {
     .unwrap();
     assert!(matches!(result, Idle::Quit));
     let frame = shell.dump_rendered_frame().await.unwrap();
-    assert!(frame.iter().any(|row| row.contains("Jump to bottom")));
+    assert!(frame.iter().any(|row| row.contains("[ ↓ Jump")));
     let mut expected = InteractiveShell::test_shell();
     for index in 0..100 {
         expected.notice(format!("wheel-row-{index}"));

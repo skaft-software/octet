@@ -523,9 +523,9 @@ mod tests {
         let shell = InteractiveShell::test_shell();
         {
             let mut state = shell.state.borrow_mut();
-            state.push_block(TranscriptBlock::Reasoning(Box::new(
-                AssistantBlock::streaming_reasoning("thinking"),
-            )));
+            let mut activity = AssistantBlock::streaming_reasoning("thinking");
+            activity.status_activity = true;
+            state.push_block(TranscriptBlock::Reasoning(Box::new(activity)));
             state.push_block(TranscriptBlock::Assistant(Box::new(
                 AssistantBlock::streaming("# Stable heading\n\nmutable"),
             )));

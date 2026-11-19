@@ -1,12 +1,147 @@
 //! Literal JavaScript source and bounded output for Codemode tool calls.
 
-use sexy_tui_rs::{visible_width, RichRenderer};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::Value;
+use sexy_tui_rs::{truncate_to_width, visible_width, RichRenderer};
 
 use super::terminal_text::sanitize_for_terminal;
 use super::tool_render::bounded_tool_failure_reason;
 use super::tool_render::{tool_value_indent_width, ToolRows};
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel};
 use crate::tui::theme::OctetTheme;
+use crate::tui::theme_schema::ToolCardLayout;
+
+const PI_SOURCE_ROWS: usize = 10;
+const PI_CALL_ROWS: usize = 8;
+
+#[derive(Debug, PartialEq, Eq)]
+struct CodemodeCall {
+    name: String,
+    args: String,
+    status: CallStatus,
+    duration_ms: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CallStatus {
+    Running,
+    Ok,
+    Error,
+    Cancelled,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CodemodeDetails {
+    calls: Vec<CodemodeCall>,
+    omitted: u64,
+    full_output_path: Option<String>,
+}
+
+/// The native extension publishes these fields in bounded result metadata.
+/// Unknown/legacy results still have the ordinary output projection.
+pub(crate) fn details(metadata: &Value) -> Option<Arc<CodemodeDetails>> {
+    let calls = metadata.get("calls")?.as_array()?;
+    let string = |value: &Value| value.as_str().map(sanitize_for_terminal);
+    let details = CodemodeDetails {
+        calls: calls
+            .iter()
+            .filter_map(|row| {
+                let status = match row.get("status")?.as_str()? {
+                    "running" => CallStatus::Running,
+                    "ok" => CallStatus::Ok,
+                    "error" => CallStatus::Error,
+                    "cancelled" => CallStatus::Cancelled,
+                    _ => return None,
+                };
+                Some(CodemodeCall {
+                    name: string(&row["name"])?,
+                    args: string(&row["args"]).unwrap_or_default(),
+                    duration_ms: row["duration_ms"].as_u64(),
+                    error: string(&row["error"]),
+                    status,
+                })
+            })
+            .collect(),
+        omitted: metadata["calls_omitted"].as_u64().unwrap_or(0),
+        full_output_path: string(&metadata["full_output_path"]),
+    };
+    Some(Arc::new(details))
+}
+
+fn pi_calls(panel: &ToolPanel, theme: &OctetTheme, width: u16, expanded: bool) -> ToolRows {
+    let mut rows = ToolRows::default();
+    let Some(details) = &panel.codemode_details else {
+        return rows;
+    };
+    if details.calls.is_empty() && details.omitted == 0 {
+        return rows;
+    }
+    rows.decoration(String::new());
+    let first = if expanded {
+        0
+    } else {
+        details.calls.len().saturating_sub(PI_CALL_ROWS)
+    };
+    if first > 0 {
+        rows.decoration(fit_line(
+            &subdued_text(
+                theme,
+                &format!("... ({first} earlier calls, ctrl+o to expand)"),
+            ),
+            width,
+        ));
+    }
+    for call in &details.calls[first..] {
+        let (icon, ascii, role) = match call.status {
+            CallStatus::Running => ("…", ".", "warning"),
+            CallStatus::Ok => ("✓", "+", "success"),
+            CallStatus::Error => ("✗", "x", "error"),
+            CallStatus::Cancelled => ("⊘", "-", "muted"),
+        };
+        let mut line = format!(
+            "{} {}",
+            theme.fg(role, if theme.unicode() { icon } else { ascii }),
+            theme.fg("tool_title", &call.name)
+        );
+        if !call.args.is_empty() {
+            let args = if expanded {
+                call.args.clone()
+            } else {
+                truncate_to_width(&call.args, 80, Some("..."))
+            };
+            line.push_str(&format!(" {}", subdued_text(theme, &args)));
+        }
+        if let Some(ms) = call.duration_ms {
+            let duration = crate::presentation::format_duration(Duration::from_millis(ms));
+            line.push_str(&format!(" {}", theme.dim(&duration)));
+        }
+        for row in wrap_hanging(&line, "", "", width) {
+            rows.decoration(row);
+        }
+        if expanded {
+            if let Some(error) = &call.error {
+                for line in error.lines() {
+                    for row in wrap_hanging(&theme.fg("error", line), "  ", "  ", width) {
+                        rows.decoration(row);
+                    }
+                }
+            }
+        }
+    }
+    if details.omitted > 0 {
+        rows.decoration(fit_line(
+            &subdued_text(
+                theme,
+                &format!("... ({} calls not retained)", details.omitted),
+            ),
+            width,
+        ));
+    }
+    rows
+}
 
 const COMPACT_SOURCE_ROWS: usize = 3;
 const COMPACT_OUTPUT_LINES: usize = 5;
@@ -30,7 +165,11 @@ pub(super) fn project_source(
     theme: &OctetTheme,
     width: u16,
     expanded: bool,
+    content_role: &str,
 ) -> ToolRows {
+    if theme.layout().tool_cards == ToolCardLayout::Pi {
+        return project_pi_source(source, renderer, theme, width, expanded, content_role);
+    }
     let label = "Codemode";
     let indent = tool_value_indent_width(label);
     let prefix = format!(
@@ -77,6 +216,44 @@ pub(super) fn project_source(
         ));
     }
     projected
+}
+
+fn project_pi_source(
+    source: &str,
+    renderer: &RichRenderer,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+    content_role: &str,
+) -> ToolRows {
+    let title = "codemode";
+    let painted = theme.apply_transcript_role_on_surface("tool_header", content_role, title);
+    let mut result = ToolRows::literal(vec![fit_line(&painted, width)], title.into(), 0);
+    if !source.trim_end().is_empty() {
+        let doc = renderer.render_inline_syntax_wrapped(source.trim_end(), "javascript", width);
+        let shown = if expanded {
+            doc.lines.len()
+        } else {
+            doc.lines.len().min(PI_SOURCE_ROWS)
+        };
+        let hidden = doc.lines.len() - shown;
+        let plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
+        let rows = doc
+            .lines
+            .into_iter()
+            .take(shown)
+            .map(|line| if plain { line.plain } else { line.styled })
+            .collect();
+        let mut projected = ToolRows::rich_literal(rows, doc.copy_text, 0, width);
+        projected.retain_rows(&(0..shown).collect::<Vec<_>>());
+        result.append(projected);
+        if hidden > 0 {
+            result.decoration(super::tool_render::pi_more_lines(
+                theme, hidden, false, width,
+            ));
+        }
+    }
+    result
 }
 
 /// Byte length of the leading blank lines plus a first non-empty line that only
@@ -136,6 +313,9 @@ pub(super) fn project_output(
     width: u16,
     expanded: bool,
 ) -> ToolRows {
+    if theme.layout().tool_cards == ToolCardLayout::Pi {
+        return project_pi_output(panel, theme, width, expanded);
+    }
     // Native cards use the same wrapped-row window as shell cards. The bounded
     // source preview below remains the semantic Tern projection, not ANSI layout.
     let (text, _) = output_preview(panel, true);
@@ -171,6 +351,70 @@ pub(super) fn project_output(
         output.copy_rows.insert(head, None);
     }
     output
+}
+
+fn project_pi_output(
+    panel: &ToolPanel,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+) -> ToolRows {
+    let mut result = pi_calls(panel, theme, width, expanded);
+    if !panel.finished {
+        return result;
+    }
+    let text = sanitize_for_terminal(&panel.output);
+    let mut lines = text.splitn(4, '\n');
+    let header = matches!(lines.next(), Some("Script completed" | "Script failed"))
+        && lines.next().is_some_and(|line| {
+            line.strip_prefix("Wall time ")
+                .and_then(|time| time.strip_suffix(" seconds"))
+                .is_some_and(|time| {
+                    !time.is_empty()
+                        && time
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                })
+        })
+        && lines.next() == Some("Output:");
+    let output = if header {
+        lines.next().unwrap_or_default()
+    } else {
+        &text[repeated_failure_status_len(panel, &text)..]
+    }
+    .trim();
+    let role = if panel.is_error {
+        "error"
+    } else {
+        "tool_output"
+    };
+    if !output.is_empty() {
+        let rows = output
+            .lines()
+            .flat_map(|line| wrap_hanging(&theme.fg(role, line), "", "", width))
+            .collect();
+        let mut projected = ToolRows::literal(rows, output.into(), 0);
+        let hidden = projected.lines.len().saturating_sub(COMPACT_OUTPUT_LINES);
+        result.decoration(String::new());
+        if !expanded && hidden > 0 {
+            projected.retain_rows(&(0..COMPACT_OUTPUT_LINES).collect::<Vec<_>>());
+            projected.decoration(super::tool_render::pi_more_lines(
+                theme, hidden, false, width,
+            ));
+            if let Some(path) = panel
+                .codemode_details
+                .as_ref()
+                .and_then(|details| details.full_output_path.as_deref())
+            {
+                projected.decoration(fit_line(
+                    &subdued_text(theme, &format!("Full output: {path}")),
+                    width,
+                ));
+            }
+        }
+        result.append(projected);
+    }
+    result
 }
 
 pub(super) fn output_text(panel: &ToolPanel, expanded: bool) -> String {

@@ -22,6 +22,7 @@ use super::{
 };
 use crate::presentation::tool_display::{compact_path, is_shell_tool};
 use crate::tui::theme::{OctetTheme, ThemeSurfaceChrome};
+use crate::tui::theme_schema::ToolCardLayout;
 
 /// Round display-only token counts; the telemetry and accounting remain exact.
 fn compact_subagent_tokens(tokens: u64) -> String {
@@ -58,11 +59,17 @@ fn tool_output_indent(theme: &OctetTheme, width: u16) -> u16 {
     theme.layout().tool_body_indent.min(width.saturating_sub(1))
 }
 
-fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<String> {
+fn nest_tool_output(
+    rows: Vec<String>,
+    duration_row: Option<usize>,
+    theme: &OctetTheme,
+    width: u16,
+) -> Vec<String> {
     let indent = tool_output_indent(theme, width);
     let mut first_content_row = true;
     rows.into_iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             // Blankness selects the connector, not which row bytes to retain:
             // private image anchors are invisible but still name a placement.
             // Pi compatibility source: packages/tui/src/components/image.ts:131-139
@@ -73,17 +80,20 @@ fn nest_tool_output(rows: Vec<String>, theme: &OctetTheme, width: u16) -> Vec<St
             {
                 return row;
             }
-            let prefix = if first_content_row && indent > 0 {
-                first_content_row = false;
+            // The final duration is a sibling of the result, not part of it.
+            let prefix = if theme.layout().tool_cards == ToolCardLayout::Octet
+                && indent > 0
+                && (first_content_row || duration_row == Some(index))
+            {
                 format!(
                     "{}{}",
                     subdued_text(theme, activity_elbow(theme)),
                     " ".repeat(usize::from(indent - 1))
                 )
             } else {
-                first_content_row = false;
                 " ".repeat(usize::from(indent))
             };
+            first_content_row = false;
             fit_line(&format!("{prefix}{row}"), width)
         })
         .collect()
@@ -111,6 +121,7 @@ fn render_progress_decoration(
 fn append_nested_tool_output(
     header: &mut Vec<String>,
     rows: Vec<String>,
+    duration_row: Option<usize>,
     theme: &OctetTheme,
     width: u16,
 ) {
@@ -122,7 +133,7 @@ fn append_nested_tool_output(
         return;
     }
 
-    if tool_output_indent(theme, width) > 0 {
+    if theme.layout().tool_cards == ToolCardLayout::Octet && tool_output_indent(theme, width) > 0 {
         let stem = subdued_text(theme, theme.glyph("vertical"));
         for continuation in header.iter_mut().skip(1) {
             if let Some(rest) = continuation.strip_prefix(' ') {
@@ -130,7 +141,7 @@ fn append_nested_tool_output(
             }
         }
     }
-    header.extend(nest_tool_output(rows, theme, width));
+    header.extend(nest_tool_output(rows, duration_row, theme, width));
 }
 
 /// One shared presentation supplies painted tool rows and their copy positions.
@@ -147,22 +158,50 @@ pub(super) fn render_tool(
         .resolve::<bool>("quiet_tool_summaries")
         .unwrap_or(false)
         && !verbose_tools;
+    let pi = theme.layout().tool_cards == ToolCardLayout::Pi;
     let compact_bash = is_shell_tool(panel.name.as_str()) && panel.display.shell_command.is_some();
     let mut lines = if let Some(source) = super::codemode_render::source(panel) {
-        super::codemode_render::project_source(&source, rich_renderer, theme, width, verbose_tools)
-    } else if let Some(command) = panel.display.shell_command.as_deref() {
-        project_bash_row(
-            command,
-            &theme.apply_transcript_role_on_surface(
-                "tool_header",
-                content_role,
-                shell_row_label(&panel.name),
-            ),
+        super::codemode_render::project_source(
+            &source,
             rich_renderer,
             theme,
             width,
             verbose_tools,
+            content_role,
         )
+    } else if let Some(command) = panel.display.shell_command.as_deref() {
+        if pi {
+            super::bash_render::project_pi_bash_call(panel, command, theme, width, content_role)
+        } else {
+            project_bash_row(
+                command,
+                &theme.apply_transcript_role_on_surface(
+                    "tool_header",
+                    content_role,
+                    shell_row_label(&panel.name),
+                ),
+                rich_renderer,
+                theme,
+                width,
+                verbose_tools,
+            )
+        }
+    } else if pi && panel.name == "read" {
+        let label = theme.apply_transcript_role_on_surface("tool_header", content_role, "read");
+        let value = panel
+            .display
+            .success
+            .strip_prefix("read ")
+            .unwrap_or(&panel.display.success);
+        let value = sanitize_for_terminal(value);
+        let text = format!("read {value}");
+        let rows = wrap_hanging(
+            &format!("{label} {}", theme.fg("accent", &value)),
+            "",
+            "",
+            width,
+        );
+        ToolRows::literal(rows, text, 0)
     } else {
         let compact = width < 60 || quiet_summary;
         let summary = if !panel.finished {
@@ -289,6 +328,19 @@ pub(super) fn render_tool(
             name if is_shell_tool(name) && compact_bash => output_lines.append(
                 project_compact_bash_output(panel, theme, nested_width, verbose_tools, ""),
             ),
+            "read" if pi && verbose_tools && !panel.is_error => {
+                let text = sanitize_for_terminal(&panel.output);
+                if !text.trim().is_empty() {
+                    let rows = text
+                        .lines()
+                        .flat_map(|line| {
+                            wrap_hanging(&theme.fg("tool_output", line), "", "", nested_width)
+                        })
+                        .collect();
+                    output_lines.decoration(String::new());
+                    output_lines.append(ToolRows::literal(rows, text, 0));
+                }
+            }
             "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
                 output_lines.append(project_diff(
                     panel,
@@ -311,42 +363,34 @@ pub(super) fn render_tool(
     // here rather than supplied by the optional adapter. Pi compatibility source:
     // packages/coding-agent/src/core/tools/render-utils.ts:142-163 prefers the
     // recorded final duration; renderers/bash.ts:91 puts it after result output.
+    let mut duration_row = None;
     if let Some(duration) = panel
         .duration
-        .filter(|_| panel.finished && theme.shows_durations())
+        .filter(|_| panel.finished && theme.shows_durations() && !(pi && panel.name == "read"))
     {
         let template = theme
             .resolve::<String>("tool_duration")
             .unwrap_or_else(|| "Took {duration}".into());
         if !template.trim().is_empty() {
-            let text = template.replace(
-                "{duration}",
-                &crate::presentation::format_duration(duration),
-            );
+            let duration = if pi && duration.as_secs() < 60 {
+                format!("{:.1}s", duration.as_secs_f64())
+            } else {
+                crate::presentation::format_duration(duration)
+            };
+            let text = template.replace("{duration}", &duration);
+            if pi {
+                output_lines.decoration(String::new());
+            }
+            duration_row = Some(output_lines.lines.len());
+            let elbow = activity_elbow(theme);
+            let text = if !pi && tool_output_indent(theme, width) == 0 && !elbow.trim().is_empty() {
+                format!("{elbow} {text}")
+            } else {
+                text
+            };
             for row in wrap_hanging(&subdued_text(theme, &text), "", "", nested_width) {
                 output_lines.decoration(row);
             }
-        }
-    }
-    if !panel.finished
-        && is_shell_tool(panel.name.as_str())
-        && (output_lines.lines.is_empty()
-            || panel
-                .output
-                .lines()
-                .any(|line| matches!(line.trim(), "..." | "…")))
-    {
-        // Pi compatibility source: packages/coding-agent/src/core/tools/
-        // render-utils.ts:142-163 exposes partial execution through Elapsed.
-        // Native cards use a static state, without another timer/animation.
-        let separator = super::semantic_separator(theme);
-        for row in wrap_hanging(
-            &subdued_text(theme, &format!("Running{separator}Esc to interrupt")),
-            "",
-            "",
-            nested_width,
-        ) {
-            output_lines.decoration(row);
         }
     }
     let indent = tool_output_indent(theme, width);
@@ -357,6 +401,7 @@ pub(super) fn render_tool(
     append_nested_tool_output(
         &mut painted,
         std::mem::take(&mut output_lines.lines),
+        duration_row,
         theme,
         width,
     );
@@ -489,7 +534,7 @@ pub(super) fn render_block_planned_with_rainbow(
     .filter(|background| *background != Color::Default);
     let collapsed_reasoning = matches!(
         block,
-        TranscriptBlock::Reasoning(reasoning) if !reasoning.reasoning_expanded
+        TranscriptBlock::Reasoning(reasoning) if reasoning.thinking_slot || !reasoning.reasoning_expanded
     );
     let mut geometry = plan.geometry;
     let mut tool_copy = None;
@@ -690,7 +735,7 @@ pub(super) fn render_block_planned_with_rainbow(
             let (output, source) =
                 render_shell_output(shell, theme, nested_width, verbose_tools, "");
             geometry.shell_output = Some(source);
-            append_nested_tool_output(&mut lines, output, theme, width);
+            append_nested_tool_output(&mut lines, output, None, theme, width);
             finish_transcript_block(lines)
         }
     };

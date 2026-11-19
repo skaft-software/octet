@@ -14,7 +14,9 @@ use super::{fit_line, semantic_separator, wrap_hanging, ShellState};
 #[derive(Clone)]
 pub(super) struct ShellChrome {
     pub(super) header: Vec<String>,
+    /// Live activity budgeted with chrome, then sliced with the transcript in fullscreen.
     pub(super) working: Vec<String>,
+    pub(super) working_bottom_padding: bool,
     pub(super) extension_above: Vec<String>,
     pub(super) composer: Vec<String>,
     pub(super) extension_below: Vec<String>,
@@ -27,6 +29,23 @@ pub(super) struct ShellChrome {
 }
 
 impl ShellChrome {
+    /// Allocate decoration only after the editor, panels and other controls fit.
+    /// The first spare row belongs to the summary, so Working and Thinking have
+    /// the same height. Keep room for history and the viewport navigation row.
+    pub(super) fn space_working_slot(&mut self) {
+        if self.working.is_empty() {
+            return;
+        }
+        let spare = self.transcript_rows.saturating_sub(3);
+        let summary = usize::from(self.working.len() == 1).min(spare);
+        // The event separator already provides the blank above the label.
+        self.working_bottom_padding = spare > summary;
+        let extra = summary + usize::from(self.working_bottom_padding);
+        self.working
+            .resize(self.working.len() + extra, String::new());
+        self.transcript_rows -= extra;
+    }
+
     /// Transcript spacing and chrome breathing room share one physical seam.
     /// Inspect the canonical tail, including when a lazy update has no rows.
     pub(super) fn separator_rows(transcript_tail: Option<&String>) -> usize {
@@ -207,15 +226,13 @@ fn shell_chrome_with_composer_rows(
         {
             let mut lines = render_chrome_composer(state, width, now);
             composer_rows = lines.len();
-            if crate::tui::composer_surface::status_footer_visible(state, width) {
-                lines.pop();
-                if state.tool_input_prompt.is_none()
-                    && state.panel.is_none()
-                    && state.overlay.is_none()
-                {
-                    // Metadata resolves into this row without moving the draft.
-                    lines.push(String::new());
-                }
+            let footer_rows = crate::tui::composer_surface::status_footer_rows(state, width);
+            let footer_start = lines.len().saturating_sub(footer_rows);
+            if state.tool_input_prompt.is_some() {
+                lines.truncate(footer_start);
+            } else {
+                // Metadata resolves into these rows without moving the draft.
+                lines[footer_start..].fill(String::new());
             }
             lines
         } else {
@@ -240,6 +257,7 @@ fn shell_chrome_with_composer_rows(
             ShellChrome {
                 header,
                 working: Vec::new(),
+                working_bottom_padding: false,
                 error,
                 composer,
                 transcript_rows: remaining.saturating_sub(panel.len()),
@@ -256,11 +274,12 @@ fn shell_chrome_with_composer_rows(
 
     // Render the integrated composer surface with its ordinary status row.
     // Autocomplete can claim that row below once we know it has real matches.
-    let footer_visible = crate::tui::composer_surface::status_footer_visible(state, width);
+    let footer_rows = crate::tui::composer_surface::status_footer_rows(state, width);
     let mut composer = render_chrome_composer(state, width, now);
     let composer_rows = composer.len();
     let mut working = render_working_status(state, width);
-    working.truncate(rows.saturating_sub(header.len() + composer.len() + 1));
+    // Keep rows for history as well as live activity on very short terminals.
+    working.truncate(rows.saturating_sub(header.len() + composer.len() + 2));
     if state.transcript_search_active() {
         // The query, not a tall hidden draft/error, owns the only cursor.
         composer.truncate(rows.saturating_sub(header.len() + working.len() + 2));
@@ -331,13 +350,11 @@ fn shell_chrome_with_composer_rows(
 
     // Let autocomplete reuse the status row, including in a short terminal
     // where that reclaimed row is what makes a choice plus its hint fit.
-    let suggestion_limit = remaining
-        .saturating_add(if footer_visible { 1 } else { 0 })
-        .min(10);
+    let suggestion_limit = remaining.saturating_add(footer_rows).min(10);
     let suggestions = render_input_suggestions(state, width, suggestion_limit);
-    if footer_visible && !suggestions.is_empty() {
-        composer.pop();
-        remaining = remaining.saturating_add(1);
+    if !suggestions.is_empty() {
+        composer.truncate(composer.len().saturating_sub(footer_rows));
+        remaining = remaining.saturating_add(footer_rows);
     }
     remaining = remaining.saturating_sub(suggestions.len());
 
@@ -355,6 +372,7 @@ fn shell_chrome_with_composer_rows(
         ShellChrome {
             header,
             working,
+            working_bottom_padding: false,
             extension_above,
             composer,
             extension_below,
@@ -369,28 +387,46 @@ fn shell_chrome_with_composer_rows(
     )
 }
 
-/// Reuse the existing activity presenter, but place liveness in chrome rather
-/// than promoting its empty source into a thinking/assistant transcript block.
-fn render_working_status(state: &ShellState, width: u16) -> Vec<String> {
+/// Paint the single mutable transcript-tail item outside the retained row cache.
+/// Working and compaction take one row; Thinking can add a detail row.
+pub(super) fn render_working_status(state: &ShellState, width: u16) -> Vec<String> {
+    if crate::tui::composer_surface::embedded_working(state, width).is_some() {
+        return Vec::new();
+    }
     let Some(status) = &state.working_status else {
         return Vec::new();
     };
-    // The expanded live trace is already the indicator. Keep independent
-    // lifecycle/retry statuses and themes with their own placeholder intact.
-    if status.is_working_activity()
-        && status.retry_activity.is_none()
-        && state.active_reasoning.is_some_and(|index| {
-            matches!(&state.transcript[index], super::TranscriptBlock::Reasoning(reasoning)
-                if reasoning.reasoning_expanded && !reasoning.finished)
+    // The model is either thinking or working: a live thinking trace takes the
+    // plain Working row's place, keeping the run timer. Retry, compaction and
+    // provider lifecycle labels keep the slot.
+    let thinking = state
+        .active_reasoning
+        .and_then(|index| match state.transcript.get(index) {
+            Some(super::TranscriptBlock::Reasoning(reasoning)) if !reasoning.finished => {
+                Some(reasoning)
+            }
+            _ => None,
         })
-        && state
-            .theme
-            .resolve::<String>("thinking_placeholder")
-            .is_none()
-    {
-        return Vec::new();
-    }
-    let block = super::TranscriptBlock::Reasoning(status.clone());
+        .filter(|_| {
+            status.is_working_activity()
+                && status.retry_activity.is_none()
+                && state
+                    .theme
+                    .resolve::<String>("thinking_placeholder")
+                    .is_none()
+        });
+    let block = super::TranscriptBlock::Reasoning(match thinking {
+        Some(reasoning) if reasoning.reasoning_expanded => return Vec::new(),
+        Some(reasoning) => {
+            let mut slot = reasoning.render_metadata();
+            slot.status_activity = true;
+            slot.thinking_slot = true;
+            slot.activity_started_at = status.activity_started_at;
+            slot.extension_working = None;
+            Box::new(slot)
+        }
+        None => status.clone(),
+    });
     let mut rich = state.rich_renderer.borrow_mut();
     let rich = rich.get_or_insert_with(|| state.theme.rich_renderer());
     let mut reasoning = state.reasoning_renderer.borrow_mut();
@@ -409,24 +445,17 @@ fn render_working_status(state: &ShellState, width: u16) -> Vec<String> {
         false,
     )
     .lines;
-    // The viewport/native transcript seam supplies the leading breathing row.
+    // Return content only. Frame layout owns the summary reservation and padding.
     let leading = rows
         .iter()
         .position(|row| !sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
         .unwrap_or(rows.len());
-    rows.drain(
-        ..if state.transcript.is_empty() {
-            leading.saturating_sub(1)
-        } else {
-            leading
-        },
-    );
-    if !rows.is_empty()
-        && rows
-            .last()
-            .is_some_and(|row| !sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
+    rows.drain(..leading);
+    while rows
+        .last()
+        .is_some_and(|row| sexy_tui_rs::strip_terminal_sequences(row).trim().is_empty())
     {
-        rows.push(String::new());
+        rows.pop();
     }
     rows
 }
@@ -447,9 +476,7 @@ fn render_chrome_composer(state: &ShellState, width: u16, now: Instant) -> Vec<S
     // Keep the real editor projection and ready geometry, but do not paint a
     // half-loaded composer. Rules, fills and embedded metadata resolve in the
     // same frame as the welcome and footer; draft input never waits for them.
-    let footer_rows = usize::from(crate::tui::composer_surface::status_footer_visible(
-        state, width,
-    ));
+    let footer_rows = crate::tui::composer_surface::status_footer_rows(state, width);
     let content_end = lines.len().saturating_sub(footer_rows);
     let chrome = state
         .theme
@@ -534,13 +561,13 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     // rows can enter native scrollback instead of being sliced away here.
     lines.truncate(chrome.transcript_rows);
     lines.resize(chrome.transcript_rows, String::new());
+    lines.extend(chrome.working);
     lines.extend(chrome.header);
     lines.extend(chrome.error);
-    lines.extend(chrome.pending);
     lines.extend(chrome.panel);
     lines.extend(chrome.extension_above);
     lines.extend(chrome.subagents);
-    lines.extend(chrome.working);
+    lines.extend(chrome.pending);
     lines.extend(chrome.composer);
     lines.extend(chrome.suggestions);
     lines.extend(chrome.extension_below);
@@ -553,15 +580,15 @@ pub(super) fn append_chrome(lines: &mut Vec<String>, chrome: ShellChrome, separa
     // grows past the viewport, sexy-tui moves committed rows into native
     // scrollback.
     // The caller measures the canonical/projected transcript tail, not just
-    // this lazy suffix. A reserved Working blank already supplies this seam.
+    // this lazy suffix. Event padding is separate from the activity slot.
     lines.extend(std::iter::repeat_n(String::new(), separator_rows));
+    lines.extend(chrome.working);
     lines.extend(chrome.header);
     lines.extend(chrome.error);
-    lines.extend(chrome.pending);
     lines.extend(chrome.panel);
     lines.extend(chrome.extension_above);
     lines.extend(chrome.subagents);
-    lines.extend(chrome.working);
+    lines.extend(chrome.pending);
     lines.extend(chrome.composer);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
     // well as in the application-owned viewport above.

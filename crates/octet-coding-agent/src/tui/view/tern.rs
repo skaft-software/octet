@@ -874,6 +874,11 @@ fn project(
         }
     }
     let chrome = super::shell_chrome::shell_chrome(shell, shell.size.0, Instant::now());
+    // The native dock is Tern's pinned region. Its first item is the live
+    // transcript tail, outside scrollable history and above editor chrome.
+    if let Some(working) = working_row(shell, client.reduce_motion()) {
+        out.dock.push(working);
+    }
     for (id, rows) in [
         ("extension.header", &chrome.header),
         ("extension.above", &chrome.extension_above),
@@ -881,11 +886,6 @@ fn project(
         if !rows.is_empty() {
             out.dock.push(ansi_rows(id, rows));
         }
-    }
-    // Run activity stays above queued input, including while a tool owns the
-    // turn. Neither adding a follow-up nor changing the editor owner settles it.
-    if let Some(working) = working_row(shell, client.reduce_motion()) {
-        out.dock.push(working);
     }
     if let Some(pending) = super::tern_pending::node(shell) {
         out.dock.push(pending);
@@ -1651,19 +1651,15 @@ fn composer(shell: &ShellState) -> Node {
                         "${}.{:06}{}",
                         cost / 1_000_000,
                         cost % 1_000_000,
-                        if shell.subscription_cost {
-                            " (sub)"
-                        } else {
-                            ""
-                        }
+                        shell.session_cost_suffix(cost),
                     ),
                 )
                 .set(
                     "title",
-                    if shell.subscription_cost {
-                        "Session cost at API prices (subscription)"
-                    } else {
-                        "Session cost"
+                    match shell.session_cost_suffix(cost) {
+                        " (sub)" => "Session cost at API prices (subscription)",
+                        " (mixed)" => "Session cost includes API-equivalent subscription usage",
+                        _ => "Session cost",
                     },
                 ),
         ));

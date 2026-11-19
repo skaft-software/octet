@@ -29,7 +29,7 @@ class LatencySummaryTests(unittest.TestCase):
     def test_scroll_offset_uses_completed_geometry_not_the_button_label(self):
         self.assertEqual(latency.scroll_offset(
             "octet-frame: sequence=1 scroll=3\noctet-frame: sequence=2 scroll=64\n"), 64)
-        self.assertIsNone(latency.scroll_offset("[ ↓ Jump to bottom ]"))
+        self.assertIsNone(latency.scroll_offset("[ ↓ Jump ]"))
 
     def test_mixed_fixture_has_paired_tool_cards_and_valid_png_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:

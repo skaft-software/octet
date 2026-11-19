@@ -203,7 +203,7 @@ padding/separator rows search within the old viewport for semantic text.
 the semantic anchor rebases it after growth, contraction, deferred-history
 prepends, and width/height changes. Scrolling above the tail keeps semantic rows
 fixed while one Markdown block continues to grow, increments the new-output
-state, and exposes one centered `[ ↓ Jump to bottom · M new ]` control on the
+state, and exposes one centered `[ ↓ Jump · M new ]` control on the
 reserved breathing row, immediately above the pinned chrome. Its row and the
 transcript capacity stay fixed, including at the oldest history row; at the live
 tail that row is blank. The noun-free `1 new` / `2 new` counter appears only when
@@ -240,7 +240,7 @@ size, disclosure, chrome and viewport intent, not visual-to-semantic anchor
 representation; anchor promotion without input feedback cannot invalidate the
 same painted cells. The scroll-delta fence is rebased only when semantic feedback
 is accepted, so unrelated input cannot discard a valid receipt after tail growth.
-Scrollbar, search-button and Jump to bottom hit targets travel with that
+Scrollbar, search-button and Jump hit targets travel with that
 completed-frame receipt, never a current transcript-cache generation. Pending
 output does not disable hover, presses or drag capture. Search visibility also
 fences the layout. Search-result feedback retains the full input/render revision
@@ -440,8 +440,10 @@ Every accepted run opens a `Working` row immediately. After the provider emits
 an actual reasoning delta, collapsed reasoning uses a bold `Thinking` activity
 label with a quieter model-adaptive shimmer than `Working`. A real semantic ATX
 or standalone-bold heading occupies the aligned detail row with a subdued
-`Ctrl+T` hint. Without a heading, the compiled default puts the hint on the
-activity row when it fits, retaining a detail row on narrow terminals. Ordinary
+`Ctrl+T` hint. In the default ANSI layout the hint stays on the detail row
+when there is no heading; Working reserves that row without painting text.
+The latest event's separator is the only blank row above the label. One blank
+row follows the summary before the composer when space permits. Ordinary
 body prose is never inferred as a label, and provider text is sanitized before
 display. The shimmer uses a monotonic 80 ms clock on the renderer thread,
 independent of semantic-event frequency. Late frames select the current phase
@@ -502,17 +504,15 @@ raw provider envelopes or headers.
 
 ## Tool presentation
 
-Tool calls expose deterministic intent and lifecycle rows. Every completed native
-tool card with recorded timing ends its nested result block with the same subdued
-`Took <duration>` row, after output/diff/media/error evidence and outside output
-preview budgets. The theme's `tool_duration` template can restyle or hide it;
-unfinished cards and older results without recorded timing never invent a duration.
-Duration decoration is not copied as tool output. Empty running shell-tool cards
-show a static `Running · Esc to interrupt` row instead of an ambiguous waiting
-placeholder. Live ellipsis-only output rows are replaced by that state; completed
-literal ellipses remain output. Substantive live output uses the existing active
-event marker and Working indicator, without an extra row that could crowd the
-latest progress out of a short terminal. Local
+Tool calls expose deterministic intent and lifecycle rows. Default tool cards
+with recorded timing end in a subdued `└ Took <duration>` row aligned with the
+result elbow, after output/diff/media/error evidence and outside output preview
+budgets. The theme's `tool_duration` template can restyle or hide it; unfinished
+cards and older results without recorded timing never invent a duration.
+Duration decoration is not copied as tool output. Live shell-tool cards use their
+active event marker and the shared Working indicator without an extra status row.
+Live ellipsis-only placeholders are hidden; completed literal ellipses remain
+output. Local
 `!` shell headings use `[running]`. No additional animation or clock is created. Event-margin dots
 identify active collapsed reasoning, assistant responses, and tool or shell
 execution, and every dot uses the same glyph footprint. The collapsed-reasoning

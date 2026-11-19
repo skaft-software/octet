@@ -34,9 +34,9 @@ fn scroll_hint(scroll: usize, new: usize) -> String {
 #[test]
 fn polish_jump_to_bottom_button_and_new_counts() {
     for (new, label) in [
-        (0, "[ ↓ Jump to bottom ]"),
-        (1, "[ ↓ Jump to bottom · 1 new ]"),
-        (2, "[ ↓ Jump to bottom · 2 new ]"),
+        (0, "[ ↓ Jump ]"),
+        (1, "[ ↓ Jump · 1 new ]"),
+        (3, "[ ↓ Jump · 3 new ]"),
     ] {
         let expected = format!("{}{label}", " ".repeat((120 - visible_width(label)) / 2));
         for scroll in [1, 2, 1000] {
@@ -74,6 +74,7 @@ fn polish_working_row_uses_the_theme_separator() {
         .with_activity_started_at(Some(Instant::now() + Duration::from_secs(3600)));
     working.reasoning_heading = Some("Working".into());
     working.show_reasoning_hint = false;
+    working.status_activity = true;
     let theme = crate::tui::theme::test_theme();
     let renderer = theme.rich_renderer();
     let rows = render_block(
@@ -188,8 +189,8 @@ fn polish_completed_tool_cards_end_with_one_recorded_duration() {
                 );
                 let dump = screen_dump(&rows.lines, 100);
                 assert_eq!(
-                    dump.lines().last().unwrap().trim_start_matches([' ', '└']),
-                    "Took 635ms",
+                    dump.lines().last().unwrap().trim_start(),
+                    "└ Took 635ms",
                     "{name}"
                 );
                 assert_eq!(dump.matches("Took 635ms").count(), 1);
@@ -240,21 +241,15 @@ fn polish_tool_duration_theme_is_shared_by_non_shell_cards() {
 }
 
 #[test]
-fn polish_running_shell_cards_never_end_with_bare_ellipsis() {
+fn polish_active_shell_cards_show_only_command_and_real_output() {
     let theme = crate::tui::theme::test_theme();
     let renderer = theme.rich_renderer();
     for (output, expected) in [
-        ("...", "Bash  sleep 1\n└ Running · Esc to interrupt"),
-        ("", "Bash  sleep 1\n└ Running · Esc to interrupt"),
+        ("...", "Bash  sleep 1"),
+        ("", "Bash  sleep 1"),
         ("step", "Bash  sleep 1\n└ step"),
-        (
-            "step\n...",
-            "Bash  sleep 1\n└ step\n  Running · Esc to interrupt",
-        ),
-        (
-            "step\n…",
-            "Bash  sleep 1\n└ step\n  Running · Esc to interrupt",
-        ),
+        ("step\n...", "Bash  sleep 1\n└ step"),
+        ("step\n…", "Bash  sleep 1\n└ step"),
     ] {
         let panel = tool_panel(
             "bash",

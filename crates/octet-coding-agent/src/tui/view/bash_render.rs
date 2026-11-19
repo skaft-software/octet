@@ -7,6 +7,7 @@ use super::terminal_text::{normalize_carriage_return_progress, sanitize_for_term
 use super::tool_render::{tool_input_preview, tool_value_indent_width, ToolRows};
 use super::{fit_line, subdued_text, wrap_hanging, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS};
 use crate::tui::theme::OctetTheme;
+use crate::tui::theme_schema::ToolCardLayout;
 
 /// Locate the final canonical `bash` result after any legacy live progress
 /// bytes. New panels replace live output at completion, while hydrated sessions
@@ -81,7 +82,7 @@ fn is_bash_complete_footer(line: &str) -> bool {
 /// Project a bounded result into display-oriented output. Protocol envelope
 /// lines are excluded; capture loss is retained separately because Ctrl+O can
 /// reveal UI-tail omissions but cannot recover bytes discarded by the tool.
-fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
+fn compact_bash_output(panel: &ToolPanel, preserve_blank: bool) -> CompactBashOutput {
     let normalized = normalize_carriage_return_progress(final_bash_result(&panel.output));
     let result = sanitize_for_terminal(&normalized);
     let mut capture_truncations = Vec::new();
@@ -162,8 +163,13 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
                 capture_metadata = false;
             }
         }
-        if trimmed.is_empty()
-            || trimmed == "(no output)"
+        if trimmed.is_empty() {
+            if preserve_blank && !capture_metadata && !content.is_empty() {
+                content.push(String::new());
+            }
+            continue;
+        }
+        if trimmed == "(no output)"
             || (capture_was_truncated && trimmed == "...")
             || (!panel.finished && matches!(trimmed, "..." | "…"))
             || (content.is_empty() && failure_reason.is_some_and(|reason| reason == trimmed))
@@ -180,6 +186,9 @@ fn compact_bash_output(panel: &ToolPanel) -> CompactBashOutput {
         }
     }
 
+    while content.last().is_some_and(String::is_empty) {
+        content.pop();
+    }
     CompactBashOutput {
         lines: content,
         capture_truncations,
@@ -200,7 +209,7 @@ pub(super) fn bash_output_changes_when_expanded(panel: &ToolPanel) -> bool {
     {
         return true;
     }
-    let compact = compact_bash_output(panel);
+    let compact = compact_bash_output(panel, false);
     compact.panel_elided || !compact.capture_truncations.is_empty() || !compact.lines.is_empty()
 }
 
@@ -237,12 +246,17 @@ pub(super) fn project_compact_bash_output(
     expanded: bool,
     output_indent: &str,
 ) -> ToolRows {
-    let compact = compact_bash_output(panel);
+    let pi = theme.layout().tool_cards == ToolCardLayout::Pi;
+    let compact = compact_bash_output(panel, pi);
     let ellipsis = if theme.unicode() { "…" } else { "..." };
     let loss_details = capture_loss_details(&compact);
     let mut output_rows = Vec::new();
     for output_line in &compact.lines {
-        let text = if theme.is_compiled_default() {
+        if output_line.is_empty() {
+            output_rows.push(String::new());
+            continue;
+        }
+        let text = if pi || theme.is_compiled_default() {
             theme.fg("tool_output", output_line)
         } else {
             subdued_text(theme, output_line)
@@ -250,22 +264,24 @@ pub(super) fn project_compact_bash_output(
         output_rows.extend(wrap_hanging(&text, output_indent, output_indent, width));
     }
     let mut projected = if output_rows.is_empty() {
-        if !panel.finished {
-            // The shared card presenter supplies one explicit Running row.
+        if pi {
+            ToolRows::default()
+        } else if !panel.finished {
             return ToolRows::default();
+        } else {
+            let placeholder = "(no output)";
+            let placeholder_rows = wrap_hanging(
+                &subdued_text(theme, placeholder),
+                output_indent,
+                output_indent,
+                width,
+            );
+            let mut rows = ToolRows::default();
+            for row in placeholder_rows {
+                rows.decoration(row);
+            }
+            rows
         }
-        let placeholder = "(no output)";
-        let placeholder_rows = wrap_hanging(
-            &subdued_text(theme, placeholder),
-            output_indent,
-            output_indent,
-            width,
-        );
-        let mut rows = ToolRows::default();
-        for row in placeholder_rows {
-            rows.decoration(row);
-        }
-        rows
     } else {
         ToolRows::literal(
             output_rows,
@@ -275,6 +291,31 @@ pub(super) fn project_compact_bash_output(
     };
 
     projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+
+    if pi {
+        let mut rows = ToolRows::default();
+        if !projected.lines.is_empty() || !loss_details.is_empty() {
+            rows.decoration(String::new());
+        }
+        let hidden = projected
+            .lines
+            .len()
+            .saturating_sub(COMPACT_EXEC_OUTPUT_ROWS);
+        if !expanded && hidden > 0 {
+            let retained = (hidden..projected.lines.len()).collect::<Vec<_>>();
+            projected.retain_rows(&retained);
+            rows.decoration(super::tool_render::pi_more_lines(
+                theme, hidden, true, width,
+            ));
+        }
+        rows.append(projected);
+        for detail in loss_details {
+            for row in wrap_hanging(&theme.fg("warning", &format!("[{detail}]")), "", "", width) {
+                rows.decoration(row);
+            }
+        }
+        return rows;
+    }
 
     if expanded {
         let mut rows = ToolRows::default();
@@ -331,6 +372,44 @@ pub(super) fn render_compact_bash_output(
     output_indent: &str,
 ) -> Vec<String> {
     project_compact_bash_output(panel, theme, width, expanded, output_indent).lines
+}
+
+pub(super) fn project_pi_bash_call(
+    panel: &ToolPanel,
+    command: &str,
+    theme: &OctetTheme,
+    width: u16,
+    content_role: &str,
+) -> ToolRows {
+    let prompt = if panel.name == "powershell" {
+        "PS>"
+    } else {
+        "$"
+    };
+    let command = format!("{prompt} {}", sanitize_for_terminal(command));
+    let mut painted = theme.apply_transcript_role_on_surface("tool_header", content_role, &command);
+    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&panel.args) {
+        let timeout = args["timeout"]
+            .as_u64()
+            .map(|s| format!("{s}s"))
+            .or_else(|| args["timeout_ms"].as_u64().map(|ms| format!("{ms}ms")));
+        if let Some(timeout) = timeout {
+            painted.push_str(&subdued_text(theme, &format!(" (timeout {timeout})")));
+        }
+    }
+    let command_rows = wrap_hanging(
+        &theme.apply_transcript_role_on_surface("tool_header", content_role, &command),
+        "",
+        "",
+        width,
+    );
+    let mut painted_rows = wrap_hanging(&painted, "", "", width);
+    let mut result = ToolRows::literal(command_rows, command, 0);
+    result.lines.clear();
+    // Timeout text is decoration. It may wrap, but must not enter command copy.
+    result.lines.append(&mut painted_rows);
+    result.copy_rows.resize(result.lines.len(), None);
+    result
 }
 
 // The caller styles the label with the shared tool_header role on its surface.
@@ -413,6 +492,30 @@ mod tests {
     use crate::tui::theme::{test_theme, test_theme_with};
 
     #[test]
+    fn bash_duration_elbow_aligns_with_output() {
+        let mut panel = panel(
+            "printf 'one\\ntwo\\n'",
+            "exit=0 duration=5.92s\nstdout: 2 lines\none\ntwo",
+        );
+        panel.duration = Some(std::time::Duration::from_millis(5_920));
+        let mut theme = test_theme();
+        theme.set_duration_preference(Some(true));
+        for expanded in [false, true] {
+            let rendered = super::super::transcript_render::render_tool(
+                &panel,
+                &theme,
+                &theme.rich_renderer(),
+                80,
+                expanded,
+                "tool_output",
+            );
+            let rows = plain_rows(&rendered.lines);
+            assert_eq!(&rows[1..], ["└ one", "  two", "└ Took 5.92s"]);
+            assert!(rendered.copy_rows.last().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn tool_duration_is_hidden_by_default_without_hiding_output() {
         let mut panel = panel(
             "true",
@@ -450,7 +553,7 @@ mod tests {
                     expanded,
                     "tool_output",
                 );
-                assert!(plain_rows(&rows.lines).join("\n").contains("Took 1.25s"));
+                assert!(plain_rows(&rows.lines).join("\n").contains("└ Took 1.25s"));
                 assert!(!rows.text.contains("Took"));
                 assert!(rows.copy_rows.last().unwrap().is_none());
             }
@@ -747,7 +850,7 @@ mod tests {
     fn bash_input_with_no_output_is_disclosure_sensitive_for_native_history() {
         for command in ["one\ntwo\nthree\nfour".to_owned(), "x".repeat(300)] {
             let panel = panel(&command, "exit=0 duration=0.1s\n(no output)");
-            assert!(compact_bash_output(&panel).lines.is_empty());
+            assert!(compact_bash_output(&panel, false).lines.is_empty());
             assert!(bash_output_changes_when_expanded(&panel));
         }
     }

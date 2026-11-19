@@ -66,13 +66,15 @@ fn working() -> TranscriptBlock {
     let mut activity = AssistantBlock::streaming_reasoning("");
     activity.reasoning_heading = Some("Working".into());
     activity.show_reasoning_hint = false;
+    activity.status_activity = true;
     TranscriptBlock::Reasoning(Box::new(activity))
 }
 
 fn thinking() -> TranscriptBlock {
-    TranscriptBlock::Reasoning(Box::new(AssistantBlock::streaming_reasoning(
-        "private detail",
-    )))
+    let mut slot = AssistantBlock::streaming_reasoning("private detail");
+    slot.thinking_slot = true;
+    slot.status_activity = true;
+    TranscriptBlock::Reasoning(Box::new(slot))
 }
 
 fn tool() -> TranscriptBlock {

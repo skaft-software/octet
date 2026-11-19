@@ -200,6 +200,7 @@ fn transcript_events_prompt_and_composer_share_one_grid() {
         AssistantBlock::streaming_reasoning("").with_model_lab(Some(ModelLab::OpenAi));
     working.reasoning_heading = Some("Working".into());
     working.show_reasoning_hint = false;
+    working.status_activity = true;
     let working = TranscriptBlock::Reasoning(Box::new(working));
     let args = serde_json::json!({"command": "printf hello"});
     let tool = TranscriptBlock::Tool(Box::new(ToolPanel::new(

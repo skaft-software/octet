@@ -7,6 +7,7 @@
 //! the view and picker owners.
 
 use crate::tui::composer::mouse::{ComposerMouseGeometry, ComposerMouseRow};
+use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
@@ -15,7 +16,12 @@ use sexy_tui_rs::{visible_width, TextEditAction, TextEditor, TextEditorProjectio
 
 use crate::presentation::compact_context_limit;
 use crate::tui::layout::PresentationLayout;
+use crate::tui::theme_schema::{StatusFooterLayout, WorkingIndicatorPlacement};
+use crate::tui::view::ShellState;
+
+mod status_footer;
 use crate::tui::view::{fit_line, footer_width, EditorDisplayMap, FooterSegment};
+pub(super) use status_footer::{workspace_branch, FooterUsage};
 
 /// Keep one physical cell after every laid-out text row for the terminal cursor.
 const CURSOR_CELL_RESERVATION: usize = 1;
@@ -245,14 +251,14 @@ fn overflow_label(theme: &super::theme::OctetTheme, count: usize, above: bool) -
 
 fn overflow_rule(
     theme: &super::theme::OctetTheme,
-    border: (u8, u8, u8),
+    paint: impl Fn(&str) -> String,
     width: usize,
     count: usize,
     above: bool,
 ) -> String {
     let horizontal = theme.glyph("horizontal");
     if count == 0 {
-        return theme.rgb_fg(border, &horizontal.repeat(width));
+        return paint(&horizontal.repeat(width));
     }
     let label = overflow_label(theme, count, above);
     let label = if visible_width(&label) + 2 <= width {
@@ -265,10 +271,111 @@ fn overflow_rule(
     let left = remaining / 2;
     format!(
         "{}{}{}",
-        theme.rgb_fg(border, &horizontal.repeat(left)),
+        paint(&horizontal.repeat(left)),
         theme.fg("dim", &label),
-        theme.rgb_fg(border, &horizontal.repeat(remaining - left)),
+        paint(&horizontal.repeat(remaining - left)),
     )
+}
+
+/// Only a native two-rule editor can host the ordinary Working indicator.
+/// Other editors, temporary input and narrow panes retain their own status slot.
+pub(super) fn embedded_working(state: &ShellState, width: u16) -> Option<&'static str> {
+    if width < 12
+        || state.theme.layout().working_indicator != WorkingIndicatorPlacement::Composer
+        || composer_chrome(&state.theme) != ComposerChrome::Boxed
+    {
+        return None;
+    }
+    state.working_rule_spinner()
+}
+
+pub(crate) enum WorkingRuleContent<'a> {
+    Label(&'a str),
+    Custom(Cow<'a, str>),
+}
+
+fn paint_composer_rule(state: &ShellState, text: &str) -> String {
+    let theme = &state.theme;
+    if let Some(border) = theme.role_rgb("composer_border") {
+        return theme.rgb_fg(border, text);
+    }
+    if theme.layout().composer_effort_color {
+        let role = match state.reasoning.split_whitespace().next() {
+            Some("minimal") => "extension.pi.thinkingMinimal",
+            Some("low") => "extension.pi.thinkingLow",
+            Some("medium") => "extension.pi.thinkingMedium",
+            Some("high") => "extension.pi.thinkingHigh",
+            Some("xhigh" | "ultra") => "extension.pi.thinkingXhigh",
+            Some("max") => "extension.pi.thinkingMax",
+            _ => "extension.pi.thinkingOff",
+        };
+        if theme.has_semantic_style(role) {
+            return theme.apply_semantic_role(role, text);
+        }
+    }
+    theme.rgb_fg(
+        theme.model_rgb(state.model_lab).unwrap_or((128, 128, 128)),
+        text,
+    )
+}
+
+fn working_rule(state: &ShellState, width: usize, hidden: usize, spinner: &str) -> String {
+    let theme = &state.theme;
+    let dash = horiz(state);
+    let paint = |text: &str| paint_composer_rule(state, text);
+    let Some(content) = state.working_rule_content() else {
+        return overflow_rule(theme, paint, width, hidden, true);
+    };
+    let overflow = (hidden > 0).then(|| format!(" {} ", overflow_label(theme, hidden, true)));
+    let left_width = overflow.as_ref().map_or(width, |label| {
+        width.saturating_sub(visible_width(label)) / 2
+    });
+    let label_budget = left_width.saturating_sub(4);
+    let prefix = match content {
+        WorkingRuleContent::Label(label) => {
+            let full = format!(
+                "{spinner} {}",
+                crate::tui::view::sanitize_for_terminal(label)
+            );
+            (visible_width(&full) <= label_budget)
+                .then(|| paint(&format!("{} {full} ", dash.repeat(2))))
+        }
+        WorkingRuleContent::Custom(row) if label_budget > 0 => {
+            // This is validated extension ANSI, not a label for the host to
+            // recolor. Clip it by cells, then fence its styles from the rule.
+            let no_color = theme.capabilities().color == super::terminal::ColorDepth::None;
+            let row = if no_color {
+                Cow::Owned(sexy_tui_rs::strip_terminal_sequences(&row))
+            } else {
+                row
+            };
+            let clipped = sexy_tui_rs::truncate_to_width(&row, label_budget, Some(""));
+            let reset = if no_color { "" } else { "\x1b[0m" };
+            Some(format!(
+                "{}{clipped}{reset} ",
+                paint(&format!("{} ", dash.repeat(2)))
+            ))
+        }
+        WorkingRuleContent::Custom(_) => None,
+    };
+    let prefix = match prefix {
+        Some(prefix) => prefix,
+        None if visible_width(spinner) < left_width => paint(&format!(
+            "{}{spinner}",
+            dash.repeat(2.min(left_width - visible_width(spinner)))
+        )),
+        None => return overflow_rule(theme, paint, width, hidden, true),
+    };
+    let mut line = format!(
+        "{prefix}{}",
+        paint(&dash.repeat(left_width - visible_width(&prefix)))
+    );
+    if let Some(label) = overflow {
+        let right = width - left_width - visible_width(&label);
+        line.push_str(&paint(&label));
+        line.push_str(&paint(&dash.repeat(right)));
+    }
+    line
 }
 
 fn render_topline(state: &super::view::ShellState, width: u16, now: Instant) -> String {
@@ -376,8 +483,11 @@ pub(crate) fn composer_editor_geometry(
             presentation.content_width,
         ))
     };
-    let prompt_and_gap = visible_width(state.theme.glyph("prompt")).saturating_add(PROMPT_GAP);
-    let text_prefix = prompt_and_gap.max(CONTINUATION_PREFIX);
+    let text_prefix = if state.theme.layout().composer_show_prompt {
+        (visible_width(state.theme.glyph("prompt")) + PROMPT_GAP).max(CONTINUATION_PREFIX)
+    } else {
+        0
+    };
     let text_width = inner_width
         .saturating_sub(text_prefix.saturating_add(CURSOR_CELL_RESERVATION))
         .max(1);
@@ -498,7 +608,9 @@ pub(crate) fn composer_mouse_geometry(
     let mut rows = Vec::new();
     if width >= 3 {
         for (screen, visual) in window.enumerate() {
-            let prefix = if visual == 0 {
+            let prefix = if !state.theme.layout().composer_show_prompt {
+                String::new()
+            } else if visual == 0 {
                 format!("{} ", state.theme.glyph("prompt"))
             } else {
                 "  ".into()
@@ -544,11 +656,7 @@ fn render_composer_box(
     let chrome = composer_chrome(theme);
     let inner_width = geometry.inner_width();
 
-    // The composer always identifies the model selected for the next prompt.
-    // It never follows a prior prompt or a generic application accent, and it
-    // does not change colour merely because work starts or the draft changes.
-    let model_accent = theme.model_rgb(state.model_lab).unwrap_or((128, 128, 128));
-    let border_rgb = theme.role_rgb("composer_border").unwrap_or(model_accent);
+    let paint_rule = |text: &str| paint_composer_rule(state, text);
     let shaded_bg = (chrome == ComposerChrome::Shaded)
         .then(|| theme.role_rgb("composer_bg"))
         .flatten();
@@ -559,19 +667,19 @@ fn render_composer_box(
     let end = window.end;
     let hidden_above = start;
     let hidden_below = total_lines.saturating_sub(end);
-    let render_rule = |count, above| overflow_rule(theme, border_rgb, terminal_width, count, above);
+    let render_rule = |count, above| overflow_rule(theme, paint_rule, terminal_width, count, above);
     let frame_rule = |left: &str, right: &str, count, above| -> String {
         format!(
             "{frame_prefix}{}{}{}",
-            theme.rgb_fg(border_rgb, left),
+            paint_rule(left),
             overflow_rule(
                 theme,
-                border_rgb,
+                paint_rule,
                 frame_width.saturating_sub(2),
                 count,
                 above
             ),
-            theme.rgb_fg(border_rgb, right),
+            paint_rule(right),
         )
     };
     // A theme that caps its reading column would otherwise float a narrow
@@ -601,7 +709,7 @@ fn render_composer_box(
                 fit_line(&format!("{frame_prefix}{row}"), width)
             }
             ComposerChrome::Framed => {
-                let vertical = theme.rgb_fg(border_rgb, theme.glyph("vertical"));
+                let vertical = paint_rule(theme.glyph("vertical"));
                 fit_line(&format!("{frame_prefix}{vertical} {row} {vertical}"), width)
             }
             ComposerChrome::Shaded if bleeds => {
@@ -623,7 +731,10 @@ fn render_composer_box(
 
     let mut lines = Vec::with_capacity(content_rows + 2);
     match chrome {
-        ComposerChrome::Boxed => lines.push(render_rule(hidden_above, true)),
+        ComposerChrome::Boxed => lines.push(match embedded_working(state, width) {
+            Some(spinner) => working_rule(state, terminal_width, hidden_above, spinner),
+            None => render_rule(hidden_above, true),
+        }),
         ComposerChrome::Topline => lines.push(render_topline(state, width, _now)),
         ComposerChrome::Framed => lines.push(frame_rule(
             theme.glyph("top_left"),
@@ -634,7 +745,6 @@ fn render_composer_box(
         ComposerChrome::Shaded => lines.push(blank_shaded_row()),
     }
 
-    let marker = theme.bold(&theme.model_fg(state.model_lab, theme.glyph("prompt")));
     let cursor_marker = composer_cursor_marker(state);
     let render_row = |content: &str| -> String {
         let content_width = visible_width(content);
@@ -651,7 +761,10 @@ fn render_composer_box(
     if editor.layout_text().is_empty() {
         for index in 0..content_rows {
             if index == 0 {
-                lines.push(finish_row(render_row(&format!("{marker} {cursor_marker}"))));
+                lines.push(finish_row(render_row(&format!(
+                    "{}{cursor_marker}",
+                    composer_prefix(state, true)
+                ))));
             } else {
                 lines.push(finish_row(render_row("")));
             }
@@ -670,11 +783,7 @@ fn render_composer_box(
         }
 
         for index in start..end {
-            let prefix = if index == 0 {
-                format!("{marker} ")
-            } else {
-                "  ".to_owned()
-            };
+            let prefix = composer_prefix(state, index == 0);
             let row = render_editor_row(
                 state,
                 editor,
@@ -716,22 +825,34 @@ fn render_composer_box(
 // Plain content fallback (very narrow terminals)
 // ---------------------------------------------------------------------------
 
+fn composer_prefix(state: &ShellState, first: bool) -> String {
+    if !state.theme.layout().composer_show_prompt {
+        String::new()
+    } else if first {
+        let theme = &state.theme;
+        format!(
+            "{} ",
+            theme.bold(&theme.model_fg(state.model_lab, theme.glyph("prompt")))
+        )
+    } else {
+        "  ".into()
+    }
+}
+
 fn render_plain_content(
     state: &super::view::ShellState,
     width: u16,
     geometry: ComposerEditorGeometry,
     editor: &ComposerEditorProjection,
 ) -> Vec<String> {
-    let marker = state.theme.bold(
-        &state
-            .theme
-            .model_fg(state.model_lab, state.theme.glyph("prompt")),
-    );
+    let prefix = composer_prefix(state, true);
     let cursor_marker = composer_cursor_marker(state);
     if editor.layout_text().is_empty() {
-        return vec![fit_line(&format!("{cursor_marker}{marker}"), width)];
+        return vec![fit_line(
+            &format!("{cursor_marker}{}", prefix.trim_end()),
+            width,
+        )];
     }
-    let prefix = format!("{marker} ");
     let row = render_editor_row(
         state,
         editor,
@@ -882,6 +1003,12 @@ fn identity_variants(full_model: &str, thinking: &str, separator: &str) -> Vec<S
 
 /// Present the host workspace without filesystem lookups. Clip from the left
 /// so a long path retains its most specific tail, without splitting graphemes.
+fn footer_home() -> Option<&'static std::path::Path> {
+    static HOME: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    HOME.get_or_init(|| dirs::home_dir().map(|home| home.canonicalize().unwrap_or(home)))
+        .as_deref()
+}
+
 fn footer_workspace(
     path: &std::path::Path,
     home: Option<&std::path::Path>,
@@ -1046,7 +1173,11 @@ fn render_status_footer_with_gap(
         state.price_display
     };
     let cost = if let Some(cost) = state.displayed_session_cost_microdollars() {
-        Some(format_microdollars(cost))
+        Some(format!(
+            "{}{}",
+            format_microdollars(cost),
+            state.session_cost_suffix(cost)
+        ))
     } else {
         match price_display {
             crate::presentation::PriceDisplay::ExplicitZero => Some("$0".to_owned()),
@@ -1058,15 +1189,6 @@ fn render_status_footer_with_gap(
     // the provider API is the source of truth. `usage_uncertain` stays a durable
     // state fact (surfaced by `/telemetry` and the non-TUI channels) and never
     // rewrites the footer cost as a subtotal or a `+ ?` marker.
-    // Pi compatibility: packages/coding-agent/src/modes/interactive/components/
-    // footer.ts:190-194 marks a subscription model's API-equivalent cost.
-    let cost = cost.map(|cost| {
-        if state.subscription_cost {
-            format!("{cost} (sub)")
-        } else {
-            cost
-        }
-    });
     if let Some(cost) = cost {
         segments.push(StatusFooterSegment::new(FooterKind::Cost, vec![cost]));
     }
@@ -1145,12 +1267,9 @@ fn render_status_footer_with_gap(
             // Workspace roots are canonicalized by the CLI. Resolve the same
             // spelling for the platform home (including Windows verbatim paths
             // and Unix symlinks), once rather than doing I/O on every frame.
-            static HOME: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-            let home = HOME
-                .get_or_init(|| dirs::home_dir().map(|home| home.canonicalize().unwrap_or(home)));
             footer_workspace(
                 path,
-                home.as_deref(),
+                footer_home(),
                 available.saturating_sub(left_width + 2),
                 state.theme.unicode(),
             )
@@ -1180,16 +1299,24 @@ fn render_status_footer_with_gap(
     fit_line(&format!("{}{body}", " ".repeat(left_inset)), width)
 }
 
-pub(crate) fn status_footer_visible(state: &super::view::ShellState, width: u16) -> bool {
+pub(crate) fn status_footer_rows(state: &ShellState, width: u16) -> usize {
     // Pi setFooter replaces the stock footer rather than stacking another one.
     // Retirement clears the contribution, restoring ordinary status chrome.
     if state.extension_footer_replaces_status() {
-        return false;
+        return 0;
     }
     let layout = state.theme.layout_for_width(width);
     let has_identity = layout.show_footer && !layout.show_header;
-    (has_identity || layout.show_status_line)
-        && composer_chrome(&state.theme) != ComposerChrome::Topline
+    if (!has_identity && !layout.show_status_line)
+        || composer_chrome(&state.theme) == ComposerChrome::Topline
+    {
+        return 0;
+    }
+    1 + usize::from(uses_two_line_footer(state) && status_footer::show_workspace(state, width))
+}
+
+pub(super) fn uses_two_line_footer(state: &ShellState) -> bool {
+    state.theme.layout().status_footer == StatusFooterLayout::TwoLine
 }
 
 fn append_status_footer(
@@ -1198,7 +1325,12 @@ fn append_status_footer(
     width: u16,
     now: Instant,
 ) {
-    if status_footer_visible(state, width) {
+    if status_footer_rows(state, width) == 0 {
+        return;
+    }
+    if uses_two_line_footer(state) {
+        lines.extend(status_footer::render(state, width));
+    } else {
         lines.push(render_status_footer(state, width, now));
     }
 }
@@ -1222,7 +1354,7 @@ pub fn render_composer_surface(
         // trusted cursor token first so the terminal backend can still place
         // its hardware cursor on a non-empty focused draft at widths 1 and 2.
         let cursor_marker = composer_cursor_marker(state);
-        let mut lines = if cursor_marker.is_empty() {
+        let mut lines = if cursor_marker.is_empty() || !state.theme.layout().composer_show_prompt {
             let editor = state.composer_editor_projection(geometry);
             render_plain_content(state, width, geometry, &editor)
         } else {
@@ -1284,15 +1416,11 @@ fn render_compact(
 
     // Prompt. The single status row is appended below it, matching the boxed
     // composer geometry used at ordinary widths.
-    let marker = state.theme.glyph("prompt");
-    let marker_s = state
-        .theme
-        .bold(&state.theme.model_fg(state.model_lab, marker));
     let cursor_marker = composer_cursor_marker(state);
 
     if editor.layout_text().is_empty() {
         lines.push(fit_line(
-            &format!("{padding}{marker_s} {cursor_marker}"),
+            &format!("{padding}{}{cursor_marker}", composer_prefix(state, true)),
             width,
         ));
         append_status_footer(&mut lines, state, width, now);
@@ -1311,11 +1439,7 @@ fn render_compact(
     }
 
     for index in start..end {
-        let content_prefix = if index == 0 {
-            format!("{marker_s} ")
-        } else {
-            "  ".to_owned()
-        };
+        let content_prefix = composer_prefix(state, index == 0);
         let prefix = format!("{padding}{content_prefix}");
         let row = render_editor_row(
             state,
@@ -1577,7 +1701,13 @@ mod tests {
             for width in 0..100 {
                 for count in [0, 1, 123456] {
                     for above in [true, false] {
-                        let row = overflow_rule(&theme, (128, 128, 128), width, count, above);
+                        let row = overflow_rule(
+                            &theme,
+                            |text| theme.rgb_fg((128, 128, 128), text),
+                            width,
+                            count,
+                            above,
+                        );
                         let plain = sexy_tui_rs::strip_terminal_sequences(&row);
                         assert_eq!(visible_width(&plain), width);
                         if !unicode {
@@ -1857,29 +1987,6 @@ mod tests {
         ));
         assert!(footer.contains("$0"), "{footer:?}");
         assert!(!footer.contains("subtotal"), "{footer:?}");
-    }
-
-    #[test]
-    fn footer_marks_subscription_cost_as_api_equivalent() {
-        for (subscription, expected) in [(true, "$0.123 (sub)"), (false, "$0.123")] {
-            let mut state = crate::tui::view::ShellState::default();
-            state.theme = crate::tui::theme::test_theme();
-            state.price_display = crate::presentation::PriceDisplay::Priced;
-            state.session_cost_microdollars = Some(123_456);
-            state.subscription_cost = subscription;
-            let footer = sexy_tui_rs::strip_terminal_sequences(&render_status_footer(
-                &state,
-                120,
-                Instant::now(),
-            ));
-            assert!(footer.contains(expected), "{footer:?}");
-            assert_eq!(footer.contains("(sub)"), subscription, "{footer:?}");
-        }
-        assert!(crate::providers::subscription_endpoint("openai-codex"));
-        assert!(crate::providers::subscription_endpoint(
-            "github-copilot-chat"
-        ));
-        assert!(!crate::providers::subscription_endpoint("openai"));
     }
 
     #[test]

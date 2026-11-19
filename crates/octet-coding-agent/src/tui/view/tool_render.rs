@@ -212,6 +212,24 @@ pub(super) fn tool_omission_hint(
     }
 }
 
+pub(super) fn pi_more_lines(
+    theme: &OctetTheme,
+    hidden: usize,
+    earlier: bool,
+    width: u16,
+) -> String {
+    let direction = if earlier { "earlier" } else { "more" };
+    fit_line(
+        &format!(
+            "{}{}{}",
+            subdued_text(theme, &format!("... ({hidden} {direction} lines, ")),
+            theme.fg("dim", "ctrl+o"),
+            subdued_text(theme, " to expand)")
+        ),
+        width,
+    )
+}
+
 pub(super) fn bounded_tool_failure_reason(panel: &ToolPanel) -> Option<String> {
     panel
         .failure_reason

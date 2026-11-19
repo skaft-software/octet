@@ -28,6 +28,13 @@ fn physical_theme_for(
     theme::test_theme_for_shimmer(background, capabilities, ShimmerMode::Physical)
 }
 
+fn thinking_slot(text: &str) -> AssistantBlock {
+    let mut slot = AssistantBlock::streaming_reasoning(text);
+    slot.thinking_slot = true;
+    slot.status_activity = true;
+    slot
+}
+
 fn render_reasoning(
     reasoning: &AssistantBlock,
     renderer: &RichRenderer,
@@ -176,8 +183,8 @@ fn expanded_reasoning_has_no_first_line_bullet() {
 #[test]
 fn collapsed_reasoning_shimmers_thinking_and_moves_heading_to_detail() {
     let theme = theme::test_theme();
-    let reasoning = AssistantBlock::streaming_reasoning("## Verifying `implementation`")
-        .with_model_lab(Some(ModelLab::Alibaba));
+    let reasoning =
+        thinking_slot("## Verifying `implementation`").with_model_lab(Some(ModelLab::Alibaba));
     let first = collapsed_reasoning_lines_at(&theme, &reasoning, 2, 0);
     let next = collapsed_reasoning_lines_at(&theme, &reasoning, 3, 0);
 
@@ -208,6 +215,7 @@ fn model_and_rainbow_shimmers_are_foreground_only() {
     let mut working = reasoning;
     working.reasoning_heading = Some("Working".into());
     working.show_reasoning_hint = false;
+    working.status_activity = true;
 
     let normal = collapsed_reasoning_lines_at(&theme, &working, 0, 0);
     assert!(normal[0].contains("38;2;"), "{normal:?}");
@@ -491,6 +499,7 @@ fn activity_reasoning(lab: Option<ModelLab>, label: &str) -> AssistantBlock {
     let mut reasoning = AssistantBlock::streaming_reasoning("").with_model_lab(lab);
     reasoning.reasoning_heading = Some(label.to_owned());
     reasoning.show_reasoning_hint = false;
+    reasoning.status_activity = true;
     reasoning
 }
 
@@ -1666,8 +1675,7 @@ fn max_rainbow_shimmer_moves_right_at_one_status_frame_per_step() {
 #[test]
 fn activity_marker_shares_the_status_shimmer_phase() {
     let theme = theme::test_theme();
-    let reasoning =
-        AssistantBlock::streaming_reasoning("private").with_model_lab(Some(ModelLab::Alibaba));
+    let reasoning = thinking_slot("private").with_model_lab(Some(ModelLab::Alibaba));
     let first = activity_shimmer_marker(&theme, &reasoning, 0, 0, "•");
     let next = activity_shimmer_marker(&theme, &reasoning, 1, 0, "•");
 
@@ -1761,6 +1769,7 @@ fn working_status_reports_root_run_elapsed_time_and_interrupt_hint() {
         .with_activity_started_at(Some(Instant::now() - Duration::from_millis(28_100)));
     working.reasoning_heading = Some("Working".into());
     working.show_reasoning_hint = false;
+    working.status_activity = true;
 
     let rendered = collapsed_reasoning_lines_at(&theme, &working, 0, 0);
     assert_eq!(rendered, vec!["Working (28s · Esc to interrupt)"]);
@@ -1775,6 +1784,7 @@ fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
     let mut working = AssistantBlock::streaming_reasoning("");
     working.reasoning_heading = Some("Working".into());
     working.show_reasoning_hint = false;
+    working.status_activity = true;
     working.retry_activity = Some(RetryActivity {
         operation: None,
         attempt: 2,
@@ -1804,31 +1814,37 @@ fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
 }
 
 #[test]
-fn collapsed_reasoning_without_a_heading_has_one_inline_hint_in_the_compiled_theme() {
-    let theme = theme::test_theme();
+fn thinking_slot_without_a_heading_reserves_the_second_row() {
+    let mut theme = theme::test_theme();
+    theme.set_duration_preference(Some(true));
     let renderer = theme.reasoning_renderer();
-    let mut reasoning =
-        AssistantBlock::streaming_reasoning("private").with_model_lab(Some(ModelLab::Alibaba));
+    let mut reasoning = thinking_slot("private").with_model_lab(Some(ModelLab::Alibaba));
     let live = render_reasoning(&reasoning, &renderer, &theme, 80);
-    assert_eq!(live.len(), 1, "{live:?}");
-    assert_eq!(
-        strip_terminal_sequences(&live[0]),
-        "Thinking · Ctrl+T to expand"
-    );
+    assert_eq!(live.len(), 2, "{live:?}");
+    assert_eq!(strip_terminal_sequences(&live[0]), "Thinking");
     assert!(live[0].contains("\x1b[1m"), "{live:?}");
+    assert_eq!(strip_terminal_sequences(&live[1]), "└ (Ctrl+T to expand)");
 
     let custom = theme::test_theme_from_source("");
     let legacy = render_reasoning(&reasoning, &custom.reasoning_renderer(), &custom, 80);
     assert_eq!(legacy.len(), 2, "{legacy:?}");
     assert_eq!(strip_terminal_sequences(&legacy[1]), "└ (Ctrl+T to expand)");
 
-    reasoning.reasoning_elapsed = Some(Duration::from_millis(13_700));
+    reasoning.status_activity = false;
+    reasoning.thinking_slot = false;
     reasoning.finish_reasoning();
-    let settled = render_reasoning(&reasoning, &renderer, &theme, 80);
-    assert!(
-        settled.is_empty(),
-        "finished reasoning leaves no trace when collapsed"
-    );
+    for (micros, expected) in [
+        (184_499, "Thought for 184ms"),
+        (184_500, "Thought for 185ms"),
+        (999_500, "Thought for 1000ms"),
+        (1_000_000, "Thought for 1s"),
+        (13_700_000, "Thought for 13s"),
+        (95_000_000, "Thought for 1m35s"),
+    ] {
+        reasoning.reasoning_elapsed = Some(Duration::from_micros(micros));
+        let settled = render_reasoning(&reasoning, &renderer, &theme, 80);
+        assert_eq!(settled, vec![theme.fg("muted", expected)]);
+    }
 }
 
 #[test]
@@ -1862,7 +1878,7 @@ fn shortcut_labels_match_between_reasoning_layouts() {
                 theme::test_theme_with(capabilities)
             };
             for text in ["private detail", "## Check\n\nprivate detail"] {
-                let reasoning = AssistantBlock::streaming_reasoning(text);
+                let reasoning = thinking_slot(text);
                 for width in [32, 80] {
                     let lines =
                         render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, width);
@@ -1888,9 +1904,8 @@ fn shortcut_labels_match_between_reasoning_layouts() {
 #[test]
 fn collapsed_reasoning_has_ascii_fallback_and_width_bounded_rows() {
     let theme = theme::test_theme_with(TerminalCapabilities::test(false, false, ColorDepth::None));
-    let reasoning = AssistantBlock::streaming_reasoning(
-        "## A heading that is intentionally much wider than the viewport\n",
-    );
+    let reasoning =
+        thinking_slot("## A heading that is intentionally much wider than the viewport\n");
     let lines = render_reasoning(&reasoning, &theme.reasoning_renderer(), &theme, 16);
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(lines[0], "Thinking", "{lines:?}");
@@ -1906,6 +1921,7 @@ fn two_line_thinking_reserves_its_detail_row_while_working() {
     let mut activity = AssistantBlock::streaming_reasoning("");
     activity.reasoning_heading = Some("Working".into());
     activity.show_reasoning_hint = false;
+    activity.status_activity = true;
     for width in [48, 160] {
         let working = render_reasoning(&activity, &still.reasoning_renderer(), &still, width);
         assert_eq!(working.len(), 2, "{width}: {working:?}");
@@ -1917,6 +1933,7 @@ fn two_line_thinking_reserves_its_detail_row_while_working() {
 
         activity.reasoning_heading = None;
         activity.show_reasoning_hint = true;
+        activity.thinking_slot = true;
         activity.append_reasoning("private detail");
         let thinking = render_reasoning(&activity, &still.reasoning_renderer(), &still, width);
         assert_eq!(
@@ -1929,6 +1946,7 @@ fn two_line_thinking_reserves_its_detail_row_while_working() {
         activity = AssistantBlock::streaming_reasoning("");
         activity.reasoning_heading = Some("Working".into());
         activity.show_reasoning_hint = false;
+        activity.status_activity = true;
     }
 }
 
@@ -1938,6 +1956,7 @@ fn non_expandable_activity_is_one_truthful_row() {
     let mut activity = AssistantBlock::streaming_reasoning("");
     activity.reasoning_heading = Some("Working".into());
     activity.show_reasoning_hint = false;
+    activity.status_activity = true;
 
     let lines = render_reasoning(&activity, &theme.reasoning_renderer(), &theme, 80);
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -1950,28 +1969,19 @@ fn non_expandable_activity_is_one_truthful_row() {
 }
 
 #[test]
-fn thinking_hint_wording_survives_layout_transitions() {
+fn thinking_hint_stays_on_the_detail_row_at_different_widths() {
     for unicode in [false, true] {
         let capabilities = TerminalCapabilities::test(false, unicode, ColorDepth::None);
         let theme = theme::test_theme_with(capabilities);
-        let mut reasoning = AssistantBlock::streaming_reasoning("private detail");
-        let inline = collapsed_reasoning_lines_sized(&theme, &reasoning, 0, 0, 80);
-        assert_eq!(inline.len(), 1);
-        assert!(inline[0].ends_with("Ctrl+T to expand"));
-        let exact_width = visible_width(&inline[0]) as u16;
-        for (width, rows) in [(exact_width, 1), (exact_width - 1, 2)] {
-            let lines = collapsed_reasoning_lines_sized(&theme, &reasoning, 0, 0, width);
-            assert_eq!(lines.len(), rows);
-            assert_eq!(lines.join("\n").matches("Ctrl+T to expand").count(), 1);
+        let mut slot = thinking_slot("private detail");
+        for heading in [None, Some("Check".to_owned())] {
+            slot.reasoning_heading = heading;
+            for width in [28, 40, 80] {
+                let rows = render_reasoning(&slot, &theme.reasoning_renderer(), &theme, width);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], "Thinking");
+                assert!(rows[1].ends_with("(Ctrl+T to expand)"));
+            }
         }
-        reasoning.reasoning_heading = Some("Check".into());
-        let headed = collapsed_reasoning_lines_sized(&theme, &reasoning, 0, 0, 80);
-        assert_eq!(headed.len(), 2);
-        assert!(headed[1].ends_with("(Ctrl+T to expand)"));
-        let custom = theme::test_theme_source_with("", capabilities, TerminalBackground::Dark);
-        reasoning.reasoning_heading = None;
-        let lines = collapsed_reasoning_lines_sized(&custom, &reasoning, 0, 0, 80);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[1].ends_with("(Ctrl+T to expand)"));
     }
 }

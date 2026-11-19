@@ -111,8 +111,8 @@ use self::viewport::{
     max_scroll_for_available, render_shell_viewport_at, render_shell_viewport_update,
 };
 use self::viewport::{
-    max_scroll_from_bottom, resolved_scroll_from_bottom, retain_viewport_anchor,
-    transcript_gesture_viewport_capacity, transcript_lines, transcript_viewport_capacity,
+    max_scroll_from_bottom, retain_viewport_anchor, transcript_gesture_viewport_capacity,
+    transcript_lines, transcript_viewport_capacity, TranscriptViewport,
 };
 
 use crate::presentation::tool_display::is_subagent_tool;
@@ -949,6 +949,7 @@ struct ToolPanel {
     /// One bounded, replaceable live-progress annotation. This is cleared once
     /// the immutable tool result arrives and never enters session persistence.
     progress_decoration: Option<ToolProgressDecoration>,
+    codemode_details: Option<Arc<codemode_render::CodemodeDetails>>,
     /// Model family captured with the call for durable presentation
     /// provenance. Lifecycle chrome deliberately no longer consumes it:
     /// active, successful, and failed headers use muted, foreground, and
@@ -993,6 +994,7 @@ impl ToolPanel {
             failure_reason,
             extension_render_segments: Vec::new(),
             progress_decoration: None,
+            codemode_details: None,
             model_lab,
             cached_diff: RefCell::new(None),
             cached_disclosure_sensitive: RefCell::new(None),
@@ -1821,6 +1823,9 @@ pub(crate) struct ShellState {
     audio_input_formats: &'static [octet_ai::AudioFormat],
     /// Workspace root and its mention-completion index.
     pub(crate) workspace: Option<PathBuf>,
+    pub(crate) workspace_branch: Option<String>,
+    pub(crate) footer_usage: crate::tui::composer_surface::FooterUsage,
+    pub(crate) footer_auto_compact: bool,
     /// Completed mention index, or `None` while a walk is in flight, before one
     /// has been requested, or after invalidation.
     file_index: Option<Arc<composer::WorkspaceFileIndex>>,
@@ -2047,7 +2052,7 @@ pub(crate) struct ShellState {
     pub(crate) price_display: PriceDisplay,
     /// The active model is subscription-priced: its cost is an API-equivalent
     /// estimate, shown with a "(sub)" marker as Pi does.
-    pub(crate) subscription_cost: bool,
+    session_cost_routes: SessionCostRoutes,
     pub(crate) latest_compaction_summary: Option<String>,
     pub(crate) reasoning: String,
     /// The foreground session's validated, user-assigned name, independent of
@@ -2340,6 +2345,9 @@ impl ShellState {
             input_modalities: Default::default(),
             audio_input_formats: octet_ai::Protocol::OpenAiChat.audio_input_formats(),
             workspace: Default::default(),
+            workspace_branch: None,
+            footer_usage: Default::default(),
+            footer_auto_compact: false,
             file_index: Default::default(),
             file_index_scanning: Default::default(),
             file_index_generation: Default::default(),
@@ -2447,7 +2455,7 @@ impl ShellState {
             run_context_estimate: Default::default(),
             telemetry_model: Default::default(),
             price_display: Default::default(),
-            subscription_cost: Default::default(),
+            session_cost_routes: SessionCostRoutes::default(),
             latest_compaction_summary: Default::default(),
             reasoning: Default::default(),
             session_name: Default::default(),
@@ -3064,9 +3072,20 @@ impl ShellState {
             .filter(|tokens| *tokens > 0)
     }
 
-    fn refresh_subagent_committed_costs(&mut self, session: &Session) {
+    fn refresh_session_cost_sources(&mut self, session: &Session) {
         self.subagent_committed_costs.clear();
+        self.session_cost_routes = SessionCostRoutes::default();
+        self.footer_usage = Default::default();
         for record in session.usage_records() {
+            self.footer_usage.add(record.usage);
+            if record.cost_microdollars.is_some_and(|cost| cost > 0)
+                || record
+                    .cost
+                    .is_some_and(|cost| cost.total_picodollars_remainder > 0)
+            {
+                self.session_cost_routes
+                    .record(record.endpoint.as_ref().map(|id| id.0.as_str()));
+            }
             if let octet_agent::UsageRecordKind::DelegatedAgent { agent_id, .. } = &record.kind {
                 let cost = self
                     .subagent_committed_costs
@@ -3117,6 +3136,19 @@ impl ShellState {
             (Some(session), None) => Some(session),
             (None, Some(delegated)) => Some(delegated),
             (None, None) => None,
+        }
+    }
+
+    pub(crate) fn session_cost_suffix(&self, displayed: u64) -> &'static str {
+        let mut routes = self.session_cost_routes;
+        // Unsettled delegated spend has no durable route attribution yet.
+        if displayed > self.session_cost_microdollars.unwrap_or_default() {
+            routes.record(None);
+        }
+        match (routes.subscription, routes.other) {
+            (true, false) => " (sub)",
+            (true, true) => " (mixed)",
+            _ => "",
         }
     }
 
@@ -3393,6 +3425,65 @@ impl ShellState {
         self.refresh_activity_group(position);
     }
 
+    pub(crate) fn working_rule_spinner(&self) -> Option<&'static str> {
+        let status = self.working_status.as_ref()?;
+        if !status.is_working_activity()
+            || status.retry_activity.is_some()
+            || self.startup_pending
+            || self.panel.is_some()
+            || self.overlay.is_some()
+            || self.tool_input_prompt.is_some()
+            || self.transcript_search_active()
+            || self
+                .pi_chrome
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.editor.is_some())
+            || self
+                .extension_ui
+                .remote
+                .mount(octet_agent::extension_remote_ui::ExtensionRemoteUiPlacement::Editor)
+                .is_some()
+        {
+            return None;
+        }
+        Some(surface_frame::spinner_glyph(
+            self.theme.unicode(),
+            if self.theme.capabilities().animation {
+                self.event_spinner_frame
+            } else {
+                0
+            },
+        ))
+    }
+
+    pub(crate) fn working_rule_content(
+        &self,
+    ) -> Option<crate::tui::composer_surface::WorkingRuleContent<'_>> {
+        use crate::tui::composer_surface::WorkingRuleContent;
+        let status = self.working_status.as_ref()?;
+        let working = status.extension_working.as_ref();
+        if working.is_some_and(|working| working.visible == Some(false)) {
+            return None;
+        }
+        let label = working
+            .and_then(|working| working.message.as_deref())
+            .unwrap_or("Working");
+        if self.theme.capabilities().animation {
+            if let Some(row) = working.and_then(|working| working.component_line.as_deref()) {
+                return Some(WorkingRuleContent::Custom(std::borrow::Cow::Borrowed(row)));
+            }
+            if let Some(frame) = remote_ui::working_frame(status) {
+                return Some(WorkingRuleContent::Custom(std::borrow::Cow::Owned(
+                    format!(
+                        "{frame} {}",
+                        self.theme.fg("accent", &sanitize_for_terminal(label))
+                    ),
+                )));
+            }
+        }
+        Some(WorkingRuleContent::Label(label))
+    }
+
     fn open_working_status(&mut self) {
         self.open_activity_status(Some("Working"), false);
     }
@@ -3425,6 +3516,7 @@ impl ShellState {
         status.reasoning_heading = label.map(str::to_owned);
         status.show_reasoning_hint = show_reasoning_hint;
         status.extension_working = self.extension_ui.working.clone();
+        status.status_activity = true;
         // Pi compatibility: packages/coding-agent/src/modes/interactive/
         // interactive-mode.ts:2413-2423,3490-3503,3714-3726
         // keeps the status container outside chat until agent_end. Rust owns
@@ -3517,7 +3609,6 @@ impl ShellState {
                 // Thinking owns its phase clock; Working owns the root-run clock.
                 reasoning.activity_started_at =
                     self.run.current().and(reasoning.reasoning_started_at);
-                reasoning.preserve_reasoning_summary = self.run.is_active();
                 reasoning.hidden_thinking_label = self.extension_ui.hidden_thinking_label.clone();
                 TranscriptBlock::Reasoning(Box::new(reasoning))
             }
@@ -3797,7 +3888,8 @@ impl ShellState {
                 .as_ref()
                 .is_none_or(|working| working.component_line.is_none())
         });
-        thinking_spinner
+        (working_spinner && crate::tui::composer_surface::embedded_working(self, self.size.0).is_some())
+            || thinking_spinner
             && (working_spinner || self
                 .active_event_blocks
                 .iter()
@@ -3913,6 +4005,22 @@ fn plural<'a>(count: impl PartialEq + From<u8>, singular: &'a str, multiple: &'a
         singular
     } else {
         multiple
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct SessionCostRoutes {
+    subscription: bool,
+    other: bool,
+}
+
+impl SessionCostRoutes {
+    fn record(&mut self, endpoint: Option<&str>) {
+        if endpoint.is_some_and(crate::providers::subscription_endpoint) {
+            self.subscription = true;
+        } else {
+            self.other = true;
+        }
     }
 }
 
@@ -5031,17 +5139,6 @@ impl InteractiveShell {
                 .saturating_add(run.elapsed_at(Instant::now()));
         }
         state.close_streaming_blocks();
-        let start = state
-            .transcript_commit_ids
-            .partition_point(|id| *id < state.run_transcript_start);
-        for index in start..state.transcript.len() {
-            if let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[index] {
-                if reasoning.preserve_reasoning_summary {
-                    reasoning.preserve_reasoning_summary = false;
-                    state.touch_block(index);
-                }
-            }
-        }
         if state.turn_requested_at.is_some() && !state.turn_generation_settled {
             // An unfinished generation attempt has no matching terminal count
             // and duration. Earlier responses cannot masquerade as complete.
@@ -5576,6 +5673,10 @@ impl InteractiveShell {
                             panel.display.mark_media_read(output.media_kinds());
                             panel.output.clear();
                             panel.output.push_str(&output.text);
+                            if panel.name == "codemode" {
+                                panel.codemode_details =
+                                    output.metadata().and_then(codemode_render::details);
+                            }
                             panel.diff = presentation_diff_metadata(output);
                         }
                         Err(error) => {
@@ -5631,6 +5732,7 @@ impl InteractiveShell {
             AgentEvent::TurnFinished {
                 message,
                 turn_usage,
+                turn_cost,
                 session_cost_microdollars,
                 run_cost_microdollars,
                 ..
@@ -5697,10 +5799,19 @@ impl InteractiveShell {
                 }
                 state.turn_streamed_output_bytes = 0;
                 state.last_turn_usage = (turn_usage.total_tokens > 0).then_some(*turn_usage);
+                state.footer_usage.add(*turn_usage);
                 state.cache_hit_rate_basis_points = (turn_usage.total_tokens > 0)
                     .then(|| usage_cache_hit_rate_basis_points(*turn_usage))
                     .flatten();
                 state.telemetry_model = state.run_model.clone();
+                if turn_cost
+                    .is_some_and(|cost| cost.total > 0 || cost.total_picodollars_remainder > 0)
+                {
+                    let subscription = state.run_provider.as_deref();
+                    let mut routes = state.session_cost_routes;
+                    routes.record(subscription);
+                    state.session_cost_routes = routes;
+                }
                 state.session_cost_microdollars = *session_cost_microdollars;
                 state.run_cost_microdollars = *run_cost_microdollars;
                 state.run_cost_available = true;
@@ -5767,7 +5878,7 @@ impl InteractiveShell {
             .then(|| session.total_cost_microdollars());
         let mut state = self.state.borrow_mut();
         state.session_cost_microdollars = session_cost_microdollars;
-        state.refresh_subagent_committed_costs(session);
+        state.refresh_session_cost_sources(session);
         state.usage_uncertain |= session.has_uncertain_usage() || session.has_unpriced_usage();
     }
 
@@ -6413,8 +6524,15 @@ impl InteractiveShell {
         self.state.borrow().session_name.clone()
     }
 
+    pub(crate) fn set_footer_auto_compact(&mut self, enabled: bool) {
+        self.state.borrow_mut().footer_auto_compact = enabled;
+    }
+
     pub fn set_workspace(&mut self, root: PathBuf) {
         let mut state = self.state.borrow_mut();
+        if crate::tui::composer_surface::uses_two_line_footer(&state) {
+            state.workspace_branch = crate::tui::composer_surface::workspace_branch(&root);
+        }
         // update_status re-asserts the workspace after every turn. Historic
         // tool summaries and their cached layouts only change with the root.
         if state.workspace.as_deref() == Some(root.as_path()) {
@@ -7596,14 +7714,9 @@ impl InteractiveShell {
         }
         let chrome = shell_chrome(state, state.size.0, Instant::now());
         let transcript = transcript_lines(state, state.size.0);
-        let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
-        let capacity = transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-        if usize::from(row) >= capacity {
-            return None;
-        }
-        let end = transcript.len().saturating_sub(scroll);
-        let start = end.saturating_sub(capacity);
-        selection_position_for_visual_cell(state, start + usize::from(row), col)
+        let viewport = TranscriptViewport::new(&chrome, &transcript, true);
+        let mut history = viewport.history_window(viewport.resolve_scroll(state));
+        selection_position_for_visual_cell(state, history.nth(usize::from(row))?, col)
     }
 
     /// Resolve a deferred press once the frame it named is recorded. A changed
@@ -7664,14 +7777,9 @@ impl InteractiveShell {
         }
         let chrome = shell_chrome(&state, state.size.0, Instant::now());
         let transcript = transcript_lines(&state, state.size.0);
-        let scroll = resolved_scroll_from_bottom(&state, transcript.len(), chrome.transcript_rows);
-        let capacity = transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-        if usize::from(row) >= capacity {
-            return None;
-        }
-        let end = transcript.len().saturating_sub(scroll);
-        let start = end.saturating_sub(capacity);
-        let line = transcript.get(start + usize::from(row))?;
+        let viewport = TranscriptViewport::new(&chrome, &transcript, true);
+        let mut history = viewport.history_window(viewport.resolve_scroll(&state));
+        let line = &transcript[history.nth(usize::from(row))?];
         sexy_tui_rs::hyperlink_at_column(line, usize::from(col))
     }
 
@@ -9540,7 +9648,6 @@ impl InteractiveShell {
         state.model_display = metadata.name;
         state.provider = model.spec.endpoint.0.clone();
         state.price_display = price_display;
-        state.subscription_cost = crate::providers::subscription_endpoint(&model.spec.endpoint.0);
         state.prompt_color = Some(prompt_color);
         welcome_card::restart_welcome_animation(&mut state);
         if state.model_lab == Some(lab) {
@@ -9618,6 +9725,12 @@ impl InteractiveShell {
         state.pending_activity_groups.clear();
         theme.set_duration_preference(state.theme.duration_preference());
         state.theme = theme;
+        if crate::tui::composer_surface::uses_two_line_footer(&state) {
+            state.workspace_branch = state
+                .workspace
+                .as_deref()
+                .and_then(crate::tui::composer_surface::workspace_branch);
+        }
         state.theme_epoch = state.theme_epoch.wrapping_add(1);
         state.invalidate_rich_text();
         // Native scrollback cannot be recoloured retroactively. The theme
@@ -9744,7 +9857,7 @@ impl InteractiveShell {
         state.hidden_subagent_calls.clear();
         state.hidden_hydrated_subagent_calls.clear();
         state.hydrated_pending_subagent_calls.clear();
-        state.refresh_subagent_committed_costs(session);
+        state.refresh_session_cost_sources(session);
         state.working_status = None;
         state.close_streaming_blocks();
         state.jump_to_tail();
@@ -9973,7 +10086,7 @@ mod bash_render;
 #[path = "view/shell_chrome.rs"]
 mod builtin_shell_chrome;
 mod clipboard_transport;
-mod codemode_render;
+pub(crate) mod codemode_render;
 mod input_dispatch;
 mod input_overlays;
 mod native_scrollback;

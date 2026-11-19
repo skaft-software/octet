@@ -56,6 +56,22 @@ pub(super) fn shell_chrome(
     width: u16,
     now: Instant,
 ) -> builtin_shell_chrome::ShellChrome {
+    let mut chrome = composed_chrome(state, width, now);
+    if state
+        .working_status
+        .as_ref()
+        .is_some_and(|status| status.is_working_activity() && status.retry_activity.is_none())
+    {
+        chrome.space_working_slot();
+    }
+    chrome
+}
+
+fn composed_chrome(
+    state: &ShellState,
+    width: u16,
+    now: Instant,
+) -> builtin_shell_chrome::ShellChrome {
     let remote = &state.extension_ui.remote;
     if state.extension_ui.remote_fullscreen_overlay
         && remote.mount(Placement::Fullscreen).is_some()
@@ -65,6 +81,7 @@ pub(super) fn shell_chrome(
         return builtin_shell_chrome::ShellChrome {
             header: Vec::new(),
             working: Vec::new(),
+            working_bottom_padding: false,
             extension_above: Vec::new(),
             composer: Vec::new(),
             extension_below: Vec::new(),
@@ -111,9 +128,7 @@ pub(super) fn shell_chrome(
         };
     }
     if footer.is_none() {
-        if let Some(footer) = builtin_footer {
-            chrome.composer.push(footer);
-        }
+        chrome.composer.extend(builtin_footer);
     }
     // Keep installed widgets adjacent to their corresponding editor region.
     for mount in &remote.mounts {
@@ -177,18 +192,21 @@ fn composer_allocation(
     remote: &Projection,
     width: u16,
     chrome: &mut builtin_shell_chrome::ShellChrome,
-) -> (Option<String>, Vec<String>, usize) {
+) -> (Vec<String>, Vec<String>, usize) {
     let height = state.size.1.max(1);
     let footer = remote.mount(Placement::Footer);
-    let builtin_footer = (crate::tui::composer_surface::status_footer_visible(state, width)
-        && chrome.suggestions.is_empty())
-    .then(|| chrome.composer.pop())
-    .flatten();
+    let builtin_footer = if chrome.suggestions.is_empty() {
+        let count = crate::tui::composer_surface::status_footer_rows(state, width);
+        chrome
+            .composer
+            .split_off(chrome.composer.len().saturating_sub(count))
+    } else {
+        Vec::new()
+    };
     let mut footer_rows = footer.map_or_else(Vec::new, |mount| {
         rows(remote, mount, width, height, usize::from(height))
     });
     let reserved = chrome.header.len()
-        + chrome.working.len()
         + chrome.error.len()
         + chrome.pending.len()
         + chrome.subagents.len()
@@ -196,16 +214,28 @@ fn composer_allocation(
         + 1; // Retain a transcript row.
     let available = usize::from(height).saturating_sub(reserved);
     if let Some(editor) = remote.mount(Placement::Editor) {
-        let editor_height = remote
+        let editor_min = remote
             .components
             .slot_lines(Some(&editor.id))
-            .map_or(3, <[_]>::len);
-        footer_rows.truncate(available.saturating_sub(editor_height.min(3)));
+            .map_or(3, |lines| lines.len().clamp(1, 3));
+        if chrome.working.len() < 2 && state.working_status.is_some() {
+            // The native fallback draft can be much taller than the mounted
+            // editor window. Reclaim any live transcript-tail rows that fit.
+            let status_limit = available
+                .saturating_sub(editor_min + builtin_footer.len())
+                .min(2);
+            if status_limit > chrome.working.len() {
+                chrome.working = builtin_shell_chrome::render_working_status(state, width);
+                chrome.working.truncate(status_limit);
+            }
+        }
+        footer_rows.truncate(available.saturating_sub(chrome.working.len() + editor_min));
     }
+    let available = available.saturating_sub(chrome.working.len());
     let footer_height = if footer.is_some() {
         footer_rows.len()
     } else {
-        usize::from(builtin_footer.is_some())
+        builtin_footer.len()
     };
     (
         builtin_footer,

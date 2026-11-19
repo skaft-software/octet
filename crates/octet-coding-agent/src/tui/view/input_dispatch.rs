@@ -783,17 +783,17 @@ impl InteractiveShell {
         }
         let mut state = self.state.borrow_mut();
         let chrome = shell_chrome(&state, state.size.0, Instant::now());
-        let length = state.rendered_transcript(state.size.0).len();
-        let scroll = resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-        let capacity = transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-        let top = length.saturating_sub(scroll).saturating_sub(capacity);
+        let viewport =
+            TranscriptViewport::new(&chrome, &state.rendered_transcript(state.size.0), true);
+        let top = viewport.window(viewport.resolve_scroll(&state)).start;
         let target = state.prompt_jump_target(top, forward);
         if let Some(target) = target {
             state.application_viewport_requested = true;
             state.viewport_anchor.set(None);
-            let capacity = transcript_viewport_capacity(chrome.transcript_rows, true).max(1);
+            let capacity = transcript_viewport_capacity(viewport.available, true).max(1);
             let maximum = max_scroll_from_bottom(&state, state.size.0);
-            let next = length
+            let next = viewport
+                .total_rows
                 .saturating_sub(target.saturating_add(capacity))
                 .min(maximum);
             state.scroll_from_bottom.set(next);
@@ -1354,14 +1354,9 @@ mod tests {
     fn viewport_top(shell: &InteractiveShell) -> usize {
         let state = shell.state.borrow();
         let chrome = shell_chrome(&state, state.size.0, Instant::now());
-        let length = state.rendered_transcript(state.size.0).len();
-        let scroll = resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-        length
-            .saturating_sub(scroll)
-            .saturating_sub(transcript_viewport_capacity(
-                chrome.transcript_rows,
-                scroll > 0,
-            ))
+        let viewport =
+            TranscriptViewport::new(&chrome, &state.rendered_transcript(state.size.0), true);
+        viewport.window(viewport.resolve_scroll(&state)).start
     }
 
     #[test]

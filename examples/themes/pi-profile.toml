@@ -8,6 +8,7 @@ thinking_spinner = true
 activity_shimmer = false
 thinking_expanded = true
 show_durations = true
+thinking_placeholder = "Thinking..."
 splash_compact = true
 prompt_rail_model_adaptive = false
 splash_model_adaptive = false
@@ -22,6 +23,11 @@ model.use_lab_color = false
 transcript_inset = 0
 block_padding_x = 1
 tool_body_indent = 0
+working_indicator = "composer"
+status_footer = "two_line"
+composer_effort_color = true
+composer_show_prompt = false
+tool_cards = "pi"
 
 [roles.thinking]
 foreground = "reasoning_text"

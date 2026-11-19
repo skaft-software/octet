@@ -604,6 +604,7 @@ impl ShellState {
         lines: &mut Vec<String>,
         width: u16,
         chrome: &super::shell_chrome::ShellChrome,
+        viewport: TranscriptViewport,
         now: Instant,
     ) {
         if self.overlay.is_some() || self.panel.is_some() || self.tool_input_prompt.is_some() {
@@ -611,10 +612,10 @@ impl ShellState {
             nav.reset_pointer();
             return;
         }
-        let length = self.rendered_transcript(width).len();
-        let scroll = resolved_scroll_from_bottom(self, length, chrome.transcript_rows);
-        let rows = transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-        let maximum = super::viewport::max_scroll_for_available(length, chrome.transcript_rows);
+        let length = viewport.total_rows;
+        let scroll = self.scroll_from_bottom.get();
+        let rows = transcript_viewport_capacity(viewport.available, scroll > 0);
+        let maximum = super::viewport::max_scroll_for_available(length, viewport.available);
         let mut nav = self.transcript_navigation.borrow_mut();
         let scrollbar = if nav.mode != TranscriptScrollbar::Hidden && rows > 0 && width > 1 {
             // A scrollable track with at least two rows needs room to move.
@@ -691,10 +692,10 @@ impl ShellState {
                 .min(width.saturating_sub(1) / 2);
             let available = usize::from(width - 2 * padding);
             let arrow = if self.theme.unicode() { "↓" } else { "v" };
-            let mut label = format!("[ {arrow} Jump to bottom ]");
+            let mut label = format!("[ {arrow} Jump ]");
             if self.new_output_count > 0 {
                 let count_label = format!(
-                    "[ {arrow} Jump to bottom{}{} new ]",
+                    "[ {arrow} Jump{}{} new ]",
                     semantic_separator(&self.theme),
                     self.new_output_count
                 );
@@ -729,9 +730,9 @@ impl ShellState {
             jump_to_bottom,
             search_buttons_row: (nav.search.is_some() && chrome.panel.len() > 1).then_some(
                 chrome.transcript_rows
+                    + chrome.working.len()
                     + chrome.header.len()
                     + chrome.error.len()
-                    + chrome.pending.len()
                     + 1,
             ),
         });
@@ -782,14 +783,12 @@ impl InteractiveShell {
                 .map_or(0, |geometry| geometry.visible_start)
         } else {
             let chrome = shell_chrome(&state, state.size.0, Instant::now());
-            let length = state.rendered_transcript(state.size.0).len();
-            let scroll = resolved_scroll_from_bottom(&state, length, chrome.transcript_rows);
-            length
-                .saturating_sub(scroll)
-                .saturating_sub(transcript_viewport_capacity(
-                    chrome.transcript_rows,
-                    scroll > 0,
-                ))
+            let viewport = TranscriptViewport::new(
+                &chrome,
+                &state.rendered_transcript(state.size.0),
+                state.application_viewport_requested,
+            );
+            viewport.window(viewport.resolve_scroll(&state)).start
         };
         state.application_viewport_requested = true;
         state.follow_tail = false;
@@ -1295,7 +1294,7 @@ mod tests {
             .enumerate()
             .find_map(|(row, line)| {
                 let plain = strip_terminal_sequences(line);
-                let start = plain.find("[ ↓ Jump to bottom")?;
+                let start = plain.find("[ ↓ Jump")?;
                 Some((visible_width(&plain[..start]) as u16, row as u16))
             })
             .expect("button in the written terminal frame")
@@ -1530,7 +1529,9 @@ mod tests {
             "\x1b[48;2;12;34;56m{} \x1b[0m",
             "x".repeat(usize::from(width - 1))
         )];
-        state.decorate_transcript_navigation(&mut lines, width, &chrome, now);
+        let viewport = TranscriptViewport::new(&chrome, &state.rendered_transcript(width), true);
+        viewport.resolve_scroll(&state);
+        state.decorate_transcript_navigation(&mut lines, width, &chrome, viewport, now);
         let mut terminal = vt100::Parser::new(1, width, 0);
         terminal.process(lines[0].as_bytes());
         let edge = terminal.screen().cell(0, width - 1).unwrap();
@@ -1669,8 +1670,8 @@ mod tests {
     #[test]
     fn jump_to_bottom_button_limits_clicks_to_its_cells() {
         for threaded in [false, true] {
-            for new in [0, 1, 2] {
-                let label_width = if new == 0 { 20 } else { 28 };
+            for new in [0, 1, 3] {
+                let label_width = if new == 0 { 10 } else { 18 };
                 let left = (60 - label_width) / 2;
                 let right = left + label_width;
                 for column in [0, left - 1, right, 59] {
@@ -1720,15 +1721,16 @@ mod tests {
             let before = frame(&shell, Instant::now());
             let row = bottom_button_row(&shell);
             let label = if unicode {
-                "[ ↓ Jump to bottom · 1 new ]"
+                "[ ↓ Jump · 1 new ]"
             } else {
-                "[ v Jump to bottom - 1 new ]"
+                "[ v Jump - 1 new ]"
             };
+            let column = (60 - visible_width(label) as u16) / 2;
             assert_eq!(
                 strip_terminal_sequences(&before[usize::from(row)]),
-                format!("{}{label}", " ".repeat(16))
+                format!("{}{label}", " ".repeat(usize::from(column)))
             );
-            dispatch(&mut shell, mouse(MouseEventKind::Moved, 17, row));
+            dispatch(&mut shell, mouse(MouseEventKind::Moved, column + 1, row));
             assert!(
                 shell
                     .state
@@ -1748,8 +1750,8 @@ mod tests {
             } else {
                 let terminal =
                     super::super::surface_frame::emulate_row_for_test(&after[usize::from(row)], 60);
-                assert!(terminal.screen().cell(0, 18).unwrap().underline());
-                assert!(terminal.screen().cell(0, 18).unwrap().bold());
+                assert!(terminal.screen().cell(0, column + 2).unwrap().underline());
+                assert!(terminal.screen().cell(0, column + 2).unwrap().bold());
             }
             dispatch(&mut shell, mouse(MouseEventKind::Moved, 0, row));
             assert!(
@@ -1762,16 +1764,17 @@ mod tests {
             );
             shell.jump_to_tail();
             let live = frame(&shell, Instant::now());
-            assert!(!live.iter().any(|line| line.contains("Jump to bottom")));
+            let prefix = if unicode { "[ ↓ Jump" } else { "[ v Jump" };
+            assert!(!live.iter().any(|line| line.contains(prefix)));
             assert_eq!(after.len(), live.len());
         }
-        let mut shell = bottom_button_shell(false, 1);
-        shell.set_size(22, 8);
+        let mut shell = bottom_button_shell(false, 3);
+        shell.set_size(16, 8);
         let narrow = frame(&shell, Instant::now());
         let row = bottom_button_row(&shell);
         assert_eq!(
             strip_terminal_sequences(&narrow[usize::from(row)]),
-            " [ ↓ Jump to bottom ]"
+            "   [ ↓ Jump ]"
         );
     }
 
@@ -1865,6 +1868,7 @@ mod tests {
             super::renderer_geometry::RenderedGeometry::capture(
                 &state,
                 super::renderer_geometry::GeometryFence::capture(&state),
+                state.application_viewport_requested,
             )
         };
         let closed = capture();
@@ -2185,6 +2189,7 @@ mod tests {
     #[test]
     fn product_transcript_search_dispatch_styles_clicks_escape_and_preserves_draft() {
         let mut shell = search_shell();
+        shell.begin_run("fixture");
         let cursor = shell.state.borrow().editor.cursor();
         let transcript = shell
             .state
@@ -2219,6 +2224,7 @@ mod tests {
             .unwrap()
             .search_buttons_row
             .unwrap() as u16;
+        assert!(strip_terminal_sequences(&rows[usize::from(row)]).contains("[<]"));
         dispatch(&mut shell, mouse(MouseEventKind::Moved, 1, row));
         assert_eq!(
             shell

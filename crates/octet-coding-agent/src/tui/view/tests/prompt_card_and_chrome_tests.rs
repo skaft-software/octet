@@ -734,6 +734,15 @@ fn event_margin_markers_cover_responses_tools_and_collapsed_reasoning() {
         .expect("steady collapsed reasoning marker");
     assert_eq!(strip_terminal_sequences(&reasoning_slot), "•");
     assert_eq!(reasoning_slot, theme.model_fg(None, "•"));
+    let mut trace = AssistantBlock::streaming_reasoning("private");
+    trace.finish_reasoning();
+    let settled_reasoning = TranscriptBlock::Reasoning(Box::new(trace));
+    for blink_phase in [true, false] {
+        assert_eq!(
+            event_margin_marker(&settled_reasoning, &theme, blink_phase, true),
+            Some(theme.fg("muted", "•"))
+        );
+    }
     let compaction = TranscriptBlock::Compaction(Box::new(CompactionBlock {
         label: "Context compacted".into(),
         summary: "summary".into(),

@@ -1549,21 +1549,25 @@ async fn remote_editor_geometry_tracks_working_rows_without_terminal_resize() {
         .prefill_editor("one\ntwo\nthree\nfour\nfive".into());
     command(&mut extensions, &mut frontend, &["editor"]).await;
     frontend.shell.notice("existing transcript");
+    extensions.sync_remote_ui(&mut frontend.shell);
+    let editor_size = |extensions: &ExecutableExtensions| {
+        let projection = extensions.remote_ui.projection();
+        let editor = projection
+            .mount(ExtensionRemoteUiPlacement::Editor)
+            .unwrap();
+        (editor.columns, editor.rows)
+    };
+    assert_eq!(editor_size(&extensions), (80, 6));
     frontend.shell.begin_run("fixture");
     extensions.sync_remote_ui(&mut frontend.shell);
-    let editor = extensions
-        .remote_ui
-        .projection()
-        .mount(ExtensionRemoteUiPlacement::Editor)
-        .unwrap()
-        .clone();
-    assert_eq!((editor.columns, editor.rows), (80, 4));
+    // A short pane reserves the Working label, not the optional summary and padding.
+    assert_eq!(editor_size(&extensions), (80, 5));
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             extensions.sync_remote_ui(&mut frontend.shell);
             if wire(&log)
                 .iter()
-                .any(|m| m["method"] == "ui/resize" && m["params"]["rows"] == 4)
+                .any(|m| m["method"] == "ui/resize" && m["params"]["rows"] == 5)
             {
                 break;
             }

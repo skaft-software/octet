@@ -49,6 +49,27 @@ pub enum ThemeDensity {
     Airy,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkingIndicatorPlacement {
+    #[default]
+    Above,
+    Composer,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusFooterLayout {
+    #[default]
+    Compact,
+    TwoLine,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolCardLayout {
+    #[default]
+    Octet,
+    Pi,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeLayout {
     pub density: ThemeDensity,
@@ -63,6 +84,11 @@ pub struct ThemeLayout {
     pub block_padding_x: Option<u16>,
     pub tool_body_indent: u16,
     pub composer_padding: u16,
+    pub working_indicator: WorkingIndicatorPlacement,
+    pub status_footer: StatusFooterLayout,
+    pub composer_effort_color: bool,
+    pub composer_show_prompt: bool,
+    pub tool_cards: ToolCardLayout,
     pub narrow_breakpoint: u16,
     pub narrow_show_header: bool,
     pub narrow_show_footer: bool,
@@ -88,6 +114,11 @@ impl Default for ThemeLayout {
             block_padding_x: None,
             tool_body_indent: 2,
             composer_padding: 1,
+            working_indicator: WorkingIndicatorPlacement::Above,
+            status_footer: StatusFooterLayout::Compact,
+            composer_effort_color: false,
+            composer_show_prompt: true,
+            tool_cards: ToolCardLayout::Octet,
             narrow_breakpoint: 64,
             narrow_show_header: false,
             narrow_show_footer: true,
@@ -824,6 +855,33 @@ fn parse_layout(value: Option<&Value>, source_name: &str) -> anyhow::Result<Them
             "composer_padding" => {
                 layout.composer_padding = bounded_u16(value, source_name, key, 0, 4)?
             }
+            "working_indicator" => {
+                layout.working_indicator = match string(value, source_name, key)?.as_str() {
+                    "above" => WorkingIndicatorPlacement::Above,
+                    "composer" => WorkingIndicatorPlacement::Composer,
+                    other => bail!("theme {source_name} has invalid layout {key} {other:?}"),
+                }
+            }
+            "status_footer" => {
+                layout.status_footer = match string(value, source_name, key)?.as_str() {
+                    "compact" => StatusFooterLayout::Compact,
+                    "two_line" => StatusFooterLayout::TwoLine,
+                    other => bail!("theme {source_name} has invalid layout {key} {other:?}"),
+                }
+            }
+            "composer_effort_color" => {
+                layout.composer_effort_color = boolean(value, source_name, key)?
+            }
+            "composer_show_prompt" => {
+                layout.composer_show_prompt = boolean(value, source_name, key)?
+            }
+            "tool_cards" => {
+                layout.tool_cards = match string(value, source_name, key)?.as_str() {
+                    "octet" => ToolCardLayout::Octet,
+                    "pi" => ToolCardLayout::Pi,
+                    other => bail!("theme {source_name} has invalid layout {key} {other:?}"),
+                }
+            }
             "narrow_breakpoint" => {
                 layout.narrow_breakpoint = bounded_u16(value, source_name, key, 20, 240)?
             }
@@ -1231,6 +1289,39 @@ mod transcript_schema_tests {
                 parse_theme(source, "invalid", TerminalBackground::Unknown).is_err(),
                 "{source}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_layout_choice_tests {
+    use super::*;
+
+    #[test]
+    fn placement_footer_and_tool_styles_are_independent_and_validated() {
+        let source = r#"
+            [metadata]
+            profile = "pi"
+            [layout]
+            working_indicator = "above"
+            [variants.light.layout]
+            status_footer = "compact"
+            tool_cards = "octet"
+            composer_show_prompt = true
+        "#;
+        let parse = |source, bg| parse_theme(source, "layout-choices", bg);
+        let dark = parse(source, TerminalBackground::Dark).unwrap().layout;
+        assert_eq!(dark.working_indicator, WorkingIndicatorPlacement::Above);
+        assert_eq!(dark.status_footer, StatusFooterLayout::TwoLine);
+        assert_eq!(dark.tool_cards, ToolCardLayout::Pi);
+        let light = parse(source, TerminalBackground::Light).unwrap().layout;
+        assert_eq!(light.working_indicator, WorkingIndicatorPlacement::Above);
+        assert_eq!(light.status_footer, StatusFooterLayout::Compact);
+        assert_eq!(light.tool_cards, ToolCardLayout::Octet);
+        assert!(light.composer_show_prompt);
+        for key in ["working_indicator", "status_footer", "tool_cards"] {
+            let source = format!("[layout]\n{key} = 'unknown'");
+            assert!(parse_theme(&source, "layout-choices", TerminalBackground::Dark).is_err());
         }
     }
 }

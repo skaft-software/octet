@@ -102,8 +102,11 @@ pub(super) fn apply(
         }
         lines.push(editor.bottom.clone());
         chrome.composer = lines;
-    } else if crate::tui::composer_surface::status_footer_visible(state, width) {
-        chrome.composer.pop();
+    } else if chrome.suggestions.is_empty() {
+        let footer_rows = crate::tui::composer_surface::status_footer_rows(state, width);
+        chrome
+            .composer
+            .truncate(chrome.composer.len().saturating_sub(footer_rows));
     }
     if let Some(footer) = &snapshot.footer {
         chrome.extension_below = footer

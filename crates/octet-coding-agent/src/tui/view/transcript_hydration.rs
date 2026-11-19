@@ -114,8 +114,18 @@ pub(super) fn append_hydrated_items(
             TranscriptItem::PrivateEntry { namespace, entry } => {
                 state.retain_private_entry(namespace, entry)
             }
-            TranscriptItem::ToolPresentation { id, result } => {
-                state.retain_tool_presentation(&id, result)
+            TranscriptItem::ToolPresentation {
+                id,
+                result,
+                codemode,
+            } => {
+                if let Some(panel) = state
+                    .tool_output_mut(&id)
+                    .filter(|panel| panel.name == "codemode")
+                {
+                    panel.codemode_details = codemode;
+                }
+                state.retain_tool_presentation(&id, result);
             }
             TranscriptItem::Assistant(text) => {
                 state.seal_activity_group();

@@ -1,7 +1,7 @@
 //! Bounded, revision-fenced renderer geometry. Read-only keyboard navigation
 //! can use prepared layout; pointer input and approvals require a written frame.
 //! Input reads these rows rather than invoking transcript layout.
-use super::{transcript_cache::SurfaceGeometry, ShellState};
+use super::{transcript_cache::SurfaceGeometry, ShellState, TranscriptViewport};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -271,16 +271,22 @@ pub(super) struct RenderedGeometry {
 impl RenderedGeometry {
     /// Capture the frame's pointer geometry, reusing the shell's copy-row
     /// alignments from earlier frames for blocks that are still visible.
-    pub(super) fn capture(state: &ShellState, fence: GeometryFence) -> Self {
+    pub(super) fn capture(
+        state: &ShellState,
+        fence: GeometryFence,
+        application_viewport: bool,
+    ) -> Self {
         let chrome =
             super::shell_chrome::shell_chrome(state, state.size.0, std::time::Instant::now());
-        let total_rows = state.transcript_cache.borrow().lines.len();
-        let scroll =
-            super::viewport::resolved_scroll_from_bottom(state, total_rows, chrome.transcript_rows);
+        let viewport = TranscriptViewport::new(
+            &chrome,
+            &state.transcript_cache.borrow().lines,
+            application_viewport && state.overlay.is_none(),
+        );
+        let scroll = viewport.resolve_scroll(state);
         let viewport_rows =
-            super::viewport::transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-        let end = total_rows.saturating_sub(scroll);
-        let start = end.saturating_sub(viewport_rows);
+            super::viewport::transcript_viewport_capacity(viewport.available, scroll > 0);
+        let std::ops::Range { start, end } = viewport.history_window(scroll);
         // Private anchor rebasing is not new semantic navigation intent.
         // Update the fence's delta only when that feedback is accepted.
         let cache = state.transcript_cache.borrow();
@@ -363,7 +369,11 @@ impl RenderedGeometry {
             panel: PanelRenderReceipt::capture(state, &chrome.panel),
             report: ReportRenderReceipt::capture(state),
             navigation_frame: state.transcript_navigation.borrow().rendered_frame(),
-            welcome_rows: cache.block_starts.first().copied().unwrap_or(total_rows),
+            welcome_rows: cache
+                .block_starts
+                .first()
+                .copied()
+                .unwrap_or(cache.lines.len()),
             welcome_mark: super::builtin_welcome_card::visible_mark_rect(state).and_then(
                 |(x, y)| (y >= start && y + 2 <= end).then_some((x, y.saturating_sub(start))),
             ),
@@ -371,11 +381,11 @@ impl RenderedGeometry {
                 .transcript_selection
                 .clone()
                 .zip(state.selection_pointer_cell),
-            total_rows,
+            total_rows: viewport.total_rows,
             visible_start: start,
             visible_lines: cache.lines[start..end].to_vec(),
             viewport_rows,
-            viewport_available: chrome.transcript_rows,
+            viewport_available: viewport.available,
             blocks,
             blocks_visited,
             animation_block_starts: state

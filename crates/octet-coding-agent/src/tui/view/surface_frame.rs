@@ -394,10 +394,7 @@ pub(super) fn event_margin_marker_with_frame(
             Some(theme.fg("accent", spinner_glyph(theme.unicode(), spinner_frame)))
         }
         TranscriptBlock::Reasoning(reasoning)
-            if collapsed_reasoning
-                && markers_enabled
-                && reasoning.finished
-                && theme.shows_durations() =>
+            if collapsed_reasoning && markers_enabled && reasoning.finished =>
         {
             Some(theme.fg("muted", event_dot))
         }

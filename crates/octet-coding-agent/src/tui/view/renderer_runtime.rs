@@ -1233,7 +1233,7 @@ mod scheduler_tests {
         state.startup_card_started_at = Some(now);
         state.application_viewport_requested = true;
         state.rendered_transcript(80);
-        let geometry = RenderedGeometry::capture(&state, GeometryFence::capture(&state));
+        let geometry = RenderedGeometry::capture(&state, GeometryFence::capture(&state), true);
         assert!(geometry.welcome_mark.is_some());
         state.render_geometry = Some(std::sync::Arc::new(geometry));
         let revision = state.transcript_semantic_revision;
@@ -1930,10 +1930,12 @@ impl ShellComponent {
             let accept = sexy_tui_rs::render_metrics::Span::new(1);
             owner.accept(model);
             drop(accept);
+            let application_viewport = self.uses_application_viewport(&owner.state);
             RenderStateGuard::Private {
                 owner,
                 shared: &self.state,
                 trace: &self.geometry_trace,
+                application_viewport,
             }
         } else {
             RenderStateGuard::Inline(state)
@@ -1947,6 +1949,7 @@ enum RenderStateGuard<'a> {
         owner: RefMut<'a, RenderOwner>,
         shared: &'a SharedState,
         trace: &'a GeometryWorkTrace,
+        application_viewport: bool,
     },
 }
 impl Deref for RenderStateGuard<'_> {
@@ -1964,6 +1967,7 @@ impl Drop for RenderStateGuard<'_> {
             owner,
             shared,
             trace,
+            application_viewport,
         } = self
         else {
             return;
@@ -1974,6 +1978,7 @@ impl Drop for RenderStateGuard<'_> {
         let mut geometry = super::renderer_geometry::RenderedGeometry::capture(
             &owner.state,
             owner.geometry_fence.expect("accepted model"),
+            *application_viewport,
         );
         drop(geometry_stage);
         crate::tui::latency::frame_geometry(

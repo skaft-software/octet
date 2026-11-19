@@ -15,32 +15,26 @@ fn reasoning_heading_moves_below_the_fixed_thinking_header() {
         },
     );
 
-    // Keep the live timer deterministic while comparing layout/animation.
-    for block in &mut shell.state.borrow_mut().transcript {
-        if let crate::tui::view::TranscriptBlock::Reasoning(reasoning) = block {
-            reasoning.activity_started_at =
-                Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
-        }
-    }
-    let rendered = shell
-        .state
-        .borrow()
-        .rendered_transcript(80)
+    let mut state = shell.state.borrow_mut();
+    state.working_status.as_mut().unwrap().activity_started_at =
+        Some(Instant::now() + Duration::from_secs(3600));
+    assert!(state.rendered_transcript(80).is_empty());
+    let rendered = rendered_with_working(&state, 80)
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
     assert_eq!(
         rendered,
         vec![
-            "",
             "• Thinking (0s · Esc to interrupt)",
             "  └ Verifying reproducibility of evidence package (Ctrl+T to expand)",
+            "",
         ]
     );
 }
 
 #[test]
-fn still_thinking_grows_above_the_independent_working_slot() {
+fn still_thinking_replaces_working_in_the_same_slot() {
     let theme = crate::tui::theme::test_theme_from_source(include_str!(
         "../../../../../../examples/themes/Still.toml"
     ));
@@ -54,11 +48,8 @@ fn still_thinking_grows_above_the_independent_working_slot() {
             .collect::<Vec<_>>()
     };
     let working = rows(&shell);
-    assert!(
-        working[working.len() - 2].contains("Working"),
-        "{working:?}"
-    );
-    assert!(working.last().is_some_and(String::is_empty), "{working:?}");
+    assert_eq!(working.len(), 3, "{working:?}");
+    assert!(working[0].contains("Working"), "{working:?}");
 
     shell.on_run_event(
         run_id,
@@ -68,12 +59,10 @@ fn still_thinking_grows_above_the_independent_working_slot() {
         },
     );
     let thinking = rows(&shell);
+    assert_eq!(thinking.len(), 3, "{thinking:?}");
+    assert!(thinking[0].contains("Thinking"), "{thinking:?}");
     assert!(
-        thinking.len() > working.len(),
-        "reasoning must grow above Working"
-    );
-    assert!(
-        thinking[thinking.len() - 2].contains("Working"),
+        !thinking.iter().any(|row| row.contains("Working")),
         "{thinking:?}"
     );
     assert!(
@@ -94,11 +83,11 @@ fn still_thinking_grows_above_the_independent_working_slot() {
         "response shrank the transcript: {responding:?}"
     );
     assert!(
-        responding[responding.len() - 2].contains("Working"),
+        responding[responding.len() - 3].contains("Working"),
         "{responding:?}"
     );
     assert!(
-        responding.last().is_some_and(String::is_empty),
+        responding[responding.len() - 2].is_empty(),
         "{responding:?}"
     );
 
@@ -116,7 +105,8 @@ fn still_thinking_grows_above_the_independent_working_slot() {
         tool.len() >= responding.len(),
         "tool replaced status with fewer rows: {tool:?}"
     );
-    assert!(tool.last().is_some_and(String::is_empty), "{tool:?}");
+    assert!(tool[tool.len() - 3].contains("Working"), "{tool:?}");
+    assert!(tool[tool.len() - 2].is_empty(), "{tool:?}");
 
     shell.on_run_event(
         run_id,
@@ -150,8 +140,12 @@ fn still_thinking_grows_above_the_independent_working_slot() {
     );
     let next_tool = rows(&shell);
     assert!(
-        next_tool.len() >= thinking_again.len(),
-        "tool replaced Thinking with fewer rows: before={thinking_again:?}, after={next_tool:?}"
+        next_tool.len() + 1 >= thinking_again.len(),
+        "switching to Working can remove only the Thinking detail: before={thinking_again:?}, after={next_tool:?}"
+    );
+    assert!(
+        next_tool[next_tool.len() - 3].contains("Working"),
+        "{next_tool:?}"
     );
 }
 
@@ -189,8 +183,8 @@ fn working_status_persists_below_running_tools_in_default_and_still() {
                 rendered
                     .iter()
                     .rev()
-                    .take(2)
-                    .any(|row| row.contains("Working (")),
+                    .nth(2)
+                    .is_some_and(|row| row.contains("Working (")),
                 "status must remain at the bottom: {rendered:?}"
             );
             let state = shell.state.borrow();
@@ -270,10 +264,8 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
     assert_eq!(rendered.len(), 3, "{rendered:?}");
-    assert!(rendered[0].is_empty(), "{rendered:?}");
-    assert!(rendered[1].starts_with("• Working ("), "{rendered:?}");
-    assert!(rendered[2].is_empty(), "{rendered:?}");
-    assert!(!rendered[1].contains("Ctrl+O"), "{rendered:?}");
+    assert!(rendered[0].starts_with("• Working ("), "{rendered:?}");
+    assert!(!rendered[0].contains("Ctrl+T"), "{rendered:?}");
 
     shell.on_run_event(
         run_id,
@@ -286,15 +278,11 @@ fn reasoning_off_run_uses_a_truthful_non_expandable_working_status() {
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
-    assert!(
-        promoted.len() > rendered.len(),
-        "thinking grows above the status"
-    );
-    assert!(promoted[0].is_empty(), "{promoted:?}");
-    assert!(promoted[1].contains("Thinking"), "{promoted:?}");
+    assert_eq!(promoted.len(), 3, "{promoted:?}");
+    assert!(promoted[0].starts_with("• Thinking ("), "{promoted:?}");
     assert!(promoted[1].contains("Ctrl+T to expand"), "{promoted:?}");
     assert!(
-        promoted.iter().any(|row| row.contains("Working")),
+        !promoted.iter().any(|row| row.contains("Working")),
         "{promoted:?}"
     );
     assert!(!promoted.join("\n").contains("provider-private detail"));
@@ -364,9 +352,8 @@ fn public_text_stream_keeps_exactly_one_working_row_while_the_run_is_active() {
         .iter()
         .position(|line| line.starts_with("• Working ("))
         .unwrap();
-    assert_eq!(working + 2, rendered.len(), "{rendered:?}");
+    assert_eq!(working + 3, rendered.len(), "{rendered:?}");
     assert!(rendered[working - 1].is_empty(), "{rendered:?}");
-    assert!(rendered[working + 1].is_empty(), "{rendered:?}");
 }
 
 #[test]
@@ -395,7 +382,7 @@ fn activity_lifecycle_is_working_thinking_streaming_working_then_settled() {
     );
     let thinking = rendered(&shell);
     assert!(thinking.iter().any(|line| line.contains("Thinking")));
-    assert!(thinking.iter().any(|line| line.starts_with("• Working (")));
+    assert!(!thinking.iter().any(|line| line.starts_with("• Working (")));
 
     shell.on_run_event(
         run_id,
@@ -418,9 +405,8 @@ fn activity_lifecycle_is_working_thinking_streaming_working_then_settled() {
         .iter()
         .position(|line| line.starts_with("• Working ("))
         .unwrap();
-    assert_eq!(working + 2, responding.len(), "{responding:?}");
+    assert_eq!(working + 3, responding.len(), "{responding:?}");
     assert!(responding[working - 1].is_empty(), "{responding:?}");
-    assert!(responding[working + 1].is_empty(), "{responding:?}");
     assert!(shell.state.borrow().has_active_status_shimmer());
 
     shell.on_run_event(
@@ -625,12 +611,12 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
             .collect::<Vec<_>>()
     };
     let initial = transcript(&shell);
-    assert_eq!(initial.len(), 3, "{initial:?}");
-    assert!(initial[0].is_empty(), "{initial:?}");
-    assert!(initial[1].contains("Thinking"), "{initial:?}");
-    assert!(initial[1].contains("Ctrl+T to expand"), "{initial:?}");
-    assert!(initial[2].is_empty(), "{initial:?}");
-    assert!(!initial.join("\n").contains("first private sentinel"));
+    assert!(initial.is_empty(), "{initial:?}");
+    let slot = rendered_with_working(&shell.state.borrow(), 80);
+    let visible = strip_terminal_sequences(&slot.join("\n"));
+    assert_eq!(visible.matches("Thinking (").count(), 1, "{visible}");
+    assert_eq!(visible.matches("Ctrl+T to expand").count(), 1, "{visible}");
+    assert!(!visible.contains("first private sentinel"));
 
     let continuation = (0..128)
         .map(|index| format!("\nprivate reasoning row {index}"))
@@ -669,7 +655,7 @@ fn streamed_reasoning_shows_one_live_indicator_until_ctrl_t() {
 }
 
 #[test]
-fn a_new_reasoning_event_preserves_the_previous_summary_geometry() {
+fn a_new_reasoning_event_does_not_paint_previous_summaries() {
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
     shell.on_run_event(
@@ -701,10 +687,14 @@ fn a_new_reasoning_event_preserves_the_previous_summary_geometry() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(!rendered.contains("Ctrl+T to expand"), "{rendered}");
+    assert!(rendered.contains("answer"), "{rendered}");
+    let with_slot =
+        strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"));
     assert_eq!(
-        rendered.matches("Ctrl+T to expand").count(),
-        2,
-        "{rendered}"
+        with_slot.matches("Ctrl+T to expand").count(),
+        1,
+        "{with_slot}"
     );
     shell.toggle_thinking();
     let expanded = shell
@@ -784,6 +774,7 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
 
     assert!(!shell.toggle_thinking());
     let hidden = rendered(&shell);
+    assert_eq!(hidden.matches("• Thinking (").count(), 1, "{hidden}");
     assert!(
         hidden.contains("Verify the result (Ctrl+T to expand)"),
         "{hidden}"
@@ -1153,10 +1144,7 @@ fn an_expanding_theme_paints_the_trace_while_the_default_paints_a_collapsed_line
                 text: "Weighing the two migration paths.".into(),
             },
         );
-        let rows = shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
+        let rows = rendered_with_working(&shell.state.borrow(), 80)
             .iter()
             .map(|row| strip_terminal_sequences(row).to_owned())
             .collect::<Vec<_>>();

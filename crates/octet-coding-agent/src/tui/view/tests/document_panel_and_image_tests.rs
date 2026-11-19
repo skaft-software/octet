@@ -636,6 +636,31 @@ fn keyboard_motion_steps_over_chips_and_delete_removes_them_whole() {
 }
 
 #[test]
+fn word_motion_and_kills_keep_paste_and_attachment_chips_atomic() {
+    let dir = tempfile::tempdir().unwrap();
+    for paste in chip_fixtures(dir.path()) {
+        let (mut shell, chip) = chip_shell_with(&paste);
+        let start = "keep ".len();
+        shell.apply_edit(EditAction::WordLeft);
+        assert_eq!(shell.state.borrow().editor.cursor(), start, "{chip}");
+        shell.apply_edit(EditAction::WordRight);
+        assert_eq!(
+            shell.state.borrow().editor.cursor(),
+            start + chip.len(),
+            "{chip}"
+        );
+        shell.apply_edit(EditAction::DeleteWordBackward);
+        assert_eq!(shell.pending(), "keep ");
+        shell.apply_edit(EditAction::Undo);
+        assert_eq!(shell.pending(), format!("keep {chip}"));
+        shell.apply_edit(EditAction::WordLeft);
+        shell.apply_edit(EditAction::DeleteWordForward);
+        assert_eq!(shell.pending(), "keep ");
+        assert!(shell.drain_composed().attachments.is_empty());
+    }
+}
+
+#[test]
 fn an_intact_chip_still_resolves_and_undo_restores_a_deleted_one() {
     let (mut shell, chip) = chip_shell_with(&"RESTORED-PASTE-PAYLOAD\n".repeat(20));
     shell.apply_edit(EditAction::Backspace);

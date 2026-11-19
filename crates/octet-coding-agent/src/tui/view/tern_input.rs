@@ -384,18 +384,36 @@ fn route(state: &SharedState, message: &Incoming) -> Option<InputEvent> {
             let raw_cursor = utf16_boundary(&edited, *cursor)?;
             let cursor = sexy_tui_rs::TextEditor::normalize_paste(&edited[..raw_cursor]).len();
             let text = sexy_tui_rs::TextEditor::normalize_paste(text);
+            use crate::tui::composer::mouse::{atomic_cursor, chip_spans};
+            let (range, cursor) = if from == to && !text.is_empty() {
+                let at = atomic_cursor(source, &shell.ledger, from);
+                let cursor = if at >= from {
+                    cursor.saturating_add(at - from)
+                } else {
+                    cursor.saturating_sub(from - at)
+                };
+                (at..at, cursor)
+            } else {
+                let spans = chip_spans(source, &shell.ledger);
+                let mut range = from..to;
+                if !range.is_empty() {
+                    for span in &spans {
+                        if span.start < to && from < span.end {
+                            range.start = range.start.min(span.start);
+                            range.end = range.end.max(span.end);
+                        }
+                    }
+                }
+                let left = cursor.saturating_sub(range.start).min(from - range.start);
+                let right = cursor.saturating_sub(from + text.len()).min(range.end - to);
+                (range, cursor - left - right)
+            };
             let text_revision = shell.editor.text_revision();
-            if !shell.editor.edit_range(from..to, &text, cursor) {
+            if !shell.editor.edit_range(range, &text, cursor) {
                 return None;
             }
-            if shell.editor.text_revision() == text_revision {
-                let cursor = crate::tui::composer::mouse::atomic_cursor(
-                    shell.editor.text(),
-                    &shell.ledger,
-                    shell.editor.cursor(),
-                );
-                shell.editor.set_cursor(cursor);
-            }
+            let cursor = atomic_cursor(shell.editor.text(), &shell.ledger, shell.editor.cursor());
+            shell.editor.set_cursor(cursor);
             shell.prompt_history_navigation = None;
             shell.composer_preferred_column = None;
             if shell.editor.text_revision() != text_revision {
@@ -697,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn native_edits_to_a_chip_apply_like_any_other_text() {
+    fn native_edits_apply_to_the_whole_chip() {
         let shell = native_slash_shell();
         let chip = shell
             .state
@@ -733,8 +751,7 @@ mod tests {
             assert_eq!(composed.attachments.len(), 1);
         }
 
-        // Editing inside the chip is an ordinary edit: the characters change,
-        // the chip stops being a chip, and its payload is not attached.
+        // Even a partial native range deletes the chip as one object.
         let chip = shell
             .state
             .borrow_mut()
@@ -743,11 +760,8 @@ mod tests {
         let draft = format!("before {chip} after");
         shell.state.borrow_mut().editor.set_text(&draft);
         edit(9, 10, "", draft.len());
-        edit(9, 9, "Q", draft.len() - 1);
-        assert_eq!(
-            shell.pending(),
-            format!("before {}Q{} after", &chip[..2], &chip[3..])
-        );
+        assert_eq!(shell.pending(), "before  after");
+        assert_eq!(shell.state.borrow().editor.cursor(), "before ".len());
         let mut state = shell.state.borrow_mut();
         let text = state.editor.text().to_owned();
         let composed = crate::tui::composer::compose(text.clone(), &mut state.ledger);

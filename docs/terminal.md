@@ -388,11 +388,11 @@ clearing inherited pixel reporting (1016) and alternate-scroll arrow emulation
 In the semantic viewport, even one upward wheel step disengages follow-tail and
 pins the reader's position through repaints, streaming and working-row or worker
 roster height changes. There is no near-bottom snap zone. Scrolling back to the
-exact bottom resumes following new output. A centered **↓ Jump to
-bottom** button above the input also returns to live output; it optionally shows
-`1 new` or `2 new`. Click any painted button cell, not the blank space around it,
-while idle or streaming, including with worker activity visible. Pending output
-never disables the painted button or changes its hover target.
+exact bottom resumes following new output. The centered `[ ↓ Jump ]` button
+above the input also returns to live output. It shows a count when space permits,
+for example `[ ↓ Jump · 3 new ]`. Click any painted button cell, not the blank
+space around it, while idle or streaming, including with worker activity visible.
+Pending output never disables the painted button or changes its hover target.
 Hover underlines the control when motion is reported; no-color/ASCII profiles
 retain a bracketed text button. PageDown and Ctrl+End keep their keyboard paths.
 Wheel history that octet doesn't capture stays with your terminal,
@@ -446,37 +446,44 @@ for every trace in the transcript and for new ones. It is separate from
 Ctrl+O, which owns tool and shell output. In native Tern, each key also resets
 only its own mode's section clicks, preserving the other mode's disclosure.
 
-**Tool call and thinking durations** in Settings controls the settled
-`• Thought for …` marker and tool-card timing. When off, a collapsed trace
-adds no timing row; Ctrl+T still reveals its retained text.
+In the default ANSI layout, one live item appears at the end of the transcript.
+In fullscreen, it scrolls out of view with the transcript; Jump returns to the
+live end. Queued steering and follow-ups stay above the composer.
+`Working` and `Thinking` share the run timer and occupy the same two lines.
+One blank line separates the latest event from the indicator. For a shaded
+prompt, that blank line is outside the card, not part of its colored edge.
+One blank line separates the summary line from the composer. The summary line stays empty while
+Working, so a Thinking update doesn't move the composer. On short terminals,
+padding yields to history and controls. These lines do not enter saved history,
+search, or copy. While the model reasons, the summary shows its latest Markdown heading with a dim
+expand hint, or the hint alone if there is no heading. Expanding the live trace
+hides both indicator lines; collapsing it restores them. Ordinary reasoning text
+never becomes a label. With **Tool call and thinking durations** on in Settings,
+a collapsed, finished trace shows a muted `• Thought for 15s` marker instead of the
+live heading. Traces under a second show rounded milliseconds, such as
+`• Thought for 185ms`. With durations off, the marker takes no space. Ctrl+T
+reveals the trace in either case. Thinking time is measured live, not recreated
+when a session is resumed.
 
-Each run owns one independent status slot below the transcript and above the
-composer. `Working (<elapsed> · Esc to interrupt)` stays there while reasoning,
-text and tools grow above it, including between provider turns. A Pi extension's
-working component updates that same slot rather than replacing reasoning rows.
-Focused panels and transcript search keep a visible input-owning row alongside
-this slot, even when a long error wraps in a short terminal.
-Expanding a live trace with Ctrl+T hides the ordinary indicator rather than
-repeating the trace below it. Collapsing the trace restores the indicator. Retry
-status keeps the interrupt hint but leaves out the run-elapsed counter, even
-after its backoff countdown reaches zero, so two clocks never compete on one
-row. While the model reasons, the bold `Thinking` label shimmers more quietly
-than `Working` on supported terminals. It shows the latest Markdown heading from
-the reasoning (a `#` heading or a standalone bold line), with a dim expand hint.
-Ordinary reasoning text never becomes a label. With no heading, the compiled
-default theme puts the hint beside `Thinking` when it fits; otherwise it uses a
-second row. Both layouts use `Ctrl+T to expand`.
+The [Pi presentation profile](themes.md#pi-presentation-profile) can put Working
+in the composer rule and show reasoning in the transcript instead.
+
+Provider lifecycle, compaction and retry labels temporarily own the same slot.
+Retry status keeps the interrupt hint but omits the run timer, so two clocks
+never compete. Pi working components can customize the Working indicator. Run
+settlement clears the slot.
 
 ```text
-• Thinking
+• Thinking (7s · Esc to interrupt)
   └ Verifying the implementation (Ctrl+T to expand)
 ```
 
 Reasoning and activity dots keep a solid, fixed-size glyph. The `Working` dot
 shares the label's phase and blinks as the shimmer crosses it, then returns to
-its resting colour. The `Thinking` dot keeps its model colour. Tool and shell
-dots turn green on success or red on failure, and assistant-response dots stay
-steady. To change the level, see [Selecting reasoning](providers.md#reasoning).
+its resting colour. The live `Thinking` dot keeps its model colour; the settled
+`Thought for` dot is muted. Tool and shell dots turn green on success or red on
+failure, and assistant-response dots stay steady. To change the level, see
+[Selecting reasoning](providers.md#reasoning).
 
 <details>
 <summary>Shimmer details</summary>
@@ -487,8 +494,7 @@ is foreground-only and parks briefly after crossing the whole label. Set
 `OCTET_SHIMMER=classic` for the old stepped field. ANSI16, unknown-background,
 reduced-motion and no-color paths keep the compatibility or static behavior.
 Expanded reasoning keeps its indent, with no margin dot or extra first bullet.
-Collapsed summaries keep their rows through provider-turn and tool handoffs;
-completed reasoning disappears when the run settles unless expanded.
+Collapsed reasoning adds no stored row; only enabled timings can leave a marker.
 
 </details>
 
@@ -508,8 +514,9 @@ text. It never loads a URL or path, copied, plain and print output never contain
 image data, and it doesn't upload anything or replace [attachment
 consent](media.md#attach-explicitly). The model must still support the format.
 
-Completed image reads keep their inline preview above the final duration row.
-Fullscreen image crops keep the original tool gutter when their first row scrolls
+Active shell cards use the event dot and show real output as it arrives. In the
+default layout with durations enabled, `└ Took …` aligns with the tool's output
+elbow below any inline image preview. Fullscreen image crops keep the original tool gutter when their first row scrolls
 above the viewport. Only the visible image rows are placed, leaving the composer
 and footer outside the placement. One fullscreen placement tracker handles native
 image anchors and raw Kitty graphics rows: scrolling, cropping and redraws retire

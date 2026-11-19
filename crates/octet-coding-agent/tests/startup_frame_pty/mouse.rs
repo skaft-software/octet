@@ -164,13 +164,13 @@ fn default_fullscreen_launch_captures_the_wheel_so_the_trackpad_scrolls() {
         "default fullscreen did not enable mouse reporting"
     );
     assert!(contains_bytes(&octet.pty.output, b"\x1b[?1006h"));
-    assert!(!parser.screen().contents().contains("Jump to bottom"));
+    assert!(!parser.screen().contents().contains("[ ↓ Jump"));
     octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
     await_screen(
         &mut octet,
         &mut parser,
         &mut consumed,
-        "Jump to bottom",
+        "[ ↓ Jump",
         STARTUP_TIMEOUT,
     );
     let capture = octet.shutdown();
@@ -185,9 +185,9 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     octet.pty.write_input(b"fullscreen-draft");
     await_screen(octet, parser, consumed, "fullscreen-draft", STARTUP_TIMEOUT);
     settle(octet, parser, consumed);
-    assert!(!parser.screen().contents().contains("Jump to bottom"));
+    assert!(!parser.screen().contents().contains("[ ↓ Jump"));
     octet.pty.write_input(&sgr(64, 20, 5, false).repeat(4));
-    await_screen(octet, parser, consumed, "Jump to bottom", STARTUP_TIMEOUT);
+    await_screen(octet, parser, consumed, "[ ↓ Jump", STARTUP_TIMEOUT);
     // The VT parser exposes partial synchronized frames; hit-test only after
     // the completed frame/geometry receipt, as the terminal presents it.
     settle(octet, parser, consumed);
@@ -202,7 +202,7 @@ fn fullscreen_gestures(octet: &mut PtyOctet, parser: &mut vt100::Parser, consume
     octet.pty.write_input(&sgr(0, columns - 1, rows - 1, true));
     await_screen(octet, parser, consumed, "MOUSE-END", STARTUP_TIMEOUT);
     settle(octet, parser, consumed);
-    assert!(!parser.screen().contents().contains("Jump to bottom"));
+    assert!(!parser.screen().contents().contains("[ ↓ Jump"));
 
     let (row, column) = (1..rows - 5)
         .find_map(|row| {
@@ -508,7 +508,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         settle(&mut octet, &mut parser, &mut consumed);
     }
     assert!(row_text(&parser, 0, 100).contains(&up_top));
-    assert!(parser.screen().contents().contains("Jump to bottom"));
+    assert!(parser.screen().contents().contains("[ ↓ Jump"));
     assert!(parser.screen().contents().contains("draft-kept"));
     octet.pty.write_input(&sgr(65, 30, 10, false).repeat(4));
     let down_top = format!("MOUSE-ROW-{:03}", top_number - 92);
@@ -526,7 +526,7 @@ fn raw_mouse_touchpad_bursts_are_proportional_and_preserve_the_draft() {
         STARTUP_TIMEOUT,
     );
     settle(&mut octet, &mut parser, &mut consumed);
-    assert!(!parser.screen().contents().contains("Jump to bottom"));
+    assert!(!parser.screen().contents().contains("[ ↓ Jump"));
     assert!(
         parser.screen().contents().contains("draft-kept"),
         "{}",
@@ -614,7 +614,7 @@ fn raw_mouse_drag_copies_painted_markdown_wrapped_rows_and_excludes_chrome() {
             STARTUP_TIMEOUT,
         );
         settle(&mut octet, &mut parser, &mut consumed);
-        assert!(parser.screen().contents().contains("Jump to bottom"));
+        assert!(parser.screen().contents().contains("[ ↓ Jump"));
         for legacy in [false, true] {
             // Search upward: rows above an inline frame can hold stale
             // scrollback the application does not own, and where the frame

@@ -72,10 +72,8 @@ fn short_transcript_chrome_follows_content_without_viewport_padding() {
         },
     );
     let streamed = render_shell_at(&shell.state.borrow(), 80, now);
-    // The response adds one content row before the host-spaced Working slot.
-    // Working already owns its leading blank, so there is no additional
-    // density transition or viewport padding at that seam.
-    assert_eq!(composer_row(&streamed), initial_composer + 1);
+    // The first visible response adds one content row and the transcript seam.
+    assert_eq!(composer_row(&streamed), initial_composer + 2);
     assert!(streamed.len() < 40);
 
     shell.on_run_event(
@@ -507,7 +505,7 @@ fn keyboard_page_navigation_claims_the_semantic_viewport_without_mouse_capture()
         scrolled
             .replacement
             .iter()
-            .any(|line| line.contains("Jump to bottom")),
+            .any(|line| line.contains("[ ↓ Jump")),
         "{:?}",
         scrolled.replacement
     );
@@ -523,7 +521,7 @@ fn keyboard_page_navigation_claims_the_semantic_viewport_without_mouse_capture()
     assert!(!live
         .replacement
         .iter()
-        .any(|line| line.contains("Jump to bottom")));
+        .any(|line| line.contains("[ ↓ Jump")));
 }
 
 #[test]
@@ -547,13 +545,13 @@ fn explicit_application_viewport_bounds_history_and_keeps_old_rows_reachable() {
     let oldest_text = oldest.join("\n");
     assert_eq!(oldest.len(), 14);
     assert!(oldest_text.contains("older 0"), "{oldest_text}");
-    assert!(oldest_text.contains("Jump to bottom"));
+    assert!(oldest_text.contains("[ ↓ Jump"));
     assert!(!oldest_text.contains("live streamed result"));
 
     shell.scroll_lines(10_000);
     let returned = render_shell_viewport_at(&shell.state.borrow(), 80, Instant::now()).join("\n");
     assert!(returned.contains("live streamed result"));
-    assert!(!returned.contains("Jump to bottom"));
+    assert!(!returned.contains("[ ↓ Jump"));
 
     shell.select_all_transcript();
     let copied = shell.copy_selected_plain_text().expect("semantic copy");
@@ -610,7 +608,7 @@ fn application_viewport_stays_anchored_while_one_markdown_block_streams() {
     let scrolled =
         render_shell_viewport_at(&shell.state.borrow(), WIDTH, Instant::now()).join("\n");
     assert!(scrolled.contains("new"), "{scrolled}");
-    assert!(scrolled.contains("Jump to bottom"), "{scrolled}");
+    assert!(scrolled.contains("[ ↓ Jump"), "{scrolled}");
 }
 
 #[test]

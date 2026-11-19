@@ -776,7 +776,8 @@ fn adjacent_bash_cards_do_not_reserve_blank_output_rows() {
         let cache = state.transcript_cache.borrow();
         cache.block_starts[1].saturating_sub(cache.block_starts[0])
     };
-    let waiting_height = card_height(&shell.state.borrow());
+    let idle_output_height = card_height(&shell.state.borrow());
+    assert_eq!(idle_output_height, 1, "only the command row before output");
 
     let mut heights = Vec::new();
     for (index, output) in [
@@ -797,9 +798,10 @@ fn adjacent_bash_cards_do_not_reserve_blank_output_rows() {
         heights.push(card_height(&state));
     }
 
-    assert!(
-        heights[0] <= waiting_height,
-        "one output row should replace the waiting row without reserving blank space: waiting={waiting_height}, rendered={heights:?}"
+    assert_eq!(
+        heights[0],
+        idle_output_height + 1,
+        "first output must add exactly one row, without placeholder or padding"
     );
     assert!(
         heights[1] > heights[0],

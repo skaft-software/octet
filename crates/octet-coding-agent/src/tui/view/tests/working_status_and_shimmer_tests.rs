@@ -13,9 +13,7 @@ fn active_run_starts_with_working_until_reasoning_is_observed() {
         .map(|line| strip_terminal_sequences(line))
         .collect::<Vec<_>>();
     assert_eq!(rendered.len(), 3, "{rendered:?}");
-    assert!(rendered[0].is_empty(), "{rendered:?}");
-    assert!(rendered[1].starts_with("• Working ("), "{rendered:?}");
-    assert!(rendered[2].is_empty(), "{rendered:?}");
+    assert!(rendered[0].starts_with("• Working ("), "{rendered:?}");
 }
 
 #[test]
@@ -296,7 +294,12 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
                 .with_model_lab(Some(ModelLab::OpenAi)),
         ))
     };
-    let reasoning = reasoning_block(false);
+    let TranscriptBlock::Reasoning(mut slot) = reasoning_block(false) else {
+        unreachable!()
+    };
+    slot.status_activity = true;
+    slot.thinking_slot = true;
+    let reasoning = TranscriptBlock::Reasoning(slot);
     let expanded_reasoning = reasoning_block(true);
     let plain = |lines: Vec<String>| {
         lines
@@ -334,8 +337,10 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
         .find(|line| line.contains("Thinking"))
         .expect("reasoning row");
     assert!(
-        reasoning_line.contains("Ctrl+T to expand"),
-        "{reasoning_line:?}"
+        reasoning_lines
+            .iter()
+            .any(|line| line.contains("└ (Ctrl+T to expand)")),
+        "{reasoning_lines:?}"
     );
     let visual_column = |line: &str, needle: &str| {
         line.find(needle)
@@ -361,6 +366,142 @@ fn collapsed_reasoning_uses_a_margin_dot_without_an_expanded_content_bullet() {
     );
     assert!(
         !reasoning_line.contains('└'),
-        "compiled hint must stay inline: {reasoning_line:?}"
+        "the heading row must not contain the detail connector: {reasoning_line:?}"
     );
+}
+
+#[test]
+fn thinking_adds_detail_to_the_same_live_transcript_item_above_queued_prompts() {
+    use octet_agent::{EntryId, FinishReason};
+
+    let mut shell = InteractiveShell::test_shell();
+    shell
+        .state
+        .borrow_mut()
+        .theme
+        .set_duration_preference(Some(true));
+    shell.set_identity("codex", "gpt-5.3-codex-spark", "high");
+    let run_id = shell.begin_run("codex");
+    let frame = |shell: &InteractiveShell| {
+        let state = shell.state.borrow();
+        let mut lines = state.rendered_transcript(80).clone();
+        builtin_shell_chrome::append_chrome(
+            &mut lines,
+            shell_chrome(&state, 80, Instant::now()),
+            1,
+        );
+        lines
+            .iter()
+            .map(|line| strip_terminal_sequences(line))
+            .collect::<Vec<_>>()
+    };
+    let composer_row = |lines: &[String]| {
+        lines
+            .iter()
+            .position(|line| line.trim_start().starts_with('›'))
+            .unwrap_or_else(|| panic!("composer row: {lines:#?}"))
+    };
+    let count =
+        |lines: &[String], label: &str| lines.iter().filter(|line| line.contains(label)).count();
+
+    let working = frame(&shell);
+    assert_eq!(count(&working, "• Working ("), 1, "{working:#?}");
+    assert_eq!(count(&working, "Thinking"), 0, "{working:#?}");
+
+    // Thinking replaces Working and fills the reserved detail row, with the run
+    // timer and interrupt hint shown once.
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "**Assessing TUI assertion**\n\nprivate trace".into(),
+        },
+    );
+    let thinking = frame(&shell);
+    let status = thinking
+        .iter()
+        .position(|line| line.contains("• Thinking ("))
+        .unwrap_or_else(|| panic!("thinking status: {thinking:#?}"));
+    assert!(
+        thinking[status].contains("Esc to interrupt"),
+        "{thinking:#?}"
+    );
+    assert!(
+        thinking[status + 1].contains("Assessing TUI assertion (Ctrl+T to expand)"),
+        "{thinking:#?}"
+    );
+    assert_eq!(count(&thinking, "Thinking"), 1, "{thinking:#?}");
+    assert_eq!(count(&thinking, "Working"), 0, "{thinking:#?}");
+    assert_eq!(count(&thinking, "Esc to interrupt"), 1, "{thinking:#?}");
+    assert!(!thinking.join("\n").contains("private trace"));
+    assert_eq!(
+        composer_row(&thinking),
+        composer_row(&working),
+        "the reserved Thinking detail must not move the composer"
+    );
+
+    // Set a deterministic phase duration before public output closes the trace.
+    {
+        let mut state = shell.state.borrow_mut();
+        let index = state.active_reasoning.unwrap();
+        let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[index] else {
+            unreachable!()
+        };
+        reasoning.reasoning_started_at = Some(Instant::now() - Duration::from_secs(15));
+    }
+    // Output resumes: Working returns and only a settled marker remains.
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::OutputDelta {
+            channel: OutputChannel::Text,
+            text: "Answer".into(),
+        },
+    );
+    shell.queue_steering(&ComposedInput::from_text("hi".into()));
+    let answered = frame(&shell);
+    assert_eq!(count(&answered, "Thinking"), 0, "{answered:#?}");
+    assert_eq!(count(&answered, "• Working ("), 1, "{answered:#?}");
+    assert_eq!(count(&answered, "• Thought for 15s"), 1, "{answered:#?}");
+    let thought_row = answered
+        .iter()
+        .position(|line| line.contains("• Thought for 15s"));
+    let answer_row = answered.iter().position(|line| line.contains("Answer"));
+    assert!(thought_row.unwrap() < answer_row.unwrap(), "{answered:#?}");
+    assert_eq!(count(&answered, "private trace"), 0, "{answered:#?}");
+    assert_eq!(
+        count(&answered, "Assessing TUI assertion"),
+        0,
+        "{answered:#?}"
+    );
+    // Queued prompts sit between the status slot and the composer.
+    let working_row = answered
+        .iter()
+        .position(|line| line.contains("• Working ("))
+        .unwrap();
+    let steering_row = answered
+        .iter()
+        .position(|line| line.contains("Steering"))
+        .unwrap_or_else(|| panic!("steering: {answered:#?}"));
+    assert!(working_row < steering_row, "{answered:#?}");
+    assert!(steering_row < composer_row(&answered), "{answered:#?}");
+    assert_eq!(steering_row, working_row + 3, "{answered:#?}");
+
+    shell.on_run_event(
+        run_id,
+        &AgentEvent::RunFinished {
+            head: EntryId("head".into()),
+            reason: FinishReason::Completed,
+        },
+    );
+    let finished = frame(&shell);
+    assert_eq!(count(&finished, "• Working ("), 0, "{finished:#?}");
+    assert_eq!(count(&finished, "• Thought for 15s"), 1, "{finished:#?}");
+    shell.set_thinking_expanded(true);
+    let expanded = frame(&shell);
+    assert_eq!(count(&expanded, "private trace"), 1, "{expanded:#?}");
+    assert_eq!(count(&expanded, "Thought for"), 0, "{expanded:#?}");
+    shell.set_thinking_expanded(false);
+    let collapsed = frame(&shell);
+    assert_eq!(count(&collapsed, "• Thought for 15s"), 1, "{collapsed:#?}");
+    assert_eq!(count(&collapsed, "private trace"), 0, "{collapsed:#?}");
 }

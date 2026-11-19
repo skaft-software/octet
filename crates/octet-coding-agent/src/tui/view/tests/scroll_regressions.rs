@@ -29,11 +29,9 @@ fn pending_history_rows(shell: &InteractiveShell) -> Vec<(usize, String)> {
     let chrome = shell_chrome(&state, WIDTH, Instant::now());
     let cache = state.transcript_cache.borrow();
     assert!(!cache.dirty);
-    let scroll = state.scroll_from_bottom.get();
-    let capacity = transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-    let end = cache.lines.len().saturating_sub(scroll);
+    let viewport = TranscriptViewport::new(&chrome, &cache.lines, true);
     history_rows(
-        cache.lines[end.saturating_sub(capacity)..end]
+        cache.lines[viewport.history_window(state.scroll_from_bottom.get())]
             .iter()
             .cloned(),
     )
@@ -89,7 +87,7 @@ fn first_scroll_reveals_one_older_row_and_returns_to_live_without_resizing() {
     let capacity = {
         let state = shell.state.borrow();
         let chrome = shell_chrome(&state, WIDTH, Instant::now());
-        transcript_viewport_capacity(chrome.transcript_rows, false)
+        transcript_viewport_capacity(chrome.transcript_rows + chrome.working.len(), false)
     };
     let render = |shell: &InteractiveShell| {
         render_shell_viewport_at(&shell.state.borrow(), WIDTH, Instant::now())

@@ -558,12 +558,11 @@ fn a_new_prompt_shows_the_working_indicator_immediately() {
         .collect::<Vec<_>>();
     let working = rows.iter().position(|row| row.contains("Working")).unwrap();
     assert_eq!(
-        working + 2,
+        working + 3,
         rows.len(),
-        "the status slot must be the transcript tail: {rows:?}"
+        "the status item must be the transcript tail: {rows:?}"
     );
     assert!(rows[working - 1].is_empty(), "{rows:?}");
-    assert!(rows[working + 1].is_empty(), "{rows:?}");
 }
 
 #[test]

@@ -519,6 +519,7 @@ pub enum TranscriptItem {
     ToolPresentation {
         id: ToolCallId,
         result: Option<serde_json::Value>,
+        codemode: Option<std::sync::Arc<crate::tui::view::codemode_render::CodemodeDetails>>,
     },
     Assistant(String),
     Reasoning(String),
@@ -769,6 +770,9 @@ fn push_message(
                             items.push(TranscriptItem::ToolPresentation {
                                 id: result.tool_call_id.clone(),
                                 result: presentation,
+                                codemode: details
+                                    .and_then(|details| details.metadata())
+                                    .and_then(crate::tui::view::codemode_render::details),
                             });
                         }
                     }

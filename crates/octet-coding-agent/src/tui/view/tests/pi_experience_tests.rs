@@ -179,15 +179,15 @@ fn pi_working_spinner_advances_without_label_shimmer_and_stops_on_settlement() {
         let mut state = shell.state.borrow_mut();
         assert!(state.has_active_thinking_spinner());
         assert!(!state.has_active_status_shimmer());
-        let raw = rendered_with_working(&state, 80).join("\n");
+        let raw = shell_chrome(&state, 80, Instant::now()).composer.join("\n");
         let plain = strip_terminal_sequences(&raw);
         assert!(
-            plain.lines().any(|row| row.starts_with(" ⠋ Working")),
+            plain.lines().any(|row| row.starts_with("── ⠋ Working")),
             "{plain:?}"
         );
         let label = raw.split_once("Working").unwrap().1.to_owned();
         state.advance_thinking_spinner(1);
-        let next = rendered_with_working(&state, 80).join("\n");
+        let next = shell_chrome(&state, 80, Instant::now()).composer.join("\n");
         assert!(
             strip_terminal_sequences(&next).contains("⠙ Working"),
             "{next:?}"
@@ -224,10 +224,11 @@ fn pi_extension_working_frames_honor_disabled_host_animation() {
             }),
             ..Default::default()
         });
-        let rows =
-            strip_terminal_sequences(&rendered_with_working(&shell.state.borrow(), 80).join("\n"));
-        assert!(rows.contains("Working"), "{rows}");
-        assert_eq!(rows.contains("X Working"), animation, "{rows}");
+        let chrome = shell_chrome(&shell.state.borrow(), 80, Instant::now());
+        assert!(chrome.working.is_empty());
+        let row = strip_terminal_sequences(&chrome.composer[0]);
+        assert!(row.contains("Working"), "{row}");
+        assert_eq!(row.contains("X Working"), animation, "{row}");
     }
 }
 
@@ -425,6 +426,7 @@ fn working_component_starts_at_the_native_spinner_column_and_clips_by_cells() {
         let renderer = theme.rich_renderer();
         let mut reasoning = AssistantBlock::streaming_reasoning("");
         reasoning.show_reasoning_hint = false;
+        reasoning.status_activity = true;
         for width in [80, 20, 12, 8, 7, 6, 5, 4, 3, 2, 1, 160] {
             let native = render_block(
                 None,
@@ -954,7 +956,7 @@ fn scroll_button_centering_and_theme_replacement_follow_theme_data() {
     shell.scroll(-1);
     let hint = |shell: &InteractiveShell| {
         let rows = render_shell_viewport_at(&shell.state.borrow(), 80, Instant::now());
-        strip_terminal_sequences(row_containing(&rows, "Jump to bottom"))
+        strip_terminal_sequences(row_containing(&rows, "Jump"))
     };
     let centered = |row: String, label: &str| {
         assert_eq!(
@@ -962,16 +964,16 @@ fn scroll_button_centering_and_theme_replacement_follow_theme_data() {
             format!("{}{label}", " ".repeat((80 - visible_width(label)) / 2))
         );
     };
-    centered(hint(&shell), "[ ↓ Jump to bottom ]");
+    centered(hint(&shell), "[ ↓ Jump ]");
     shell.set_theme(pi);
-    centered(hint(&shell), "[ ↓ Jump to bottom ]");
+    centered(hint(&shell), "[ ↓ Jump ]");
     let ascii = crate::tui::theme::test_theme_source_with(
         "[metadata]\nprofile = 'pi'\n",
         TerminalCapabilities::test(true, false, ColorDepth::TrueColor),
         TerminalBackground::Dark,
     );
     shell.set_theme(ascii);
-    centered(hint(&shell), "[ v Jump to bottom ]");
+    centered(hint(&shell), "[ v Jump ]");
 }
 
 #[test]
@@ -1083,12 +1085,20 @@ fn inherited_style_fixture(foreground_role: &str) -> String {
     )
 }
 
+fn display_header_labels(theme: &OctetTheme) -> (&'static str, &'static str) {
+    use crate::tui::theme_schema::ToolCardLayout;
+    match theme.layout().tool_cards {
+        ToolCardLayout::Pi => ("read", "$"),
+        ToolCardLayout::Octet => ("Read", "Bash"),
+    }
+}
+
 fn rendered_read_header(theme: &OctetTheme) -> String {
     rendered_tool_header(
         theme,
         "read",
         serde_json::json!({"path":"file.txt"}),
-        "Read",
+        display_header_labels(theme).0,
     )
 }
 
@@ -1097,7 +1107,7 @@ fn rendered_bash_header(theme: &OctetTheme) -> String {
         theme,
         "bash",
         serde_json::json!({"command":"printf result"}),
-        "Bash",
+        display_header_labels(theme).1,
     )
 }
 
@@ -1138,7 +1148,7 @@ fn rendered_scroll_hint(theme: &OctetTheme) -> String {
     }
     shell.scroll(-1);
     let rows = render_shell_viewport_at(&shell.state.borrow(), 80, Instant::now());
-    row_containing(&rows, "Jump to bottom").to_owned()
+    row_containing(&rows, "Jump").to_owned()
 }
 
 fn assert_rendered_style(
@@ -1205,7 +1215,7 @@ fn legacy_foreground_and_accent_attributes_reach_the_rendered_header_and_scroll_
         let hint = rendered_scroll_hint(&theme);
         assert_rendered_style(
             &hint,
-            "Jump to bottom",
+            "Jump",
             vt100::Color::Rgb(0x76, 0x54, 0x32),
             vt100::Color::Rgb(0x23, 0x45, 0x67),
             true,
@@ -1246,7 +1256,7 @@ fn explicit_transcript_roles_override_inherited_attributes_after_aliases_compile
     let hint = rendered_scroll_hint(&theme);
     assert_rendered_style(
         &hint,
-        "Jump to bottom",
+        "Jump",
         vt100::Color::Rgb(0xa1, 0xb2, 0xc3),
         vt100::Color::Rgb(0x45, 0x67, 0x89),
         false,
@@ -1274,8 +1284,14 @@ fn pi_tool_title_inheritance_and_explicit_header_overrides_preserve_attributes()
         let source = format!("{profile}{base}");
         let theme = test_theme_from_source(&source);
         for (label, header) in [
-            ("Read", rendered_read_header(&theme)),
-            ("Bash", rendered_bash_header(&theme)),
+            (
+                display_header_labels(&theme).0,
+                rendered_read_header(&theme),
+            ),
+            (
+                display_header_labels(&theme).1,
+                rendered_bash_header(&theme),
+            ),
         ] {
             assert_rendered_style(
                 &header,
@@ -1292,8 +1308,14 @@ fn pi_tool_title_inheritance_and_explicit_header_overrides_preserve_attributes()
             format!("{source}\n[roles.tool_header]\nforeground = '#cba987'\nbold = false\n");
         let theme = test_theme_from_source(&source);
         for (label, header) in [
-            ("Read", rendered_read_header(&theme)),
-            ("Bash", rendered_bash_header(&theme)),
+            (
+                display_header_labels(&theme).0,
+                rendered_read_header(&theme),
+            ),
+            (
+                display_header_labels(&theme).1,
+                rendered_bash_header(&theme),
+            ),
         ] {
             assert_rendered_style(
                 &header,
@@ -1319,8 +1341,14 @@ fn imported_pi_tool_title_colors_read_and_bash_card_labels() {
             .into_owned();
     let theme = test_theme_from_source(&source);
     for (label, header) in [
-        ("Read", rendered_read_header(&theme)),
-        ("Bash", rendered_bash_header(&theme)),
+        (
+            display_header_labels(&theme).0,
+            rendered_read_header(&theme),
+        ),
+        (
+            display_header_labels(&theme).1,
+            rendered_bash_header(&theme),
+        ),
     ] {
         assert_rendered_style(
             &header,
@@ -1523,8 +1551,10 @@ fn wide_tool_indent_preserves_output_in_narrow_content() {
 
 #[test]
 fn activity_surface_roles_override_reasoning_and_fall_back_when_unset() {
-    let activity =
-        TranscriptBlock::Reasoning(Box::new(AssistantBlock::streaming_reasoning("private")));
+    let mut activity = AssistantBlock::streaming_reasoning("private");
+    activity.status_activity = true;
+    activity.thinking_slot = true;
+    let activity = TranscriptBlock::Reasoning(Box::new(activity));
     for (extra, role, bg) in [
         ("", "surface.reasoning", vt100::Color::Rgb(0x11, 0x22, 0x33)),
         (
@@ -1638,6 +1668,7 @@ fn working_component_keeps_crossing_graphemes_between_gutter_and_frame() {
         for width in [20, 80] {
             let mut reasoning = AssistantBlock::streaming_reasoning("");
             reasoning.show_reasoning_hint = false;
+            reasoning.status_activity = true;
             let block = TranscriptBlock::Reasoning(Box::new(reasoning.clone()));
             let plan = compile_surface_plan(None, &block, &theme, width);
             for glyph in ["界", "👩‍💻", "界e\u{301}"] {
@@ -1673,4 +1704,185 @@ fn working_component_keeps_crossing_graphemes_between_gutter_and_frame() {
             }
         }
     }
+}
+
+#[test]
+fn working_placement_is_independent_of_footer_and_effort_color() {
+    for (placement, chrome, embedded) in [
+        ("composer", "boxed", true),
+        ("above", "boxed", false),
+        ("composer", "shaded", false),
+    ] {
+        let theme = test_theme_from_source(&format!(
+            r##"
+            [metadata]
+            profile = "pi"
+            [layout]
+            working_indicator = "{placement}"
+            [colors]
+            composer = "{chrome}"
+            [roles."extension.pi.thinkingMedium"]
+            foreground = "#129abc"
+        "##
+        ));
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(100, 24);
+        shell.set_identity("fixture", "model", "medium");
+        let idle = shell_chrome(&shell.state.borrow(), 100, Instant::now());
+        shell.begin_run("fixture");
+        let active = shell_chrome(&shell.state.borrow(), 100, Instant::now());
+        assert_eq!(active.composer.len(), idle.composer.len());
+        assert_eq!(
+            strip_terminal_sequences(&active.composer[0]).contains("Working"),
+            embedded
+        );
+        assert_eq!(active.working.is_empty(), embedded);
+        if chrome == "boxed" {
+            for index in [0, 2] {
+                let row = &active.composer[index];
+                let parser = surface_frame::emulate_row_for_test(row, 100);
+                assert_eq!(
+                    parser.screen().cell(0, 0).unwrap().fgcolor(),
+                    vt100::Color::Rgb(0x12, 0x9a, 0xbc)
+                );
+            }
+        }
+        assert!(
+            strip_terminal_sequences(active.composer.last().unwrap()).ends_with("model • medium")
+        );
+        assert!(!shell_chrome(&shell.state.borrow(), 9, Instant::now())
+            .working
+            .is_empty());
+    }
+}
+
+#[test]
+fn pi_reasoning_and_embedded_working_can_appear_together() {
+    let mut shell = InteractiveShell::test_shell_with_theme(themes().remove(0));
+    shell.set_size(100, 24);
+    shell.begin_run("test");
+    shell.set_thinking_expanded(false);
+    let mut state = shell.state.borrow_mut();
+    state.append_text_block(OutputChannel::Reasoning, "hidden trace");
+    let rows = state.rendered_transcript(100);
+    assert_content_cell(&rows, "Thinking...", 1, true, 100);
+    assert!(!strip_terminal_sequences(&rows.join("\n")).contains("hidden trace"));
+    drop(rows);
+    let chrome = shell_chrome(&state, 100, Instant::now());
+    assert!(chrome.working.is_empty());
+    assert!(strip_terminal_sequences(&chrome.composer[0]).contains("Working"));
+}
+
+#[test]
+fn pi_bash_and_read_match_the_reference_disclosure() {
+    let theme = themes().remove(0);
+    let renderer = theme.rich_renderer();
+    let render = |panel: &ToolPanel, expanded| {
+        super::super::transcript_render::render_tool(
+            panel,
+            &theme,
+            &renderer,
+            100,
+            expanded,
+            "surface.tool.success",
+        )
+    };
+    let panel = |name: &str, args: serde_json::Value, output: &str| {
+        let mut panel = ToolPanel::new(
+            ToolCallId(name.into()),
+            name.into(),
+            args.to_string(),
+            summarize_tool(name, &args),
+            output.into(),
+            true,
+            false,
+            None,
+            None,
+        );
+        panel.duration = Some(Duration::from_millis(742));
+        panel
+    };
+    let output = "first\nsecond\nthird\nfourth\n\nfifth\nsixth\nseventh";
+    let bash = panel(
+        "bash",
+        serde_json::json!({"command":"printf result","timeout":15}),
+        output,
+    );
+    let rows = render(&bash, false);
+    assert_eq!(
+        rows.lines
+            .iter()
+            .map(|row| strip_terminal_sequences(row))
+            .collect::<Vec<_>>(),
+        [
+            "$ printf result (timeout 15s)",
+            "",
+            "... (3 earlier lines, ctrl+o to expand)",
+            "fourth",
+            "",
+            "fifth",
+            "sixth",
+            "seventh",
+            "",
+            "Took 0.7s"
+        ]
+    );
+    assert_eq!(
+        rows.text,
+        "$ printf result\nfourth\n\nfifth\nsixth\nseventh"
+    );
+    assert!(render(&bash, true).text.contains(output));
+    let read = panel(
+        "read",
+        serde_json::json!({"path":"fixture.txt"}),
+        "fixture output",
+    );
+    let rows = render(&read, false);
+    assert_eq!(rows.lines.len(), 1);
+    assert_eq!(strip_terminal_sequences(&rows.lines[0]), "read fixture.txt");
+    assert!(render(&read, true).text.contains("fixture output"));
+}
+
+#[test]
+fn pi_codemode_uses_separate_source_calls_and_output_previews() {
+    let theme = themes().remove(0);
+    let renderer = theme.rich_renderer();
+    let script = (1..=12)
+        .map(|n| format!("text({n});"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let args = serde_json::json!({"code":script});
+    let mut panel = ToolPanel::new(ToolCallId("fixture".into()), "codemode".into(), args.to_string(), summarize_tool("codemode", &args), "Script completed\nWall time 0.6 seconds\nOutput:\nalpha\nbeta\ngamma\ndelta\nepsilon\nzeta".into(), true, false, None, None);
+    panel.duration = Some(Duration::from_millis(600));
+    let calls = (1..=10).map(|n| serde_json::json!({"name":format!("call-{n}"), "status":"ok", "args":"{}", "duration_ms":9})).collect::<Vec<_>>();
+    panel.codemode_details = super::super::codemode_render::details(
+        &serde_json::json!({"calls":calls,"full_output_path":"/fixture/output"}),
+    );
+    let render = |expanded| {
+        super::super::transcript_render::render_tool(
+            &panel,
+            &theme,
+            &renderer,
+            100,
+            expanded,
+            "surface.tool.success",
+        )
+    };
+    let compact = render(false);
+    let rows = strip_terminal_sequences(&compact.lines.join("\n"));
+    assert!(rows.starts_with("codemode\ntext(1);"), "{rows}");
+    assert!(
+        rows.contains("... (2 more lines, ctrl+o to expand)"),
+        "{rows}"
+    );
+    assert!(
+        rows.contains("... (2 earlier calls, ctrl+o to expand)\n✓ call-3 {} 9ms"),
+        "{rows}"
+    );
+    assert!(rows.contains("alpha\nbeta\ngamma\ndelta\nepsilon\n... (1 more lines, ctrl+o to expand)\nFull output: /fixture/output\n\nTook 0.6s"), "{rows}");
+    assert!(!compact.text.contains("Full output:"));
+    let expanded = render(true);
+    assert!(expanded.text.contains("text(12);"));
+    assert!(expanded.text.contains("zeta"));
+    assert!(!expanded.text.contains("Wall time"));
 }

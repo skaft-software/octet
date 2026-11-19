@@ -121,44 +121,49 @@ fn working_slot_stays_below_reasoning_and_tools_for_the_entire_run() {
                 } else {
                     "Working"
                 };
-                let working_row = previous
+                let activity_end = previous
                     .iter()
                     .position(|row| row.contains(working_label))
                     .unwrap();
+                let composer = previous
+                    .iter()
+                    .position(|row| row.starts_with('›'))
+                    .unwrap();
                 let mut paint = |shell: &mut InteractiveShell| {
-                    {
-                        let mut state = shell.state.borrow_mut();
-                        if let Some(index) = state.active_reasoning {
-                            if let TranscriptBlock::Reasoning(reasoning) =
-                                &mut state.transcript[index]
-                            {
-                                let future = Instant::now() + Duration::from_secs(3600);
-                                reasoning.activity_started_at = Some(future);
-                                reasoning.reasoning_started_at = Some(future);
-                            }
-                        }
-                    }
-                    let visible = !expanded || shell.state.borrow().active_reasoning.is_none();
+                    let thinking = shell.state.borrow().active_reasoning.is_some();
+                    let label = if thinking {
+                        "Thinking ("
+                    } else {
+                        working_label
+                    };
                     let rows = frame(&component, width);
                     assert_eq!(
-                        rows.iter()
-                            .filter(|row| row.contains(working_label))
-                            .count(),
-                        usize::from(visible),
+                        rows.iter().filter(|row| row.contains(label)).count(),
+                        usize::from(!thinking || !expanded),
                         "{isolated}/{component_line}/{expanded}: {rows:?}"
                     );
                     assert_eq!(
-                        rows.iter().position(|row| row.contains(working_label)),
-                        visible.then_some(working_row),
-                        "working slot moved: {previous:?} -> {rows:?}"
+                        rows.iter().position(|row| row.contains(label)),
+                        (!thinking || !expanded).then_some(activity_end),
+                        "the activity label must stay on the same row: {previous:?} -> {rows:?}"
                     );
-                    let released_row =
-                        !visible && previous.iter().any(|row| row.contains(working_label));
+                    assert_eq!(
+                        rows.iter().position(|row| row.starts_with('›')),
+                        Some(composer)
+                    );
+                    assert!(
+                        !rows.iter().any(|row| row.contains(if thinking {
+                            working_label
+                        } else {
+                            "Thinking ("
+                        })),
+                        "{rows:?}"
+                    );
                     for (old_row, text) in history_positions(&previous) {
                         if let Some(row) = rows.iter().position(|current| current == &text) {
                             assert!(
-                                row <= old_row + usize::from(released_row),
-                                "history moved down: {previous:?} -> {rows:?}"
+                                row <= old_row + 1,
+                                "only the Thinking detail can release one history row: {previous:?} -> {rows:?}"
                             );
                         }
                     }
@@ -245,6 +250,61 @@ fn working_slot_stays_below_reasoning_and_tools_for_the_entire_run() {
 }
 
 #[test]
+fn live_activity_padding_surrounds_a_stable_two_line_slot() {
+    for fullscreen in [false, true] {
+        let (mut shell, _) = fixture(80, 32, false);
+        let mut status_row = None;
+        for thinking in [false, true] {
+            if thinking {
+                shell.on_agent_event(&AgentEvent::OutputDelta {
+                    channel: OutputChannel::Reasoning,
+                    text: "## Checking padding\n\nPrivate trace".into(),
+                });
+            }
+            let state = shell.state.borrow();
+            let rows = if fullscreen {
+                render_shell_viewport_at(&state, 80, Instant::now())
+            } else {
+                render_shell_at(&state, 80, Instant::now())
+            };
+            let rows = rows
+                .iter()
+                .map(|row| strip_terminal_sequences(row))
+                .collect::<Vec<_>>();
+            let last = rows
+                .iter()
+                .position(|row| row.contains("HISTORY-39"))
+                .unwrap();
+            let label = if thinking {
+                "• Thinking ("
+            } else {
+                "• Working ("
+            };
+            let status = rows.iter().position(|row| row.contains(label)).unwrap();
+            assert_eq!(status - last, 2, "{fullscreen}/{thinking}: {rows:?}");
+            assert!(rows[last + 1..status]
+                .iter()
+                .all(|row| row.trim().is_empty()));
+            assert_eq!(status, *status_row.get_or_insert(status));
+            if thinking {
+                assert!(rows[status + 1].contains("Checking padding"));
+            } else {
+                assert!(rows[status + 1].trim().is_empty());
+            }
+            assert!(rows[status + 2].trim().is_empty());
+            assert!(
+                rows[status + 3].starts_with('─'),
+                "expected composer rule: {rows:?}"
+            );
+            assert!(
+                rows[status + 4].starts_with('›'),
+                "expected composer: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn working_keeps_a_neutral_row_after_the_shaded_prompt_card() {
     let theme = crate::tui::theme::test_theme_for(
         crate::tui::theme::TerminalBackground::Dark,
@@ -290,6 +350,98 @@ fn working_keeps_a_neutral_row_after_the_shaded_prompt_card() {
             .trim()
             .is_empty());
         assert_eq!(bg(working - 1), None);
+    }
+}
+
+#[test]
+fn fullscreen_activity_scrolls_out_but_steering_stays_above_the_composer() {
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    for threaded in [false, true] {
+        let (mut shell, component) = fixture(80, 24, threaded);
+        shell.state.borrow_mut().render_threaded = threaded;
+        shell.queue_steering(&ComposedInput::from_text("queued fixture".into()));
+        let paint = |shell: &InteractiveShell| {
+            let rows = frame(&component, 80);
+            shell.state.frame_written_at(None);
+            rows
+        };
+        let find = |rows: &[String], label: &str| rows.iter().position(|row| row.contains(label));
+        let working = paint(&shell);
+        let steering = find(&working, "Steering").unwrap();
+        let activity = find(&working, "• Working (").unwrap();
+        assert!(activity < steering);
+        {
+            let state = shell.state.borrow();
+            assert!(InteractiveShell::transcript_position_at_screen_cell(
+                &state,
+                activity as u16,
+                0
+            )
+            .is_none());
+        }
+
+        shell.scroll_lines(-2); // reserved summary, then the label
+        let scrolled = paint(&shell);
+        let jump = find(&scrolled, "[ ↓ Jump").unwrap();
+        assert!(find(&scrolled, "• Working (").is_none(), "{scrolled:?}");
+        assert!(jump < steering);
+        assert_eq!(find(&scrolled, "Steering"), Some(steering));
+        let history = history_positions(&scrolled);
+
+        shell.on_agent_event(&AgentEvent::OutputDelta {
+            channel: OutputChannel::Reasoning,
+            text: "## Checking viewport placement\n\nPrivate fixture trace".into(),
+        });
+        let thinking_scrolled = paint(&shell);
+        assert_eq!(history_positions(&thinking_scrolled), history);
+        assert!(find(&thinking_scrolled, "• Thinking (").is_none());
+        assert!(thinking_scrolled[jump].contains("[ ↓ Jump"));
+        assert!(shell.intercept_transcript_input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: thinking_scrolled[jump].find('[').unwrap() as u16,
+            row: jump as u16,
+            modifiers: KeyModifiers::NONE,
+        })));
+        let thinking = paint(&shell);
+        let detail = find(&thinking, "Checking viewport placement").unwrap();
+        let status = find(&thinking, "• Thinking (").unwrap();
+        assert_eq!(detail, status + 1);
+        assert!(detail < steering);
+        assert_eq!(find(&thinking, "Steering"), Some(steering));
+
+        shell.scroll_lines(-1);
+        let clipped = paint(&shell);
+        assert!(find(&clipped, "• Thinking (").unwrap() < jump);
+        assert!(find(&clipped, "Checking viewport placement").is_none());
+        shell.scroll_lines(-1);
+        assert!(find(&paint(&shell), "• Thinking (").is_none());
+        shell.scroll_lines(2);
+        assert_eq!(find(&paint(&shell), "• Thinking ("), Some(status));
+
+        shell.on_agent_event(&AgentEvent::CompactionStarted {
+            reason: octet_agent::CompactionReason::Threshold,
+        });
+        let compacting = paint(&shell);
+        assert!(find(&compacting, "Compacting context").unwrap() < steering);
+        shell.scroll_lines(-1);
+        let scrolled = paint(&shell);
+        assert!(find(&scrolled, "Compacting context").is_none());
+        assert_eq!(find(&scrolled, "Steering"), Some(steering));
+        shell.on_agent_event(&AgentEvent::RunFinished {
+            reason: octet_agent::FinishReason::Completed,
+            head: octet_agent::EntryId("fixture".into()),
+        });
+        shell.jump_to_tail();
+        let settled = paint(&shell);
+        for label in ["• Working (", "• Thinking (", "Compacting context"] {
+            assert!(find(&settled, label).is_none(), "{settled:?}");
+            let state = shell.state.borrow();
+            assert!(!state
+                .rendered_transcript(80)
+                .iter()
+                .any(|row| strip_terminal_sequences(row).contains(label)));
+        }
     }
 }
 
@@ -358,9 +510,14 @@ fn working_slot_keeps_composer_and_completion_hits_on_painted_rows() {
 }
 
 #[test]
-fn collapsed_reasoning_completion_preserves_rows_at_inline_hint_widths() {
+fn collapsed_reasoning_completion_adds_only_one_transcript_row() {
     for width in [32, 40, 48, 64, 80] {
         let (mut shell, component) = fixture(width, 24, true);
+        shell
+            .state
+            .borrow_mut()
+            .theme
+            .set_duration_preference(Some(true));
         shell.on_agent_event(&AgentEvent::OutputDelta {
             channel: OutputChannel::Reasoning,
             text: "A private trace without a summary heading".into(),
@@ -368,10 +525,39 @@ fn collapsed_reasoning_completion_preserves_rows_at_inline_hint_widths() {
         let before = frame(&component, width);
         shell.state.borrow_mut().finish_turn_streaming_blocks();
         let after = frame(&component, width);
+        // The settled marker and its separator enter history; the reserved
+        // summary line stays with the live slot instead of absorbing the marker.
+        let expected = history_positions(&before)
+            .into_iter()
+            .filter_map(|(row, text)| row.checked_sub(2).map(|row| (row, text)))
+            .collect::<Vec<_>>();
         assert_eq!(
             history_positions(&after),
-            history_positions(&before),
-            "completion changed row geometry at width {width}: {before:?} -> {after:?}"
+            expected,
+            "{width}: {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after
+                .iter()
+                .filter(|line| line.contains("• Thought for "))
+                .count(),
+            1
+        );
+        let thinking = before
+            .iter()
+            .position(|line| line.contains("• Thinking ("))
+            .unwrap();
+        assert_eq!(
+            after.iter().position(|line| line.contains("• Working (")),
+            Some(thinking)
+        );
+        let composer = before
+            .iter()
+            .position(|line| line.starts_with('›'))
+            .unwrap();
+        assert_eq!(
+            after.iter().position(|line| line.starts_with('›')),
+            Some(composer)
         );
     }
 }
@@ -580,7 +766,8 @@ fn bash_completion_keeps_cached_renderer_geometry_until_the_final_frame_arrives(
 #[test]
 fn live_roster_settlement_reserves_rows_until_the_wave_settles() {
     for isolated in [false, true] {
-        for (width, height) in [(24, 16), (80, 24), (120, 32)] {
+        // Leave visible history above the roster and padded live slot.
+        for (width, height) in [(24, 22), (80, 24), (120, 32)] {
             let (mut shell, component) = fixture(width, height, isolated);
             let mut states = vec![
                 ("wheel-input", "pending"),

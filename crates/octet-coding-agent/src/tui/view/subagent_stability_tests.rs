@@ -473,11 +473,9 @@ fn visible_rows(shell: &InteractiveShell, width: u16) -> Vec<String> {
     let state = shell.state.borrow();
     let chrome = shell_chrome(&state, width, Instant::now());
     let transcript = transcript_lines(&state, width);
-    let scroll = resolved_scroll_from_bottom(&state, transcript.len(), chrome.transcript_rows);
-    let capacity = transcript_viewport_capacity(chrome.transcript_rows, scroll > 0);
-    let end = transcript.len().saturating_sub(scroll);
-    let start = end.saturating_sub(capacity);
-    transcript[start..end]
+    let viewport = TranscriptViewport::new(&chrome, &transcript, true);
+    let history = viewport.history_window(viewport.resolve_scroll(&state));
+    transcript[history]
         .iter()
         .map(|line| strip_terminal_sequences(line))
         .collect()

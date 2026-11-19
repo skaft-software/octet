@@ -870,7 +870,11 @@ fn paint_mark(shell: &InteractiveShell) -> (u16, u16) {
     use crate::tui::view::renderer_geometry::{GeometryFence, RenderedGeometry};
     let mut state = shell.state.borrow_mut();
     state.rendered_transcript(state.size.0);
-    let geometry = RenderedGeometry::capture(&state, GeometryFence::capture(&state));
+    let geometry = RenderedGeometry::capture(
+        &state,
+        GeometryFence::capture(&state),
+        state.application_viewport_requested,
+    );
     let (x, y) = geometry.welcome_mark.expect("visible mark");
     state.render_geometry = Some(std::sync::Arc::new(geometry));
     (x, y as u16)

@@ -175,7 +175,11 @@ fn transcript_stable_rows(state: &ShellState, acknowledged: Option<CommitCursor>
         };
         let block_end = block_start.saturating_add(block_len);
         if transcript_block_is_final_at(state, index) {
-            if finalized_block_rows_are_stable(block) {
+            let expandable_read = state.theme.layout().tool_cards
+                == crate::tui::theme_schema::ToolCardLayout::Pi
+                && matches!(block, TranscriptBlock::Tool(panel)
+                    if panel.name == "read" && !panel.is_error && !panel.output.trim().is_empty());
+            if !expandable_read && finalized_block_rows_are_stable(block) {
                 stable_rows = block_end;
                 continue;
             }

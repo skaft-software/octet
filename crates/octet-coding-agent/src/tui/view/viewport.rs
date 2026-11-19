@@ -1,10 +1,11 @@
 use std::cell::Ref;
+use std::ops::Range;
 use std::time::Instant;
 
 use sexy_tui_rs::{wrap_text_with_ansi, FrameUpdate};
 
 use super::renderer_runtime::ShellFrameState;
-use super::shell_chrome::{append_viewport_chrome, shell_chrome};
+use super::shell_chrome::{append_viewport_chrome, shell_chrome, ShellChrome};
 use super::transcript_selection::{
     selection_position_for_visual_cell, visual_line_for_transcript_position, TranscriptPosition,
 };
@@ -35,6 +36,56 @@ pub(super) fn max_scroll_for_available(transcript_len: usize, available: usize) 
     }
 }
 
+/// The application viewport can scroll through the live activity after the
+/// retained history. That suffix has no transcript block or copy coordinates.
+#[derive(Clone, Copy)]
+pub(super) struct TranscriptViewport {
+    pub(super) available: usize,
+    pub(super) total_rows: usize,
+    history_rows: usize,
+    activity_start: usize,
+}
+
+impl TranscriptViewport {
+    pub(super) fn new(chrome: &ShellChrome, history: &[String], scroll_activity: bool) -> Self {
+        let activity_rows = if scroll_activity {
+            chrome.working.len()
+        } else {
+            0
+        };
+        // The viewport's navigation row supplies the final bottom padding row.
+        // Keep the event's own separator in scroll coordinates, not copyable history.
+        let padded = scroll_activity && chrome.working_bottom_padding;
+        let activity_start = history.len()
+            + if padded {
+                ShellChrome::separator_rows(history.last())
+            } else {
+                0
+            };
+        Self {
+            available: chrome.transcript_rows + activity_rows,
+            total_rows: activity_start + activity_rows - usize::from(padded),
+            history_rows: history.len(),
+            activity_start,
+        }
+    }
+
+    pub(super) fn resolve_scroll(self, state: &ShellState) -> usize {
+        resolved_scroll_from_bottom(state, self.total_rows, self.available)
+    }
+
+    pub(super) fn window(self, scroll: usize) -> Range<usize> {
+        let capacity = transcript_viewport_capacity(self.available, scroll > 0);
+        let end = self.total_rows.saturating_sub(scroll);
+        end.saturating_sub(capacity)..end
+    }
+
+    pub(super) fn history_window(self, scroll: usize) -> Range<usize> {
+        let window = self.window(scroll);
+        window.start.min(self.history_rows)..window.end.min(self.history_rows)
+    }
+}
+
 pub(super) fn max_scroll_from_bottom(state: &ShellState, width: u16) -> usize {
     if state.overlay.is_some() {
         return 0;
@@ -50,7 +101,8 @@ pub(super) fn max_scroll_from_bottom(state: &ShellState, width: u16) -> usize {
             });
     }
     let chrome = shell_chrome(state, width, Instant::now());
-    max_scroll_for_available(transcript_lines(state, width).len(), chrome.transcript_rows)
+    let viewport = TranscriptViewport::new(&chrome, &transcript_lines(state, width), true);
+    max_scroll_for_available(viewport.total_rows, viewport.available)
 }
 
 pub(super) fn transcript_viewport_capacity_for_state(state: &ShellState, width: u16) -> usize {
@@ -63,9 +115,7 @@ pub(super) fn transcript_viewport_capacity_for_state(state: &ShellState, width: 
         return 0;
     }
     let chrome = shell_chrome(state, width, Instant::now());
-    let transcript = transcript_lines(state, width);
-    let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
-    transcript_viewport_capacity(chrome.transcript_rows, scroll > 0)
+    transcript_viewport_capacity(chrome.transcript_rows + chrome.working.len(), false)
 }
 
 /// Capacity for a pointer gesture that is already captured.
@@ -443,12 +493,11 @@ pub(super) fn retain_viewport_anchor(state: &ShellState) {
         return;
     }
     let chrome = shell_chrome(state, state.size.0, Instant::now());
-    let transcript = transcript_lines(state, state.size.0);
-    let scroll = resolved_scroll_from_bottom(state, transcript.len(), chrome.transcript_rows);
+    let viewport = TranscriptViewport::new(&chrome, &transcript_lines(state, state.size.0), true);
+    let scroll = viewport.resolve_scroll(state);
     if scroll > 0 {
-        let capacity = transcript_viewport_capacity(chrome.transcript_rows, true);
-        let end = transcript.len().saturating_sub(scroll);
-        capture_viewport_anchor(state, end.saturating_sub(capacity), end);
+        let history = viewport.history_window(scroll);
+        capture_viewport_anchor(state, history.start, history.end);
     }
 }
 
@@ -488,8 +537,9 @@ pub(super) fn upgrade_viewport_anchor(state: &ShellState) {
         start.saturating_add(anchor.fallback_block_row)
     };
     drop(cache);
-    let available = shell_chrome(state, state.size.0, Instant::now()).transcript_rows;
-    let capacity = transcript_viewport_capacity(available, true);
+    let chrome = shell_chrome(state, state.size.0, Instant::now());
+    let capacity =
+        transcript_viewport_capacity(chrome.transcript_rows + chrome.working.len(), true);
     let mut fallback = None;
     // Promotion must keep tool rows just like capture. Looking
     // below the viewport can pick a hidden tail row whose screen offset is then
@@ -598,15 +648,18 @@ pub(super) fn resolved_scroll_from_bottom(
     scroll
 }
 
-fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -> Vec<String> {
+fn transcript_viewport_lines(
+    state: &ShellState,
+    width: u16,
+    chrome: &ShellChrome,
+) -> (Vec<String>, TranscriptViewport) {
     state.refresh_transcript_search(width);
     let transcript = transcript_lines(state, width);
-    state.reveal_transcript_search(transcript.len(), available);
-    let scroll = resolved_scroll_from_bottom(state, transcript.len(), available);
-    let scrolled = scroll > 0;
-    let capacity = transcript_viewport_capacity(available, scrolled);
-    let end = transcript.len().saturating_sub(scroll);
-    let start = end.saturating_sub(capacity);
+    let viewport = TranscriptViewport::new(chrome, &transcript, true);
+    state.reveal_transcript_search(viewport.total_rows, viewport.available);
+    let scroll = viewport.resolve_scroll(state);
+    let window = viewport.window(scroll);
+    let Range { start, end } = viewport.history_window(scroll);
     // An image cut by either edge of the viewport is placed only for its
     // visible rows. Kitty-protocol terminals (Ghostty, Kitty, WezTerm) draw a
     // placement over text at full height, so an uncropped one covered the
@@ -621,14 +674,19 @@ fn transcript_viewport_lines(state: &ShellState, width: u16, available: usize) -
     let mut lines = sexy_tui_rs::images::crop_anchors_to_window(&transcript, start, end);
     state.decorate_transcript_search(&mut lines, start);
     super::transcript_selection::decorate_selection(state, &mut lines, start);
-    if scrolled || !state.follow_tail {
+    if !state.follow_tail {
         capture_viewport_anchor(state, start, end);
-    } else if state.follow_tail {
+    } else {
         state.viewport_anchor.set(None);
     }
-    drop(transcript);
-
-    lines
+    if viewport.activity_start > transcript.len() && window.contains(&transcript.len()) {
+        lines.push(String::new());
+    }
+    lines.extend_from_slice(
+        &chrome.working[window.start.saturating_sub(viewport.activity_start)
+            ..window.end.saturating_sub(viewport.activity_start)],
+    );
+    (lines, viewport)
 }
 
 pub(super) fn render_shell_viewport_at(
@@ -637,15 +695,20 @@ pub(super) fn render_shell_viewport_at(
     now: Instant,
 ) -> Vec<String> {
     let _stage = sexy_tui_rs::render_metrics::Span::new(2);
-    let chrome = shell_chrome(state, width, now);
-    let mut lines = if state.overlay.is_some() {
-        let mut overlay = overlay_lines(state, width, chrome.transcript_rows);
-        overlay.truncate(chrome.transcript_rows);
-        overlay
+    let mut chrome = shell_chrome(state, width, now);
+    let (mut lines, viewport) = if state.overlay.is_some() {
+        (
+            overlay_lines(state, width, chrome.transcript_rows),
+            TranscriptViewport::new(&chrome, &[], false),
+        )
     } else {
-        transcript_viewport_lines(state, width, chrome.transcript_rows)
+        let (lines, viewport) = transcript_viewport_lines(state, width, &chrome);
+        // Keep the dock's allocation intact; only change which rows can scroll.
+        chrome.transcript_rows = viewport.available;
+        chrome.working.clear();
+        (lines, viewport)
     };
-    state.decorate_transcript_navigation(&mut lines, width, &chrome, now);
+    state.decorate_transcript_navigation(&mut lines, width, &chrome, viewport, now);
     #[cfg(test)]
     super::fullscreen_work_tests::record(|work| {
         work.cells_rendered += lines

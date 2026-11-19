@@ -134,10 +134,10 @@ model recoloring. Tern receives those rows as native ANSI content, not a second
 terminal renderer. Extension titles are owner-scoped terminal-safe text, not theme
 colors. Removing a mount restores the native surface.
 
-A cached Pi working indicator starts at the native spinner column. Its content
-fits inside the activity surface; cards, rails, padding and native fill remain
-around it. Clipping respects terminal cells, including wide characters, and the
-component's styles stop before native padding and borders.
+Above the composer, a cached Pi working indicator starts at the native spinner
+column inside the activity surface. In the composer, it interrupts the top rule.
+Both placements clip by terminal cells, including wide characters, and preserve
+the component's own styles without letting them spill into native chrome.
 
 The built-in `pi` and imported Pi palettes default to disabling native label
 shimmer/rainbow and model recoloring. Explicit native theme overrides still win.
@@ -160,7 +160,7 @@ its presentation policy:
 | Area | Native theme controls |
 | --- | --- |
 | Tool/activity gutter | `[colors] margin_markers`, `event_marker_gutter`, `tool_dot_breathing`, `tool_dot_dim`, `tool_dot_bright` |
-| Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg`; `[glyphs]` border characters |
+| Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg`; `[layout] working_indicator`, `composer_effort_color`, `composer_show_prompt`; `[glyphs]` border characters |
 | Prompt/tool fill and padding | `prompt_wash`, `[roles."surface.user"]`, `[roles."surface.tool"]`, tool/shell state roles, `[surfaces.user]`, `[surfaces.tool]` |
 | Thinking/tool text and animation | `[roles.thinking]`, `[roles.tool_header]`, `[roles.scroll_hint]`; `[colors] activity_shimmer`, `thinking_spinner` |
 | Spacing and narrow layouts | `[layout] density`, `transcript_inset`, `block_padding_x`, `tool_body_indent`, `composer_padding`, `narrow_*`; per-surface `padding`, `narrow_padding`, `marker_gutter`, `prompt_marker` |
@@ -215,10 +215,11 @@ tool calls and thinking. Octet defaults to Off and the Pi profile defaults to
 On. Native themes can set `[colors] show_durations`; an explicit user preference
 wins. The live run timer and run outcome are independent.
 
-When enabled, a completed native tool card shows `Took 1.3s` as its last nested result row
-when recorded timing is available, including after resume. This includes shell,
-read, edit, write, Codemode and extension tool cards; output preview budgets do
-not hide the duration.
+When enabled, a completed native tool card shows `Took 1.3s` as its last nested
+result row when recorded timing is available, including after resume.
+This includes shell, read, edit, write, Codemode and extension tool cards;
+output preview budgets do not hide the duration. Pi-style cards leave off the
+connector, format short durations in tenths of a second, and omit timing on reads.
 This is a final duration, not a live counter; it is decoration, excluded from
 copied command output. Values below 1 ms use microseconds (e.g. `812µs`),
 values below 1 s use milliseconds (e.g. `1.25ms`), and longer values use
@@ -296,11 +297,17 @@ families; with no reported colors or known appearance, it uses ANSI/default
 colors and faint neutral text without inventing panel fills. Known light/dark
 appearance without RGB uses black/white reference backgrounds. Model switches
 do not recolor the Pi palette or replace its prompt fill with Octet's model wash.
-Pi presentation uses full-width, one-cell-padded prompt and tool fills, unboxed
-assistant text, and an 80 ms braille spinner beside a non-shimmering working
-label (ASCII fallback without Unicode; reduced motion keeps a static native
-marker). Completed tool fills use the palette's success/error colors. Imported
-Pi JSON and newly generated adapter snapshots use the same presentation policy.
+Pi presentation uses full-width, one-cell-padded prompt and tool fills and
+unboxed assistant text. In the ANSI renderer, the editor has no prompt
+chevron. The ordinary `Working` spinner sits in its top rule while reasoning
+stays in the transcript. Both editor rules follow the selected thinking level.
+The spinner advances every 80 ms (ASCII without Unicode, static with reduced
+motion). A two-line footer places the workspace and branch above usage and
+model details. Bash previews keep the last five wrapped output rows; Codemode
+previews show source, nested calls and output separately. Ctrl+O opens retained
+output; it cannot recover bytes the tool never retained. Completed tool fills
+use the palette's success/error colors. Imported Pi JSON and newly generated
+adapter snapshots use the same presentation policy.
 The native welcome uses the compact 8×2 mark with `octet  v<version>` and
 `<access> · /changelog`, without duplicate model, discovery or exit help.
 Pi palette colors stay unchanged; custom extension headers still replace the
@@ -333,6 +340,7 @@ profile = "pi"
 activity_shimmer = false
 
 [layout]
+working_indicator = "above" # keep the Pi footer and cards, move Working out of the rule
 # This controls surface interiors, not the host-owned neutral event separator.
 block_padding_x = 2
 tool_body_indent = 0
@@ -354,6 +362,21 @@ selected background variant is resolved first, then explicit file values
 recursively override the profile. Explicit `false` and terminal-default colors
 are retained. Existing adapter snapshots without a profile keep their legacy
 layout and fills rather than silently adopting the new defaults.
+
+These ANSI layout controls are independent. They can be set on any native
+TOML theme, including per terminal appearance in `[variants.*.layout]`:
+
+| `[layout]` | Octet default | Pi default | Effect |
+| --- | --- | --- | --- |
+| `working_indicator` | `"above"` | `"composer"` | Place `Working` above the editor or in its top rule. Extension working rows keep their own styling. Compact widths, other composer shapes, and extension-owned or temporary editors keep the separate status slot. Retry and compaction keep their own states. |
+| `status_footer` | `"compact"` | `"two_line"` | Use one Octet metadata row or the two-line workspace/usage footer. Short or very narrow panes omit the workspace row. The `topline` composer keeps its single embedded metadata row. |
+| `composer_effort_color` | `false` | `true` | Use the palette's `extension.pi.thinking*` roles for composer rules when present. An explicit `composer_border` color wins. |
+| `composer_show_prompt` | `true` | `false` | Show the draft chevron and its continuation gutter. |
+| `tool_cards` | `"octet"` | `"pi"` | Choose native tool headers, preview windows and duration decoration. Custom extension renderers retain ownership. |
+
+`[colors] thinking_placeholder` sets the transcript label for a collapsed or
+empty thinking trace, independently of where `Working` sits. Pi defaults to
+`"Thinking..."`; a reviewed extension can supply its own hidden-thinking label.
 
 `[model] use_lab_color = true` can re-enable model colors independently of the
 profile. `activity_shimmer` controls native label animation; reduced-motion and
@@ -549,7 +572,7 @@ In addition to the text-role vocabulary above, `thinking`, `tool_header` and
 `scroll_hint` accept the same style fields. `tool_header` styles native tool
 labels, including Bash; Pi palettes inherit their bold `toolTitle` styling unless
 an explicit `tool_header` override is set. `scroll_hint` styles the centered
-Jump to bottom control, defaulting to bold theme-accent text; reported hover
+Jump control, defaulting to bold theme-accent text; reported hover
 adds underline without changing geometry. Explicit foreground, background and
 attribute overrides still apply. Surface roles use
 `[roles."surface.<kind>"]`, including `surface.activity`; activity falls back to

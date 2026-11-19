@@ -484,7 +484,7 @@ fn mounted_editor_height_preserves_all_fitting_footer_rows() {
     shell.set_remote_ui(remote);
     let state = shell.state.borrow();
     let chrome = shell_chrome(&state, 80, Instant::now());
-    assert_eq!(chrome.working.len(), 2);
+    assert_eq!(chrome.working.len(), 1);
     assert_eq!(chrome.composer.len(), 3);
     assert_eq!(
         chrome.extension_below.len(),
@@ -520,7 +520,7 @@ fn short_editor_composes_the_allocated_cursor_window_without_slicing() {
     shell.set_remote_ui(remote);
     let state = shell.state.borrow();
     let chrome = shell_chrome(&state, 80, Instant::now());
-    assert_eq!(chrome.working.len(), 2);
+    assert_eq!(chrome.working.len(), 1);
     assert_eq!(
         chrome.composer.len(),
         5,

@@ -146,8 +146,11 @@ pub(super) struct AssistantBlock {
     /// model switches mid-session.
     pub(super) model_lab: Option<crate::tui::theme::ModelLab>,
     pub(super) finished: bool,
-    /// Keep a closed provider turn's collapsed summary stable until its run ends.
-    pub(super) preserve_reasoning_summary: bool,
+    /// The run's status slot, not a transcript trace: `Working` liveness
+    /// rows and the slot's rendering of a live thinking trace.
+    pub(super) status_activity: bool,
+    /// This slot row presents the live thinking trace in place of `Working`.
+    pub(super) thinking_slot: bool,
     /// Reasoning is retained verbatim but stays out of the mutable native
     /// scrollback tail until the user explicitly asks to inspect it.
     pub(super) reasoning_expanded: bool,
@@ -177,7 +180,8 @@ impl AssistantBlock {
         let mut metadata = Self::streaming("");
         metadata.model_lab = self.model_lab;
         metadata.finished = self.finished;
-        metadata.preserve_reasoning_summary = self.preserve_reasoning_summary;
+        metadata.status_activity = self.status_activity;
+        metadata.thinking_slot = self.thinking_slot;
         metadata.reasoning_expanded = self.reasoning_expanded;
         metadata.reasoning_started_at = self.reasoning_started_at;
         metadata.reasoning_elapsed = self.reasoning_elapsed;
@@ -256,7 +260,8 @@ impl AssistantBlock {
             source_map: RefCell::new(None),
             model_lab: None,
             finished: false,
-            preserve_reasoning_summary: false,
+            status_activity: false,
+            thinking_slot: false,
             reasoning_expanded: false,
             reasoning_started_at: None,
             reasoning_elapsed: None,
@@ -331,7 +336,9 @@ impl AssistantBlock {
     /// from it and the animation clock gates on it, so the two can never
     /// disagree about which row is `Working` and which is `Thinking`.
     pub(super) fn activity_label(&self) -> &str {
-        if self.is_working_activity() {
+        if self.thinking_slot {
+            "Thinking"
+        } else if self.is_working_activity() {
             "Working"
         } else if self.text.is_empty() && !self.show_reasoning_hint {
             self.reasoning_heading.as_deref().unwrap_or("Thinking")

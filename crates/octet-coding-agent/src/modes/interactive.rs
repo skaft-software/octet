@@ -5348,6 +5348,7 @@ fn update_status(shell: &mut InteractiveShell, app: &App) {
     shell.set_input_modalities(app.model.spec.effective_input_modalities());
     shell.set_audio_input_formats(app.model.spec.protocol.audio_input_formats());
     shell.set_workspace(app.config.workspace.clone());
+    shell.set_footer_auto_compact(app.config.compaction.mode.enabled());
     shell.set_prompt_templates(app.prompts.descriptors());
     shell.set_skill_commands(Arc::from(
         app.skills
@@ -5706,6 +5707,7 @@ fn configure_auto_compaction(
     // legacy Responses session cannot leave configuration claiming `native`
     // while the Agent safely remains in its previous mode.
     app.config.compaction.mode = candidate_mode;
+    shell.set_footer_auto_compact(candidate_mode.enabled());
     app.config.compaction.threshold_fraction = candidate_threshold;
     let threshold_detail = if (effective_threshold - candidate_threshold).abs() < f64::EPSILON {
         format!("{:.0}%", effective_threshold * 100.0)

@@ -1164,20 +1164,6 @@ fn activity_status_line(
     if reasoning.retry_activity.is_some() {
         return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
     }
-    if reasoning.finished {
-        if !theme.shows_durations() {
-            return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
-        }
-        // The owning run remains interruptible. Keep the same metadata shape
-        // so completion cannot pull a separate disclosure hint inline.
-        let elapsed =
-            format_activity_duration(reasoning.reasoning_elapsed.unwrap_or_default().as_secs());
-        let separator = super::semantic_separator(theme);
-        return format!(
-            "{label} {}",
-            subdued_text(theme, &format!("({elapsed}{separator}Esc to interrupt)"))
-        );
-    }
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
@@ -1214,12 +1200,32 @@ pub(super) fn collapsed_reasoning_lines_sized(
     rainbow_strength: u16,
     width: u16,
 ) -> Vec<String> {
-    if reasoning.finished && (theme.shows_durations() || !reasoning.preserve_reasoning_summary) {
+    // The live transcript tail shows either Thinking or Working, with the
+    // shared run timer. Only Thinking with detail needs a second row.
+    if reasoning.thinking_slot {
+        let status = activity_status_line(theme, reasoning, "Thinking", shimmer_frame, 0);
+        let mut detail = reasoning.reasoning_heading.clone().unwrap_or_default();
+        if !reasoning.reasoning_expanded {
+            if !detail.is_empty() {
+                detail.push(' ');
+            }
+            detail.push_str(&format!("({REASONING_EXPAND_HINT})"));
+        }
+        let detail = if detail.is_empty() {
+            String::new()
+        } else {
+            subdued_text(theme, &format!("{} {detail}", activity_elbow(theme)))
+        };
+        return vec![status, detail];
+    }
+    if reasoning.finished {
         if reasoning.text.is_empty() {
             return Vec::new();
         }
+        // The status slot owns live thinking. The transcript owns only the
+        // settled summary, like a hidden trace label in assistant-message.ts:188-195.
         if let Some(label) = &reasoning.hidden_thinking_label {
-            return vec![theme.fg("muted", label)];
+            return vec![subdued_text(theme, label)];
         }
         return reasoning
             .reasoning_elapsed
@@ -1230,6 +1236,9 @@ pub(super) fn collapsed_reasoning_lines_sized(
                     &format!("Thought for {}", format_thought_duration(elapsed)),
                 )]
             });
+    }
+    if !reasoning.status_activity {
+        return Vec::new();
     }
     // Pi replaces the current indicator on retry (packages/coding-agent/src/modes/
     // interactive/interactive-mode.ts:2413-2417,3805-3813). Working-only overrides
@@ -1386,7 +1395,28 @@ pub(super) fn render_reasoning_on_surface_with_rainbow(
     rainbow_strength: u16,
 ) -> Vec<String> {
     let non_expandable_activity = reasoning.text.is_empty() && !reasoning.show_reasoning_hint;
-    if non_expandable_activity || !reasoning.reasoning_expanded {
+    if !reasoning.status_activity
+        && (!reasoning.reasoning_expanded || reasoning.text.trim().is_empty())
+    {
+        let timed_summary = reasoning.finished
+            && reasoning.reasoning_elapsed.is_some()
+            && theme.shows_durations()
+            && !reasoning.text.trim().is_empty();
+        if let Some(label) = theme
+            .resolve::<String>("thinking_placeholder")
+            .filter(|_| !timed_summary)
+        {
+            reasoning.invalidate_layout();
+            return vec![fit_line(
+                &theme.apply_semantic_role(
+                    "thinking",
+                    reasoning.hidden_thinking_label.as_deref().unwrap_or(&label),
+                ),
+                width,
+            )];
+        }
+    }
+    if reasoning.thinking_slot || non_expandable_activity || !reasoning.reasoning_expanded {
         // The transcript now holds status rows, not this Markdown prefix.
         // Re-expansion must establish a full body before applying tail updates.
         reasoning.invalidate_layout();

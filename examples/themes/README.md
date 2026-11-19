@@ -6,6 +6,10 @@
   `[variants.dark]`, and `[variants.light]`, the published semantic role
   vocabulary, the `extension.<namespace>.<role>` contribution channel, typed
   glyphs with ASCII fallbacks, transcript surfaces, and layout.
+- [`pi-profile.toml`](pi-profile.toml) is the embedded set of Pi layout defaults.
+  Use `[metadata] profile = "pi"` in a native theme, then override individual
+  `[layout]` choices such as `working_indicator = "above"`. The fragment is not a
+  standalone palette.
 - [`Cards.toml`](Cards.toml) (`Cards`) is a ready-to-use shaded-surfaces
   theme: compact rail chrome with model-coloured prompt stripes, dark/light
   fills, a quiet amber UI accent, a borderless shaded composer, and a themed

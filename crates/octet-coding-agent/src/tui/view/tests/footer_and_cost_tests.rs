@@ -655,7 +655,7 @@ fn subagent_rows_share_thinking_indent_and_elbow() {
                 .collect();
             shell.state.borrow_mut().set_subagent_activity(view);
             let frame = strip_terminal_sequences(
-                &shell.state.borrow().rendered_transcript(width).join("\n"),
+                &rendered_with_working(&shell.state.borrow(), width).join("\n"),
             );
             let prefix = if unicode { "  └ " } else { "  `- " };
             let thinking = frame
@@ -1016,5 +1016,51 @@ fn settled_subagent_attention_is_quiet_with_inspector_retention() {
             changed,
             "ordinary completion adds no history"
         );
+    }
+}
+
+#[test]
+fn footer_cost_attribution_follows_usage_not_the_selected_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::create(dir.path().join("usage.jsonl")).unwrap();
+    let mut shell = InteractiveShell::test_shell();
+    let catalog = octet_ai::ModelCatalog::builtin().unwrap();
+    let api = catalog
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    let mut subscription = api.clone();
+    Arc::make_mut(&mut subscription.spec).endpoint = octet_ai::EndpointId("openai-codex".into());
+    for (route, total, expected) in [
+        (&subscription, 123_456, "$0.123 (sub)"),
+        (&api, 500_000, "$0.623 (mixed)"),
+    ] {
+        let model = route.spec.id.clone();
+        let entry = session
+            .append(EntryValue::Message(octet_ai::Message::Assistant(
+                octet_ai::AssistantMessage {
+                    content: vec![octet_ai::AssistantPart::Text("answer".into())],
+                    model: model.clone(),
+                    protocol: route.spec.protocol,
+                },
+            )))
+            .unwrap();
+        session
+            .record_assistant_usage(
+                entry,
+                route.spec.endpoint.clone(),
+                model,
+                octet_ai::Usage::default(),
+                Some(octet_ai::Cost {
+                    total,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        shell.set_session_accounting(&session);
+        for selected in [&api, &subscription] {
+            shell.set_model_theme(selected);
+            let footer = plain_footer(&shell, 170, Instant::now());
+            assert!(footer.contains(expected), "{footer}");
+        }
     }
 }

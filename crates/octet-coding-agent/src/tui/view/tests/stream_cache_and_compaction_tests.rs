@@ -260,7 +260,7 @@ fn hidden_reasoning_stream_does_not_grow_native_scrollback() {
     terminal.set_scrollback(0);
     let visible = terminal.screen().contents();
     assert!(visible.contains("Thinking"), "{visible:?}");
-    assert!(visible.contains("Working"), "{visible:?}");
+    assert!(!visible.contains("Working"), "{visible:?}");
     assert!(visible.contains("Ctrl+T to expand"), "{visible:?}");
     assert!(!visible.contains("private sentinel"), "{visible:?}");
     let state = shell.state.borrow();
