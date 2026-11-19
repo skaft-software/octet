@@ -1,8 +1,8 @@
 # octet computer-use
 
-**Distribution: 0.10.4.** This bundle requires exactly octet 0.10.4.
+**Distribution: 0.10.5.** This bundle requires exactly octet 0.10.5.
 Use the [version-matched installation](../../docs/installation.md) and the
-[0.10.4 release notes](../../docs/releases/v0.10.4.md) for published assets.
+[0.10.5 release notes](../../docs/releases/v0.10.5.md) for published assets.
 A reviewed source checkout with `--extension-dir ./extensions` works too.
 Windows and Linux desktop parity remain unqualified.
 

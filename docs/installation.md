@@ -4,21 +4,19 @@
 
 <a id="binary-availability"></a>
 
-## octet 0.10.4
+## octet 0.10.5
 
-The source tree is the octet **0.10.5 release candidate**, an unreleased source
-candidate. The commands below install the published 0.10.4 release; 0.10.5 is not
-yet published to native or npm channels.
+The commands below install the published octet **0.10.5** release.
 
 Install the native agent below, then
 [enable the optional Pi adapter](pi-compatibility.md). The
-[release notes](releases/v0.10.4.md) describe changes and known boundaries.
+[release notes](releases/v0.10.5.md) describe changes and known boundaries.
 
 ## Install native binaries
 
-Native v0.10.4 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
+Native v0.10.5 packages target macOS Apple silicon and Intel, GNU/Linux x86-64,
 and Windows x86-64 (MSVC, preview). Use the version-pinned
-[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.10.4)
+[GitHub release](https://github.com/skaft-software/octet/releases/tag/v0.10.5)
 for signed assets, exact-source CI and public-install receipts. Use only channels
 recorded as available there; unsigned development artifacts are not a release.
 
@@ -27,10 +25,17 @@ release and run it in PowerShell. It checks the ZIP against the checksum manifes
 but does not independently verify its Sigstore signature. Native MSVC artifact
 qualification is separate from GNU test builds.
 
+```powershell
+irm https://github.com/skaft-software/octet/releases/download/v0.10.5/install-octet.ps1 | iex
+octet --version   # octet 0.10.5
+```
+
+On macOS and GNU/Linux:
+
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/skaft-software/octet/releases/download/v0.10.4/install-octet.sh | sh
-octet --version   # octet 0.10.4
+  https://github.com/skaft-software/octet/releases/download/v0.10.5/install-octet.sh | sh
+octet --version   # octet 0.10.5
 ```
 
 When moving from Ygg, install octet afresh. Older installations and data stay
@@ -41,10 +46,10 @@ registries remain separate, unpublished channels. CLI installation with Bun is u
 
 ## Install from npm
 
-**v0.10.4 is published to npm.** Pin the release rather than following a mutable dist-tag:
+**v0.10.5 is published to npm.** Pin the release rather than following a mutable dist-tag:
 
 ```sh
-npm install -g @skaft/octet@0.10.4
+npm install -g @skaft/octet@0.10.5
 octet --version
 ```
 
@@ -116,7 +121,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets the octet 0.10.5 release candidate. Check `octet --version`,
+This checkout targets octet 0.10.5. Check `octet --version`,
 and use matching source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -141,9 +146,9 @@ need Git for Windows or another Bash-compatible shell.
 
 ## Optional packages
 
-Executable extension bundles are pinned to the host version. The 0.10.4 catalog
+Executable extension bundles are pinned to the host version. The 0.10.5 catalog
 includes six optional bundles, including Pi. Older bundles need their matching
-host; do not reuse a 0.9.6 bundle with octet 0.10.4.
+host; do not reuse a 0.9.6 bundle with octet 0.10.5.
 
 ```sh
 octet extension install octet-web-search
