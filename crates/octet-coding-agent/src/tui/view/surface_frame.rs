@@ -257,7 +257,7 @@ pub(super) fn cushion_row_is_painted(
 }
 
 /// Whether any SGR sequence in `row` selects a background colour.
-fn paints_background(row: &str) -> bool {
+pub(super) fn paints_background(row: &str) -> bool {
     let mut rest = row;
     while let Some(start) = rest.find("\x1b[") {
         rest = &rest[start + 2..];

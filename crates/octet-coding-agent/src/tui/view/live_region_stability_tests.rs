@@ -242,6 +242,55 @@ fn working_slot_stays_below_reasoning_and_tools_for_the_entire_run() {
 }
 
 #[test]
+fn working_keeps_a_neutral_row_after_the_shaded_prompt_card() {
+    let theme = crate::tui::theme::test_theme_for(
+        crate::tui::theme::TerminalBackground::Dark,
+        crate::tui::terminal::TerminalCapabilities::test(
+            true,
+            true,
+            crate::tui::terminal::ColorDepth::TrueColor,
+        ),
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(80, 24);
+    shell.set_identity("codex", "gpt-6.2-astra", "high");
+    for index in 0..24 {
+        shell.notice(format!("history {index}"));
+    }
+    shell.on_prompt_submitted("continue");
+    shell.mark_prompt_persisted();
+    shell.begin_run("codex");
+    let state = shell.state.borrow();
+    for rows in [
+        render_shell_at(&state, 80, Instant::now()),
+        render_shell_viewport_at(&state, 80, Instant::now()),
+    ] {
+        let prompt = rows
+            .iter()
+            .position(|row| strip_terminal_sequences(row).contains("› continue"))
+            .unwrap();
+        let working = rows
+            .iter()
+            .position(|row| strip_terminal_sequences(row).contains("• Working ("))
+            .unwrap();
+        let bg = |row: usize| sexy_tui_rs::utils::background_sgr_at_column(&rows[row], 2);
+        assert!(
+            bg(prompt + 1).is_some(),
+            "fixture needs a painted bottom edge"
+        );
+        assert_eq!(
+            working,
+            prompt + 3,
+            "expected a neutral row outside the prompt card"
+        );
+        assert!(strip_terminal_sequences(&rows[working - 1])
+            .trim()
+            .is_empty());
+        assert_eq!(bg(working - 1), None);
+    }
+}
+
+#[test]
 fn working_slot_keeps_composer_and_completion_hits_on_painted_rows() {
     let cell = |rows: &[String], text: &str| {
         rows.iter()

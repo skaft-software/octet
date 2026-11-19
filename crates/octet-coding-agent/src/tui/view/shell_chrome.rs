@@ -34,6 +34,7 @@ impl ShellChrome {
             !sexy_tui_rs::strip_terminal_sequences(line)
                 .trim()
                 .is_empty()
+                || super::surface_frame::paints_background(line)
         }))
     }
 }
