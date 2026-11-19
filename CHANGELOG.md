@@ -88,6 +88,7 @@
 - Hidden output, compaction and thinking rows share one hint style: (Ctrl+O to expand) and (Ctrl+T to expand).
 - Compact tool cards show hidden row counts without a leading plus sign.
 - A permanent provider rejection behind a gateway 503 stops without a second request.
+- Saved video replayed to text-only models is sized as the placeholder actually sent.
 
 ## [0.10.4] - 2026-11-12
 

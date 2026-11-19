@@ -562,3 +562,95 @@ async fn numeric_permanent_code_under_503_sends_one_post() {
         "HTTP posts [default numeric, default string, Codex numeric, Codex string]"
     );
 }
+#[tokio::test]
+async fn text_only_video_replay_and_literal_placeholder_share_admission() {
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let mut posts = Vec::new();
+    let mut expected_input = None;
+    for video in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+        let mut route = loopback_route(&server.uri(), 4096, false);
+        Arc::make_mut(&mut route.spec).capabilities.input_modalities =
+            octet_ai::ModalitySet::none();
+        let clip = Media::video_bytes(
+            bytes::Bytes::from_static(include_bytes!("../../../octet-ai/src/video/tiny.mp4")),
+            "video/mp4".parse().unwrap(),
+        );
+        let with_clip = UserMessage {
+            content: vec![UserPart::Media(clip)],
+        };
+        let wire = octet_ai::responses::encode_responses_replay(
+            &route,
+            None,
+            &[ResponsesReplayItem::User(with_clip.clone())],
+        )
+        .unwrap();
+        let text = wire.items()[0].as_json()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(text.contains("original retained"));
+        let path = dir.path().join("s.jsonl");
+        let mut s = Session::create(&path).unwrap();
+        s.append(EntryValue::Message(Message::User(if video {
+            with_clip
+        } else {
+            UserMessage {
+                content: vec![UserPart::Text(text)],
+            }
+        })))
+        .unwrap();
+        let assistant = s
+            .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+                model: route.spec.id.clone(),
+                protocol: Protocol::OpenAiResponses,
+                content: vec![AssistantPart::Text("prior answer".into())],
+            })))
+            .unwrap();
+        s.append_responses_turn(assistant,route.endpoint.id.clone(),route.spec.id.clone(),octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(serde_json::json!({"type":"message","id":"prior","role":"assistant","content":[{"type":"output_text","text":"prior answer"}]})).unwrap()])).unwrap();
+        drop(s);
+        let mut agent = loopback_agent(
+            dir.path(),
+            route.clone(),
+            Session::open(&path).unwrap(),
+            "system".into(),
+            ExtensionHost::new(),
+        );
+        agent.set_provider_retries_enabled(false);
+        let mut replay = (*agent
+            .session()
+            .responses_replay_snapshot(&route.endpoint.id, &route.spec.id)
+            .unwrap()
+            .unwrap())
+        .clone();
+        replay.push(ResponsesReplayItem::User(UserMessage {
+            content: vec![UserPart::Text("follow-up".into())],
+        }));
+        let input =
+            octet_ai::responses::encode_responses_replay(&route, Some("system"), &replay).unwrap();
+        let items = serde_json::to_value(input.items()).unwrap();
+        if let Some(e) = expected_input.as_ref() {
+            assert_eq!(e, &items);
+        } else {
+            expected_input = Some(items);
+        }
+        let err = agent.complete("follow-up").await.unwrap_err();
+        let requests = server.received_requests().await.unwrap();
+        if let Some(sent) = requests.first() {
+            let b: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(Some(&b["input"]), expected_input.as_ref());
+        }
+        eprintln!("video={video} requests={} outcome={err:?}", requests.len());
+        posts.push(requests.len());
+    }
+    assert_eq!(
+        posts,
+        [1, 1],
+        "identical Responses input, retained video vs literal text"
+    );
+}

@@ -3849,7 +3849,7 @@ async fn responses_estimate_discounts_encoded_video_frames_not_source_bytes() {
         })
         .sum();
     let (discounted, _) =
-        super::context_estimate::responses_replay_media_adjustment(&replay, limits);
+        super::context_estimate::responses_replay_media_adjustment(&replay, &model.spec);
     // The serialized request carries the frames; discounting the source
     // video's bytes instead can erase unrelated text from the estimate.
     assert_ne!(
@@ -5408,5 +5408,52 @@ async fn video_tool_lowering_preserves_source_and_reports_frame_delivery() {
     assert_eq!(
         video.data.as_ref(),
         include_bytes!("../../../octet-ai/src/video/tiny.mp4")
+    );
+}
+
+#[test]
+fn replayed_video_placeholder_is_priced_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("saved.jsonl");
+    let image_route = tool_media_model(
+        Protocol::OpenAiResponses,
+        octet_ai::ModalitySet::none().with(Modality::Image),
+    );
+    let InputPart::Media(video) = video_input_fixture() else {
+        unreachable!()
+    };
+    let mut session = Session::create(&path).unwrap();
+    session
+        .append(EntryValue::Message(Message::User(UserMessage {
+            content: vec![UserPart::Media(video)],
+        })))
+        .unwrap();
+    drop(session);
+    let session = Session::open(&path).unwrap();
+    let mut model = image_route.clone();
+    Arc::make_mut(&mut model.spec).capabilities.input_modalities = octet_ai::ModalitySet::none();
+    let exact = super::context_estimate::exact_responses_replay(&session, &model, "").unwrap();
+    let wire = serde_json::to_string(&exact.input).unwrap();
+    assert!(wire.contains("original retained") && !wire.contains("input_image"));
+    let plain_equivalent = super::context_estimate::estimate_responses_request_tokens(
+        &exact.input,
+        &[],
+        &[],
+        None,
+        &model.spec,
+    );
+    let estimated = super::context_estimate::reconcile_context_estimate(
+        &session,
+        &model,
+        "",
+        &session.context().unwrap(),
+        &[],
+    )
+    .input_tokens;
+    assert_eq!(
+        estimated,
+        plain_equivalent,
+        "identical text-only provider input, {} JSON bytes",
+        wire.len()
     );
 }

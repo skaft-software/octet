@@ -148,11 +148,18 @@ pub(super) fn request_media_adjustment(messages: &[Message]) -> (u64, u64) {
 
 pub(super) fn responses_replay_media_adjustment(
     replay: &[ResponsesReplayItem],
-    limits: Option<octet_ai::ImageInputLimits>,
+    spec: &octet_ai::ModelSpec,
 ) -> (u64, u64) {
+    let limits = spec.preset.image_input_limits;
     let mut inline_payload_bytes = 0u64;
     let mut semantic_tokens = 0u64;
     let mut observe = |media: &Media| {
+        // A route without video input replays a text placeholder instead
+        // (`octet_ai::video::prepare_replayed_user_message`); its bytes are
+        // already in the serialized input, so no frame allowance applies.
+        if matches!(media, Media::Video(_)) && !spec.supports_video_input() {
+            return;
+        }
         // Encoded Responses input carries a video's sampled frames, not its
         // source bytes; discount only the frame payloads actually serialized.
         let payload = match media {
@@ -708,13 +715,13 @@ pub(super) fn estimate_responses_request_tokens(
     replay: &[ResponsesReplayItem],
     tools: &[ToolDef],
     instructions: Option<&str>,
-    limits: Option<octet_ai::ImageInputLimits>,
+    spec: &octet_ai::ModelSpec,
 ) -> u64 {
     let mut bytes = CountingWriter::default();
     if serde_json::to_writer(&mut bytes, &(input, tools, instructions)).is_err() {
         return 64;
     }
-    let (inline_payload_bytes, semantic_tokens) = responses_replay_media_adjustment(replay, limits);
+    let (inline_payload_bytes, semantic_tokens) = responses_replay_media_adjustment(replay, spec);
     // Opaque replay and native compact checkpoints are estimated from exactly
     // what will be serialized, never from canonical history they replaced.
     // Only canonical replay media is converted from base64 bytes to a semantic
@@ -730,13 +737,13 @@ pub(super) fn estimate_responses_request_tokens(
 pub(super) fn estimate_compact_request_tokens(
     request: &ResponsesCompactRequest,
     replay: &[ResponsesReplayItem],
-    limits: Option<octet_ai::ImageInputLimits>,
+    spec: &octet_ai::ModelSpec,
 ) -> u64 {
     let mut bytes = CountingWriter::default();
     if serde_json::to_writer(&mut bytes, request).is_err() {
         return 64;
     }
-    let (inline_payload_bytes, semantic_tokens) = responses_replay_media_adjustment(replay, limits);
+    let (inline_payload_bytes, semantic_tokens) = responses_replay_media_adjustment(replay, spec);
     bytes
         .0
         .saturating_sub(inline_payload_bytes)
@@ -879,7 +886,7 @@ fn reconcile_context_estimate_with(
                 &exact.replay,
                 tools,
                 exact.instructions.as_deref(),
-                model.spec.preset.image_input_limits,
+                &model.spec,
             )
         });
     let provider_tokens = provider_context_estimate(session, model);
