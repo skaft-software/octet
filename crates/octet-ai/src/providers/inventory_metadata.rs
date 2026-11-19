@@ -378,8 +378,19 @@ pub fn modalities_from_entry(entry: &serde_json::Value, direction: &str) -> Moda
         match value.as_str().unwrap().to_ascii_lowercase().as_str() {
             "image" | "vision" => result = result.with(crate::Modality::Image),
             "audio" => result = result.with(crate::Modality::Audio),
+            // OpenCode inventories advertise concrete input MIME types. Recognize
+            // the formats we can send; an arbitrary audio/* is not evidence.
+            "audio/wav" | "audio/x-wav" | "audio/mp3" | "audio/mpeg" | "audio/aac"
+            | "audio/ogg" | "audio/opus" | "audio/flac"
+                if direction == "input" =>
+            {
+                result = result.with(crate::Modality::Audio);
+            }
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" if direction == "input" => {
+                result = result.with(crate::Modality::Image);
+            }
             // models.dev says `pdf`; OpenRouter's architecture says `file`.
-            "pdf" | "file" if direction == "input" => {
+            "pdf" | "file" | "application/pdf" if direction == "input" => {
                 result = result.with(crate::Modality::Pdf);
             }
             _ => {}

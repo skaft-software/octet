@@ -76,7 +76,9 @@ request fits the provider's total request limit.
 - Static provider presets, discovered model inventories, explicit custom-model
   declarations and pinned models.dev records can supply modality information.
   Explicit audio assertions take precedence over provider-scoped models.dev
-  metadata; only silence allows a catalog fallback. Catalog entries retain the
+  metadata; only silence allows a catalog fallback. OpenCode Go's `gemini-4-argon`
+  advertises concrete input types such as `audio/wav` and `audio/mpeg`; octet
+  recognizes these for both attachments and `read`. Catalog entries retain the
   decision's source: declaration, catalog, absent evidence or unsupported protocol.
   Custom Chat models can set `preset.audio_input: true` (or `false` to deny);
   normalized caches preserve the assertion. Resolved `preset.audio_input_source`

@@ -40,6 +40,7 @@ fn agent(model: octet_ai::Model, session: Session, workspace: &std::path::Path) 
     extensions.load(&CoreTools);
     Agent::new(AgentConfig {
         client: AiClient::with_http_client(reqwest::Client::builder().no_proxy().build().unwrap()),
+        reasoning: crate::app::default_reasoning_for_model(&model),
         model,
         session,
         system: String::new(),
@@ -47,7 +48,6 @@ fn agent(model: octet_ai::Model, session: Session, workspace: &std::path::Path) 
         effect_broker: EffectBroker::default(),
         extensions,
         max_turns: Some(3),
-        reasoning: octet_ai::ReasoningConfig::Off,
         reasoning_mode: octet_ai::ReasoningMode::Standard,
         cache_retention: octet_ai::CacheRetention::None,
         session_id: None,
@@ -94,6 +94,11 @@ async fn recorded_audio_attachment_and_read_replay_identical_bytes_through_resum
             &crate::providers::OPENCODE,
             Protocol::GoogleGenerativeAi,
             "gemini-recorded-audio-new",
+        ),
+        (
+            &crate::providers::OPENCODE_GO,
+            Protocol::GoogleGenerativeAi,
+            "gemini-4-argon",
         ),
         (
             crate::providers::BUILTIN_PROVIDER_DECLARATIONS
@@ -169,9 +174,17 @@ async fn recorded_audio_attachment_and_read_replay_identical_bytes_through_resum
                     .await;
                 // Newly advertised IDs deliberately have no entry in the pinned
                 // models.dev snapshot: a stale snapshot must not deny live audio.
-                let fresh = serde_json::json!({"data": [{"id": api_name,
-                "input_modalities": ["text", "audio"], "tools": true, "supported_parameters": ["tools"],
-                "context_window": 128000, "max_output_tokens": 4096}]});
+                let fresh = if declaration.id == "opencode-go" {
+                    // The Go /models entry for this exact route uses MIME types, not "audio".
+                    serde_json::json!({"data": [{"id": api_name, "modalities": {
+                        "input": ["text", "image/png", "video/mp4", "audio/wav", "audio/mp3",
+                                  "audio/aac", "audio/ogg", "audio/flac", "application/pdf"],
+                        "output": ["text"]}, "capabilities": {"tools": {"supported": true}}}]})
+                } else {
+                    serde_json::json!({"data": [{"id": api_name,
+                        "input_modalities": ["text", "audio"], "tools": true, "supported_parameters": ["tools"],
+                        "context_window": 128000, "max_output_tokens": 4096}]})
+                };
                 let inventory = if cached {
                     serde_json::from_slice(&serde_json::to_vec(&fresh).unwrap()).unwrap()
                 } else {

@@ -171,6 +171,7 @@ fn inventory_modality_envelopes_keep_input_and_output_independent() {
         serde_json::json!({"input_modalities":["text","image","pdf"], "output_modalities":["text","audio"]}),
         serde_json::json!({"architecture":{"input_modalities":["text","image","file"], "output_modalities":["text","audio"]}}),
         serde_json::json!({"modalities":{"input":["text","image","pdf"], "output":["text","audio"]}}),
+        serde_json::json!({"modalities":{"input":["text","image/jpeg","application/pdf","audio/unknown"], "output":["text","audio"]}}),
         serde_json::json!({"provider":{"capabilities":{"input_modalities":["text","image","pdf"], "output_modalities":["text","audio"]}}}),
         serde_json::json!({"top_provider":{"modalities":{"input":["text","image","pdf"], "output":["text","audio"]}}}),
     ] {
