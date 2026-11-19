@@ -103,8 +103,9 @@ checkpoint without replacing its model with the recovery mirror: a synchronous
 native edit may already have completed while its checkpoint is still in flight.
 The draft and caret reach the recovery mirror only through that checkpoint; a
 newer native user edit still takes precedence. A component that never answers is
-revealed one second after publication, so a handoff cannot strand the custom
-chrome. Only the editor path is causally fenced. Other placements rely on frame
+revealed one second after publication. If an editor has no frame for its current
+geometry, the host retires it instead and keeps the native draft editable.
+Only the editor path is causally fenced. Other placements rely on frame
 order after the palette update, so a frame already in flight when the palette
 changed may be shown once.
 The resource phase keeps pumping input and UI until the released handoff settles

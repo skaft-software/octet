@@ -613,7 +613,10 @@ for line in sys.stdin:
         frame()
     elif method == 'ui/resize':
         state['surface'].update(columns=p['columns'], rows=p['rows'])
-        frame()
+        # Publishing the palette can also change the editor's available height.
+        # The silent-renderer fixture must ignore that request as well.
+        if not flag('no-rerender'):
+            frame()
     elif method == 'shutdown':
         send(dict(id=m['id'], result={}))
         break
@@ -949,29 +952,43 @@ for line in sys.stdin:
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn held_chrome_that_never_rerenders_is_revealed_at_the_bounded_deadline() {
-        let mut fixture = handoff_fixture(&["no-rerender"]).await;
-        settle_session_start(&mut fixture).await;
-        assert!(fixture.shell.composer_slot_mount().is_none());
-        let started = std::time::Instant::now();
-        let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
-        )
-        .await
-        .expect("resource readiness must not wait indefinitely for a silent editor")
-        .unwrap();
-        // This component answers neither the palette nor the draft. Its only
-        // frame predates the palette; resource readiness must pump all the way
-        // to the fallback rather than claim the hidden editor is already ready.
-        assert!(started.elapsed() >= Duration::from_secs(1));
-        assert!(fixture.shell.composer_slot_mount().is_some());
-        let visible = frame_text(&mut fixture.shell).await;
-        assert!(
-            visible.contains("CUSTOM-EDITOR palette=native"),
-            "{visible}"
-        );
-        fixture.process.shutdown().await;
+        for height in [6, 40] {
+            let mut fixture = handoff_fixture(&["no-rerender"]).await;
+            fixture.shell.set_size(120, height);
+            settle_session_start(&mut fixture).await;
+            assert!(fixture.shell.composer_slot_mount().is_none());
+            let started = std::time::Instant::now();
+            let mut input = futures_util::stream::pending::<std::io::Result<Event>>();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                refresh_resource_paths(&mut fixture.app, &mut fixture.shell, &mut input),
+            )
+            .await
+            .expect("resource readiness must not wait indefinitely for a silent editor")
+            .unwrap();
+            assert!(started.elapsed() >= Duration::from_secs(1));
+            let visible = frame_text(&mut fixture.shell).await;
+            if height == 6 {
+                // With no room for a second footer row, the old frame still fits.
+                assert!(fixture.shell.composer_slot_mount().is_some());
+                assert!(
+                    visible.contains("CUSTOM-EDITOR palette=native"),
+                    "{visible}"
+                );
+            } else {
+                // The extra footer row invalidates the cached editor frame. Do
+                // not give an invisible editor input at the handoff deadline.
+                assert!(fixture.shell.composer_slot_mount().is_none());
+                assert!(!visible.contains("CUSTOM-EDITOR"), "{visible}");
+                fixture
+                    .shell
+                    .prefill_editor("native draft remains editable".into());
+                assert!(frame_text(&mut fixture.shell)
+                    .await
+                    .contains("native draft remains editable"));
+            }
+            fixture.process.shutdown().await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

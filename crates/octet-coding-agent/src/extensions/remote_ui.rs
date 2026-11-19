@@ -656,7 +656,8 @@ impl RemoteUi {
     /// is first given the native draft, after the palette, and is revealed by
     /// the frame that follows its acknowledgement of that draft; the draft the
     /// user typed while it was held is therefore what it shows. A component
-    /// that never answers is revealed at the bounded deadline.
+    /// that never answers is revealed at the bounded deadline if it still has
+    /// a frame. An editor with no frame must not take input from the native draft.
     pub(super) fn settle_held(&mut self, shell: &mut InteractiveShell) {
         if self.handoff_pending || !self.has_held() {
             return;
@@ -664,6 +665,26 @@ impl RemoteUi {
         let expired = self
             .handoff_released
             .is_none_or(|released| released.elapsed() >= HELD_CHROME_FRAME_DEADLINE);
+        if expired {
+            // A palette change can resize the composer and invalidate the held
+            // frame. Retire an editor that cannot paint its new rectangle rather
+            // than handing it input while the user sees a blank composer.
+            for index in (0..self.mounts.len()).rev() {
+                let mount = &self.mounts[index];
+                if mount.held.is_some()
+                    && mount.editor.is_some()
+                    && self.components.slot_lines(Some(&mount.view.id)).is_none()
+                {
+                    let title = mount.view.title.clone();
+                    if let Some(notice) = self.remove(index, "editor handoff timed out", true) {
+                        shell.notice(notice);
+                    }
+                    shell.notice(format!(
+                        "Custom editor {title} did not render at startup; restored the native draft."
+                    ));
+                }
+            }
+        }
         let native = shell.extension_editor_snapshot();
         let mut deliveries = Vec::new();
         for mount in &mut self.mounts {
