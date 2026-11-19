@@ -250,12 +250,10 @@ fn restore_terminal(advance_line: bool) {
             event::DisableBracketedPaste,
             event::DisableMouseCapture
         );
-        // Windows cannot restore mouse capture before it has ever been enabled.
-        // An uncaptured native surface must still restore the cursor on exit.
-        let _ = execute!(out, cursor::SetCursorStyle::DefaultUserShape, cursor::Show);
-    } else {
-        let _ = execute!(out, cursor::Show);
     }
+    // Show the cursor independently of mouse restoration, which can fail on
+    // Windows if capture was never enabled. Leave its shape untouched.
+    let _ = execute!(out, cursor::Show);
     if advance_line {
         let _ = execute!(out, cursor::MoveToNextLine(1), cursor::MoveToColumn(0));
     }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve the terminal's cursor shape and blink settings in both fullscreen and inline modes.
+
 ## [0.10.5] - 2026-11-19
 
 ### Added

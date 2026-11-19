@@ -1321,6 +1321,39 @@ fn real_octet_defaults_to_fullscreen_and_restores_the_primary_screen() {
 }
 
 #[test]
+fn real_octet_leaves_cursor_shape_to_the_terminal() {
+    let _guard = pty_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let binary = Path::new(env!("CARGO_BIN_EXE_octet"));
+    let cursor_shape = regex::bytes::Regex::new(r"\x1b\[[0-9]* q").unwrap();
+    for fullscreen in [false, true] {
+        let mut octet = if fullscreen {
+            PtyOctet::spawn_default_fullscreen(
+                binary,
+                MouseMode::Auto,
+                StartupFixture::Model("probe"),
+            )
+        } else {
+            PtyOctet::spawn(binary, MouseMode::Auto)
+        };
+        octet.wait_until(STARTUP_TIMEOUT, |output| {
+            synchronized_frame_end_containing(output, READY_MARKER).is_some()
+        });
+        let capture = octet.shutdown();
+        assert!(capture.status.success());
+        let shape_commands: Vec<_> = cursor_shape
+            .find_iter(&capture.output)
+            .map(|command| visible_bytes(command.as_bytes()))
+            .collect();
+        assert!(
+            shape_commands.is_empty(),
+            "fullscreen={fullscreen}: octet emitted cursor shape commands: {shape_commands:?}"
+        );
+    }
+}
+
+#[test]
 fn real_octet_startup_frame_pty_contract() {
     let _guard = pty_test_lock()
         .lock()

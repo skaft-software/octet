@@ -756,7 +756,8 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
             // fullscreen entry uses ED2/CUP (packages/tui/src/tui-alt-screen.ts:
             // 384-386); its title uses OSC 0 (terminal.ts:600-604). Octet keeps
             // its existing OSC 2 contract and batches both with the first paint.
-            self.append_render_data("\x1b[0m\x1b[2 q\x1b[?25l\x1b[?6l\x1b[r\x1b[2J\x1b[H");
+            // The terminal owns cursor style; the frame only places and shows it.
+            self.append_render_data("\x1b[0m\x1b[?25l\x1b[?6l\x1b[r\x1b[2J\x1b[H");
             self.append_render_data(&data[SYNC_OUTPUT_BEGIN.len()..]);
         } else {
             self.append_render_data(data);

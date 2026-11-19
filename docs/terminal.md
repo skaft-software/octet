@@ -414,6 +414,8 @@ Resize bursts settle after 75 ms of quiet (150 ms maximum); width changes reflow
 the transcript, while height-only changes reuse its wrapping. Away-and-back
 resizes also rebuild native history. The hardware composer cursor stays visible
 inside synchronized frames through panels, resizing, and renderer resumes.
+The terminal controls the cursor's shape and blink; octet doesn't override
+those settings on startup or reset them on exit.
 Fullscreen paints address only visible terminal rows, without scrolling newlines
 or row insertion. Offline virtual-terminal checks cover every paint through
 working-message rotation (including wide glyphs and full-width rows), spinner
