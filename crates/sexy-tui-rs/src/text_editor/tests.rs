@@ -649,3 +649,43 @@ fn line_edge_kills_merge_lines_and_are_undoable() {
     assert!(tail.apply(TextEditAction::Undo, 80));
     assert_eq!(tail.text(), "one\ntwo");
 }
+
+#[test]
+fn vertical_motion_snaps_out_of_atomic_ranges() {
+    // (text, cursor, action, protected range, expected cursor, text after typing X)
+    for (text, cursor, action, range, expected, typed) in [
+        (
+            "abc\n[chip]",
+            2,
+            TextEditAction::Down,
+            4..10,
+            4,
+            "abc\nX[chip]",
+        ),
+        (
+            "abcdefghi\n[chip]",
+            5,
+            TextEditAction::Down,
+            10..16,
+            16,
+            "abcdefghi\n[chip]X",
+        ),
+        (
+            "[chip]\nabcde",
+            9,
+            TextEditAction::Up,
+            0..6,
+            0,
+            "X[chip]\nabcde",
+        ),
+    ] {
+        let mut editor = TextEditor::new();
+        editor.set_text(text);
+        editor.set_cursor(cursor);
+        let atomic = [range];
+        editor.apply_with_atomic_ranges(action, 80, &atomic);
+        assert_eq!(editor.cursor(), expected, "{text:?}");
+        editor.apply_with_atomic_ranges(TextEditAction::Char('X'), 80, &atomic);
+        assert_eq!(editor.text(), typed);
+    }
+}

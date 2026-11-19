@@ -88,6 +88,21 @@ fn atomic_target(target: usize, ranges: &[Range<usize>], forward: bool) -> usize
         )
 }
 
+/// Visual motion lands on a column, not a grapheme step, so it has no
+/// direction inside a protected range: snap to the nearer edge.
+fn atomic_nearest(target: usize, ranges: &[Range<usize>]) -> usize {
+    ranges
+        .iter()
+        .find(|range| range.start < target && target < range.end)
+        .map_or(target, |range| {
+            if target - range.start <= range.end - target {
+                range.start
+            } else {
+                range.end
+            }
+        })
+}
+
 fn atomic_edit_range(range: Range<usize>, atomic: &[Range<usize>]) -> Range<usize> {
     atomic_target(range.start, atomic, false)..atomic_target(range.end, atomic, true)
 }
@@ -709,10 +724,10 @@ impl TextEditor {
             TextEditAction::Newline => self.insert_atomic("\n"),
             TextEditAction::Left => self.move_left(atomic),
             TextEditAction::Right => self.move_right(atomic),
-            TextEditAction::Up => self.move_vertical(VerticalDirection::Up, wrap_width),
-            TextEditAction::Down => self.move_vertical(VerticalDirection::Down, wrap_width),
-            TextEditAction::Home => self.move_to_visual_edge(false, wrap_width),
-            TextEditAction::End => self.move_to_visual_edge(true, wrap_width),
+            TextEditAction::Up => self.move_vertical(VerticalDirection::Up, wrap_width, atomic),
+            TextEditAction::Down => self.move_vertical(VerticalDirection::Down, wrap_width, atomic),
+            TextEditAction::Home => self.move_to_visual_edge(false, wrap_width, atomic),
+            TextEditAction::End => self.move_to_visual_edge(true, wrap_width, atomic),
             TextEditAction::WordLeft => self.move_word(false, atomic),
             TextEditAction::WordRight => self.move_word(true, atomic),
             TextEditAction::JumpForward(character) => self.jump_to_char(character, true, atomic),
@@ -1155,7 +1170,12 @@ impl TextEditor {
         }
     }
 
-    fn move_vertical(&mut self, direction: VerticalDirection, wrap_width: usize) -> bool {
+    fn move_vertical(
+        &mut self,
+        direction: VerticalDirection,
+        wrap_width: usize,
+        atomic: &[Range<usize>],
+    ) -> bool {
         self.last_action = None;
         let layout = self.layout(wrap_width);
         let line = &layout.lines[layout.cursor_row];
@@ -1179,6 +1199,7 @@ impl TextEditor {
                 target_column,
             ),
         };
+        let cursor = atomic_nearest(cursor, atomic);
         if cursor == self.cursor {
             return false;
         }
@@ -1187,10 +1208,15 @@ impl TextEditor {
         true
     }
 
-    fn move_to_visual_edge(&mut self, end: bool, wrap_width: usize) -> bool {
+    fn move_to_visual_edge(
+        &mut self,
+        end: bool,
+        wrap_width: usize,
+        atomic: &[Range<usize>],
+    ) -> bool {
         let layout = self.layout(wrap_width);
         let line = &layout.lines[layout.cursor_row];
-        let cursor = if end { line.visible_end } else { line.start };
+        let cursor = atomic_target(if end { line.visible_end } else { line.start }, atomic, end);
         let changed = cursor != self.cursor;
         self.finish_after_boundary_motion(cursor);
         changed

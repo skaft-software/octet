@@ -91,6 +91,7 @@
 - Saved video replayed to text-only models is sized as the placeholder actually sent.
 - Context checks count refreshed system instructions alongside compacted Responses history.
 - Copying expanded Pi Codemode output keeps the leading indentation of every line.
+- Up, Down, Home and End in `sexy-tui-rs` editors step over protected chips instead of landing inside them.
 
 ## [0.10.4] - 2026-11-12
 

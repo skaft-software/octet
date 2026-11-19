@@ -596,3 +596,25 @@ fn paste_chips_delete_whole_and_arrows_step_over_them() {
     shell.apply_edit(EditAction::Undo);
     assert_eq!(shell.state.borrow().editor.text(), text);
 }
+
+#[test]
+fn native_down_does_not_split_a_real_paste_chip() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_size(100, 30);
+    let chip = shell
+        .state
+        .borrow_mut()
+        .ledger
+        .attach_pasted_text("line\n".repeat(40));
+    let before = format!("abc\n{chip}");
+    shell.state.borrow_mut().editor.set_text(&before);
+    shell.state.borrow_mut().editor.set_cursor(2);
+    shell.apply_edit(EditAction::Down);
+    let cursor = shell.state.borrow().editor.cursor();
+    shell.apply_edit(EditAction::Char('X'));
+    assert!(
+        [4, before.len()].contains(&cursor),
+        "native cursor={cursor}"
+    );
+    assert!(shell.state.borrow().editor.text().contains(&chip));
+}
