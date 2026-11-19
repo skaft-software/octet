@@ -753,8 +753,15 @@ pub(super) fn effective_request_estimate(request: &Request) -> u64 {
         .as_ref()
         .and_then(|options| options.input.as_ref())
     {
+        // The codec sends refreshed `instructions` beside a native checkpoint
+        // (`openai_responses/request.rs` `refresh_instructions`); without one
+        // the system already lives inside the encoded items.
+        let instructions = input
+            .contains_compaction()
+            .then_some(request.system.as_deref())
+            .flatten();
         let mut bytes = CountingWriter::default();
-        serde_json::to_writer(&mut bytes, &(input, &request.tools))
+        serde_json::to_writer(&mut bytes, &(input, &request.tools, instructions))
             .expect("provider input serializes");
         // The explicit window is what will be sent, so it is sized from its
         // own bytes. Canonical media it carries uses the same semantic

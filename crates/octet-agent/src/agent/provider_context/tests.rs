@@ -2169,3 +2169,94 @@ async fn system_only_projection_keeps_the_native_compaction_checkpoint() {
     );
     assert_eq!(input.items(), original_input.items());
 }
+
+struct LongSystemOnly;
+#[async_trait::async_trait]
+impl ProviderContextHook for LongSystemOnly {
+    async fn project_context(
+        &self,
+        request: &Request,
+        _context: &ProviderContextProjectionContext,
+    ) -> Result<Option<ProviderContextProjection>, String> {
+        Ok(Some(ProviderContextProjection {
+            system: Some("system instruction ".repeat(1000)),
+            tools: None,
+            messages: request.messages.clone(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn system_only_hook_counts_checkpoint_and_refreshed_instructions() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut session = Session::create(workspace.path().join("session.jsonl")).unwrap();
+    let mut model = model();
+    Arc::make_mut(&mut model.spec).protocol = Protocol::OpenAiResponses;
+    session
+        .append(EntryValue::Message(projected_user("compacted away")))
+        .unwrap();
+    let covered_through = session
+        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
+            model: model.spec.id.clone(),
+            protocol: Protocol::OpenAiResponses,
+            content: vec![AssistantPart::Text("earlier answer".into())],
+        })))
+        .unwrap();
+    session
+        .append(EntryValue::ResponsesCompaction {
+            endpoint: model.endpoint.id.clone(),
+            model: model.spec.id.clone(),
+            covered_through,
+            output: octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(
+                serde_json::json!({"type":"compaction", "id":"cmp-1", "encrypted_content":"C".repeat(32768)}),
+            )
+            .unwrap()]),
+        })
+        .unwrap();
+    session
+        .append(EntryValue::Message(projected_user("after the checkpoint")))
+        .unwrap();
+    let mut canonical = request();
+    canonical.messages = session.context().unwrap();
+    canonical.responses =
+        durable_responses_options(&session, &model, "canonical system", None).unwrap();
+    let original_input = canonical
+        .responses
+        .as_ref()
+        .and_then(|options| options.input.as_ref())
+        .expect("same-route session replays its checkpoint")
+        .clone();
+    assert!(original_input.contains_compaction());
+    let hooks: Vec<Arc<dyn ProviderContextHook>> = vec![Arc::new(LongSystemOnly)];
+    let mut notices = Vec::new();
+    let projected = project_provider_context(
+        canonical,
+        &hooks,
+        &identity(),
+        &model,
+        &AbortFlag::default(),
+        &mut session,
+        &mut notices,
+    )
+    .await
+    .unwrap();
+    let input = projected
+        .responses
+        .as_ref()
+        .unwrap()
+        .input
+        .as_ref()
+        .unwrap();
+    assert!(input.contains_compaction());
+    assert_eq!(input.items(), original_input.items());
+    let instructions = projected.system.as_deref().unwrap();
+    let combined = super::super::context_estimate::estimate_responses_request_tokens(
+        input,
+        &[],
+        &projected.tools,
+        Some(instructions),
+        &model.spec,
+    );
+    let hook_path = effective_request_estimate(&projected);
+    assert!(hook_path >= combined, "hook-path estimate={hook_path}, same input plus refreshed instructions={combined}, instructions={} bytes", instructions.len());
+}

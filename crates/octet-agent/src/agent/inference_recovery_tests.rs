@@ -562,6 +562,80 @@ async fn numeric_permanent_code_under_503_sends_one_post() {
         "HTTP posts [default numeric, default string, Codex numeric, Codex string]"
     );
 }
+struct LongSystemOnlyHook;
+#[async_trait::async_trait]
+impl crate::extension::ProviderContextHook for LongSystemOnlyHook {
+    async fn project_context(
+        &self,
+        request: &Request,
+        _ctx: &crate::extension::ProviderContextProjectionContext,
+    ) -> Result<Option<crate::extension::ProviderContextProjection>, String> {
+        Ok(Some(crate::extension::ProviderContextProjection {
+            system: Some("system instruction ".repeat(1000)),
+            tools: None,
+            messages: request.messages.clone(),
+        }))
+    }
+}
+#[tokio::test]
+async fn system_hook_and_direct_instructions_share_checkpoint_admission() {
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let mut posts = Vec::new();
+    for hooked in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+        let route = loopback_route(&server.uri(), 12_000, false);
+        let mut s = Session::create(dir.path().join("s.jsonl")).unwrap();
+        s.append(user_message(UserInput::from("before checkpoint")))
+            .unwrap();
+        s.append_responses_compaction(route.endpoint.id.clone(),route.spec.id.clone(),octet_ai::ResponsesOutput::new(vec![octet_ai::ResponsesItem::new(serde_json::json!({"type":"compaction","id":"cmp","encrypted_content":"C".repeat(32768)})).unwrap()])).unwrap();
+        let mut host = ExtensionHost::new();
+        if hooked {
+            host.provider_context_hook(LongSystemOnlyHook);
+        }
+        let system = if hooked {
+            "system".into()
+        } else {
+            "system instruction ".repeat(1000)
+        };
+        let mut agent = loopback_agent(dir.path(), route, s, system, host);
+        agent.set_provider_retries_enabled(false);
+        let err = agent.complete("after checkpoint").await.unwrap_err();
+        let requests = server.received_requests().await.unwrap();
+        if !hooked {
+            assert!(
+                matches!(err, AgentError::ContextExceeded { .. }),
+                "unexpected control: {err:?}"
+            );
+        }
+        if let Some(sent) = requests.first() {
+            let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(
+                body["instructions"].as_str().unwrap(),
+                "system instruction ".repeat(1000)
+            );
+            assert!(body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["encrypted_content"].as_str().map(str::len) == Some(32768)));
+        }
+        eprintln!(
+            "hooked={hooked} requests={} outcome={err:?}",
+            requests.len()
+        );
+        posts.push(requests.len());
+    }
+    assert_eq!(
+        posts,
+        [0, 0],
+        "same checkpoint and instructions, unhooked vs hooked"
+    );
+}
 #[tokio::test]
 async fn text_only_video_replay_and_literal_placeholder_share_admission() {
     use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
