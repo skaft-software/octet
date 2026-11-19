@@ -1,0 +1,76 @@
+name: Correction of error (COE)
+description: Post-mortem for a defect that reached users in a published release.
+title: "coe: "
+labels:
+  - coe
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A COE is written by a person. Agents may supply evidence (logs, timelines, commit lists, test output) when asked, but never the analysis or conclusions. Never include credentials, private prompts, repository contents, or unredacted session files.
+  - type: checkboxes
+    attributes:
+      label: Authorship
+      options:
+        - label: A person wrote this COE. Any agent-supplied evidence is linked or quoted as evidence.
+          required: true
+  - type: input
+    attributes:
+      label: Affected releases
+      description: First and last affected versions, and the fixing version once released.
+      placeholder: "0.9.0 – 0.10.5; fixed in 0.10.6"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Summary
+      description: What broke, who it affected, and its current status.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: User impact
+      description: Which users and paths were affected, which were not, and whether any data was lost.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Timeline
+      description: Dated events, newest first, from the change that introduced the defect to the fix reaching users.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Root cause
+      description: The mechanism, with the evidence that confirms it.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Why it escaped
+      description: Which checks ran, what each one could and could not see, and why none caught this.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Five whys
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Fix and verification
+      description: The fix, the regression test that fails without it, and how it was verified on a real terminal or platform.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Action items
+      description: One task per item, each with an owner and a target release.
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Related
+      description: Fix commits, releases, issues and evidence.
