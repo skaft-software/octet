@@ -162,23 +162,6 @@ impl ExtensionProcess {
         let entry_parent = session_head.clone();
         let previous_revision = pin.revision;
         let namespace = &self.descriptor().manifest.name;
-        // Oversized inline gaps resynchronize via the existing counted chunk
-        // transport, reserved before persistence. This is not append replay.
-        let snapshot = if gap.is_none() {
-            let profile = connection.session_profile().map_err(|_| bounds())?;
-            let revision = store.next_revision().map_err(|_| bounds())?;
-            let view = store
-                .history(session, namespace, owner.clone(), &profile, None, revision)
-                .map_err(|_| bounds())?;
-            Some(
-                store
-                    .transfer(parent_id, view, &profile)
-                    .map_err(|_| bounds())?,
-            )
-        } else {
-            None
-        };
-        let gap = gap.unwrap_or_default();
         let candidate = Entry {
             id: EntryId("9".repeat(20)),
             parent: entry_parent.clone().map(EntryId),
@@ -203,7 +186,7 @@ impl ExtensionProcess {
                 ..Default::default()
             }),
         };
-        let candidate_receipt = receipt::Receipt {
+        let mut candidate_receipt = receipt::Receipt {
             result: SessionLeafAppendResult {
                 entry_id: candidate.id.0.clone(),
                 head: candidate.id.0.clone(),
@@ -217,24 +200,58 @@ impl ExtensionProcess {
             previous_revision,
             view_revision: MAX_SAFE,
             previous_head: previous_head.clone(),
-            gap: visible_gap(&gap, namespace, session),
+            gap: visible_gap(gap.as_deref().unwrap_or_default(), namespace, session),
         };
-        let mut candidate_receipt = serde_json::to_value(candidate_receipt).expect("receipt JSON");
-        if let Some(snapshot) = &snapshot {
-            candidate_receipt["snapshot"] = json!(snapshot);
+        #[derive(Serialize)]
+        struct Response<'a, T> {
+            jsonrpc: &'static str,
+            id: &'a ExtensionRequestId,
+            result: T,
         }
         let max_bytes = connection.max_message_bytes();
-        if validate_session_snapshot_size(
-            &json!({"jsonrpc":"2.0","id":request_id,"result":candidate_receipt}),
-            max_bytes.saturating_sub(1),
-        )
-        .is_err()
-        {
-            if let Some(snapshot) = &snapshot {
+        let byte_limit = max_bytes.saturating_sub(1);
+        // Count the entire frame without materializing a potentially large
+        // inline gap. If the count or byte budget is exceeded, reserve a
+        // counted snapshot before persisting the append.
+        let inline = gap.is_some()
+            && validate_session_snapshot_size(
+                &Response {
+                    jsonrpc: "2.0",
+                    id: request_id,
+                    result: &candidate_receipt,
+                },
+                byte_limit,
+            )
+            .is_ok();
+        let (gap, snapshot) = if inline {
+            (gap.unwrap_or_default(), None)
+        } else {
+            let profile = connection.session_profile().map_err(|_| bounds())?;
+            let revision = store.next_revision().map_err(|_| bounds())?;
+            let view = store
+                .history(session, namespace, owner.clone(), &profile, None, revision)
+                .map_err(|_| bounds())?;
+            let snapshot = store
+                .transfer(parent_id, view, &profile)
+                .map_err(|_| bounds())?;
+            candidate_receipt.gap.clear();
+            let mut result = serde_json::to_value(candidate_receipt).expect("receipt JSON");
+            result["snapshot"] = json!(&snapshot);
+            if validate_session_snapshot_size(
+                &Response {
+                    jsonrpc: "2.0",
+                    id: request_id,
+                    result,
+                },
+                byte_limit,
+            )
+            .is_err()
+            {
                 store.transfers.remove(&snapshot.transfer_id);
+                return Err(bounds());
             }
-            return Err(bounds());
-        }
+            (Vec::new(), Some(snapshot))
+        };
         let view_revision = store.next_revision().map_err(|_| bounds())?;
         let gap_entries: Vec<Entry> = gap.into_iter().cloned().collect();
         let entry_id = session

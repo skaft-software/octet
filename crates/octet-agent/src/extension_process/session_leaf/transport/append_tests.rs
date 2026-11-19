@@ -569,6 +569,15 @@ fn append_response_progress(session: &mut Session, index: usize) {
 
 #[tokio::test]
 async fn delayed_command_appends_resync_large_gap_and_continue_after_settlement() {
+    assert_delayed_command_appends_resync(false).await;
+}
+
+#[tokio::test]
+async fn a_single_media_entry_triggers_counted_append_resync_by_encoded_size() {
+    assert_delayed_command_appends_resync(true).await;
+}
+
+async fn assert_delayed_command_appends_resync(large_media: bool) {
     let temp = tempfile::tempdir().unwrap();
     write_executable_script(&temp.path().join("extension.py"), SCRIPT);
     let manifest = ExtensionManifest::parse(
@@ -622,7 +631,22 @@ commands = ["append"]
             })
             .await
             .unwrap();
-        append_response_progress(&mut session, index);
+        if large_media && index == 0 {
+            // Raw bytes fit the frame budget, but their base64 wire form does not.
+            let media = octet_ai::Media::audio_bytes(
+                vec![42; 900 * 1024].into(),
+                octet_ai::AudioFormat::Wav,
+            );
+            session
+                .append(EntryValue::Message(octet_ai::Message::User(
+                    octet_ai::UserMessage {
+                        content: vec![octet_ai::UserPart::Media(media)],
+                    },
+                )))
+                .unwrap();
+        } else {
+            append_response_progress(&mut session, index);
+        }
         if index == 1 {
             let head = session.head().unwrap();
             session.checkout_root().unwrap();
@@ -655,7 +679,7 @@ commands = ["append"]
         .expect("same live command retains the sole writer across progress and settlement");
         if index == 0 {
             let snapshot = &receipt["snapshot"];
-            assert_eq!(snapshot["entry_count"], 17);
+            assert_eq!(snapshot["entry_count"], if large_media { 1 } else { 17 });
             assert!(receipt.get("gap").is_none());
         } else {
             assert_eq!(receipt["gap"].as_array().unwrap().len(), 1);
@@ -667,7 +691,7 @@ commands = ["append"]
             .unwrap()
             .entries()
             .len(),
-        20
+        if large_media { 4 } else { 20 }
     );
     assert!(process.shutdown().await);
 }
