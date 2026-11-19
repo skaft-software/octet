@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.10.5] - 2026-11-18
+## [0.10.5] - 2026-11-19
 
 ### Added
 
@@ -87,6 +87,7 @@
 - Tern sessions encode the welcome mark once instead of on every streamed update.
 - Hidden output, compaction and thinking rows share one hint style: (Ctrl+O to expand) and (Ctrl+T to expand).
 - Compact tool cards show hidden row counts without a leading plus sign.
+- A permanent provider rejection behind a gateway 503 stops without a second request.
 
 ## [0.10.4] - 2026-11-12
 

@@ -178,6 +178,15 @@ fn sanitize_http_error(redactor: &CredentialRedactor, error: &mut crate::error::
             .and_then(json_scalar_string)
     };
     let known_code = |code: &str| {
+        // A numeric permanent code (for example 422 behind a gateway 503)
+        // vetoes retries, so keep it as its canonical status number only.
+        if let Some(status) = code
+            .parse::<u16>()
+            .ok()
+            .filter(|_| crate::error::permanent_provider_code(code))
+        {
+            return Some(status.to_string());
+        }
         (code == error.status.as_str()
             || (code.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
                 && crate::error::permanent_provider_code(code))

@@ -477,3 +477,88 @@ async fn unsupported_input_caps_refuse_before_dispatch_and_uncapped_hook_veto_st
         }
     }
 }
+
+// End-to-end admission and retry checks against a loopback Responses server.
+fn loopback_route(uri: &str, window: u64, codex: bool) -> Model {
+    let mut model = model();
+    let spec = Arc::make_mut(&mut model.spec);
+    spec.limits.context_window = window;
+    spec.limits.max_output_tokens = 512;
+    let endpoint = Arc::make_mut(&mut model.endpoint);
+    endpoint.runtime.responses_profile = if codex {
+        octet_ai::ResponsesRuntimeProfile::Codex
+    } else {
+        octet_ai::ResponsesRuntimeProfile::Default
+    };
+    endpoint.transport = octet_ai::EndpointTransport::Http;
+    endpoint.base_url = url::Url::parse(&format!("{uri}/")).unwrap();
+    endpoint.auth = octet_ai::Auth::bearer("synthetic");
+    model
+}
+fn loopback_agent(
+    dir: &std::path::Path,
+    model: Model,
+    session: Session,
+    system: String,
+    extensions: ExtensionHost,
+) -> Agent {
+    let mut agent = Agent::new(AgentConfig {
+        client: AiClient::new(),
+        model,
+        session,
+        system,
+        sandbox: SandboxConfig::new(dir),
+        effect_broker: EffectBroker::default(),
+        extensions,
+        max_turns: Some(1),
+        reasoning: ReasoningConfig::Off,
+        reasoning_mode: ReasoningMode::Standard,
+        cache_retention: CacheRetention::Short,
+        session_id: None,
+    })
+    .unwrap();
+    agent
+        .set_compaction_token_mode(AgentCompactionMode::Disabled, 0.9, 2)
+        .unwrap();
+    agent
+}
+#[tokio::test]
+async fn numeric_permanent_code_under_503_sends_one_post() {
+    use std::sync::atomic::AtomicUsize;
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let mut counts = Vec::new();
+    for codex in [false, true] {
+        for code in [serde_json::json!(422), serde_json::json!("422")] {
+            let server = MockServer::start().await;
+            let calls = AtomicUsize::new(0);
+            Mock::given(method("POST"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ResponseTemplate::new(503)
+                            .insert_header("Retry-After", "0")
+                            .set_body_json(serde_json::json!({"error":{"code":code}}))
+                    } else {
+                        ResponseTemplate::new(400)
+                    }
+                })
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut agent = loopback_agent(
+                dir.path(),
+                loopback_route(&server.uri(), 32768, codex),
+                Session::create(dir.path().join("s.jsonl")).unwrap(),
+                "system".into(),
+                ExtensionHost::new(),
+            );
+            agent.set_provider_retries_enabled(true);
+            let _ = agent.complete("fixture").await.unwrap_err();
+            counts.push(server.received_requests().await.unwrap().len());
+        }
+    }
+    assert_eq!(
+        counts,
+        [1, 1, 1, 1],
+        "HTTP posts [default numeric, default string, Codex numeric, Codex string]"
+    );
+}

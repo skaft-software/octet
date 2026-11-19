@@ -2954,3 +2954,47 @@ async fn http_error_type_is_available_when_code_or_message_is_absent() {
         serde_json::from_str(http.body_snippet.as_deref().unwrap()).unwrap();
     assert_eq!(body["error"]["type"], "invalid_request_error");
 }
+
+#[tokio::test]
+async fn numeric_permanent_provider_code_under_server_error_vetoes_retry() {
+    for code in [serde_json::json!(422), serde_json::json!("422")] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(
+                    serde_json::json!({"error": {"code": code, "message": "private"}}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let model = make_test_model(&server.uri(), Protocol::OpenAiChat, false);
+        let Err(AiError::Http(error)) = AiClient::new().stream(&model, text_request()).await else {
+            panic!("expected a structured HTTP error");
+        };
+        assert_eq!(error.provider_code.as_deref(), Some("422"));
+        assert!(!error.is_safe_to_retry());
+        assert!(!error.is_transient_server_error());
+        assert!(!format!("{error} {error:?}").contains("private"));
+    }
+}
+
+#[tokio::test]
+async fn numeric_transient_provider_code_keeps_server_error_retryable() {
+    for code in [serde_json::json!(429), serde_json::json!(5031)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(serde_json::json!({"error": {"code": code}})),
+            )
+            .mount(&server)
+            .await;
+        let model = make_test_model(&server.uri(), Protocol::OpenAiChat, false);
+        let Err(AiError::Http(error)) = AiClient::new().stream(&model, text_request()).await else {
+            panic!("expected a structured HTTP error");
+        };
+        assert!(error.is_safe_to_retry(), "code {code}: {error:?}");
+        assert!(error.is_transient_server_error(), "code {code}: {error:?}");
+    }
+}

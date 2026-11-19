@@ -1116,7 +1116,8 @@ recognized error codes and types. Octet generates its own guidance for the
 failure; it does not quote the provider's HTTP response body. Even short or
 transformed prompt echoes in `message`, `code` or `type` are not copied through.
 Octet can recognize explicit context-window failures without retaining the
-provider's wording. Use the shape-only request trace below to investigate an
+provider's wording. A permanent client-error code (such as `422`) inside a
+5xx response stops automatic retry. Use the shape-only request trace below to investigate an
 opaque rejection without recording the prompt.
 
 ## Provider request trace
