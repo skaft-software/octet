@@ -28,7 +28,7 @@ credentials, account access, regional access or an unavailable model mean
 **UNTESTED**, not success and not evidence that every route on the codec fails.
 Offline dummy codec bytes are not live recognition fixtures.
 
-## Route worksheet (initial state)
+## Route worksheet
 
 | Route | Recorded input to check | Transport | Recognition |
 | --- | --- | --- | --- |
@@ -38,6 +38,7 @@ Offline dummy codec bytes are not live recognition fixtures.
 | Gemini Developer API | WAV, MP3, AAC, FLAC, Ogg Opus inline | UNTESTED | UNTESTED |
 | Gemini Developer API Files | Same formats, resumable upload + fileData | UNTESTED | UNTESTED |
 | Vertex AI, authorized project/location/model | Same formats inline; explicit GCS fileData | UNTESTED | UNTESTED |
+| OpenCode Go `gemini-4-argon` (0.10.5) | Recorded audio attachment | PASS | PASS |
 | OpenCode Google-compatible route, exact model | Same formats inline | UNTESTED | UNTESTED |
 | Responses/Codex, Anthropic, Bedrock, Mistral Conversations, Pi Messages, extension stream | Native audio is not implemented; verify local route-named continuation/refusal only | UNTESTED (no native audio route) | UNTESTED |
 

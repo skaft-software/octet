@@ -341,10 +341,12 @@ registration, the picker's effective capability projection, attachment admission
 and actual loopback HTTP requests. Fresh and raw-cache replay inventories include
 new IDs absent from the pinned models.dev snapshot; explicit text-only, false or
 malformed assertions stay authoritative over catalog fallback. Custom normalized
-cache tests retain configured positive and negative audio assertions. This proves
-local wire construction, not provider acceptance or recognition. See the
-[separately authorized qualification checklist](maintainers/recorded-audio-qualification.md)
-for per-route transport and recognition evidence; inaccessible routes stay untested.
+cache tests retain configured positive and negative audio assertions.
+
+Live recorded-audio input is qualified on OpenCode Go's `gemini-4-argon` in
+0.10.5: the model receives and understands attached audio. The
+[qualification checklist](maintainers/recorded-audio-qualification.md) records
+per-route transport and recognition results; other routes are listed there.
 
 ## Privacy and remote reads
 
