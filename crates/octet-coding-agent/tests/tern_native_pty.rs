@@ -666,8 +666,13 @@ impl SyntheticStream {
             requests,
         }
     }
-    fn pty(&self) -> NativePty {
+    fn pty(&self, show_durations: bool) -> NativePty {
         NativePty::configured(Options::default(), |home, _, _| {
+            fs::write(
+                home.join(".octet/config.toml"),
+                format!("show_durations = {show_durations}\n"),
+            )
+            .unwrap();
             let path = home.join(".octet/credentials/custom.json");
             let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             record["base_url"] = json!(self.url);
@@ -2391,7 +2396,9 @@ fn native_extensions_empty_and_untrusted_installed_menus_cannot_grant_by_pointer
 #[test]
 fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_real_runtime() {
     let server = SyntheticStream::new();
-    let mut pty = server.pty();
+    // The first answer delta settles reasoning. Opt into its collapsed marker
+    // so this test can check both the collapsed and expanded native section.
+    let mut pty = server.pty(true);
     pty.ready();
     assert!(pty
         .messages
@@ -2499,7 +2506,7 @@ fn native_loopback_stream_reasoning_markdown_working_finalization_and_draft_are_
 #[test]
 fn native_loopback_cancel_settles_without_dispatching_followup_and_can_recall_it() {
     let server = SyntheticStream::new();
-    let mut pty = server.pty();
+    let mut pty = server.pty(false);
     pty.ready();
     pty.command("loopback interrupt prompt");
     pty.wait(|pty| {
