@@ -725,10 +725,7 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
     let mut shell = InteractiveShell::test_shell();
     let run_id = shell.begin_run("openai");
     let rendered = |shell: &InteractiveShell| {
-        shell
-            .state
-            .borrow()
-            .rendered_transcript(80)
+        rendered_with_working(&shell.state.borrow(), 80)
             .iter()
             .map(|line| strip_terminal_sequences(line))
             .collect::<Vec<_>>()
@@ -738,7 +735,7 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
         run_id,
         &AgentEvent::OutputDelta {
             channel: OutputChannel::Reasoning,
-            text: "first private thought".into(),
+            text: "## Check the layout\n\nfirst private thought".into(),
         },
     );
     let collapsed = rendered(&shell);
@@ -756,6 +753,13 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
     assert!(shell.toggle_thinking());
     let expanded = rendered(&shell);
     assert!(expanded.contains("first private thought"), "{expanded}");
+    assert_eq!(
+        expanded.matches("Check the layout").count(),
+        1,
+        "{expanded}"
+    );
+    assert!(!expanded.contains("• Thinking ("), "{expanded}");
+    assert!(!expanded.contains("• Working ("), "{expanded}");
     assert!(!expanded.contains("Ctrl+T to expand"), "{expanded}");
 
     // A trace that starts after the choice follows it instead of the theme.
@@ -766,18 +770,24 @@ fn ctrl_t_shows_thinking_alone_and_keeps_the_choice_for_later_blocks() {
             text: "answer".into(),
         },
     );
+    assert!(rendered(&shell).contains("• Working ("));
     shell.on_run_event(
         run_id,
         &AgentEvent::OutputDelta {
             channel: OutputChannel::Reasoning,
-            text: "second private thought".into(),
+            text: "## Verify the result\n\nsecond private thought".into(),
         },
     );
     let later = rendered(&shell);
     assert!(later.contains("second private thought"), "{later}");
+    assert!(!later.contains("• Thinking ("), "{later}");
 
     assert!(!shell.toggle_thinking());
     let hidden = rendered(&shell);
+    assert!(
+        hidden.contains("Verify the result (Ctrl+T to expand)"),
+        "{hidden}"
+    );
     assert!(!hidden.contains("first private thought"), "{hidden}");
     assert!(!hidden.contains("second private thought"), "{hidden}");
 }

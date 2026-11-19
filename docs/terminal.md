@@ -456,7 +456,8 @@ text and tools grow above it, including between provider turns. A Pi extension's
 working component updates that same slot rather than replacing reasoning rows.
 Focused panels and transcript search keep a visible input-owning row alongside
 this slot, even when a long error wraps in a short terminal.
-Only run settlement removes it. Retry
+Expanding a live trace with Ctrl+T hides the ordinary indicator rather than
+repeating the trace below it. Collapsing the trace restores the indicator. Retry
 status keeps the interrupt hint but leaves out the run-elapsed counter, even
 after its backoff countdown reaches zero, so two clocks never compete on one
 row. While the model reasons, the bold `Thinking` label shimmers more quietly

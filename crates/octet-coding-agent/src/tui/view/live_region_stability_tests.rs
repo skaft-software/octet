@@ -138,23 +138,26 @@ fn working_slot_stays_below_reasoning_and_tools_for_the_entire_run() {
                             }
                         }
                     }
+                    let visible = !expanded || shell.state.borrow().active_reasoning.is_none();
                     let rows = frame(&component, width);
                     assert_eq!(
                         rows.iter()
                             .filter(|row| row.contains(working_label))
                             .count(),
-                        1,
+                        usize::from(visible),
                         "{isolated}/{component_line}/{expanded}: {rows:?}"
                     );
                     assert_eq!(
                         rows.iter().position(|row| row.contains(working_label)),
-                        Some(working_row),
+                        visible.then_some(working_row),
                         "working slot moved: {previous:?} -> {rows:?}"
                     );
+                    let released_row =
+                        !visible && previous.iter().any(|row| row.contains(working_label));
                     for (old_row, text) in history_positions(&previous) {
                         if let Some(row) = rows.iter().position(|current| current == &text) {
                             assert!(
-                                row <= old_row,
+                                row <= old_row + usize::from(released_row),
                                 "history moved down: {previous:?} -> {rows:?}"
                             );
                         }

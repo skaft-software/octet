@@ -375,6 +375,21 @@ fn render_working_status(state: &ShellState, width: u16) -> Vec<String> {
     let Some(status) = &state.working_status else {
         return Vec::new();
     };
+    // The expanded live trace is already the indicator. Keep independent
+    // lifecycle/retry statuses and themes with their own placeholder intact.
+    if status.is_working_activity()
+        && status.retry_activity.is_none()
+        && state.active_reasoning.is_some_and(|index| {
+            matches!(&state.transcript[index], super::TranscriptBlock::Reasoning(reasoning)
+                if reasoning.reasoning_expanded && !reasoning.finished)
+        })
+        && state
+            .theme
+            .resolve::<String>("thinking_placeholder")
+            .is_none()
+    {
+        return Vec::new();
+    }
     let block = super::TranscriptBlock::Reasoning(status.clone());
     let mut rich = state.rich_renderer.borrow_mut();
     let rich = rich.get_or_insert_with(|| state.theme.rich_renderer());
