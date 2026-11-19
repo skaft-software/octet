@@ -46,6 +46,10 @@ the metadata digest and every tarball's SHA-256/SHA-512 digests. Local scripts
 check deterministic packing, tarball/path/lifecycle/secret handling, and an
 offline install; they do **not** prove registry publication or macOS acceptance.
 
+Both the native archive reader and npm verifier cap individual members at 64 MiB,
+except for the Windows MSVC `octet.exe` (80 MiB). The platform archive still
+must fit 128 MiB compressed and 160 MiB expanded.
+
 All files in the [public documentation inventory](../package-assets.txt) are
 retained byte-for-byte from the verified native assets. The 0.8.1 npm publication
 followed the signed native release, so its bundled docs are that release-time

@@ -31,6 +31,12 @@ MAX_ENTRIES = 4096
 MAX_MEMBER_BYTES = 64 * 1024 * 1024
 
 
+def member_limit(windows: bool, native_path: str) -> int:
+    # The v0.10.5 MSVC CLI is 69,048,832 bytes. Keep all other members
+    # and the total expanded archive under their existing limits.
+    return 80 * 1024 * 1024 if windows and native_path == "octet.exe" else MAX_MEMBER_BYTES
+
+
 def documentation_files() -> set[str]:
     inventory = pathlib.Path(__file__).resolve().parent.parent / "docs/package-assets.txt"
     result = set()
@@ -245,8 +251,9 @@ def inspect_tarball(path: pathlib.Path, expected: ExpectedPackage) -> Inspection
                 fail(f"{path.name} repeats member {name}")
             if member.mode & 0o7000 or member.mode & 0o002:
                 fail(f"{path.name} has unsafe permissions on {name}")
-            if member.size < 0 or member.size > MAX_MEMBER_BYTES:
-                fail(f"{path.name} member {name} exceeds {MAX_MEMBER_BYTES} bytes")
+            size_limit = member_limit(expected.os == "win32" and relative.startswith("bin/"), relative.removeprefix("bin/"))
+            if member.size < 0 or member.size > size_limit:
+                fail(f"{path.name} member {name} exceeds {size_limit} bytes")
             if not (member.isdir() or member.isreg()):
                 fail(f"{path.name} contains a link or special member: {name}")
             if not allowed_member(expected, relative, member.isdir()):
@@ -259,7 +266,7 @@ def inspect_tarball(path: pathlib.Path, expected: ExpectedPackage) -> Inspection
                 stream = archive.extractfile(member)
                 if stream is None:
                     fail(f"{path.name} member cannot be read: {name}")
-                data = stream.read(MAX_MEMBER_BYTES + 1)
+                data = stream.read(member.size + 1)
                 if len(data) != member.size:
                     fail(f"{path.name} member size changed while reading: {name}")
                 contents[relative] = data

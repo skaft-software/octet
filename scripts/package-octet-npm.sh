@@ -102,7 +102,7 @@ documentation_extras = verification["DOCUMENTATION_EXTRAS"]
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 160 * 1024 * 1024
-MAX_MEMBER_BYTES = 64 * 1024 * 1024
+member_limit = verification["member_limit"]
 MAX_ENTRIES = 4096
 WINDOWS_FORBIDDEN = set('<>:"|?*')
 WINDOWS_DEVICES = {
@@ -243,8 +243,9 @@ def validate_archive(target, archive, expected_digest):
                 or relative.startswith(("docs/", "examples/", "sdk/"))
             ):
                 fail(f"native release archive has an unexpected member: {name}")
-            if size > MAX_MEMBER_BYTES:
-                fail(f"native release archive member exceeds {MAX_MEMBER_BYTES} bytes: {name}")
+            size_limit = member_limit(windows, relative)
+            if size > size_limit:
+                fail(f"native release archive member exceeds {size_limit} bytes: {name}")
             if not (is_directory or is_regular) or (zipped and stat.S_ISLNK(mode)):
                 fail(f"native release archive contains a link or special file: {name}")
             expanded += size
