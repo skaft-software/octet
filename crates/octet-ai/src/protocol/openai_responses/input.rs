@@ -207,7 +207,11 @@ pub(super) fn map_user_input(
     synthetic_tool_results: &std::collections::HashSet<String>,
     computer_call_ids: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<ResponsesInputItem>, AiError> {
-    let user = crate::video::prepare_user_message(model, user)?;
+    let user = if preserve_tool_call_ids {
+        crate::video::prepare_replayed_user_message(model, user)?
+    } else {
+        crate::video::prepare_user_message(model, user)?
+    };
     let mut input = Vec::new();
     let mut content = Vec::new();
     for part in &user.content {

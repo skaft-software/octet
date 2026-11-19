@@ -34,6 +34,83 @@ fn request() -> Request {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn decoder_scratch_is_private_under_permissive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // umask is process-wide; set it in a fresh copy of the test binary.
+    const CHILD: &str = "OCTET_VIDEO_SCRATCH_PERMISSION_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let scratch = decoder_scratch().unwrap();
+        assert_eq!(
+            fs::metadata(scratch.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        return;
+    }
+    let output = Command::new("sh")
+        .args(["-c", "umask 000; exec \"$@\"", "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "video::tests::decoder_scratch_is_private_under_permissive_umask",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+fn explicit_responses_input_excludes_canonical_video_from_preflight() {
+    let model = model(Protocol::OpenAiResponses);
+    let mut request = request();
+    request.messages = vec![request.messages[0].clone(); 13];
+    assert!(matches!(
+        crate::protocol::openai_responses::build_request(&model, &request),
+        Err(AiError::Validation(
+            crate::ValidationError::RequestBytes { .. }
+        ))
+    ));
+    request.responses = Some(crate::responses::ResponsesOptions::full_replay(
+        crate::responses::ResponsesInput::new(Vec::new()),
+    ));
+    let parts = crate::protocol::openai_responses::build_request(&model, &request).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+    assert_eq!(body["input"], serde_json::json!([]));
+}
+
+#[test]
+fn text_only_responses_replay_omits_video_without_consuming_the_source() {
+    let mut model = model(Protocol::OpenAiResponses);
+    Arc::make_mut(&mut model.spec).capabilities.input_modalities = crate::ModalitySet::none();
+    let request = request();
+    let Message::User(user) = &request.messages[0] else {
+        unreachable!()
+    };
+    let replay = [crate::responses::ResponsesReplayItem::User(user.clone())];
+    let input = crate::responses::encode_responses_replay(&model, None, &replay).unwrap();
+    let text = input.items()[0].as_json()["content"][1]["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("original retained"), "{text}");
+    assert!(
+        matches!(&user.content[1], UserPart::Media(Media::Video(video)) if video.data.as_ref() == include_bytes!("tiny.mp4") && video.cached_frames().is_none())
+    );
+    assert!(matches!(
+        prepare_user_message(&model, user),
+        Err(AiError::Unsupported(crate::UnsupportedError::Video))
+    ));
+}
+
 fn cached_clip() -> VideoMedia {
     let Media::Video(video) = clip() else {
         unreachable!()
@@ -254,6 +331,28 @@ async fn cancelled_model_frame_preparation_preserves_source_and_caches_failure()
     );
     assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
     assert_eq!(frame_decodes(&video), VIDEO_FRAMES);
+}
+
+#[tokio::test]
+async fn sparse_video_reuses_last_frame_after_its_timestamp() {
+    let Media::Video(video) = Media::video_bytes(
+        Bytes::from_static(include_bytes!("single-frame.mp4")),
+        "video/mp4".parse().unwrap(),
+    ) else {
+        unreachable!()
+    };
+    let frames = video.prepare_frames().await.unwrap();
+    assert_eq!(
+        frames.iter().map(|frame| frame.seconds).collect::<Vec<_>>(),
+        [0.25, 0.75, 1.25, 1.75]
+    );
+    let crate::ImageSource::Inline(last) = &frames[0].image.source else {
+        unreachable!()
+    };
+    assert!(!last.is_empty());
+    assert!(frames.iter().all(
+        |frame| matches!(&frame.image.source, crate::ImageSource::Inline(bytes) if bytes == last)
+    ));
 }
 
 #[tokio::test]

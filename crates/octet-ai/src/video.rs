@@ -384,14 +384,35 @@ fn check_preparation(
     }
 }
 
+#[cfg(unix)]
+fn decoder_scratch() -> Result<tempfile::TempDir, VideoPreparationError> {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .map_err(|_| error("cannot create private decoder scratch directory"))
+}
+
+#[cfg(windows)]
+fn decoder_scratch() -> Result<crate::secure_fs::PrivateTempDir, VideoPreparationError> {
+    crate::secure_fs::PrivateTempDir::new()
+        .map_err(|_| error("cannot create private decoder scratch directory"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn decoder_scratch() -> Result<tempfile::TempDir, VideoPreparationError> {
+    Err(error(
+        "private decoder scratch is unavailable on this platform",
+    ))
+}
+
 fn sample(
     video: &VideoMedia,
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Vec<VideoFrame>, VideoPreparationError> {
     check_preparation(deadline, cancelled)?;
-    let dir = tempfile::tempdir()
-        .map_err(|_| error("cannot create private decoder scratch directory"))?;
+    let dir = decoder_scratch()?;
     let input = dir.path().join("input");
     fs::write(&input, &video.data).map_err(|_| error("cannot write decoder input"))?;
     let metadata = dir.path().join("metadata");
@@ -446,78 +467,113 @@ fn sample(
         ));
     }
     let mut frames = Vec::with_capacity(VIDEO_FRAMES);
-    let mut total = 0usize;
+    let output = dir.path().join("frame.jpg");
+    let mut final_frame: Option<crate::ImageMedia> = None;
     for index in 0..VIDEO_FRAMES {
         let seconds = duration * (2 * index + 1) as f64 / (2 * VIDEO_FRAMES) as f64;
-        let output = dir.path().join("frame.jpg");
-        run(
-            Command::new("ffmpeg")
-                .args([
-                    "-nostdin",
-                    "-v",
-                    "error",
-                    "-y",
-                    "-max_alloc",
-                    "67108864",
-                    "-max_pixels",
-                    "16000000",
-                    "-threads",
-                    "1",
-                    "-protocol_whitelist",
-                    "file,pipe",
-                    "-format_whitelist",
-                    FORMATS,
-                    "-ss",
-                ])
-                .arg(format!("{seconds:.6}"))
-                .arg("-i")
-                .arg(&input)
-                .args([
-                    "-map",
-                    "0:v:0",
-                    "-an",
-                    "-sn",
-                    "-dn",
-                    "-frames:v",
-                    "1",
-                    "-vf",
-                    "scale=768:768:force_original_aspect_ratio=decrease",
-                    "-threads",
-                    "1",
-                    "-q:v",
-                    "3",
-                    "-fs",
-                    "1048576",
-                ])
-                .arg(&output)
-                .stdout(Stdio::null()),
-            deadline,
-            cancelled,
-        )?;
-        let len = fs::metadata(&output)
-            .map_err(|_| error("video has no frame at a sampled timestamp"))?
-            .len() as usize;
-        total = total.saturating_add(len);
-        if len > MAX_FRAME_BYTES / VIDEO_FRAMES || total > MAX_FRAME_BYTES {
-            return Err(error("sampled frames exceed the 4 MiB output limit"));
-        }
-        let data = fs::read(&output).map_err(|_| error("cannot read sampled frame"))?;
-        let Media::Image(image) = Media::image_bytes(Bytes::from(data), mime::IMAGE_JPEG) else {
-            unreachable!()
+        let image = if let Some(image) = &final_frame {
+            image.clone()
+        } else {
+            decode_frame(&input, &output, Some(seconds), deadline, cancelled)?;
+            let missing = match fs::metadata(&output) {
+                Ok(metadata) if metadata.len() == 0 => {
+                    fs::remove_file(&output)
+                        .map_err(|_| error("cannot remove empty frame scratch"))?;
+                    true
+                }
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => return Err(error("cannot inspect sampled frame")),
+            };
+            if missing {
+                // The container duration can exceed its last video timestamp
+                // (including a valid clip with exactly one frame). Decode
+                // through EOF once, continually replacing the same JPEG.
+                decode_frame(&input, &output, None, deadline, cancelled)?;
+            }
+            let len = fs::metadata(&output)
+                .map_err(|_| error("video contains no decodable frame"))?
+                .len();
+            if len > (MAX_FRAME_BYTES / VIDEO_FRAMES) as u64 {
+                return Err(error("sampled frames exceed the 4 MiB output limit"));
+            }
+            let data = fs::read(&output).map_err(|_| error("cannot read sampled frame"))?;
+            let Media::Image(image) = Media::image_bytes(Bytes::from(data), mime::IMAGE_JPEG)
+            else {
+                unreachable!()
+            };
+            let image = crate::prepare_user_image(
+                &image,
+                crate::ImageInputLimits {
+                    max_width: MAX_FRAME_EDGE,
+                    max_height: MAX_FRAME_EDGE,
+                    max_bytes: MAX_FRAME_BYTES / VIDEO_FRAMES,
+                },
+            )
+            .map_err(|_| error("decoder produced an invalid or oversized frame"))?;
+            fs::remove_file(&output).map_err(|_| error("cannot remove sampled frame scratch"))?;
+            if missing {
+                final_frame = Some(image.clone());
+            }
+            image
         };
-        let image = crate::prepare_user_image(
-            &image,
-            crate::ImageInputLimits {
-                max_width: MAX_FRAME_EDGE,
-                max_height: MAX_FRAME_EDGE,
-                max_bytes: MAX_FRAME_BYTES / VIDEO_FRAMES,
-            },
-        )
-        .map_err(|_| error("decoder produced an invalid or oversized frame"))?;
         frames.push(VideoFrame { seconds, image });
-        fs::remove_file(output).map_err(|_| error("cannot remove sampled frame scratch"))?;
     }
     Ok(frames)
+}
+
+fn decode_frame(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    seconds: Option<f64>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<(), VideoPreparationError> {
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-max_alloc",
+        "67108864",
+        "-max_pixels",
+        "16000000",
+        "-threads",
+        "1",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-format_whitelist",
+        FORMATS,
+    ]);
+    if let Some(seconds) = seconds {
+        command.arg("-ss").arg(format!("{seconds:.6}"));
+    }
+    command.arg("-i").arg(input).args([
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        "scale=768:768:force_original_aspect_ratio=decrease",
+        "-pix_fmt",
+        "yuvj420p",
+        "-threads",
+        "1",
+        "-q:v",
+        "3",
+    ]);
+    if seconds.is_some() {
+        command.args(["-frames:v", "1", "-fs", "1048576"]);
+    } else {
+        command.args(["-fps_mode", "passthrough", "-update", "1"]);
+    }
+    run(
+        command.arg(output).stdout(Stdio::null()),
+        deadline,
+        cancelled,
+    )
 }
 
 /// Prepare video sources before synchronous request/replay projection. Failed
@@ -597,6 +653,32 @@ pub(crate) fn prepare_user_message<'a>(
     model: &crate::Model,
     user: &'a crate::UserMessage,
 ) -> Result<Cow<'a, crate::UserMessage>, AiError> {
+    project_user_message(model, user, false)
+}
+
+/// Only replay may omit video that the route cannot accept. New input must
+/// still pass the normal modality checks.
+pub(crate) fn prepare_replayed_user_message<'a>(
+    model: &crate::Model,
+    user: &'a crate::UserMessage,
+) -> Result<Cow<'a, crate::UserMessage>, AiError> {
+    project_user_message(model, user, true)
+}
+
+fn project_user_message<'a>(
+    model: &crate::Model,
+    user: &'a crate::UserMessage,
+    replay: bool,
+) -> Result<Cow<'a, crate::UserMessage>, AiError> {
+    let project = |video: &VideoMedia| {
+        if replay && !model.spec.supports_video_input() {
+            Ok(vec![UserPart::Text(crate::transform::video_placeholder(
+                model,
+            ))])
+        } else {
+            project(model, video)
+        }
+    };
     let has_video = user.content.iter().any(|part| match part {
         UserPart::Media(Media::Video(_)) => true,
         UserPart::ToolResult(result) => result
@@ -611,7 +693,7 @@ pub(crate) fn prepare_user_message<'a>(
     let mut content = Vec::new();
     for part in &user.content {
         match part {
-            UserPart::Media(Media::Video(video)) => content.extend(project(model, video)?),
+            UserPart::Media(Media::Video(video)) => content.extend(project(video)?),
             UserPart::ToolResult(result) => {
                 let mut result = result.clone();
                 let mut adjacent = Vec::new();
@@ -625,7 +707,7 @@ pub(crate) fn prepare_user_message<'a>(
                 });
                 content.push(UserPart::ToolResult(result));
                 for video in adjacent {
-                    content.extend(project(model, &video)?);
+                    content.extend(project(&video)?);
                 }
             }
             _ => content.push(part.clone()),

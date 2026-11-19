@@ -689,6 +689,6 @@ fn push_synthetic_results(
 #[cfg(test)]
 mod tests;
 
-fn video_placeholder(target: &Model) -> String {
+pub(crate) fn video_placeholder(target: &Model) -> String {
     format!("(video omitted: provider {} model {} does not support native video or images; original retained)", target.endpoint.id.0, target.spec.api_name)
 }

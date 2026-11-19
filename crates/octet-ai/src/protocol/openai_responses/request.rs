@@ -396,7 +396,14 @@ pub(crate) fn build_request(
     model: &crate::catalog::Model,
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
-    crate::recorded_audio::check_media_budget(model, req)?;
+    let explicit_input = req
+        .responses
+        .as_ref()
+        .is_some_and(|options| options.input.is_some());
+    if !explicit_input {
+        crate::recorded_audio::check_media_budget(model, req)?;
+    }
+    // Explicit input is already encoded, and is bounded by the final writer.
     // 1. Normalize model-gated reasoning, then run validation.
     let defaults = crate::protocol::preset::request_defaults(model, req)?;
     let req = normalize_request_reasoning(&defaults, &model.spec.capabilities);

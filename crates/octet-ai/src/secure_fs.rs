@@ -596,6 +596,9 @@ mod imp;
 #[path = "secure_fs/imp_windows.rs"]
 mod imp;
 
+#[cfg(windows)]
+pub(crate) use imp::PrivateTempDir;
+
 #[cfg(not(any(unix, windows)))]
 #[path = "secure_fs/imp_other.rs"]
 mod imp;

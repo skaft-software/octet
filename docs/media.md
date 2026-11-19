@@ -131,7 +131,7 @@ Remote video reads are not enabled.
 On an **image-capable route**, including **openai-codex / Responses**, octet
 samples **four frames** at the midpoints of four equal duration intervals
 (12.5%, 37.5%, 62.5%, 87.5%). Each JPEG fits within **768×768 pixels**;
-together they occupy at most **4 MiB**. Text immediately before each image gives
+together they occupy at most **4 MiB**. A requested timestamp after the last video frame reuses that frame. Text immediately before each image gives
 its requested timestamp in seconds from the start. The composer chip and read
 result show **“video sent as 4 frames”**. These are sparse visual samples, not
 continuous video understanding; **audio is not sent** on this fallback.
@@ -155,7 +155,9 @@ than adding a video codec dependency. Install a maintained FFmpeg distribution
 from your OS package manager. Only whitelisted local containers/protocols are
 opened; source frames are capped at **16 million pixels**, duration at **24 hours**,
 decoder allocation size at **64 MiB**, and the complete preparation at **30 seconds**.
-JPEG output and private scratch are bounded and removed after preparation.
+Decoder scratch is owner-only from creation (mode `0700` on Unix, protected
+user-only ACL on Windows). It is removed after preparation; a process crash can
+leave private scratch behind.
 Preparation runs off the interactive driver, with at most two decoder workers per
 process; queueing and decoding share the 30-second deadline. Input and interrupts
 remain available while a cold video read is prepared. Cancellation and timeout
@@ -180,7 +182,9 @@ A cold read records deferred frame delivery, not a preparation failure; the
 provider-input projection reports the current frame outcome. Preparation failures
 are cached for that source in the current process, so encoding and later turns do
 not retry the decoder; read or attach the clip again to retry. Switching to a
-text-only model also derives a placeholder without erasing video.
+text-only model also derives a placeholder without erasing video, including
+in native Responses replay and compaction. New attachments still require a
+compatible route.
 
 Rust embedders call `video::prepare_message_frames(&model, &messages).await` before
 synchronous lowering or encoding so sampled frames also fit the selected model's
@@ -192,8 +196,9 @@ canonical context or route-affine Responses replay window before projection. Vid
 boundary stay cold. Incremental preparation inspects only the changed active
 suffix (including coalesced tool results), and resets its cursor when checkout,
 compaction, model selection or image-limit changes affect that window. An explicit
-Responses input already owns the wire content, so the client does not decode
-canonical media that it replaces.
+Responses input already owns the wire content, so the client neither decodes
+nor counts the canonical media it replaces against the media byte limit. The
+selected input still has to fit the final request byte ceiling.
 
 For Pi compatibility, the reference defines only `ImageContent` for binary visual
 input (`packages/ai/src/types.ts:438–442`), sniffs still images

@@ -77,6 +77,8 @@
 - Gemini audio uploads check every clip's size before sending any of them.
 - Copying a code block after an identical LaTeX or Mermaid diagram copies that block's own source.
 - Paste and attachment chips delete as one object, and arrow keys step over them.
+- Video decoding keeps scratch footage and frames in an owner-only directory and reuses the last frame for late samples in sparse clips.
+- Responses budgets the selected compacted input and leaves a placeholder for historical video on text-only routes.
 - Tern sessions encode the welcome mark once instead of on every streamed update.
 - Hidden output, compaction and thinking rows share one hint style: (Ctrl+O to expand) and (Ctrl+T to expand).
 

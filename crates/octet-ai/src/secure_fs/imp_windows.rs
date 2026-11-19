@@ -269,6 +269,65 @@ fn with_private_descriptor<T>(
     })
 }
 
+/// An inheritable, user-only DACL is set on creation, without changing the
+/// permissions of the (possibly shared) temporary parent.
+pub(crate) struct PrivateTempDir(PathBuf);
+
+impl PrivateTempDir {
+    pub(crate) fn new() -> Result<Self, SecureFileError> {
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+        let parent = std::env::temp_dir().canonicalize()?;
+        for _ in 0..TEMP_NAME_ATTEMPTS {
+            let path = parent.join(format!("octet-video-{}", random_temp_suffix()?));
+            let wide: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+            let created = with_private_descriptor(true, |descriptor| {
+                let attributes = SECURITY_ATTRIBUTES {
+                    nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: descriptor.cast_mut().cast(),
+                    bInheritHandle: 0,
+                };
+                // SAFETY: the path is nul-terminated and the security descriptor
+                // and its backing ACL live through the synchronous call.
+                if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
+                    return Err(last_error().into());
+                }
+                Ok(())
+            });
+            match created {
+                Ok(()) => {
+                    let scratch = Self(path);
+                    // Fail closed on a filesystem that did not honor the DACL.
+                    open_private_directory_for_lock(scratch.path())?;
+                    return Ok(scratch);
+                }
+                Err(SecureFileError::Io(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    continue
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate private scratch",
+        )
+        .into())
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.path());
+    }
+}
+
 fn component_is_safe(name: &OsStr) -> bool {
     let units = name.encode_wide().collect::<Vec<_>>();
     if units.is_empty()
