@@ -1492,7 +1492,7 @@ mod tests {
             Err(error) => error,
         };
         let diagnostic = format!("{error:?} {error}");
-        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(diagnostic.contains("The provider denied access"));
         for value in [PRIMARY_TOKEN, DYNAMIC_TOKEN] {
             assert!(!diagnostic.contains(value));
             assert!(!format!("{provider:?}{:?}{session:?}", model.endpoint).contains(value));

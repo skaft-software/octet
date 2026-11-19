@@ -1111,28 +1111,13 @@ billable work, not a repair for unstable prefixes. The credential-free
 
 ## Provider errors
 
-HTTP failures retain the provider's status, structured error code and type,
-including pretty-printed Responses and Codex error bodies. Actionable messages
-such as model-not-found, invalid-parameter and context-length explanations stay
-visible, with these privacy limits shared by native and host HTTP requests:
-
-- Keep only the first message line, removing remote exception class prefixes and
-  traceback/stack frames while retaining the human explanation.
-- Replace exact request-text echoes of at least 24 characters with `[request text]`
-  when canonical request content is available. Matching examines at most 64 KiB
-  of text and 4096 parts, newest messages first, then system and tool descriptions;
-  it is bounded exact matching, not detection of paraphrased or encoded echoes.
-- Replace quoted spans longer than 48 characters with `[quoted text]`, keeping
-  short quoted model and parameter identifiers.
-- Limit the scrubbed message to 200 characters, including a truncation ellipsis,
-  then credential-redact and control-escape it. Credentials are also redacted
-  before truncation so a cut cannot expose a partial credential.
-
-Messages with no useful explanation after scrubbing are omitted. Request and
-header fields outside the selected error fields are omitted, as are malformed
-JSON bodies whose diagnostic fields cannot be extracted safely. HTTP status and
-available code/type metadata remain; use the shape-only request trace below when
-the provider supplies no explanation.
+HTTP failures retain the status, a sanitized request ID when available, and
+recognized error codes and types. Octet generates its own guidance for the
+failure; it does not quote the provider's HTTP response body. Even short or
+transformed prompt echoes in `message`, `code` or `type` are not copied through.
+Octet can recognize explicit context-window failures without retaining the
+provider's wording. Use the shape-only request trace below to investigate an
+opaque rejection without recording the prompt.
 
 ## Provider request trace
 

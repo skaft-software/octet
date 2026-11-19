@@ -59,7 +59,7 @@
 - Responses sessions continue after context hooks edit history, keeping tool calls paired and reasoning in place.
 - Resumed sessions switch models cleanly, keeping earlier thinking saved in the session.
 - Google-compatible routes, including OpenCode Go, continue multi-turn conversations.
-- Provider errors show the provider's message, scrubbed of request echoes and stack traces.
+- HTTP errors show recognized codes and local guidance without quoting provider error bodies.
 - Payload hooks keep request bytes stable across turns, preserving prompt cache hits.
 - Cache and thinking-token counts stay accurate when providers send partial usage updates.
 - Codex sign-in refreshes bind the model list to your current plan.

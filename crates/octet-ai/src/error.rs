@@ -104,7 +104,7 @@ pub struct HttpError {
     pub retry_after: Option<std::time::Duration>,
     /// Provider-specific error code.
     pub provider_code: Option<String>,
-    /// Truncated snippet of response body. Never contains sensitive headers/creds.
+    /// Host-authored diagnostic for the response, not remote body contents.
     pub body_snippet: Option<String>,
     /// Hint indicating if the request is safe to retry (pre-first-byte).
     pub retryable: bool,
@@ -144,7 +144,7 @@ impl HttpError {
     }
 }
 
-fn permanent_provider_code(code: &str) -> bool {
+pub(crate) fn permanent_provider_code(code: &str) -> bool {
     matches!(
         code,
         "server_is_overloaded"
@@ -173,6 +173,28 @@ fn permanent_provider_code(code: &str) -> bool {
         .parse::<u16>()
         .ok()
         .is_some_and(|status| (400..500).contains(&status) && status != 408 && status != 429)
+}
+
+/// Recognizes token/context exhaustion without retaining provider prose.
+#[doc(hidden)]
+pub fn mentions_context_limit(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "context window exceeded",
+        "context window exceeds",
+        "context length exceeded",
+        "context_length_exceeded",
+        "model_context_window_exceeded",
+        "maximum context length",
+        "exceeds the context window",
+        "exceeds model's maximum context length",
+        "too many tokens",
+        "token limit",
+        "prompt is too long",
+        "input is too long",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// Network/connection error.

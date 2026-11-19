@@ -460,23 +460,23 @@ async fn custom_http_preserves_bounded_error_body_and_credential_redaction() {
 }
 
 #[tokio::test]
-async fn custom_http_scrubs_request_echoes_and_keeps_actionable_messages() {
+async fn custom_http_uses_local_guidance_without_quoting_provider_text() {
     for (message, expected) in [
         (
             "ValueError: rejected prompt: confidential acquisition plan",
-            "rejected prompt: [request text]",
+            "The provider rejected the request. Check the model and request settings.",
         ),
         (
             "The model `x` does not exist",
-            "The model `x` does not exist",
+            "The provider rejected the request. Check the model and request settings.",
         ),
         (
             "Invalid value for 'reasoning.effort'",
-            "Invalid value for 'reasoning.effort'",
+            "The provider rejected the request. Check the model and request settings.",
         ),
         (
             "maximum context length is 128000 tokens",
-            "maximum context length is 128000 tokens",
+            "Input exceeds the context window. Reduce the conversation size and try again.",
         ),
     ] {
         let tracked = client().track_request_dispatch();

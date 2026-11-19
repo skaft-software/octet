@@ -616,7 +616,11 @@ async fn compact_http_errors_preserve_retry_metadata_and_taxonomy() {
         assert_eq!(error.status.as_u16(), status);
         assert_eq!(error.request_id.as_deref(), Some("req-compact"));
         assert_eq!(error.retry_after, Some(Duration::from_secs(7)));
-        assert_eq!(error.provider_code.as_deref(), Some("compact_error"));
+        assert!(
+            error.provider_code.is_none(),
+            "unknown remote codes are not published"
+        );
+        assert!(!error.body_snippet.as_deref().unwrap().contains("nope"));
         assert_eq!(error.retryable, retryable);
     }
 }

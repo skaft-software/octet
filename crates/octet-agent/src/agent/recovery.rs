@@ -102,23 +102,7 @@ pub(super) fn looks_like_context_error(error: &AiError) -> bool {
     }
     // Generic request_too_large can mean an encoded media/HTTP byte limit,
     // not token overflow. Only context/token-specific evidence may compact.
-    let text = error.to_string().to_ascii_lowercase();
-    [
-        "context window exceeded",
-        "context window exceeds",
-        "context length exceeded",
-        "context_length_exceeded",
-        "model_context_window_exceeded",
-        "maximum context length",
-        "exceeds the context window",
-        "exceeds model's maximum context length",
-        "too many tokens",
-        "token limit",
-        "prompt is too long",
-        "input is too long",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
+    octet_ai::error::mentions_context_limit(&error.to_string())
 }
 
 pub(super) fn provider_requests_connection_refresh(error: &octet_ai::ProviderError) -> bool {
