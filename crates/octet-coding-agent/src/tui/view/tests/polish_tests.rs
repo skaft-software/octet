@@ -124,6 +124,8 @@ fn polish_tool_omissions_share_hidden_word_and_shortcut() {
         dump.lines().nth(2).unwrap(),
         "… 4 output rows hidden (Ctrl+O to expand)"
     );
+    let narrow = render_compact_bash_output(&panel, &theme, 24, false, "");
+    assert_eq!(screen_dump(&narrow, 24).lines().nth(2), Some("4 Ctrl+O"));
 }
 
 #[test]

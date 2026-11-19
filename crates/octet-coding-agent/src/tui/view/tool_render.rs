@@ -208,7 +208,7 @@ pub(super) fn tool_omission_hint(
     if visible_width(&long) <= available {
         long
     } else {
-        format!("+{hidden} Ctrl+O")
+        format!("{hidden} Ctrl+O")
     }
 }
 
