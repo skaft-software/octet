@@ -32,6 +32,14 @@ pub(crate) fn build_request(
     req: &Request,
 ) -> Result<HttpRequestParts, AiError> {
     crate::recorded_audio::check_media_budget(model, req)?;
+    build_request_with_audio(model, req, |audio| Ok(google_inline_audio_part(audio)))
+}
+
+pub(crate) fn build_request_with_audio(
+    model: &crate::catalog::Model,
+    req: &Request,
+    mut audio_part: impl FnMut(&crate::AudioMedia) -> Result<Option<Value>, AiError>,
+) -> Result<HttpRequestParts, AiError> {
     let req = normalize_request_reasoning(req, &model.spec.capabilities);
     let (diagnostics, tools, use_strict_mode) = validate_for_dispatch(model, &req)?;
 
@@ -43,7 +51,7 @@ pub(crate) fn build_request(
         );
     }
 
-    let contents = google_contents(model, &req)?;
+    let contents = google_contents(model, &req, &mut audio_part)?;
     root.insert("contents".to_owned(), Value::Array(contents));
 
     if let Some(tools) = tools {
@@ -92,7 +100,7 @@ pub(crate) fn build_request(
 /// Pi compatibility: packages/ai/src/api/google-generative-ai.ts:95-100 and
 /// google-shared.ts:448-449 resolve strict sampling while building params,
 /// before dispatch (constrained-sampling.ts:271-278).
-pub(crate) fn validate_for_dispatch(
+fn validate_for_dispatch(
     model: &crate::catalog::Model,
     req: &Request,
 ) -> Result<(Vec<crate::error::Diagnostic>, Option<Value>, bool), AiError> {
@@ -113,7 +121,11 @@ pub(crate) fn validate_for_dispatch(
     Ok((diagnostics, tools, strict))
 }
 
-fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<Value>, AiError> {
+fn google_contents(
+    model: &crate::catalog::Model,
+    req: &Request,
+    audio_part: &mut impl FnMut(&crate::AudioMedia) -> Result<Option<Value>, AiError>,
+) -> Result<Vec<Value>, AiError> {
     let mut contents = Vec::new();
     let mut tool_names = HashMap::<String, String>::new();
     let mut pending_calls = Vec::new();
@@ -146,7 +158,7 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                         }
                         UserPart::Media(Media::Audio(audio)) => {
                             if model.spec.supports_audio_input(audio.format) {
-                                if let Some(part) = google_inline_audio_part(audio) {
+                                if let Some(part) = audio_part(audio)? {
                                     parts.push(part);
                                 }
                             }
@@ -203,7 +215,7 @@ fn google_contents(model: &crate::catalog::Model, req: &Request) -> Result<Vec<V
                                     ToolResultPart::Media(Media::Audio(audio))
                                         if model.spec.supports_audio_input(audio.format) =>
                                     {
-                                        google_inline_audio_part(audio)
+                                        audio_part(audio)?
                                     }
                                     _ => None,
                                 };
@@ -344,7 +356,7 @@ fn google_inline_image_part(image: &crate::types::ImageMedia) -> Option<Value> {
     Some(Value::Object(part))
 }
 
-fn google_inline_audio_part(audio: &crate::types::AudioMedia) -> Option<Value> {
+pub(crate) fn google_inline_audio_part(audio: &crate::types::AudioMedia) -> Option<Value> {
     use crate::types::{AudioFormat, AudioPayload};
     if let AudioPayload::ProviderRef(reference) = &audio.payload {
         return crate::google_files::usable(reference).then(|| {

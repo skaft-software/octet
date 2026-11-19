@@ -2,10 +2,7 @@
 //! Contract: https://ai.google.dev/gemini-api/docs/files (resumable upload,
 //! finalize, PROCESSING/ACTIVE states, 48-hour storage). Vertex uses GCS fileData,
 //! not this API. Canonical session media always retains its original bytes.
-use crate::{
-    AiError, AudioMedia, AudioPayload, Media, Message, Model, Protocol, ProviderMediaRef, Request,
-    ToolResultPart, UserPart,
-};
+use crate::{AiError, AudioMedia, AudioPayload, Media, Model, Protocol, ProviderMediaRef, Request};
 use sha2::{Digest as _, Sha256};
 use std::time::{Duration, SystemTime};
 
@@ -46,42 +43,69 @@ pub(crate) fn upload_base(model: &Model) -> Option<url::Url> {
         })
 }
 
-pub(crate) async fn prepare(
-    http: &reqwest::Client,
+const FILE_URI_PREFIX: &str = "https://generativelanguage.googleapis.com/v1beta/files/";
+const MAX_FILE_ID_BYTES: usize = 128;
+
+const SLOT_PREFIX: &str = "octet-audio-slot:";
+
+pub(crate) struct UploadSlots(Vec<AudioMedia>);
+
+/// Admit the exact inference wire shape with worst-case file URI lengths.
+/// Only audio selected by the codec acquires an upload slot. The private
+/// placeholder scheme cannot be produced by a caller-supplied provider ref.
+pub(crate) fn admit(
     model: &Model,
-    request: &mut Request,
-    upload: &url::Url,
-    headers: http::HeaderMap,
-) -> Result<(), AiError> {
-    // Reserve room for text, schemas and JSON framing. The final writer enforces
-    // the documented entire-request 20 MB ceiling, not a raw-clip approximation.
+    request: &Request,
+) -> Result<Option<(crate::protocol::HttpRequestParts, UploadSlots)>, AiError> {
     let estimated = crate::recorded_audio::estimated_media_bytes(request);
     if estimated < 16_000_000 {
-        return Ok(());
+        return Ok(None);
     }
-    if estimated > 256 * 1024 * 1024 {
-        return Err(crate::recorded_audio::limit_error(model, 256 * 1024 * 1024));
+    const MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+    if estimated > MAX_SOURCE_BYTES {
+        return Err(crate::recorded_audio::limit_error(model, MAX_SOURCE_BYTES));
     }
-    // File preparation is a provider side effect: reject locally invalid
-    // requests before sending recording bytes, not only at generateContent.
-    crate::protocol::google::validate_for_dispatch(model, request)?;
-    // Preflight every clip before the first upload: an oversized later clip
-    // must not reject the request after an earlier clip was already sent.
-    let oversized = request.messages.iter().any(|message| {
-        let Message::User(user) = message else {
-            return false;
+    crate::recorded_audio::check_projected_media_budget(model, request, |media| {
+        matches!(media, Media::Audio(audio) if model.spec.supports_audio_input(audio.format)
+            && matches!(audio.payload, AudioPayload::Inline(_)))
+    })?;
+    let mut slots = Vec::new();
+    let parts = crate::protocol::google::build_request_with_audio(model, request, |audio| {
+        let AudioPayload::Inline(data) = &audio.payload else {
+            return Ok(crate::protocol::google::google_inline_audio_part(audio));
         };
-        user.content.iter().any(|part| match part {
-            UserPart::Media(Media::Audio(audio)) => clip_too_large(model, audio),
-            UserPart::ToolResult(result) => result.content.iter().any(|part| {
-                matches!(part, ToolResultPart::Media(Media::Audio(audio)) if clip_too_large(model, audio))
-            }),
-            _ => false,
-        })
-    });
-    if oversized {
-        return Err(failure(model, CLIP_TOO_LARGE));
+        if data.len() > 20 * 1024 * 1024 {
+            return Err(failure(model, CLIP_TOO_LARGE));
+        }
+        let index = slots.len();
+        slots.push(audio.clone());
+        let width = FILE_URI_PREFIX.len() + MAX_FILE_ID_BYTES - SLOT_PREFIX.len();
+        Ok(Some(serde_json::json!({"fileData": {
+            "mimeType": audio.mime_type(),
+            "fileUri": format!("{SLOT_PREFIX}{index:0width$}"),
+        }})))
+    })?;
+    Ok(Some((parts, UploadSlots(slots))))
+}
+
+impl UploadSlots {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
+}
+
+pub(crate) async fn resolve(
+    http: &reqwest::Client,
+    model: &Model,
+    slots: UploadSlots,
+    body: &bytes::Bytes,
+    upload: &url::Url,
+    headers: http::HeaderMap,
+) -> Result<bytes::Bytes, AiError> {
+    // Parse only our own admitted body, and replace only the exact file-data
+    // leaves the codec reserved. Everything else stays as admitted, even if
+    // another input reference would expire while an upload is in flight.
+    let mut body: serde_json::Value = serde_json::from_slice(body).expect("built-in Google JSON");
     let mut digest = Sha256::new();
     digest.update(upload.as_str());
     for (name, value) in &headers {
@@ -91,29 +115,12 @@ pub(crate) async fn prepare(
         digest.update([0]);
     }
     let identity: [u8; 32] = digest.finalize().into();
-    tokio::time::timeout(Duration::from_secs(60), async {
-        for message in &mut request.messages {
-            let Message::User(user) = message else {
-                continue;
-            };
-            for part in &mut user.content {
-                match part {
-                    UserPart::Media(Media::Audio(audio)) => {
-                        prepare_clip(http, model, audio, upload, &headers, identity).await?
-                    }
-                    UserPart::ToolResult(result) => {
-                        for part in &mut result.content {
-                            if let ToolResultPart::Media(Media::Audio(audio)) = part {
-                                prepare_clip(http, model, audio, upload, &headers, identity)
-                                    .await?;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+    let uris = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut uris = Vec::with_capacity(slots.0.len());
+        for audio in slots.0 {
+            uris.push(prepare_clip(http, model, &audio, upload, &headers, identity).await?);
         }
-        Ok(())
+        Ok::<_, AiError>(uris)
     })
     .await
     .map_err(|_| {
@@ -121,7 +128,22 @@ pub(crate) async fn prepare(
             model,
             "audio file preparation timed out; retry or use a smaller clip",
         )
-    })?
+    })??;
+    for content in body["contents"].as_array_mut().expect("Google contents") {
+        for part in content["parts"].as_array_mut().expect("Google parts") {
+            if let Some(uri) = part
+                .get_mut("fileData")
+                .and_then(|data| data.get_mut("fileUri"))
+            {
+                if let Some(index) = uri.as_str().and_then(|uri| uri.strip_prefix(SLOT_PREFIX)) {
+                    let index: usize = index.parse().expect("upload slot index");
+                    *uri = serde_json::Value::String(uris[index].clone());
+                }
+            }
+        }
+    }
+    // These ASCII provider URIs can never be longer than the admitted slots.
+    crate::recorded_audio::encode(model, &body).map(bytes::Bytes::from)
 }
 
 fn failure(model: &Model, stage: &str) -> AiError {
@@ -169,30 +191,18 @@ async fn metadata(
 const CLIP_TOO_LARGE: &str =
     "audio clip exceeds the 20 MiB safety bound; split or compress the original";
 
-/// An inline clip this route would upload but that exceeds the per-clip bound.
-fn clip_too_large(model: &Model, audio: &AudioMedia) -> bool {
-    model.spec.supports_audio_input(audio.format)
-        && matches!(&audio.payload, AudioPayload::Inline(data) if data.len() > 20 * 1024 * 1024)
-}
-
 async fn prepare_clip(
     http: &reqwest::Client,
     model: &Model,
-    audio: &mut AudioMedia,
+    audio: &AudioMedia,
     upload: &url::Url,
     headers: &http::HeaderMap,
     identity: [u8; 32],
-) -> Result<(), AiError> {
-    if !model.spec.supports_audio_input(audio.format) {
-        return Ok(());
-    }
+) -> Result<String, AiError> {
     let AudioPayload::Inline(data) = &audio.payload else {
-        return Ok(());
+        unreachable!("only inline audio acquires an upload slot");
     };
     let data = data.clone();
-    if clip_too_large(model, audio) {
-        return Err(failure(model, CLIP_TOO_LARGE));
-    }
     let cached = {
         let cache = audio
             .preparation
@@ -211,8 +221,7 @@ async fn prepare_clip(
             .map(|(_, _, reference)| reference.clone())
     };
     if let Some(reference) = cached {
-        audio.payload = AudioPayload::ProviderRef(reference);
-        return Ok(());
+        return Ok(reference.id);
     }
     let response = http
         .post(upload.clone())
@@ -260,7 +269,7 @@ async fn prepare_clip(
             .filter(|name| {
                 name.strip_prefix("files/").is_some_and(|id| {
                     !id.is_empty()
-                        && id.len() <= 128
+                        && id.len() <= MAX_FILE_ID_BYTES
                         && id.bytes().all(|byte| {
                             byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
                         })
@@ -271,7 +280,7 @@ async fn prepare_clip(
             Some("ACTIVE") => {
                 let reference = ProviderMediaRef {
                     protocol: Protocol::GoogleGenerativeAi,
-                    id: format!("https://generativelanguage.googleapis.com/v1beta/{name}"),
+                    id: format!("{FILE_URI_PREFIX}{}", &name["files/".len()..]),
                     // Files have a documented 48h TTL. Revalidate/reupload much
                     // earlier and never persist this process-local optimization.
                     expires_at: Some(SystemTime::now() + Duration::from_secs(15 * 60)),
@@ -285,8 +294,7 @@ async fn prepare_clip(
                     cache.files.remove(0);
                 }
                 cache.files.push((identity, data, reference.clone()));
-                audio.payload = AudioPayload::ProviderRef(reference);
-                return Ok(());
+                return Ok(reference.id);
             }
             Some("PROCESSING") if attempt < 20 => {
                 let mut poll = upload.clone();
@@ -317,6 +325,7 @@ async fn prepare_clip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Message, UserPart};
     use std::sync::Arc;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -395,24 +404,10 @@ mod tests {
         ] {
             let mut headers = http::HeaderMap::new();
             headers.insert("x-goog-api-key", key.parse().unwrap());
-            let mut request = canonical.clone();
-            if let Err(error) = prepare(&http, &model, &mut request, &upload, headers).await {
-                let requests = server.received_requests().await.unwrap();
-                panic!(
-                    "{error}; paths: {:?}",
-                    requests
-                        .iter()
-                        .map(|r| (
-                            &r.method,
-                            r.url.path(),
-                            r.headers.get("x-goog-upload-command")
-                        ))
-                        .collect::<Vec<_>>()
-                );
-            }
-            let body = crate::protocol::google::build_request(&model, &request)
-                .unwrap()
-                .body;
+            let (parts, slots) = admit(&model, &canonical).unwrap().unwrap();
+            let body = resolve(&http, &model, slots, &parts.body, &upload, headers)
+                .await
+                .unwrap();
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 value["contents"][0]["parts"],
@@ -423,11 +418,19 @@ mod tests {
             assert!(body.len() < 1024);
         }
         // Expiry is never a durable dependency: reconstruct from the saved bytes.
-        let mut resumed: Request =
+        let resumed: Request =
             serde_json::from_slice(&serde_json::to_vec(&canonical).unwrap()).unwrap();
-        prepare(&http, &model, &mut resumed, &upload, http::HeaderMap::new())
-            .await
-            .unwrap();
+        let (parts, slots) = admit(&model, &resumed).unwrap().unwrap();
+        resolve(
+            &http,
+            &model,
+            slots,
+            &parts.body,
+            &upload,
+            http::HeaderMap::new(),
+        )
+        .await
+        .unwrap();
         let Message::User(user) = &canonical.messages[0] else {
             unreachable!()
         };
@@ -459,11 +462,13 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let (model, mut request) = fixture();
-        let error = prepare(
+        let (model, request) = fixture();
+        let (parts, slots) = admit(&model, &request).unwrap().unwrap();
+        let error = resolve(
             &reqwest::Client::builder().no_proxy().build().unwrap(),
             &model,
-            &mut request,
+            slots,
+            &parts.body,
             &url::Url::parse(&server.uri()).unwrap(),
             http::HeaderMap::new(),
         )
@@ -531,46 +536,5 @@ mod reference_tests {
             reference.protocol = Protocol::OpenAiChat;
             assert!(!usable(&reference));
         }
-    }
-}
-
-#[cfg(test)]
-mod admission_tests {
-    use super::*;
-    #[tokio::test]
-    async fn invalid_request_does_not_start_a_file_upload() {
-        let server = wiremock::MockServer::start().await;
-        let mut model = crate::ModelCatalog::builtin()
-            .unwrap()
-            .resolve(&crate::ModelId("gpt-4o-mini".into()))
-            .unwrap();
-        std::sync::Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
-        std::sync::Arc::make_mut(&mut model.spec)
-            .capabilities
-            .input_modalities = crate::ModalitySet::none().with(crate::Modality::Audio);
-        let mut request = Request {
-            temperature: Some(f32::NAN),
-            messages: vec![Message::User(crate::UserMessage {
-                content: vec![UserPart::Media(Media::audio_bytes(
-                    bytes::Bytes::from(vec![0; 12_000_000]),
-                    crate::AudioFormat::Wav,
-                ))],
-            })],
-            ..crate::test_fixtures::base_request()
-        };
-        let error = prepare(
-            &reqwest::Client::builder().no_proxy().build().unwrap(),
-            &model,
-            &mut request,
-            &url::Url::parse(&server.uri()).unwrap(),
-            http::HeaderMap::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(server.received_requests().await.unwrap().is_empty());
-        assert!(matches!(
-            error,
-            AiError::Validation(crate::ValidationError::InvalidTemperature)
-        ));
     }
 }

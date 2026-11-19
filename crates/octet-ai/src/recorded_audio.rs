@@ -33,12 +33,19 @@ fn media_bytes(media: &Media) -> usize {
 /// Preflight before constructing any base64 or JSON values. It bounds the
 /// largest temporary media representation independently from token estimates.
 pub(crate) fn estimated_media_bytes(request: &Request) -> usize {
-    estimated_media_bytes_for(request, true)
+    estimated_media_bytes_for(request, true, |_| false)
 }
 
-fn estimated_media_bytes_for(request: &Request, native_video: bool) -> usize {
+fn estimated_media_bytes_for(
+    request: &Request,
+    native_video: bool,
+    replaced: impl Fn(&Media) -> bool,
+) -> usize {
     let mut total = 0usize;
     let mut add = |media: &Media| {
+        if replaced(media) {
+            return;
+        }
         let bytes = match media {
             Media::Video(video) if !native_video => {
                 video
@@ -87,7 +94,15 @@ fn estimated_media_bytes_for(request: &Request, native_video: bool) -> usize {
 }
 
 pub(crate) fn check_media_budget(model: &Model, request: &Request) -> Result<usize, AiError> {
-    let total = estimated_media_bytes_for(request, model.spec.supports_native_video());
+    check_projected_media_budget(model, request, |_| false)
+}
+
+pub(crate) fn check_projected_media_budget(
+    model: &Model,
+    request: &Request,
+    replaced: impl Fn(&Media) -> bool,
+) -> Result<usize, AiError> {
+    let total = estimated_media_bytes_for(request, model.spec.supports_native_video(), replaced);
     if total > MAX_REQUEST_BYTES {
         Err(limit_error(model, MAX_REQUEST_BYTES))
     } else {

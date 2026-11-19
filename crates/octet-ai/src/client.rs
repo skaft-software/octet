@@ -1028,13 +1028,10 @@ impl AiClient {
         result.map_err(|error| sanitize_ai_error(&diagnostic_redactor, error))
     }
 
-    async fn prepare_google_files(
+    fn validate_google_upload_proxy(
         &self,
         model: &Model,
-        request: &mut Request,
         upload: &url::Url,
-        environment: &std::collections::BTreeMap<String, String>,
-        host_options: &HostRequestOptions,
     ) -> Result<(), AiError> {
         // Files is a credential-bearing provider request, just like inference.
         // Pi rejects unsupported proxy schemes before dispatch:
@@ -1045,18 +1042,7 @@ impl AiClient {
                 model.endpoint.id.0, model.spec.api_name
             ))
         })?;
-        crate::protocol::google::validate_for_dispatch(model, request)?;
-        let mut headers = model.endpoint.default_headers.clone();
-        merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
-        let resolved = crate::auth::resolve_headers_with_api_key(
-            &model.endpoint.auth,
-            environment,
-            host_options.api_key.as_ref(),
-        )
-        .await
-        .map_err(AiError::Auth)?;
-        headers.extend(resolved.headers);
-        crate::google_files::prepare(&self.http, model, request, upload, headers).await
+        Ok(())
     }
 
     async fn stream_once(
@@ -1226,12 +1212,33 @@ impl AiClient {
         // tool turns are normalized into valid canonical messages first.
         let mut req = req;
         req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
-        if let Some(upload) = crate::google_files::upload_base(model) {
-            if crate::recorded_audio::estimated_media_bytes(&req) >= 16_000_000 {
-                self.prepare_google_files(model, &mut req, &upload, environment, host_options)
-                    .await?;
+        // An inference hook is not authorization for a separate provider Files
+        // operation. When a hook can veto or remove content, keep media inline.
+        let files = if host_options.on_payload.is_none()
+            && host_options.transform_headers.is_none()
+            && host_options.provider_hooks.is_empty()
+            && self.provider_request_hooks.is_empty()
+            && self.host_http_sender.is_none()
+            && !matches!(&model.endpoint.auth, crate::auth::Auth::RequestSigner(_))
+        {
+            match crate::google_files::upload_base(model) {
+                Some(upload) => match crate::google_files::admit(model, &req)? {
+                    Some((parts, slots)) => {
+                        let upload = if slots.is_empty() {
+                            None
+                        } else {
+                            self.validate_google_upload_proxy(model, &upload)?;
+                            Some((upload, slots))
+                        };
+                        Some((upload, parts))
+                    }
+                    None => None,
+                },
+                None => None,
             }
-        }
+        } else {
+            None
+        };
         let tool_definitions = req.tools.clone();
         // Reject malformed schemas before a provider request can consume them.
         // The same immutable snapshot is retained by response assembly below.
@@ -1248,25 +1255,36 @@ impl AiClient {
             crate::types::OutputModalities::Text => None,
         };
         // 1. Build the HTTP request parts via the protocol codec
-        let mut parts = match model.spec.protocol {
-            Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(model, &req)?,
-            Protocol::AnthropicMessages => crate::protocol::anthropic::build_request(model, &req)?,
-            Protocol::OpenAiResponses => {
-                crate::protocol::openai_responses::build_request(model, &req)?
-            }
-            Protocol::BedrockConverse => crate::protocol::bedrock::build_request(model, &req)?,
-            Protocol::GoogleGenerativeAi => crate::protocol::google::build_request(model, &req)?,
-            Protocol::MistralConversations => {
-                crate::protocol::mistral_conversations::build_request(model, &req)?
-            }
-            Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req)?,
-            Protocol::ExtensionStream => {
-                return Err(crate::error::UnsupportedError::ExtensionStream.into())
-            }
+        let (upload, mut parts) = if let Some((upload, parts)) = files {
+            (upload, parts)
+        } else {
+            let parts = match model.spec.protocol {
+                Protocol::OpenAiChat => crate::protocol::openai_chat::build_request(model, &req)?,
+                Protocol::AnthropicMessages => {
+                    crate::protocol::anthropic::build_request(model, &req)?
+                }
+                Protocol::OpenAiResponses => {
+                    crate::protocol::openai_responses::build_request(model, &req)?
+                }
+                Protocol::BedrockConverse => crate::protocol::bedrock::build_request(model, &req)?,
+                Protocol::GoogleGenerativeAi => {
+                    crate::protocol::google::build_request(model, &req)?
+                }
+                Protocol::MistralConversations => {
+                    crate::protocol::mistral_conversations::build_request(model, &req)?
+                }
+                Protocol::PiMessages => crate::protocol::pi_messages::build_request(model, &req)?,
+                Protocol::ExtensionStream => {
+                    return Err(crate::error::UnsupportedError::ExtensionStream.into())
+                }
+            };
+            (None, parts)
         };
 
-        if let Some(trace) = &trace {
-            trace.stage("encoded", &parts.body);
+        if upload.is_none() {
+            if let Some(trace) = &trace {
+                trace.stage("encoded", &parts.body);
+            }
         }
 
         // A host payload hook sees and may replace exactly the encoded JSON the
@@ -1312,6 +1330,7 @@ impl AiClient {
             headers.insert(k.clone(), v.clone());
         }
         merge_preset_headers(&mut headers, &model.spec.preset.headers)?;
+        let mut upload_headers = upload.as_ref().map(|_| headers.clone());
 
         headers.insert(
             http::header::CONTENT_TYPE,
@@ -1348,6 +1367,9 @@ impl AiClient {
             )
             .await
             .map_err(AiError::Auth)?;
+            if let Some(headers) = &mut upload_headers {
+                headers.extend(resolved_headers.headers.clone());
+            }
             diagnostic_redactor = resolved_headers.redactor;
             let mut current_key = None;
             for (key, value) in resolved_headers.headers {
@@ -1364,8 +1386,24 @@ impl AiClient {
             diagnostic_redactor.include_proxy_url(proxy);
         }
 
+        if let Some(((upload, slots), headers)) = upload.zip(upload_headers) {
+            // The exact inference wire shape, headers and auth passed local
+            // admission. Only those audio slots may send recording bytes.
+            parts.body = crate::google_files::resolve(
+                &self.http,
+                model,
+                slots,
+                &parts.body,
+                &upload,
+                headers,
+            )
+            .await?;
+            if let Some(trace) = &trace {
+                trace.stage("encoded", &parts.body);
+            }
+        }
+
         let fallback_request = HttpStreamRequest {
-            request_context: &req,
             model: model.clone(),
             compatibility: req.compatibility,
             parts,

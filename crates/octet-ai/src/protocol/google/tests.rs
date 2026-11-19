@@ -691,8 +691,12 @@ fn repeated_and_prefix_related_text_chunks_are_preserved_as_deltas() {
         }
         let mut request = base_request();
         request.messages.push(Message::Assistant(response.message));
-        let contents =
-            google_contents(&model_with_api_name("gemini-4-argon-contributor"), &request).unwrap();
+        let contents = google_contents(
+            &model_with_api_name("gemini-4-argon-contributor"),
+            &request,
+            &mut |audio| Ok(google_inline_audio_part(audio)),
+        )
+        .unwrap();
         let replay = &contents[0]["parts"][0];
         assert_eq!(replay["text"], "aaaaa");
         assert_eq!(replay["thoughtSignature"], "c2lnbmVk");

@@ -74,7 +74,7 @@
 - Context hooks that change only the system prompt keep compacted Responses history.
 - Native compaction right after resuming a session keeps its video frames.
 - Context estimates for Responses sessions with video count the frames actually sent.
-- Gemini audio uploads check every clip's size before sending any of them.
+- Gemini admits the inference request before uploading audio and keeps audio inline when request hooks can veto or remove it.
 - Copying a code block after an identical LaTeX or Mermaid diagram copies that block's own source.
 - Paste and attachment chips delete as one object, and arrow keys step over them.
 - Video decoding keeps scratch footage and frames in an owner-only directory and reuses the last frame for late samples in sparse clips.

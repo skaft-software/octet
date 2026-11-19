@@ -254,9 +254,11 @@ Earlier audio reads remain in history and are re-sent: an album can exceed the
 request-byte limit even when every track fits individually and token context
 remains. On the built-in Gemini Developer API route, an estimated 16 MB of
 encoded media triggers the documented resumable Files API before constructing
-`generateContent`. File preparation validates request settings, tool schemas and the
-upload URL's proxy configuration before resolving credentials or making any Files
-request. Unsupported or malformed proxies fail closed with an audio preparation
+`generateContent`. Octet validates the encoded inference request (including its
+byte limit with file references), headers and proxy settings, then resolves
+credentials before making any Files request. A payload or header hook, or a
+custom HTTP sender, does not authorize that separate upload: those requests
+keep audio inline and must fit the inline limit. Unsupported or malformed proxies fail closed with an audio preparation
 stage error; they never select a direct provider connection.
 Audio uploads finalize, wait for `ACTIVE` within a bounded
 60-second preparation deadline, and become `fileData` parts in their original

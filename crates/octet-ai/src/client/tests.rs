@@ -420,15 +420,8 @@ fn structured_http_error_sanitization_is_bounded_valid_json() {
 }
 
 async fn assert_google_files_validation_precedes_credentials(strict_schema: bool) {
-    let server = wiremock::MockServer::start().await;
-    let client = AiClient::try_with_proxy_environment(Default::default()).unwrap();
-    let mut model = crate::ModelCatalog::builtin()
-        .unwrap()
-        .resolve(&crate::ModelId("gpt-4o-mini".into()))
-        .unwrap();
-    Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
-    Arc::make_mut(&mut model.spec).capabilities.input_modalities =
-        crate::ModalitySet::none().with(crate::Modality::Audio);
+    let client = blocked_gemini_test_client();
+    let model = gemini_files_test_model();
     let mut request = crate::test_fixtures::base_request();
     request.messages = vec![crate::Message::User(crate::UserMessage {
         content: vec![crate::UserPart::Media(crate::Media::audio_bytes(
@@ -452,19 +445,18 @@ async fn assert_google_files_validation_precedes_credentials(strict_schema: bool
         request.temperature = Some(f32::NAN);
     }
     for api_key in [None, Some(crate::Secret::from("fake-key"))] {
-        let error = client
-            .prepare_google_files(
+        let result = client
+            .stream_once(
                 &model,
-                &mut request,
-                &url::Url::parse(&server.uri()).unwrap(),
+                request.clone(),
                 &Default::default(),
                 &HostRequestOptions {
                     api_key,
                     ..Default::default()
                 },
             )
-            .await
-            .unwrap_err();
+            .await;
+        let error = result.err().expect("local admission must reject");
         if strict_schema {
             assert!(
                 matches!(
@@ -483,7 +475,6 @@ async fn assert_google_files_validation_precedes_credentials(strict_schema: bool
             );
         }
     }
-    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -545,45 +536,9 @@ async fn google_files_proxy_preflight_precedes_credentials_and_upload() {
     Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
     Arc::make_mut(&mut model.spec).capabilities.input_modalities =
         crate::ModalitySet::none().with(crate::Modality::Audio);
-    let mut request = crate::test_fixtures::base_request();
-    request.messages = vec![crate::Message::User(crate::UserMessage {
-        content: vec![crate::UserPart::Media(crate::Media::audio_bytes(
-            bytes::Bytes::from(vec![42; 12_000_000]),
-            crate::AudioFormat::Wav,
-        ))],
-    })];
     let upload = url::Url::parse(&format!("{}/upload/v1beta/files", direct.uri())).unwrap();
-    // No API key: the proxy-stage error must win over credential resolution.
     let error = client
-        .prepare_google_files(
-            &model,
-            &mut request,
-            &upload,
-            &std::collections::BTreeMap::new(),
-            &HostRequestOptions::default(),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("audio file preparation") && error.contains("proxy"),
-        "{error}"
-    );
-    assert!(direct.received_requests().await.unwrap().is_empty());
-    // With a credential available, metadata and bytes must still never go direct.
-    let options = HostRequestOptions {
-        api_key: Some(crate::Secret::from("private-key")),
-        ..Default::default()
-    };
-    let error = client
-        .prepare_google_files(
-            &model,
-            &mut request,
-            &upload,
-            &std::collections::BTreeMap::new(),
-            &options,
-        )
-        .await
+        .validate_google_upload_proxy(&model, &upload)
         .unwrap_err()
         .to_string();
     assert!(
@@ -593,16 +548,108 @@ async fn google_files_proxy_preflight_precedes_credentials_and_upload() {
     assert!(direct.received_requests().await.unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn google_files_rejects_an_oversized_clip_before_uploading_earlier_clips() {
-    let server = wiremock::MockServer::start().await;
+fn gemini_files_test_model() -> Model {
     let mut model = crate::ModelCatalog::builtin()
         .unwrap()
         .resolve(&crate::ModelId("gpt-4o-mini".into()))
         .unwrap();
-    Arc::make_mut(&mut model.spec).protocol = Protocol::GoogleGenerativeAi;
-    Arc::make_mut(&mut model.spec).capabilities.input_modalities =
-        crate::ModalitySet::none().with(crate::Modality::Audio);
+    let endpoint = Arc::make_mut(&mut model.endpoint);
+    endpoint.id.0 = "gemini".into();
+    endpoint.base_url = "https://generativelanguage.googleapis.com/v1beta/"
+        .parse()
+        .unwrap();
+    endpoint.auth = crate::auth::Auth::HeaderEnv {
+        name: http::HeaderName::from_static("x-goog-api-key"),
+        var: "OCTET_TEST_GEMINI_FILES_KEY".into(),
+    };
+    let spec = Arc::make_mut(&mut model.spec);
+    spec.endpoint = model.endpoint.id.clone();
+    spec.protocol = Protocol::GoogleGenerativeAi;
+    spec.api_name = "gemini-test".into();
+    spec.capabilities.input_modalities = crate::ModalitySet::none().with(crate::Modality::Audio);
+    model
+}
+
+fn blocked_gemini_test_client() -> AiClient {
+    // Block egress even if request admission regresses.
+    AiClient::try_with_proxy_environment(std::collections::BTreeMap::from([(
+        "HTTPS_PROXY".into(),
+        "socks5://127.0.0.1:1".into(),
+    )]))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn gemini_files_rejects_an_oversized_inference_body_before_any_upload() {
+    let mut request = crate::test_fixtures::base_request();
+    // Bounded JSON encoding counts all escaping in the final inference body.
+    request.system = Some("\0".repeat(3_400_000));
+    request.messages = vec![crate::Message::User(crate::UserMessage {
+        content: vec![crate::UserPart::Media(crate::Media::audio_bytes(
+            bytes::Bytes::from(vec![42; 12_000_000]),
+            crate::AudioFormat::Wav,
+        ))],
+    })];
+    let result = blocked_gemini_test_client()
+        .stream_once(
+            &gemini_files_test_model(),
+            request,
+            &Default::default(),
+            &HostRequestOptions::default(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(AiError::Validation(crate::ValidationError::RequestBytes {
+            limit: crate::recorded_audio::GOOGLE_INLINE_BYTES,
+            ..
+        }))
+    ));
+}
+
+#[tokio::test]
+async fn gemini_payload_veto_precedes_files_and_credentials() {
+    struct Refuse;
+    impl crate::PayloadHook for Refuse {
+        fn on_payload(
+            &self,
+            body: serde_json::Value,
+            _: &crate::HookModelContext,
+        ) -> Result<Option<serde_json::Value>, AiError> {
+            assert!(body["contents"][0]["parts"][0].get("inlineData").is_some());
+            Err(crate::ConfigError::Parse("test payload veto".into()).into())
+        }
+    }
+    let model = gemini_files_test_model();
+    let mut request = crate::test_fixtures::base_request();
+    request.messages = vec![crate::Message::User(crate::UserMessage {
+        content: vec![crate::UserPart::Media(crate::Media::audio_bytes(
+            bytes::Bytes::from(vec![42; 12_000_000]),
+            crate::AudioFormat::Wav,
+        ))],
+    })];
+    // A deliberately unusable proxy is an independent guard against network
+    // access. The old order hit this proxy check before the payload veto.
+    let client = blocked_gemini_test_client();
+    let result = client
+        .stream_once(
+            &model,
+            request,
+            &Default::default(),
+            &HostRequestOptions {
+                on_payload: Some(Arc::new(Refuse)),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AiError::Config(crate::ConfigError::Parse(message))) if message == "test payload veto")
+    );
+}
+
+#[tokio::test]
+async fn google_files_rejects_an_oversized_clip_before_uploading_earlier_clips() {
+    let model = gemini_files_test_model();
     let clip = |len| {
         crate::UserPart::Media(crate::Media::audio_bytes(
             bytes::Bytes::from(vec![42; len]),
@@ -613,25 +660,16 @@ async fn google_files_rejects_an_oversized_clip_before_uploading_earlier_clips()
     request.messages = vec![crate::Message::User(crate::UserMessage {
         content: vec![clip(12_000_000), clip(21 * 1024 * 1024)],
     })];
-    let upload = url::Url::parse(&format!("{}/upload/v1beta/files", server.uri())).unwrap();
-    let options = HostRequestOptions {
-        api_key: Some(crate::Secret::from("private-key")),
-        ..Default::default()
-    };
-    let error = AiClient::new()
-        .prepare_google_files(
+    let error = blocked_gemini_test_client()
+        .stream_once(
             &model,
-            &mut request,
-            &upload,
-            &std::collections::BTreeMap::new(),
-            &options,
+            request,
+            &Default::default(),
+            &HostRequestOptions::default(),
         )
         .await
-        .unwrap_err()
+        .err()
+        .expect("oversized later clip must refuse before files or credentials")
         .to_string();
     assert!(error.contains("20 MiB"), "{error}");
-    assert!(
-        server.received_requests().await.unwrap().is_empty(),
-        "an earlier clip was uploaded before the request was rejected"
-    );
 }
