@@ -230,7 +230,17 @@ fn queued_input_native_chrome_is_bounded_readonly_and_tracks_queue_ownership() {
         );
         let preview = find_node(&surface.sent.dock, "pending.preview").unwrap();
         assert!(serde_json::to_string(preview).unwrap().contains("oldest"));
+        assert!(!serde_json::to_string(preview).unwrap().contains("hostile"));
         assert!(!serde_json::to_string(preview).unwrap().contains("\\u001b"));
+        assert_eq!(
+            find_node(&surface.sent.dock, "pending.preview.0")
+                .unwrap()
+                .p
+                .as_ref()
+                .unwrap()
+                .as_map()["wrap"],
+            "none"
+        );
         walk(
             std::slice::from_ref(find_node(&surface.sent.dock, "pending").unwrap()),
             &mut |node| {

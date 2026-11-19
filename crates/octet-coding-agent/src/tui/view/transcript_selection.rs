@@ -1,7 +1,7 @@
 use sexy_tui_rs::{slice_by_column, strip_terminal_sequences, visible_width, wrap_text_with_ansi};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::presentation::{format_duration, RunOutcome};
+use crate::presentation::{format_run_elapsed, RunOutcome};
 
 use super::outcome_render::{bounded_outcome_detail, completion_text};
 
@@ -211,11 +211,11 @@ pub(super) fn block_copy_text(block: &TranscriptBlock) -> String {
             }
             RunOutcome::Failed { elapsed, reason } => format!(
                 "failed · {}\n{}",
-                format_duration(*elapsed),
+                format_run_elapsed(*elapsed),
                 bounded_outcome_detail(reason.as_str())
             ),
             RunOutcome::Interrupted { elapsed } => {
-                format!("interrupted · {}", format_duration(*elapsed))
+                format!("interrupted · {}", format_run_elapsed(*elapsed))
             }
             RunOutcome::NeedsInput { prompt } => format!("needs input · {prompt}"),
         },
@@ -594,6 +594,7 @@ fn wrapped_line_col_offset(text: &str, line_index: usize, col: u16, wrap_width: 
 #[derive(Clone, Debug)]
 struct AlignedCopyRow {
     painted: String,
+    decoration_only: bool,
     row: CopyRow,
     cursor_before: usize,
     cursor_after: usize,
@@ -697,6 +698,7 @@ pub(super) struct BlockCopyMemo {
 pub(super) struct CopySurface<'a> {
     /// The block's painted rows.
     pub(super) painted: &'a [String],
+    decoration_rows: &'a [usize],
     /// The block's semantic copy text.
     pub(super) text: &'a str,
     pub(super) geometry: SurfaceGeometry,
@@ -745,6 +747,7 @@ impl BlockCopyMemo {
         let CopySurface {
             painted,
             text: copy_text,
+            decoration_rows,
             geometry,
             output_start,
         } = surface;
@@ -763,19 +766,22 @@ impl BlockCopyMemo {
         let content = painted
             .get(first..first.saturating_add(content_rows))
             .unwrap_or_default();
-        let reusable =
-            if self.output_start != output_start || self.shell_output != geometry.shell_output {
-                0
-            } else {
-                match (identity, self.identity) {
-                    (Some(current), Some(previous)) if current == previous => self.rows.len(),
-                    (Some(current), Some(previous)) if current.same_layout(previous) => {
-                        self.reusable_rows(content, copy_text, geometry.content_left)
-                    }
-                    (Some(_), _) => 0,
-                    (None, _) => self.reusable_rows(content, copy_text, geometry.content_left),
+        let reusable = if self.output_start != output_start
+            || self.shell_output != geometry.shell_output
+        {
+            0
+        } else {
+            match (identity, self.identity) {
+                (Some(current), Some(previous)) if current == previous => self.rows.len(),
+                (Some(current), Some(previous)) if current.same_layout(previous) => {
+                    self.reusable_rows(content, copy_text, geometry.content_left, decoration_rows)
                 }
-            };
+                (Some(_), _) => 0,
+                (None, _) => {
+                    self.reusable_rows(content, copy_text, geometry.content_left, decoration_rows)
+                }
+            }
+        };
         self.identity = identity;
         self.output_start = output_start;
         self.shell_output = geometry.shell_output;
@@ -785,7 +791,7 @@ impl BlockCopyMemo {
         let table_rows = self
             .source_map
             .as_ref()
-            .map(|map| align_table_rows(content, copy_text, map, geometry))
+            .map(|map| align_table_rows(content, copy_text, map, geometry, decoration_rows))
             .unwrap_or_default();
         self.fragment_rows = table_rows
             .iter()
@@ -823,14 +829,20 @@ impl BlockCopyMemo {
                 && geometry
                     .shell_output
                     .is_some_and(|source| row <= source.metadata_rows);
+            let decoration_only = decoration_rows.binary_search(&row).is_ok();
             let mut aligned = align_copy_row(
-                if metadata { "" } else { line },
+                if metadata || decoration_only {
+                    ""
+                } else {
+                    line
+                },
                 source,
                 cursor,
                 geometry.content_left,
                 output_start.is_some() && row > 0,
             );
-            if metadata {
+            aligned.decoration_only = decoration_only;
+            if metadata || decoration_only {
                 line.clone_into(&mut aligned.painted);
             }
             if let Some(table) = table_rows.get(&row) {
@@ -852,7 +864,13 @@ impl BlockCopyMemo {
     ///
     /// Only a revision-only change to the same layout reaches this, so a live
     /// answer verifies the prefix once instead of re-matching the whole block.
-    fn reusable_rows(&self, content: &[String], copy_text: &str, content_left: u16) -> usize {
+    fn reusable_rows(
+        &self,
+        content: &[String],
+        copy_text: &str,
+        content_left: u16,
+        decoration_rows: &[usize],
+    ) -> usize {
         if self.content_left != Some(content_left) {
             return 0;
         }
@@ -866,8 +884,11 @@ impl BlockCopyMemo {
         self.rows
             .iter()
             .zip(content)
-            .take_while(|(aligned, line)| {
-                aligned.painted == **line && aligned.still_holds(copy_text, common, identical)
+            .enumerate()
+            .take_while(|(i, (aligned, line))| {
+                aligned.decoration_only == decoration_rows.binary_search(i).is_ok()
+                    && aligned.painted == **line
+                    && aligned.still_holds(copy_text, common, identical)
             })
             .count()
     }
@@ -1006,9 +1027,11 @@ impl CopyRowsMemo {
         let Some(painted) = cache.lines.get(start..start.saturating_add(length)) else {
             return false;
         };
+        let decoration_rows = markdown_decoration_rows(&state.transcript[index]);
         entry.align(
             CopySurface {
                 painted,
+                decoration_rows: decoration_rows.as_deref().map_or(&[], Vec::as_slice),
                 text: &copy_text,
                 geometry,
                 output_start,
@@ -1047,6 +1070,7 @@ fn align_copy_row(
     let plain = strip_terminal_sequences(line);
     let mut aligned = AlignedCopyRow {
         painted: line.to_owned(),
+        decoration_only: false,
         row: CopyRow {
             text: String::new(),
             offset: cursor,
@@ -1195,6 +1219,7 @@ impl CopyRows {
         Self::build_visible_with(
             CopySurface {
                 painted,
+                decoration_rows: &[],
                 text: copy_text,
                 geometry,
                 output_start,
@@ -1452,6 +1477,7 @@ pub(super) fn visible_copy_rows(
     let rows = CopyRows::build_visible_with(
         CopySurface {
             painted,
+            decoration_rows: &[],
             text,
             geometry,
             output_start,
@@ -1461,6 +1487,13 @@ pub(super) fn visible_copy_rows(
         None,
     );
     (!rows.is_empty()).then_some(rows)
+}
+
+fn markdown_decoration_rows(block: &TranscriptBlock) -> Option<std::cell::Ref<'_, Vec<usize>>> {
+    match block {
+        TranscriptBlock::Assistant(block) => Some(block.decoration_rows.borrow()),
+        _ => None,
+    }
 }
 
 /// The renderer and the synchronous frontend share this projection. Only the
@@ -1502,9 +1535,11 @@ pub(super) fn visible_block_copy_rows(
     let mut index_rows = state.copy_rows.borrow_mut();
     let memo = index_rows.block(index);
     memo.source_map = source_map;
+    let decoration_rows = markdown_decoration_rows(&state.transcript[index]);
     let rows = CopyRows::build_visible_with(
         CopySurface {
             painted,
+            decoration_rows: decoration_rows.as_deref().map_or(&[], Vec::as_slice),
             text: &copy_text,
             geometry,
             output_start,
@@ -1842,6 +1877,7 @@ fn align_narrow_tables(
     plain: &str,
     source: &super::markdown_source::SourceMap,
     geometry: SurfaceGeometry,
+    decoration_rows: &[usize],
 ) -> std::collections::HashMap<usize, CopyRow> {
     let mut output = std::collections::HashMap::new();
     let mut painted_row = 0;
@@ -1866,6 +1902,9 @@ fn align_narrow_tables(
                 while painted_row < content.len() && cursor < combined.len() {
                     let row = painted_row;
                     painted_row += 1;
+                    if decoration_rows.binary_search(&row).is_ok() {
+                        continue;
+                    }
                     let line = strip_terminal_sequences(&content[row]);
                     let inset = visual_col_to_offset(&line, usize::from(geometry.content_left));
                     let tail = &line[inset..];
@@ -1920,16 +1959,17 @@ fn align_table_rows(
     plain: &str,
     source: &super::markdown_source::SourceMap,
     geometry: SurfaceGeometry,
+    decoration_rows: &[usize],
 ) -> std::collections::HashMap<usize, CopyRow> {
     let content_left = geometry.content_left;
-    let mut output = align_narrow_tables(content, plain, source, geometry);
+    let mut output = align_narrow_tables(content, plain, source, geometry, decoration_rows);
     if source.table_rows.is_empty() {
         return output;
     }
     let mut row_index = 0;
     let mut consumed = Vec::new();
     for (row, line) in content.iter().enumerate() {
-        if output.contains_key(&row) {
+        if output.contains_key(&row) || decoration_rows.binary_search(&row).is_ok() {
             continue;
         }
         let line = strip_terminal_sequences(line);

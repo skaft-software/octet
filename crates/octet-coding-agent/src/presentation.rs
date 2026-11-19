@@ -22,8 +22,8 @@ pub use changed_files::{
     validate_changed_file_evidence, WorkspaceSnapshot,
 };
 pub use formatting::{
-    compact_context_limit, format_duration, format_token_rate, format_token_rate_value,
-    PriceDisplay,
+    compact_context_limit, format_duration, format_run_elapsed, format_token_rate,
+    format_token_rate_value, PriceDisplay,
 };
 #[cfg(test)]
 pub use model::resolve_model_display_name;

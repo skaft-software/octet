@@ -348,11 +348,8 @@ settlement persists matching `delegated_agent` usage records; idle rendering
 therefore cannot count it twice.
 
 Accepted steering waiting for the next model boundary and local queued
-follow-ups share a compact pending-state hint above the composer. It is capped
-at two rows: a count and one clipped preview, with a `+N more` suffix. Admitted
-steering takes preview priority because it is delivered before local follow-ups.
-Explicit newlines receive a visible marker; the preview never expands into a
-second transcript. The recall affordance is advertised only while at least one
+follow-ups share a compact pending-state hint above the composer. Each steering prompt previews only its first display row, with an ellipsis
+for omitted text. Steering appears before follow-ups, in delivery order. The recall affordance is advertised only while at least one
 queued entry is genuinely editable, so the hint never promises a recall that the
 agent-side claim would refuse.
 

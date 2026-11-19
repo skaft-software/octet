@@ -581,7 +581,9 @@ async fn error_fixture_redacts_primary_and_dynamic_credentials_everywhere() {
         Err(error) => error,
     };
     let error_diagnostics = format!("{error:?} {error}");
-    assert!(error_diagnostics.contains("[REDACTED]"));
+    assert!(matches!(&error, AiError::Http(http) if http.status.as_u16() == 401));
+    assert!(error_diagnostics.contains("Check the configured credentials and model permissions"));
+    assert!(!error_diagnostics.contains("request rejected:"));
     assert!(!error_diagnostics.contains(PRIMARY_TOKEN));
     assert!(!error_diagnostics.contains(DYNAMIC_HEADER));
 

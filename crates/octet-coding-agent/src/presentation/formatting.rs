@@ -89,6 +89,26 @@ impl PriceDisplay {
     }
 }
 
+/// Elapsed run time for live status and settled outcomes, not tool or rate telemetry.
+pub fn format_run_elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds == 0 && !duration.is_zero() {
+        return format_duration(duration);
+    }
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!(
+            "{}h{:02}m{:02}s",
+            seconds / 3_600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    }
+}
+
 /// Display-only, three-significant-digit rounding, with ties rounded up.
 /// Integer nanoseconds avoid floating-point drift and preserve stored precision.
 /// Only the returned string allocates; trailing fractional zeroes are omitted.

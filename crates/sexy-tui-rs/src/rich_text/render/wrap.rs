@@ -296,7 +296,10 @@ impl RichRenderer {
         let logical = split_runs_at_newlines(&runs);
         let line_runs = logical.first().cloned().unwrap_or_default();
         if self.runs_width(&line_runs) <= width {
-            return RichLine { runs: line_runs };
+            return RichLine {
+                runs: line_runs,
+                ..Default::default()
+            };
         }
         let glyphs = GlyphSet::for_capabilities(self.capabilities);
         let indicator = glyphs.ellipsis;
@@ -338,7 +341,9 @@ impl RichRenderer {
         {
             return line;
         }
-        self.clip_runs(&line.runs, width)
+        let mut clipped = self.clip_runs(&line.runs, width);
+        clipped.decoration_only = line.decoration_only;
+        clipped
     }
 
     pub(super) fn expand_run_tabs<'a>(&self, runs: &'a [RichRun]) -> Cow<'a, [RichRun]> {
@@ -402,7 +407,11 @@ impl RichRenderer {
             }
             styled.push_str(&styled_text);
         }
-        RenderedLine { styled, plain }
+        RenderedLine {
+            decoration_only: line.decoration_only && !plain.is_empty(),
+            styled,
+            plain,
+        }
     }
 
     /// Escape-free copy/log representation under this renderer's ASCII or

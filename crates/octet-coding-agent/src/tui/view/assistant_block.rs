@@ -138,6 +138,8 @@ pub(super) struct AssistantBlock {
     pub(super) render_source: SharedText,
     pub(super) markdown: StreamingMarkdown,
     pub(super) layout: RefCell<StreamingRenderCache>,
+    /// Physical content rows supplied only by the code renderer, not by Markdown.
+    pub(super) decoration_rows: RefCell<Vec<usize>>,
     /// Canonical copy projection, computed only when selection requests it.
     copy_text: RefCell<Option<String>>,
     /// Original Markdown provenance is renderer-owned and Arc-shared in receipts.
@@ -239,6 +241,7 @@ impl AssistantBlock {
         self.text = rendered.text;
         self.markdown = rendered.markdown;
         self.layout = rendered.layout;
+        self.decoration_rows = rendered.decoration_rows;
         self.copy_text = rendered.copy_text;
         self.source_map = rendered.source_map;
         self.render_source = source.clone();
@@ -256,6 +259,7 @@ impl AssistantBlock {
             render_source,
             markdown,
             layout: RefCell::new(StreamingRenderCache::default()),
+            decoration_rows: RefCell::default(),
             copy_text: RefCell::new(None),
             source_map: RefCell::new(None),
             model_lab: None,
@@ -507,12 +511,13 @@ impl AssistantBlock {
             return None;
         }
         let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
-        Some(self.layout.borrow_mut().render_line_update(
-            &self.markdown,
-            renderer,
-            width,
-            !use_plain,
-        ))
+        let mut layout = self.layout.borrow_mut();
+        let update = layout.render_line_update(&self.markdown, renderer, width, !use_plain);
+        let mut decoration = self.decoration_rows.borrow_mut();
+        let keep = decoration.partition_point(|row| *row < update.stable_prefix);
+        decoration.truncate(keep);
+        decoration.extend(layout.decoration_rows_from(update.stable_prefix));
+        Some(update)
     }
 
     pub(super) fn render_on_surface(
@@ -526,6 +531,8 @@ impl AssistantBlock {
         // transcript block shares the same outer baseline; semantic styling
         // supplies hierarchy without changing horizontal geometry.
         let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
+        let mut decoration = self.decoration_rows.borrow_mut();
+        decoration.clear();
         if looks_like_diff(&self.text) {
             return renderer
                 .render_diff(
@@ -542,20 +549,28 @@ impl AssistantBlock {
                 .collect();
         }
         if self.finished && background.is_some_and(|background| background != Color::Default) {
-            return renderer
-                .render_on_background(
-                    self.markdown.committed(),
-                    width,
-                    background.expect("checked above"),
-                )
+            let document = renderer.render_on_background(
+                self.markdown.committed(),
+                width,
+                background.expect("checked above"),
+            );
+            decoration.extend(
+                document
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, line)| line.decoration_only.then_some(i)),
+            );
+            return document
                 .lines
                 .into_iter()
                 .map(|line| if use_plain { line.plain } else { line.styled })
                 .collect();
         }
-        self.layout
-            .borrow_mut()
-            .render_lines(&self.markdown, renderer, width, !use_plain)
+        let mut layout = self.layout.borrow_mut();
+        let lines = layout.render_lines(&self.markdown, renderer, width, !use_plain);
+        decoration.extend(layout.decoration_rows_from(0));
+        lines
     }
 }
 

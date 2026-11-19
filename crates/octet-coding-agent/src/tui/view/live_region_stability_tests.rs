@@ -305,6 +305,38 @@ fn live_activity_padding_surrounds_a_stable_two_line_slot() {
 }
 
 #[test]
+fn compaction_has_one_blank_row_after_bash_output() {
+    for isolated in [false, true] {
+        let (mut shell, component) = fixture(80, 24, isolated);
+        let id = ToolCallId("bash-before-compaction".into());
+        shell.on_agent_event(&AgentEvent::ToolStarted {
+            id: id.clone(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "pwd"}),
+        });
+        shell.on_agent_event(&AgentEvent::ToolFinished {
+            id,
+            result: Ok(octet_agent::ToolOutput::new("exit=0 duration=10ms\nstdout: 1 lines\n/workspace/spacing-test\ncomplete_stdout=true")),
+            duration: Duration::from_millis(10),
+        });
+        shell.on_agent_event(&AgentEvent::CompactionStarted {
+            reason: octet_agent::CompactionReason::Threshold,
+        });
+        let rows = frame(&component, 80);
+        let output = rows
+            .iter()
+            .position(|row| row.contains("/workspace/spacing-test"))
+            .unwrap();
+        let label = rows
+            .iter()
+            .position(|row| row.contains("Compacting context"))
+            .unwrap();
+        assert_eq!(label, output + 2, "{rows:?}");
+        assert!(rows[output + 1].trim().is_empty());
+    }
+}
+
+#[test]
 fn working_keeps_a_neutral_row_after_the_shaded_prompt_card() {
     let theme = crate::tui::theme::test_theme_for(
         crate::tui::theme::TerminalBackground::Dark,

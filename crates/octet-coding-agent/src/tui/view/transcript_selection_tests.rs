@@ -418,6 +418,7 @@ fn memoized_copy_rows_match_a_fresh_alignment_through_a_stream() {
             let memoized = CopyRows::build_visible_with(
                 CopySurface {
                     painted: &painted,
+                    decoration_rows: &[],
                     text,
                     geometry,
                     output_start: None,
@@ -445,6 +446,7 @@ fn memoized_copy_rows_match_a_fresh_alignment_through_a_stream() {
             CopyRows::build_visible_with(
                 CopySurface {
                     painted: &painted,
+                    decoration_rows: &[],
                     text: &full,
                     geometry: moved,
                     output_start: None,

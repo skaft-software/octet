@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::assistant_block::AssistantBlock;
 use super::{activity_elbow, finish_transcript_block, fit_line, subdued_text};
+use crate::presentation::format_run_elapsed;
 use crate::tui::terminal::ColorDepth;
 use crate::tui::theme::{OctetTheme, ShimmerMode, TerminalBackground};
 
@@ -1129,27 +1130,12 @@ fn reasoning_detail_line(theme: &OctetTheme, reasoning: &AssistantBlock) -> Stri
     subdued_text(theme, &detail)
 }
 
-fn format_activity_duration(seconds: u64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3_600 {
-        format!("{}m{:02}s", seconds / 60, seconds % 60)
-    } else {
-        format!(
-            "{}h{:02}m{:02}s",
-            seconds / 3_600,
-            (seconds / 60) % 60,
-            seconds % 60
-        )
-    }
-}
-
 pub(super) fn format_thought_duration(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     if seconds == 0 {
         format!("{}ms", (elapsed.as_micros() + 500) / 1_000)
     } else {
-        format_activity_duration(seconds)
+        format_run_elapsed(elapsed)
     }
 }
 
@@ -1167,7 +1153,7 @@ fn activity_status_line(
     let Some(started_at) = reasoning.activity_started_at else {
         return label;
     };
-    let elapsed = format_activity_duration(started_at.elapsed().as_secs());
+    let elapsed = format_run_elapsed(Duration::from_secs(started_at.elapsed().as_secs()));
     let separator = super::semantic_separator(theme);
     let detail = subdued_text(theme, &format!("({elapsed}{separator}Esc to interrupt)"));
     format!("{label} {detail}")

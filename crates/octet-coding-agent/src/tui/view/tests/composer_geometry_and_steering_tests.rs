@@ -192,7 +192,7 @@ fn queued_steering_uses_active_model_color() {
 }
 
 #[test]
-fn steering_preview_wraps_the_complete_message() {
+fn steering_preview_clips_a_long_first_line() {
     let mut shell = InteractiveShell::test_shell();
     shell.queue_steering(&ComposedInput::from_text(
         "i'm sending you a longer steering prompt just because i want to see how octet's tui handles showing this in the queued prompts area".into(),
@@ -203,18 +203,14 @@ fn steering_preview_wraps_the_complete_message() {
         .map(|line| strip_terminal_sequences(&line))
         .collect::<Vec<_>>();
 
-    assert!(rendered.len() > 2, "{rendered:?}");
+    assert_eq!(rendered.len(), 2, "{rendered:?}");
     assert!(rendered[1].starts_with("  └ i'm sending"), "{rendered:?}");
-    assert!(
-        rendered.last().unwrap().contains("queued prompts area"),
-        "{rendered:?}"
-    );
-    assert!(!rendered.join("\n").contains('…'));
+    assert!(rendered[1].ends_with('…'), "{rendered:?}");
     assert!(rendered.iter().all(|line| visible_width(line) <= 71));
 }
 
 #[test]
-fn steering_messages_preserve_explicit_newlines() {
+fn steering_preview_omits_later_lines_but_recall_preserves_them() {
     let mut shell = InteractiveShell::test_shell();
     shell.queue_steering(&ComposedInput::from_text(
         "first line\nsecond 👩‍💻 line".into(),
@@ -225,14 +221,15 @@ fn steering_messages_preserve_explicit_newlines() {
         .map(|line| strip_terminal_sequences(&line))
         .collect::<Vec<_>>();
 
-    assert_eq!(rendered.len(), 3, "{rendered:?}");
-    assert!(rendered[1].contains("first line"), "{rendered:?}");
-    assert!(rendered[2].contains("second 👩‍💻 line"), "{rendered:?}");
+    assert_eq!(rendered.len(), 2, "{rendered:?}");
+    assert_eq!(rendered[1], "  └ first line…");
+    shell.restore_queued_steering();
+    assert_eq!(shell.pending(), "first line\nsecond 👩‍💻 line");
     assert!(rendered.iter().all(|line| visible_width(line) <= 40));
 }
 
 #[test]
-fn steering_overflow_previews_first_prompt_and_counts_the_rest() {
+fn two_long_steering_prompts_each_occupy_one_row() {
     let mut shell = InteractiveShell::test_shell();
     shell.queue_steering(&ComposedInput::from_text(
         "first prompt has enough words to require several wrapped display rows".into(),
@@ -247,9 +244,9 @@ fn steering_overflow_previews_first_prompt_and_counts_the_rest() {
         .collect::<Vec<_>>();
     let joined = rendered.join("\n");
 
-    assert_eq!(rendered.len(), 5, "{rendered:?}");
+    assert_eq!(rendered.len(), 3, "{rendered:?}");
     assert!(joined.contains("└ first prompt"), "{rendered:?}");
-    assert!(joined.contains("queued rows hidden"), "{rendered:?}");
+    assert!(joined.contains("└ second prompt"), "{rendered:?}");
     assert!(rendered.iter().all(|line| visible_width(line) <= 30));
 }
 
@@ -286,7 +283,7 @@ fn mixed_pending_messages_keep_both_texts_and_fit_the_shell() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            text.contains("steer two") && text.contains("follow two"),
+            !text.contains("steer two") && text.contains("follow two"),
             "{text}"
         );
         let frame = render_shell(&shell.state.borrow(), width);

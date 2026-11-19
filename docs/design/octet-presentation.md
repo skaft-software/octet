@@ -125,9 +125,8 @@ through chronological messages and pending adjustments to output reserve and
 remaining capacity. Every displayed category has its own colour; categories
 must not be duplicated merely to create a separate accounting slice.
 
-Queued steering is a pending-state hint, not a second transcript. It occupies at
-most two rows: one count and one clipped preview of the oldest queued message,
-with a compact count for additional messages.
+Each queued steering preview occupies one display row. An ellipsis marks text
+beyond the first line or the available width. Delivery and recall keep the full input.
 
 ## Approval contract
 
@@ -164,7 +163,8 @@ it exists.
 
 ## Duration display
 
-Live activity elapsed timers use whole seconds: `28s`, `1m49s`, or `1h01m01s`.
+Live activity timers and final run summaries use whole seconds: `28s`, `1m49s`,
+or `1h01m01s`. Subsecond outcomes keep their finer precision.
 Other TUI durations share one display-only formatter: up to three significant digits,
 with `ns`, `µs`, `ms`, `s`, `min`, or `h` selected automatically. Rounding is
 nearest, ties upward, and promotes across unit boundaries; fractional trailing

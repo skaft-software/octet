@@ -40,6 +40,7 @@ pub(super) fn inline_source_bytes(content: &[Inline]) -> usize {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct RichLine {
+    pub(super) decoration_only: bool,
     pub(super) runs: Vec<RichRun>,
 }
 
@@ -66,6 +67,7 @@ impl RichLine {
     }
 
     pub(super) fn extend(&mut self, other: RichLine) {
+        self.decoration_only |= other.decoration_only;
         for run in other.runs {
             self.push(run.text, run.style, run.link);
         }

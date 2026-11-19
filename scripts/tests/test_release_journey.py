@@ -116,7 +116,13 @@ class ReleaseJourneyTests(unittest.TestCase):
     def test_wait_boundary_does_not_wait_for_process_exit_and_cleanup_reaps_child(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "started"
-            code = "from pathlib import Path; import time; Path('started').write_text('yes'); time.sleep(10)"
+            # Detached gate runners can pass SIG_IGN through exec. Mark the
+            # fixture ready only once it will act on the test's interrupt.
+            code = (
+                "from pathlib import Path; import signal, time; "
+                "signal.signal(signal.SIGINT, signal.SIG_DFL); "
+                "Path('started').write_text('yes'); time.sleep(10)"
+            )
             with MODULE.child([sys.executable, "-c", code], {"PATH": os.defpath}, Path(directory)) as child:
                 start = time.monotonic()
                 child.wait_until(marker.exists)

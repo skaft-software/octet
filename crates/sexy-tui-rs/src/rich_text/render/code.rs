@@ -214,6 +214,9 @@ impl RichRenderer {
             ));
         }
 
+        for row in &mut output {
+            row.decoration_only = true;
+        }
         output
     }
 
@@ -246,6 +249,9 @@ impl RichRenderer {
         }
         if bordered {
             output.push(self.code_border_line(block_width, None, false, border_style));
+        }
+        for row in &mut output {
+            row.decoration_only = true;
         }
         output
     }

@@ -120,6 +120,8 @@ impl Default for RenderOptions {
 /// One rendered terminal row with a copyable escape-free equivalent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderedLine {
+    /// The renderer supplied the entire row (e.g. a fence label), not the document.
+    pub decoration_only: bool,
     pub styled: String,
     pub plain: String,
 }
@@ -490,6 +492,7 @@ impl RichRenderer {
             }
             let text = self.sanitize(&line.text);
             let content = RichLine {
+                decoration_only: false,
                 runs: self
                     .diff_code_runs(&text, line.kind, language.as_deref(), style)
                     .unwrap_or_else(|| vec![RichRun::new(text, style, None)]),

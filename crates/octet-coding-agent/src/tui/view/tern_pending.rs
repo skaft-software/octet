@@ -2,6 +2,7 @@
 
 use octet_tern::wire::{Kind, Node, Props, Span};
 
+use super::input_overlays::{pending_previews, PendingPreview};
 use super::{tern_controls, ShellState};
 
 pub(super) fn node(shell: &ShellState) -> Option<Node> {
@@ -62,7 +63,24 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
             ));
         }
     }
-    let preview = super::input_overlays::pending_message_texts(shell).join("\n");
+    let previews = pending_previews(shell, usize::from(shell.size.0))
+        .into_iter()
+        .enumerate()
+        .map(|(index, preview)| {
+            let (text, props) = match preview {
+                PendingPreview::Steering(text) => (
+                    text,
+                    Props::new().set("wrap", "none").set("truncate", "end"),
+                ),
+                PendingPreview::Wrapped(text) => (text, Props::new()),
+            };
+            Node::new(
+                format!("pending.preview.{index}"),
+                Kind::Text,
+                props.text("spans", vec![Span::styled(text, "muted")]),
+            )
+        })
+        .collect();
     Some(Node::with_children(
         "pending",
         Kind::Card,
@@ -77,11 +95,7 @@ pub(super) fn node(shell: &ShellState) -> Option<Node> {
                     .set("align", "center"),
                 heading,
             ),
-            Node::new(
-                "pending.preview",
-                Kind::Text,
-                Props::new().text("spans", vec![Span::styled(preview, "muted")]),
-            ),
+            Node::with_children("pending.preview", Kind::Col, Props::new(), previews),
         ],
     ))
 }

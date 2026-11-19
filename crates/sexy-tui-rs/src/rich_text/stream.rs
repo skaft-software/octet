@@ -1093,6 +1093,24 @@ impl StreamingRenderCache {
         }
     }
 
+    /// Decoration in the same physical row space as `render_line_update`.
+    pub fn decoration_rows_from(&self, start: usize) -> impl Iterator<Item = usize> + '_ {
+        let committed = self.committed_lines.len();
+        let tail_start = committed + usize::from(committed != 0 && self.tail_visible != 0);
+        self.committed_lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .chain(
+                self.tail_lines[..self.tail_visible]
+                    .iter()
+                    .enumerate()
+                    .skip(start.saturating_sub(tail_start))
+                    .map(move |(i, line)| (tail_start + i, line)),
+            )
+            .filter_map(|(i, line)| line.decoration_only.then_some(i))
+    }
+
     fn selected_lines_from(&self, start: usize, styled: bool) -> Vec<String> {
         let separator = usize::from(!self.committed_lines.is_empty() && self.tail_visible > 0);
         let total = self.committed_lines.len() + separator + self.tail_visible;

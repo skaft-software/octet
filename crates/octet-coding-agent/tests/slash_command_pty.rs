@@ -706,9 +706,11 @@ fn real_octet_settings_and_scoped_models_report_while_a_response_is_streaming() 
     octet.pty.wait_for(b"Launch and session");
     octet.pty.wait_for(b"Configured model");
     octet.pty.wait_for(b"Active reasoning");
-    // The structured report is paged: scroll its owner to inspect the trust
-    // section rather than requiring offscreen facts in the initial frame.
-    octet.pty.write_input(b"\x1b[F");
+    // Workspace trust precedes the preference instructions. On a short
+    // terminal those last instructions can fill the entire final page.
+    octet.pty.write_input(b"\x1b[F"); // End
+    octet.pty.wait_for(b"Change a preference");
+    octet.pty.write_input(b"\x1b[5~"); // PageUp
     octet
         .pty
         .wait_for(b"Project trust is deliberately not persisted here");

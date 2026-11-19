@@ -1757,7 +1757,7 @@ fn activity_durations_use_compact_clock_units() {
         (3600, "1h00m00s"),
         (3661, "1h01m01s"),
     ] {
-        assert_eq!(format_activity_duration(seconds), expected);
+        assert_eq!(format_run_elapsed(Duration::from_secs(seconds)), expected);
     }
 }
 

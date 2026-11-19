@@ -56,8 +56,10 @@ impl TranscriptViewport {
         // The viewport's navigation row supplies the final bottom padding row.
         // Keep the event's own separator in scroll coordinates, not copyable history.
         let padded = scroll_activity && chrome.working_bottom_padding;
+        // A single-line activity such as compaction has no bottom padding,
+        // but needs the same separator above it as Working and Thinking.
         let activity_start = history.len()
-            + if padded {
+            + if activity_rows > 0 {
                 ShellChrome::separator_rows(history.last())
             } else {
                 0

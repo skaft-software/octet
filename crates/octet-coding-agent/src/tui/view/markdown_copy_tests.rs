@@ -263,6 +263,34 @@ fn markdown_source_copy_partial_fence_is_raw_code_and_full_fence_keeps_language(
 }
 
 #[test]
+fn markdown_source_copy_inside_and_after_a_labeled_fence() {
+    let source =
+        "Before the example.\n\n```rust\nlet answer = 42;\n```\n\nNow run the rust example.";
+    for live in [false, true] {
+        let mut shell = fixture_kind(source, live);
+        for word in ["Before", "answer", "Now", "example."] {
+            let start = cell(&shell, word, usize::from(word == "example."));
+            let end = (start.0, start.1 + word.len() as u16);
+            for (a, b) in [(start, end), (end, start)] {
+                clipboard_transport::TEST_COPY.with(|copy| *copy.borrow_mut() = None);
+                mouse(&mut shell, MouseEventKind::Down(MouseButton::Left), a);
+                mouse(&mut shell, MouseEventKind::Drag(MouseButton::Left), b);
+                let frame =
+                    render_shell_viewport_at(&shell.state.borrow(), 100, std::time::Instant::now());
+                assert!(
+                    frame[usize::from(a.0)].contains(&format!("\x1b[0;7m{word}\x1b[0m")),
+                    "live={live}, word={word}: {:?}",
+                    frame[usize::from(a.0)]
+                );
+                mouse(&mut shell, MouseEventKind::Up(MouseButton::Left), b);
+                clipboard_transport::TEST_COPY
+                    .with(|copy| assert_eq!(copy.borrow().as_deref(), Some(word)));
+            }
+        }
+    }
+}
+
+#[test]
 fn markdown_source_copy_table_rows_keep_pipes_only_for_whole_rows() {
     let mut shell =
         fixture("| Name | Value |\n| :--- | ---: |\n| **alpha** | `beta` |\n| gamma | delta |");

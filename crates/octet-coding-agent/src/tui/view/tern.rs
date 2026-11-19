@@ -19,7 +19,7 @@ use super::renderer_runtime::SharedState;
 use super::terminal_text::sanitize_for_terminal;
 use super::tern_theme::NativeTheme;
 use super::{AssistantBlock, NoticeTone, ShellState, TranscriptBlock};
-use crate::presentation::format_duration;
+use crate::presentation::{format_duration, format_run_elapsed};
 use crate::tui::theme::ModelLab;
 
 pub(super) const SURFACE: &str = "octet.session";
@@ -1368,7 +1368,7 @@ fn working_row(shell: &ShellState, reduce_motion: bool) -> Option<Node> {
             Kind::Text,
             Props::new().text(
                 "spans",
-                vec![Span::styled(format_duration(run.elapsed_at(now)), "dim")],
+                vec![Span::styled(format_run_elapsed(run.elapsed_at(now)), "dim")],
             ),
         );
     }
@@ -2142,7 +2142,7 @@ fn outcome_parts(outcome: &super::OutcomeBlock) -> Vec<Span> {
     };
     let mut spans = Vec::with_capacity(7);
     if let Some(duration) = duration {
-        spans.push(Span::styled(format_duration(duration), "dim"));
+        spans.push(Span::styled(format_run_elapsed(duration), "dim"));
         spans.push(Span::new(" · "));
     }
     spans.push(Span::styled(verdict, token));

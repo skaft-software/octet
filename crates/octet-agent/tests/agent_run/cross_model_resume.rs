@@ -304,11 +304,12 @@ async fn codex_bad_request_shows_structured_details_in_public_failure() {
         "status=400",
         "code=invalid_reasoning_pair",
         "type=invalid_request_error",
-        "requires its paired function call",
+        "paired function call to be replayed together",
     ] {
         assert!(diagnostic.contains(expected), "{diagnostic}");
     }
     for private in [
+        "Reasoning item requires its paired function call",
         "test-api-key",
         "PRIVATE_PROMPT_MUST_NOT_APPEAR",
         "PRIVATE_HEADER_MUST_NOT_APPEAR",

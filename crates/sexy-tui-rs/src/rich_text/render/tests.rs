@@ -1046,7 +1046,13 @@ fn fitting_owned_lines_preserve_run_text_and_link_allocations() {
                 )
             })
             .collect::<Vec<_>>();
-        let clipped = renderer.clip_line(RichLine { runs }, width);
+        let clipped = renderer.clip_line(
+            RichLine {
+                runs,
+                ..Default::default()
+            },
+            width,
+        );
         assert_eq!(
             clipped.runs.as_ptr(),
             allocation,
@@ -1083,7 +1089,11 @@ fn reference_encode_clipped_line(renderer: &RichRenderer, line: &RichLine) -> Re
         }
         styled.push_str(&styled_text);
     }
-    RenderedLine { styled, plain }
+    RenderedLine {
+        decoration_only: line.decoration_only && !plain.is_empty(),
+        styled,
+        plain,
+    }
 }
 
 #[test]
@@ -1142,10 +1152,22 @@ fn owned_line_clipping_matches_general_path_and_encoded_bytes() {
                         let runs = identity_path_runs(parts);
                         for width in [0, 1, 2, 3, 7, 16, 120] {
                             let expected = renderer.clip_runs(&runs, width);
-                            let actual = renderer.clip_line(RichLine { runs: runs.clone() }, width);
+                            let actual = renderer.clip_line(
+                                RichLine {
+                                    runs: runs.clone(),
+                                    ..Default::default()
+                                },
+                                width,
+                            );
                             assert_same_runs(&actual.runs, &expected.runs);
                             assert_eq!(
-                                renderer.encode_line(RichLine { runs: runs.clone() }, width),
+                                renderer.encode_line(
+                                    RichLine {
+                                        runs: runs.clone(),
+                                        ..Default::default()
+                                    },
+                                    width
+                                ),
                                 reference_encode_clipped_line(&renderer, &expected),
                                 "width={width} parts={parts:?} policy={:?}",
                                 renderer.options.width,

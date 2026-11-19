@@ -167,7 +167,7 @@ fn slash_suggestion_display_description(
         })
 }
 
-fn truncate_suggestion_display(value: &str, width: usize, ellipsis: &str) -> String {
+fn truncate_plain_cell(value: &str, width: usize, ellipsis: &str) -> String {
     // Input is a plain, terminal-safe cell. The ANSI-aware truncator only adds
     // a trusted reset when clipping; strip that synthetic reset before styling
     // so no-colour renderers never receive an escape sequence.
@@ -269,8 +269,7 @@ pub(super) fn render_slash_suggestions(
             " ".repeat(marker_width)
         };
         let display_label = slash_suggestion_display_label(state, command);
-        let label =
-            truncate_suggestion_display(&display_label, label_width, state.theme.glyph("ellipsis"));
+        let label = truncate_plain_cell(&display_label, label_width, state.theme.glyph("ellipsis"));
         let label = format!(
             "{label}{}",
             " ".repeat(label_width.saturating_sub(visible_width(&label)))
@@ -284,7 +283,7 @@ pub(super) fn render_slash_suggestions(
         let fixed_width = marker_width + 1 + label_width;
         let description_width = usize::from(popup_width).saturating_sub(fixed_width + 2);
         let display_description = slash_suggestion_display_description(state, command);
-        let description = truncate_suggestion_display(
+        let description = truncate_plain_cell(
             &display_description,
             description_width,
             state.theme.glyph("ellipsis"),
@@ -376,8 +375,7 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     for (index, suggestion) in matches.into_iter().enumerate().skip(start).take(item_rows) {
         let safe_path =
             sanitize_ordinary_surface_cell(&suggestion.completion, state.theme.unicode());
-        let path =
-            truncate_suggestion_display(&safe_path, available_width, state.theme.glyph("ellipsis"));
+        let path = truncate_plain_cell(&safe_path, available_width, state.theme.glyph("ellipsis"));
         let prefix = if index == selected {
             marker.to_owned()
         } else {
@@ -539,33 +537,49 @@ pub(super) fn render_input_suggestions(
     render_path_suggestions(state, width, max_rows)
 }
 
-pub(super) fn pending_message_texts(state: &ShellState) -> Vec<String> {
+pub(super) enum PendingPreview {
+    Steering(String),
+    Wrapped(String),
+}
+
+pub(super) fn pending_previews(state: &ShellState, width: usize) -> Vec<PendingPreview> {
     let mixed = !state.steering_queue.is_empty() && !state.follow_up_queue.is_empty();
-    let mut texts = Vec::new();
+    let mut previews = Vec::new();
     if !state.pending_controls.is_empty() {
-        texts.push(super::sanitize_for_terminal(
+        previews.push(PendingPreview::Wrapped(super::sanitize_for_terminal(
             &state.pending_controls.join("; "),
-        ));
+        )));
     }
-    for (kind, text) in state
-        .steering_queue
-        .iter()
-        .map(|entry| ("Steering", entry.display.as_str()))
-        .chain(
-            state
-                .follow_up_queue
-                .iter()
-                .map(|entry| ("Follow-up", entry.composed.transcript_text.as_str())),
-        )
-    {
-        let text = super::sanitize_for_terminal(text);
-        texts.push(if mixed {
-            format!("{kind}: {text}")
+    let ellipsis = state.theme.glyph("ellipsis");
+    for entry in state.steering_queue.iter() {
+        let (first, omitted) = entry
+            .display
+            .split_once('\n')
+            .map_or((entry.display.as_str(), false), |(first, _)| {
+                (first.trim_end_matches('\r'), true)
+            });
+        let mut text = if mixed {
+            String::from("Steering: ")
+        } else {
+            String::new()
+        };
+        text.push_str(&super::sanitize_for_terminal(first));
+        if omitted {
+            text.push_str(ellipsis);
+        }
+        previews.push(PendingPreview::Steering(truncate_plain_cell(
+            &text, width, ellipsis,
+        )));
+    }
+    for entry in state.follow_up_queue.iter() {
+        let text = super::sanitize_for_terminal(&entry.composed.transcript_text);
+        previews.push(PendingPreview::Wrapped(if mixed {
+            format!("Follow-up: {text}")
         } else {
             text
-        });
+        }));
     }
-    texts
+    previews
 }
 
 /// Namespaced binding the compiled default declares for restoring a queued
@@ -673,17 +687,20 @@ pub(super) fn render_pending_steering(
     );
     let continuation = format!("{ACTIVITY_DETAIL_INDENT}  ");
     let mut content = Vec::new();
-    for text in pending_message_texts(state) {
-        content.extend(
-            super::wrap_hanging(
+    let available = usize::from(width).saturating_sub(visible_width(&prefix));
+    for preview in pending_previews(state, available) {
+        match preview {
+            PendingPreview::Steering(text) => content.push(fit_line(
+                &format!("{prefix}{}", state.theme.fg("muted", &text)),
+                width,
+            )),
+            PendingPreview::Wrapped(text) => content.extend(super::wrap_hanging(
                 &state.theme.fg("muted", &text),
                 &prefix,
                 &continuation,
                 width,
-            )
-            .into_iter()
-            .map(|row| fit_line(&row, width)),
-        );
+            )),
+        }
     }
     let budget = max_rows - 1;
     if content.len() > budget {

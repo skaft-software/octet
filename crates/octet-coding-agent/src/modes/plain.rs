@@ -20,7 +20,7 @@ use crate::app::bootstrap::{
 };
 use crate::modes::{timestamp, HostRunOutcome, RUN_STREAM_LOST_MESSAGE};
 use crate::presentation::{
-    format_duration, is_hidden_tool_detail, provider_lifecycle_label,
+    format_run_elapsed, is_hidden_tool_detail, provider_lifecycle_label,
     summarize_tool_with_workspace, tool_failure_reason, tool_result_is_failure, RunOutcome,
     RunPhase, RunTracker,
 };
@@ -168,7 +168,7 @@ fn outcome_text(outcome: &RunOutcome) -> String {
         | RunOutcome::CompletedWithWarnings {
             elapsed, summary, ..
         } => {
-            let mut parts = vec![format!("[completed] {}", format_duration(*elapsed))];
+            let mut parts = vec![format!("[completed] {}", format_run_elapsed(*elapsed))];
             if summary.files_changed > 0 {
                 parts.push(format!(
                     "{} file{} changed",
@@ -179,10 +179,10 @@ fn outcome_text(outcome: &RunOutcome) -> String {
             parts.join(" - ")
         }
         RunOutcome::Failed { elapsed, reason } => {
-            format!("[failed] {reason} - {}", format_duration(*elapsed))
+            format!("[failed] {reason} - {}", format_run_elapsed(*elapsed))
         }
         RunOutcome::Interrupted { elapsed } => {
-            format!("[interrupted] {}", format_duration(*elapsed))
+            format!("[interrupted] {}", format_run_elapsed(*elapsed))
         }
         RunOutcome::NeedsInput { prompt } => format!("[needs input] {prompt}"),
     }
@@ -613,7 +613,7 @@ async fn run_prompt(
                             crate::output::stderr!(
                                 "[working] {} - {}",
                                 provider_lifecycle_label(provider, &lifecycle),
-                                format_duration(current.phase_elapsed_at(std::time::Instant::now()))
+                                format_run_elapsed(current.phase_elapsed_at(std::time::Instant::now()))
                             );
                             continue;
                         }
@@ -628,7 +628,7 @@ async fn run_prompt(
                         output,
                         &mut response_open,
                         theme,
-                        &format!("[working] {label} - {}", format_duration(current.phase_elapsed_at(std::time::Instant::now()))),
+                        &format!("[working] {label} - {}", format_run_elapsed(current.phase_elapsed_at(std::time::Instant::now()))),
                     )?;
                     output.flush()?;
                 }
@@ -891,15 +891,13 @@ mod tests {
                 warnings: 0,
             },
         });
-        assert_eq!(completed, "[completed] 1.2s - 2 files changed");
+        assert_eq!(completed, "[completed] 1s - 2 files changed");
         assert!(completed.is_ascii());
 
         let failed = outcome_text(&RunOutcome::Failed {
             elapsed: Duration::from_secs(2),
             reason: "command exited 1".into(),
         });
-        // Plain outcomes share the adaptive formatter: whole seconds omit
-        // fractional trailing zeroes just like completed outcomes.
         assert_eq!(failed, "[failed] command exited 1 - 2s");
         assert!(failed.is_ascii());
 
@@ -925,7 +923,7 @@ mod tests {
                 warnings: 3,
             },
         });
-        assert_eq!(with_warnings, "[completed] 1.2s - 2 files changed");
+        assert_eq!(with_warnings, "[completed] 1s - 2 files changed");
         assert!(with_warnings.is_ascii());
         assert!(!with_warnings.contains("warning"));
 

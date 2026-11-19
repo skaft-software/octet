@@ -6,7 +6,7 @@ use super::*;
 fn single_response_completion_uses_reported_output_over_dispatch_to_stream_end() {
     let mut metrics = octet_ai::InferenceMetrics::default();
     let outcome = crate::presentation::RunOutcome::Completed {
-        elapsed: Duration::from_secs(2),
+        elapsed: Duration::from_secs(113),
         summary: crate::presentation::RunSummary {
             files_changed: 0,
             tool_calls: 0,
@@ -20,14 +20,14 @@ fn single_response_completion_uses_reported_output_over_dispatch_to_stream_end()
             .map(|span| span.t)
             .collect::<String>()
     };
-    assert_eq!(text(metrics.clone()), "2s · completed · 0 tools");
+    assert_eq!(text(metrics.clone()), "1m53s · completed · 0 tools");
     let without_metrics = super::super::OutcomeBlock::new(outcome.clone(), None);
     assert_eq!(
         outcome_parts(&without_metrics)
             .into_iter()
             .map(|span| span.t)
             .collect::<String>(),
-        "2s · completed · 0 tools"
+        "1m53s · completed · 0 tools"
     );
     metrics.decode_estimate = Some(octet_ai::DecodeEstimate {
         tokens_per_second: 100.0,
@@ -48,14 +48,14 @@ fn single_response_completion_uses_reported_output_over_dispatch_to_stream_end()
     });
     // Neither a decode fit nor a server counter carries the dispatch-to-stream-end
     // interval, so neither becomes the displayed rate.
-    assert_eq!(text(metrics.clone()), "2s · completed · 0 tools");
+    assert_eq!(text(metrics.clone()), "1m53s · completed · 0 tools");
     metrics.client = Some(octet_ai::ClientInferenceMetrics {
         scope: Some(octet_ai::ClientTimingScope::Request),
         elapsed_ns: 1_600_000_000,
         reported_output_tokens: 120,
         ..Default::default()
     });
-    assert_eq!(text(metrics), "2s · completed · 0 tools · 75.0 tok/s");
+    assert_eq!(text(metrics), "1m53s · completed · 0 tools · 75.0 tok/s");
 }
 
 #[test]

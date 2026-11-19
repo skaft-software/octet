@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::presentation::{format_duration, RunOutcome};
+use crate::presentation::{format_run_elapsed, RunOutcome};
 use crate::tui::theme::OctetTheme;
 
 use super::terminal_text::sanitize_for_terminal;
@@ -33,7 +33,7 @@ fn completion_status_text(
     separator: &str,
     generation: Option<&super::RunGenerationRate>,
 ) -> String {
-    let mut text = format!("{status}{separator}{}", format_duration(elapsed));
+    let mut text = format!("{status}{separator}{}", format_run_elapsed(elapsed));
     if let Some(generation) = generation {
         text.push_str(separator);
         text.push_str(&completion_rate_detail(generation));
@@ -76,7 +76,7 @@ fn outcome_line(
             theme.fg("error", theme.glyph("error")),
             theme.fg(
                 "error",
-                &format!("failed{separator}{}", format_duration(*elapsed))
+                &format!("failed{separator}{}", format_run_elapsed(*elapsed))
             )
         ),
         RunOutcome::Interrupted { elapsed } => format!(
@@ -84,7 +84,7 @@ fn outcome_line(
             theme.fg("warning", theme.glyph("interrupt")),
             subdued_text(
                 theme,
-                &format!("interrupted{separator}{}", format_duration(*elapsed)),
+                &format!("interrupted{separator}{}", format_run_elapsed(*elapsed)),
             )
         ),
         RunOutcome::NeedsInput { .. } => format!(
@@ -206,7 +206,7 @@ mod tests {
             );
         }
         let line = strip_terminal_sequences(&outcome_line(&with_warnings, None, &theme));
-        assert_eq!(line, "✓ completed · 1.38min");
+        assert_eq!(line, "✓ completed · 1m23s");
         assert!(!line.to_ascii_lowercase().contains("warning"), "{line}");
 
         // The success glyph and role are the ones the completed line uses; the
@@ -232,7 +232,7 @@ mod tests {
         };
         let plain = rendered(with_warnings);
         assert_eq!(plain, rendered(completed), "{plain:?}");
-        assert_eq!(plain, "✓ completed · 1.38min", "{plain:?}");
+        assert_eq!(plain, "✓ completed · 1m23s", "{plain:?}");
         assert!(!plain.to_ascii_lowercase().contains("warning"), "{plain:?}");
     }
 
@@ -329,7 +329,7 @@ mod tests {
 
         assert_eq!(
             strip_terminal_sequences(&outcome_line(&outcome, None, &theme)),
-            "× failed · 9.4s"
+            "× failed · 9s"
         );
         let RunOutcome::Failed { reason, .. } = &outcome else {
             unreachable!()
@@ -349,11 +349,11 @@ mod tests {
             .map(|line| strip_terminal_sequences(&line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.starts_with("× failed · 9.4s\n"), "{rendered:?}");
+        assert!(rendered.starts_with("× failed · 9s\n"), "{rendered:?}");
         assert!(rendered.contains("Provider unavailable␇"), "{rendered:?}");
 
         let copied = block_copy_text(&TranscriptBlock::Outcome(OutcomeBlock::new(outcome, None)));
-        assert!(copied.starts_with("failed · 9.4s\nProvider unavailable␇\n"));
+        assert!(copied.starts_with("failed · 9s\nProvider unavailable␇\n"));
         assert!(copied.ends_with('…'));
     }
 }
@@ -446,7 +446,7 @@ mod decode_estimate_tests {
             " · ",
             missing_block.generation.as_ref(),
         );
-        assert_eq!(missing, "completed · 1min");
+        assert_eq!(missing, "completed · 1m00s");
         for inference in [None, Some(metrics)] {
             assert_eq!(
                 super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(block(
@@ -472,7 +472,7 @@ mod decode_estimate_tests {
             " · ",
             estimated_block.generation.as_ref(),
         );
-        assert_eq!(text, "completed · 1min · ~50.0 tok/s (estimated tokens)");
+        assert_eq!(text, "completed · 1m00s · ~50.0 tok/s (estimated tokens)");
         assert_eq!(
             super::super::block_copy_text(&super::super::TranscriptBlock::Outcome(estimated_block)),
             text

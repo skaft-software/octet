@@ -200,7 +200,7 @@ fn event_blanks_are_theme_independent_and_working_promotion_does_not_bounce() {
                 );
             }
             assert!(
-                visible_position(&settled, "1.38min").is_some(),
+                visible_position(&settled, "1m23s").is_some(),
                 "{name}/{width}: {settled:?}"
             );
         }
@@ -281,7 +281,7 @@ fn content_width_uses_usable_streaming_width_and_real_final_markdown_and_complet
                 "visible.",
                 "marker.",
                 "completed",
-                "1.38min",
+                "1m23s",
             ] {
                 assert!(
                     rows.iter().any(|row| row.contains(marker)),
