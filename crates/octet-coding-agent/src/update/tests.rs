@@ -68,6 +68,25 @@ async fn installer_download_deadline_covers_body_and_exit_and_reaps_child() {
     }
 }
 
+/// Write an executable `/bin/sh` script from a child process. Writing it here
+/// would leave a writable descriptor that a concurrent test's fork inherits
+/// until its exec, and exec'ing the script meanwhile fails with ETXTBSY
+/// ("Text file busy"); 4 of 40 parallel runs of these tests hit that.
+#[cfg(unix)]
+fn write_probe_script(path: &std::path::Path, body: &str) {
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '#!/bin/sh\\n%s\\n' \"$1\" > \"$2\" && chmod 700 \"$2\"",
+        ])
+        .arg("write-probe-script")
+        .arg(body)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn installed_version_probe_requires_success_and_exact_target_without_exposing_output() {
@@ -81,8 +100,7 @@ async fn installed_version_probe_requires_success_and_exact_target_without_expos
         ("printf 'private diagnostic\\n'", false),
         ("dd if=/dev/zero bs=1025 count=1 2>/dev/null", false),
     ] {
-        std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_probe_script(&executable, script);
         let result = verify_installed_version(&executable, &version).await;
         assert_eq!(result.is_ok(), succeeds);
         if let Err(error) = result {
@@ -96,8 +114,7 @@ async fn installed_version_probe_requires_success_and_exact_target_without_expos
 async fn installed_version_probe_has_a_bounded_deadline() {
     let directory = tempfile::tempdir().unwrap();
     let executable = directory.path().join("octet");
-    std::fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    write_probe_script(&executable, "exec sleep 30");
     let error = tokio::time::timeout(
         Duration::from_secs(7),
         verify_installed_version(&executable, &semver::Version::new(0, 7, 5)),
@@ -105,7 +122,7 @@ async fn installed_version_probe_has_a_bounded_deadline() {
     .await
     .expect("version probe deadline")
     .unwrap_err();
-    assert!(error.to_string().contains("timed out"));
+    assert!(error.to_string().contains("timed out"), "{error:#}");
 }
 
 fn stable_release(tag: &str) -> serde_json::Value {
