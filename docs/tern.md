@@ -296,8 +296,10 @@ requests verbose output; this gate includes command-image preparation, hashing
 and blob upload, not just image nodes. Second Ctrl+O removes the output projection
 without discarding captured source. A tool-header click opens or closes only that
 card. It cannot bypass the command-output gate; with verbose tools off, opening
-a command with captured output shows a hint instead. Local `!` commands are not
-tool calls and continue to use only global disclosure.
+a command with captured output shows a hint instead. This also holds when an
+extension renders the command: its rows may contain output, so Tern uses the
+native command rail until output is disclosed. Local `!` commands are not tool
+calls and continue to use only global disclosure.
 `!!` retains its existing exclusion from model context; its output can still be
 stored as non-model-visible configuration presentation metadata.
 

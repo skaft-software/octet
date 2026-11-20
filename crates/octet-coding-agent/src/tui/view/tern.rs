@@ -831,7 +831,12 @@ fn project(
         for (index, block) in shell.transcript.iter().enumerate() {
             // Commit IDs survive prepends, deletion, resume and streaming.
             let identity = shell.transcript_commit_ids[index];
-            if shell.extension_markdown(index).is_none() {
+            // Renderer rows are opaque: even a compact snapshot can contain
+            // captured command output. Use the native source rail until the
+            // same disclosure that admits its output also admits those rows.
+            let gated_command = matches!(block, TranscriptBlock::Tool(panel)
+                if command_rail(&panel.name) && !ToolDisclosure::for_panel(shell, index, panel).output);
+            if !gated_command && shell.extension_markdown(index).is_none() {
                 if let Some(rendered) =
                     shell.extension_rendered(index, shell.transcript_content_width(shell.size.0))
                 {
@@ -1905,6 +1910,7 @@ fn tool_group(index: u64, shell: &ShellState, header: Node, mut visible: Vec<Nod
 #[derive(Clone, Copy)]
 pub(super) struct ToolDisclosure {
     expanded: bool,
+    output: bool,
     pub(super) images: bool,
 }
 impl ToolDisclosure {
@@ -1917,11 +1923,14 @@ impl ToolDisclosure {
         let command = command_rail(&panel.name);
         // Without an explicit card choice, retain live noncommand output and
         // opt-in image previews. A header close suppresses that card's details.
+        let expanded =
+            details || (!explicit && !panel.finished && !command && panel.name != "codemode");
+        let output = expanded && (!command || shell.verbose_tools);
         Self {
-            expanded: details
-                || (!explicit && !panel.finished && !command && panel.name != "codemode"),
+            expanded,
+            output,
             images: if command {
-                shell.verbose_tools && details
+                output
             } else {
                 !explicit || details
             },
@@ -1940,7 +1949,7 @@ fn tool_node(
     let index = shell.transcript_commit_ids[index];
     let mut header = tool_header(index, panel, shell, expanded);
     let command_output = command_rail(&panel.name);
-    let show_output = expanded && (!command_output || shell.verbose_tools);
+    let show_output = disclosure.output;
     let script_output = panel.name == "codemode";
     let mut body = Vec::new();
     if script_output {

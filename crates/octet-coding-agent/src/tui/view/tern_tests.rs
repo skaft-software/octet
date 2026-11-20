@@ -739,6 +739,75 @@ fn captured_command_images_are_not_transported_before_disclosure() {
 }
 
 #[test]
+fn extension_command_rows_cannot_bypass_native_capture_disclosure() {
+    use super::super::{summarize_tool, ToolPanel};
+    use octet_agent::extension_process::{ExtensionResourceOwner, TranscriptRenderResponse};
+
+    const OUTPUT: &str = "captured-row-marker";
+    for (name, render_shell) in [("bash", "default"), ("exec", "self")] {
+        let (mut shell, mut surface, wire) = setup(16);
+        let owner = ExtensionResourceOwner {
+            session_id: "session".into(),
+            extension_instance_id: "renderer".into(),
+            process_generation: 1,
+        };
+        shell.set_transcript_render_owners(vec![owner.clone()]);
+        let args = json!({"command":"echo fixture"});
+        let index = shell
+            .state
+            .borrow_mut()
+            .push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                octet_ai::ToolCallId("call".into()),
+                name.into(),
+                args.to_string(),
+                summarize_tool(name, &args),
+                OUTPUT.into(),
+                true,
+                false,
+                None,
+                None,
+            ))));
+        let identity = shell.state.borrow().transcript_commit_ids[index];
+        surface.flush(&shell.state).unwrap();
+        toggle(&shell, &id(identity, "tool"), false);
+        surface.flush(&shell.state).unwrap();
+        let candidate = shell.transcript_render_candidates().pop().unwrap();
+        assert!(candidate.key.expanded && !shell.verbose_tools());
+        let rows = || TranscriptRenderResponse {
+            registered: true,
+            lines: Some(vec![format!("Adapter: {OUTPUT}")]),
+            render_shell: Some(render_shell.into()),
+            markdown: None,
+        };
+        assert!(shell.accept_transcript_render(&candidate, owner.clone(), rows()));
+        surface.flush(&shell.state).unwrap();
+        assert!(
+            !wire
+                .messages("f")
+                .iter()
+                .any(|frame| frame.to_string().contains(OUTPUT)),
+            "a local click sent captured {name} output through extension rows"
+        );
+        assert!(find_node(&surface.sent.main, &id(identity, "command")).is_some());
+        assert!(find_node(&surface.sent.main, &id(identity, "capture.hint")).is_some());
+
+        shell.toggle_disclosure();
+        surface.flush(&shell.state).unwrap();
+        assert!(serde_json::to_string(&surface.sent.main)
+            .unwrap()
+            .contains(&format!("Adapter: {OUTPUT}")));
+        shell.toggle_disclosure();
+        let compact = shell.transcript_render_candidates().pop().unwrap();
+        assert!(!compact.key.expanded);
+        assert!(shell.accept_transcript_render(&compact, owner, rows()));
+        surface.flush(&shell.state).unwrap();
+        assert!(!serde_json::to_string(&surface.sent.main)
+            .unwrap()
+            .contains(OUTPUT));
+    }
+}
+
+#[test]
 fn native_image_disclosure_is_per_card_within_existing_transport_policy() {
     use super::super::{summarize_tool, ToolPanel};
     use crate::hydrate::ToolResultImage;
