@@ -356,6 +356,9 @@ native workspace trust keep their original host gate.
   below. Registration capture never invokes resource discovery.
 - A shared in-process `pi.events.on/once/off/emit` bus preserving synchronous
   order, object/function identity and retained owner contexts across factories.
+  As in Pi 1.6, a listener's throw or rejection never reaches the emitter: it is
+  reported as that extension's `events:<channel>` issue, and dropped once the
+  listener's session has ended.
 - Text/image tool results, `details` retained in `metadata.pi_details`, explicit
   error results, structured outputs and cancellation signals. Optional undefined
   object members are omitted only in final, progress and hook-result tool details;

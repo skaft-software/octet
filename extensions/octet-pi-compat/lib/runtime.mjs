@@ -199,10 +199,19 @@ class SharedBus {
           if (entry.captured?.state && !entry.captured.state.alive) continue;
           if (entry.once) entry.off();
           const s = { ...(entry.captured || emitter), factory: entry.factory };
-          const result = this.runtime.scope.run(s, () => entry.handler(data));
+          // Pi 1.6.0 core/extensions/loader.ts (pi.events.on reportingHandler) and core/event-bus.ts: a
+          // listener's sync throw or rejection never reaches the emitter. It is reported as that
+          // extension's `events:<channel>` error, and dropped once the listener's session has ended.
+          const report = error => {
+            if (entry.captured?.state && !entry.captured.state.alive) return;
+            this.runtime.reportCallbackError(`events:${topic}`, entry.factory, error, entry.captured?.state);
+          };
+          let result;
+          try { result = this.runtime.scope.run(s, () => entry.handler(data)); }
+          catch (error) { report(error); continue; }
           // Objects/functions never serialize here. Cross-factory object identity
           // and synchronous listener ordering are the actual in-process Pi bus.
-          if (result?.then) this.runtime.track(result, s);
+          if (result?.then) this.runtime.track(Promise.resolve(result).catch(report), s);
         }
       },
     }, 'pi.events');

@@ -92,3 +92,27 @@ test('model-turn projection problems group affected extension paths once without
     'an earlier projection issue must not disable future callbacks');
   await peer.close();
 });
+
+test('pi.events listener faults are reported for the listener, never thrown to the emitter (Pi 1.6)', async t => {
+  const entries = fixtures(t, [
+    `export default pi => {
+      pi.events.on('boom', () => { throw new Error('${secret}'); });
+      pi.events.on('boom', () => Promise.reject(new Error('${secret}')));
+      pi.events.on('boom', data => { data.after = true; });
+    };`,
+    `export default pi => pi.registerCommand('boom', { handler(_args, ctx) {
+      const data = { after: false };
+      pi.events.emit('boom', data);
+      ctx.ui.notify('emitted after=' + data.after);
+    } });`,
+  ]);
+  const peer = launch(t, entries); await peer.init(); await peer.start();
+  const reply = await peer.command('boom').response;
+  assert.ok(reply.result, JSON.stringify(reply));
+  await peer.wait(frame => frame.method === 'notification' && frame.params.message === 'emitted after=true');
+  await peer.wait(frame => notice(frame) && /events:boom hook failed and was skipped/.test(frame.params.message));
+  const notices = peer.seen.filter(notice);
+  assert.ok(notices.every(frame => frame.params.message.startsWith('Extension 0: ')), JSON.stringify(notices));
+  assert.doesNotMatch(JSON.stringify(notices) + peer.stderr(), new RegExp(secret));
+  await peer.close();
+});
