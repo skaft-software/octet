@@ -535,8 +535,11 @@ elbow below any inline image preview. Fullscreen image crops keep the original t
 above the viewport. Only the visible image rows are placed, leaving the composer
 and footer outside the placement. One fullscreen placement tracker handles native
 image anchors and raw Kitty graphics rows: scrolling, cropping and redraws retire
-old placements before emitting images at their current rows. Status updates away
-from an image leave its placement alone. Pi-compatible composer/footer components
+old placements before placing images at their current rows. On Kitty-compatible
+terminals, scrolling reuses uploaded image data by ID, even for up to 16 recently
+offscreen images. Eviction, a full redraw, a screen change or an unconfirmed
+write can require a fresh upload. Status updates away from an image leave its
+placement alone. Pi-compatible composer/footer components
 share this terminal painter; they do not write a separate graphics frame.
 Terminal-specific pixels still require separate qualification; protocol and
 retained-row tests are not Rex or Ghostty verification.

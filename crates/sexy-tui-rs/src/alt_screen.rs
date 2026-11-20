@@ -19,9 +19,14 @@
 //! [`Terminal`] the caller owns, and `enter` refuses a terminal that cannot
 //! address the cursor (the caller then stays on the primary screen).
 
+use crate::images::{ImageAnchor, ImageProtocol};
 use crate::terminal::Terminal;
 use crate::utils::slice_by_column;
 use std::collections::BTreeSet;
+
+/// Off-screen images whose data stays in the terminal so they can be placed
+/// again by ID. Pi's cap (pi-tui 1.5.1 dist/tui-alt-screen.js:27).
+const MAX_CACHED_OFFSCREEN_KITTY_IMAGES: usize = 16;
 
 /// Enter the alternate screen.
 pub const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
@@ -63,6 +68,10 @@ pub struct AlternateScreen {
     /// Kitty placements the last frame left on screen. Erasing a row never
     /// removes a graphics placement, so these are deleted explicitly.
     placements: Vec<Placement>,
+    /// Native Kitty images whose data this screen uploaded, least recently
+    /// shown first. Mirrors Pi's `uploadedKittyImages`
+    /// (pi-tui 1.5.1 dist/tui-alt-screen.js:247-293).
+    uploaded: Vec<u32>,
 }
 
 /// One Kitty image the terminal holds at a window row.
@@ -89,6 +98,7 @@ impl AlternateScreen {
             window: Vec::new(),
             last_size: None,
             placements: Vec::new(),
+            uploaded: Vec::new(),
         }
     }
 
@@ -136,6 +146,7 @@ impl AlternateScreen {
         self.window.clear();
         self.last_size = None;
         self.placements.clear();
+        self.uploaded.clear();
         true
     }
 
@@ -169,14 +180,39 @@ impl AlternateScreen {
         if self.options.synchronized_output {
             buffer.push_str(BEGIN_SYNCHRONIZED_OUTPUT);
         }
-        let (stale_images, dirty) = self.plan_rows(&rows, usize::from(height), full_redraw);
-        for id in &stale_images {
+        // A full clear may free image data in some terminals, so a full redraw
+        // releases every upload and re-sends visible images. Pi keeps data
+        // across its full redraw (dist/tui-alt-screen.js:1500-1505); re-sending
+        // is the safe choice when the terminal's behaviour is unknown.
+        let mut freed: Vec<u32> = Vec::new();
+        if full_redraw {
+            freed.append(&mut self.uploaded);
+        }
+        // Diff against the original rows (as Pi compares `screen`); only the
+        // painted copy carries place-by-ID anchors.
+        let painted = self.mark_held_images(rows.clone());
+        freed.extend(self.evict_offscreen_images(&rows));
+        let placed = placements_in(&rows);
+        let (stale_images, dirty) =
+            self.plan_rows(&rows, &placed, usize::from(height), full_redraw);
+        // Free data before dropping any placement: kitty also frees images left
+        // with no placement when a data-freeing delete arrives.
+        for id in &freed {
             buffer.push_str(&delete_kitty_image(*id));
+        }
+        for id in stale_images.iter().filter(|id| !freed.contains(id)) {
+            buffer.push_str(&if self.uploaded.contains(id) {
+                // Still held: move the placement, keep the data (Pi deletes
+                // placements and re-places by ID, dist/tui-alt-screen.js:1503-1512).
+                delete_kitty_placements(*id)
+            } else {
+                delete_kitty_image(*id)
+            });
         }
         if full_redraw {
             buffer.push_str("\x1b[2J");
         }
-        for (row, line) in rows.iter().enumerate() {
+        for (row, line) in painted.iter().enumerate() {
             if !dirty[row] {
                 continue;
             }
@@ -205,7 +241,7 @@ impl AlternateScreen {
             buffer.push_str(END_SYNCHRONIZED_OUTPUT);
         }
         terminal.write(&buffer);
-        self.placements = placements_in(&rows);
+        self.placements = placed;
         self.window = rows;
         self.last_size = Some((width, height));
     }
@@ -223,6 +259,7 @@ impl AlternateScreen {
     fn plan_rows(
         &self,
         rows: &[String],
+        placed: &[Placement],
         height: usize,
         full_redraw: bool,
     ) -> (BTreeSet<u32>, Vec<bool>) {
@@ -231,7 +268,6 @@ impl AlternateScreen {
             .enumerate()
             .map(|(row, line)| full_redraw || self.window.get(row) != Some(line))
             .collect();
-        let placed = placements_in(rows);
         let mut stale = BTreeSet::new();
         loop {
             let mut changed = false;
@@ -243,7 +279,7 @@ impl AlternateScreen {
                     changed = true;
                 }
             }
-            for new in &placed {
+            for new in placed {
                 if stale.contains(&new.id) && !dirty[new.row] {
                     dirty[new.row] = true;
                     changed = true;
@@ -253,6 +289,61 @@ impl AlternateScreen {
                 return (stale, dirty);
             }
         }
+    }
+
+    /// Rewrite native Kitty anchors whose data this screen already uploaded
+    /// so the adapter places them by ID, then record every visible image as
+    /// most recently shown (Pi's `replacementLine`, dist/tui-alt-screen.js:251-266).
+    fn mark_held_images(&mut self, rows: Vec<String>) -> Vec<String> {
+        let mut visible = Vec::new();
+        let rows = rows
+            .into_iter()
+            .map(|line| {
+                let mut line = line;
+                for anchor in ImageAnchor::parse_all(&line) {
+                    if anchor.protocol() != ImageProtocol::Kitty || anchor.is_held() {
+                        continue;
+                    }
+                    let id = anchor.id().get();
+                    if self.uploaded.contains(&id) {
+                        line = line.replacen(&anchor.marker(), &anchor.held().marker(), 1);
+                    }
+                    visible.push(id);
+                }
+                line
+            })
+            .collect();
+        for id in visible {
+            self.uploaded.retain(|held| *held != id);
+            self.uploaded.push(id);
+        }
+        rows
+    }
+
+    /// Free the least recently shown off-screen uploads beyond Pi's cap
+    /// (dist/tui-alt-screen.js:278-292).
+    fn evict_offscreen_images(&mut self, rows: &[String]) -> Vec<u32> {
+        let visible: BTreeSet<u32> = rows
+            .iter()
+            .flat_map(|line| ImageAnchor::parse_all(line))
+            .map(|anchor| anchor.id().get())
+            .collect();
+        let mut offscreen = self
+            .uploaded
+            .iter()
+            .filter(|id| !visible.contains(id))
+            .count();
+        let mut evicted = Vec::new();
+        self.uploaded.retain(|id| {
+            if offscreen > MAX_CACHED_OFFSCREEN_KITTY_IMAGES && !visible.contains(id) {
+                offscreen -= 1;
+                evicted.push(*id);
+                false
+            } else {
+                true
+            }
+        });
+        evicted
     }
 
     /// Leave the alternate screen.
@@ -281,6 +372,7 @@ impl AlternateScreen {
             .placements
             .iter()
             .map(|placement| placement.id)
+            .chain(self.uploaded.drain(..))
             .collect::<BTreeSet<_>>()
         {
             buffer.push_str(&delete_kitty_image(id));
@@ -323,6 +415,11 @@ fn placements_in(rows: &[String]) -> Vec<Placement> {
                 .map(move |(id, rows)| Placement { row, id, rows })
         })
         .collect()
+}
+
+/// Kitty graphics escape that deletes one image's placements, keeping its data.
+fn delete_kitty_placements(id: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\")
 }
 
 /// Kitty graphics escape that deletes one image and all of its placements.

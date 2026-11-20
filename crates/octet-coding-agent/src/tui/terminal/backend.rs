@@ -52,6 +52,10 @@ const MAX_ENCODED_IMAGES: usize = 64;
 pub(crate) struct TerminalImageStore {
     images: Arc<Mutex<HashMap<u32, Arc<TerminalImage>>>>,
     encoded: Arc<Mutex<HashMap<EncodedImageKey, Arc<[u8]>>>>,
+    /// Bumped on every registration, so a payload sent for an earlier image
+    /// under the same ID is never placed by ID in place of the new one.
+    generations: Arc<Mutex<HashMap<u32, u64>>>,
+    next_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TerminalImageStore {
@@ -61,6 +65,13 @@ impl TerminalImageStore {
             .lock()
             .expect("terminal image store mutex poisoned")
             .insert(id.get(), image);
+        let generation = self
+            .next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.generations
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .insert(id.get(), generation);
         // A re-registered ID must not serve bytes encoded from the old payload.
         self.encoded
             .lock()
@@ -86,6 +97,15 @@ impl TerminalImageStore {
             .expect("terminal image store mutex poisoned")
             .get(&id.get())
             .cloned()
+    }
+
+    /// The registration generation of an image ID, read with its payload.
+    fn generation(&self, id: ImageId) -> Option<u64> {
+        self.generations
+            .lock()
+            .expect("terminal image store mutex poisoned")
+            .get(&id.get())
+            .copied()
     }
 
     /// Number of retained encoded placements. Test-observable so the bound is
@@ -339,6 +359,19 @@ pub struct OctetTerminal<W: FrameSink = Stdout> {
     in_synchronized_frame_depth: usize,
     /// Visible setup belongs to the first frame, not raw-mode acquisition.
     initial_frame: bool,
+    /// Kitty images this terminal has been sent, by ID and registration
+    /// generation. Confirmed only after the frame carrying the payload is
+    /// written, and forgotten on any failed write or screen switch.
+    held: HeldImages,
+}
+
+/// Payloads this adapter delivered to the terminal. A painter may mark an
+/// anchor `held` (data already uploaded); it is placed by ID only when this
+/// set agrees, otherwise the full payload is sent again.
+#[derive(Default)]
+pub(crate) struct HeldImages {
+    confirmed: HashMap<u32, u64>,
+    pending: Vec<(u32, u64)>,
 }
 
 /// SGR 1006 and 1016 have identical byte shapes but different coordinate units.
@@ -494,6 +527,7 @@ impl OctetTerminal<Stdout> {
             write_log: open_tui_write_log(std::env::var_os("OCTET_TUI_WRITE_LOG")),
             in_synchronized_frame_depth: 0,
             initial_frame: true,
+            held: HeldImages::default(),
         })
     }
 }
@@ -534,6 +568,9 @@ impl<W: FrameSink> OctetTerminal<W> {
     }
 
     fn append_image_anchor(&mut self, anchor: ImageAnchor) {
+        // Generation first: a re-registration between these reads can then
+        // only cause one extra resend, never a stale payload marked as held.
+        let generation = self.image_store.generation(anchor.id());
         let Some(image) = self.image_store.get(anchor.id()) else {
             return;
         };
@@ -562,6 +599,45 @@ impl<W: FrameSink> OctetTerminal<W> {
                 column.len().checked_add(encoded_len)?.checked_add(2)
             })
         };
+        // The painter says the terminal holds this image and this adapter
+        // confirmed sending exactly this payload: move it, don't resend it.
+        if anchor.is_held()
+            && anchor.protocol() == ImageProtocol::Kitty
+            && generation.is_some()
+            && self.held.confirmed.get(&key.id) == generation.as_ref()
+        {
+            let encoder = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default());
+            let Ok(place) =
+                encoder.encode_place_existing(anchor.id(), &image, layout, anchor.crop())
+            else {
+                return;
+            };
+            let Some(placement_len) = placement_len(place.len()) else {
+                return;
+            };
+            if self.pending.try_reserve(placement_len).is_err()
+                || (self.write_log.is_some()
+                    && self.pending_log.try_reserve(LOG_MARKER.len()).is_err())
+            {
+                return;
+            }
+            if let Some(column) = &column {
+                self.pending.extend_from_slice(column.as_bytes());
+            }
+            self.pending.extend_from_slice(place.as_bytes());
+            if column.is_some() {
+                self.pending.extend_from_slice(b"\x1b8");
+            }
+            if self.write_log.is_some() {
+                self.pending_log.extend_from_slice(LOG_MARKER);
+            }
+            return;
+        }
+        let record_sent = |held: &mut HeldImages| {
+            if let (ImageProtocol::Kitty, Some(generation)) = (anchor.protocol(), generation) {
+                held.pending.push((key.id, generation));
+            }
+        };
         // A visible image is re-emitted on every frame that touches its row, and
         // a shimmer or dot tick touches many rows. Re-encoding means re-running
         // base64 over the whole payload in bounded chunks per frame, so reuse
@@ -586,6 +662,7 @@ impl<W: FrameSink> OctetTerminal<W> {
             if self.write_log.is_some() {
                 self.pending_log.extend_from_slice(LOG_MARKER);
             }
+            record_sent(&mut self.held);
             return;
         }
         let encoder = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default());
@@ -622,6 +699,7 @@ impl<W: FrameSink> OctetTerminal<W> {
             if self.write_log.is_some() {
                 self.pending_log.extend_from_slice(LOG_MARKER);
             }
+            record_sent(&mut self.held);
             self.image_store.remember_encoded(key, encoded.into());
         }
     }
@@ -654,7 +732,13 @@ impl<W: FrameSink> OctetTerminal<W> {
         if self.pending.is_empty() {
             return;
         }
-        let _ = self.out.write_frame(&self.pending);
+        if self.out.write_frame(&self.pending).is_ok() {
+            let delivered = std::mem::take(&mut self.held.pending);
+            self.held.confirmed.extend(delivered);
+        } else {
+            // The terminal may not have received a payload; resend everything.
+            self.held = HeldImages::default();
+        }
         let log_failed = self.write_log.as_mut().is_some_and(|log| {
             log.write_all(&self.pending_log)
                 .and_then(|()| log.flush())
@@ -706,6 +790,8 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
     }
 
     fn enter_alternate_screen(&mut self, sequence: &str) {
+        // Each screen keeps its own images.
+        self.held = HeldImages::default();
         let _keyboard_mode = lifecycle::lock_keyboard_mode();
         self.write(sequence);
         // Kitty maintains independent keyboard stacks for the two screens.
@@ -730,6 +816,7 @@ impl<W: FrameSink> sexy_tui_rs::Terminal for OctetTerminal<W> {
     }
 
     fn leave_alternate_screen(&mut self, sequence: &str) {
+        self.held = HeldImages::default();
         let _keyboard_mode = lifecycle::lock_keyboard_mode();
         let mut bytes = Vec::new();
         if lifecycle::take_remote_keyboard_on_alt() {

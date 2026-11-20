@@ -75,6 +75,7 @@ pub(crate) fn terminal(
             write_log: None,
             in_synchronized_frame_depth: 0,
             initial_frame: false,
+            held: HeldImages::default(),
         }),
         frames,
     )
@@ -196,6 +197,121 @@ process.stdout.write(encodeKitty('AA==', {imageId: 7, columns: 20, rows: 4, move
             }]);
         }
     }
+    screen.exit(&mut terminal, &[], true);
+    for frame in frames.lock().unwrap().drain(..) {
+        model.feed(&frame);
+    }
+    model.assert_placements(&[]);
+}
+
+// A scroll moves placements; it must not re-send image data. Re-transmitting
+// and re-decoding every visible screenshot on every frame is what made fast
+// fullscreen scrolling fall behind in libghostty (Rex), leaving stale images.
+#[test]
+fn kitty_graphics_scroll_places_held_images_without_resending_data() {
+    use sexy_tui_rs::{AltScreenOptions, AlternateScreen, ImageLayout};
+    let store = TerminalImageStore::default();
+    let png = || {
+        Arc::new(
+            TerminalImage::from_bytes(include_bytes!("fixtures/screenshot.png").to_vec()).unwrap(),
+        )
+    };
+    let first = ImageId::new(21).unwrap();
+    let second = ImageId::new(22).unwrap();
+    store.register(first, png());
+    store.register(second, png());
+    let (mut terminal, frames) = terminal(Arc::new(Mutex::new((40, 10))), store);
+    let mut screen = AlternateScreen::new(AltScreenOptions {
+        synchronized_output: true,
+        ..AltScreenOptions::default()
+    });
+    let mut model = model::Kitty::new(10, 40);
+    screen.enter(&mut terminal);
+    for frame in frames.lock().unwrap().drain(..) {
+        model.feed(&frame);
+    }
+    let layout = ImageLayout::new(20, 4).unwrap();
+    let mut document = vec![String::new(); 30];
+    document[2] = format!(
+        "  {}",
+        ImageAnchor::new(ImageProtocol::Kitty, first, layout).marker()
+    );
+    document[8] = "window state".into();
+    document[12] = format!(
+        "  {}",
+        ImageAnchor::new(ImageProtocol::Kitty, second, layout).marker()
+    );
+    document[18] = "Click  computer use click".into();
+    let mut uploaded: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    // Scroll down and back up one row per frame, like a wheel burst.
+    for start in (0..22).chain((0..22).rev()) {
+        let mut window = sexy_tui_rs::images::crop_anchors_to_window(&document, start, start + 8);
+        window.resize(8, String::new());
+        window.push("[ ↓ Jump ]".into());
+        window.push("composer / footer".into());
+        screen.paint(&mut terminal, &window, 40, 10, None, false);
+        let visible: Vec<_> = window
+            .iter()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                ImageAnchor::parse_all(line)
+                    .into_iter()
+                    .map(move |anchor| (row, anchor))
+            })
+            .collect();
+        let expected: Vec<_> = visible
+            .iter()
+            .map(|(row, anchor)| model::Placement {
+                image: anchor.id().get(),
+                placement: None,
+                row: *row as u16,
+                column: anchor.column().unwrap_or(2),
+                rows: anchor.placed_rows(),
+                columns: anchor.layout().columns(),
+            })
+            .collect();
+        let ids: std::collections::BTreeSet<u32> = visible
+            .iter()
+            .map(|(_, anchor)| anchor.id().get())
+            .collect();
+        // Pi parity: data is sent the first time an image is shown on this
+        // screen; re-entering from the off-screen cache only places it.
+        let first_shown = ids.difference(&uploaded).count();
+        let before = model.transmissions;
+        for frame in frames.lock().unwrap().drain(..) {
+            model.feed(&frame);
+        }
+        model.assert_placements(&expected);
+        assert_eq!(
+            model.transmissions - before,
+            first_shown,
+            "frame at row {start}: only images shown for the first time may send data (visible {ids:?}, uploaded {uploaded:?})"
+        );
+        uploaded.extend(ids);
+    }
+    // A full redraw may free image data, so every visible image is sent again
+    // and none is placed by ID (the model rejects a=p without data).
+    let mut window = sexy_tui_rs::images::crop_anchors_to_window(&document, 0, 8);
+    window.resize(8, String::new());
+    window.push("[ ↓ Jump ]".into());
+    window.push("composer / footer".into());
+    let visible = window
+        .iter()
+        .flat_map(|line| ImageAnchor::parse_all(line))
+        .map(|anchor| anchor.id().get())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    screen.invalidate();
+    let before = model.transmissions;
+    screen.paint(&mut terminal, &window, 40, 10, None, false);
+    for frame in frames.lock().unwrap().drain(..) {
+        model.feed(&frame);
+    }
+    assert_eq!(
+        model.transmissions - before,
+        visible,
+        "full redraw resends visible images"
+    );
     screen.exit(&mut terminal, &[], true);
     for frame in frames.lock().unwrap().drain(..) {
         model.feed(&frame);

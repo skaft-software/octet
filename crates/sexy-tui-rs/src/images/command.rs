@@ -185,6 +185,23 @@ impl ImageProtocolEncoder {
         self.encode_transmission(CommandKind::Place, id, image, layout, Some(crop))
     }
 
+    /// Place an image the Kitty terminal already holds, without its payload.
+    /// Callers must only use this for an ID they transmitted to this terminal
+    /// and have not deleted with `d=I` since. iTerm2 has no image IDs and
+    /// returns [`ImageError::UnsupportedOperation`].
+    pub fn encode_place_existing(
+        &self,
+        id: ImageId,
+        image: &TerminalImage,
+        layout: ImageLayout,
+        crop: Option<ImageCrop>,
+    ) -> Result<String, ImageError> {
+        if self.protocol != ImageProtocol::Kitty {
+            return Err(ImageError::UnsupportedOperation);
+        }
+        Ok(super::transmit::kitty_place_header(id, image, layout, crop))
+    }
+
     /// Encode a replacement. Kitty emits a targeted delete immediately before
     /// transmission; iTerm2 returns [`ImageError::UnsupportedOperation`] rather
     /// than pretending that an unaddressable OSC image was replaced.

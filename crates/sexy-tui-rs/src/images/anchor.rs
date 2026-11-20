@@ -62,6 +62,9 @@ pub struct ImageAnchor {
     /// Zero-based destination column retained when a viewport re-anchors an
     /// image without its original visible prefix.
     column: Option<u16>,
+    /// The fullscreen painter already uploaded this image's data, so the
+    /// terminal adapter may place it by ID without re-sending the payload.
+    held: bool,
 }
 
 const IMAGE_ANCHOR_PREFIX: &str = "\x1bP+octet-image;";
@@ -76,6 +79,7 @@ impl ImageAnchor {
             layout,
             crop: None,
             column: None,
+            held: false,
         }
     }
 
@@ -124,6 +128,16 @@ impl ImageAnchor {
         self.column
     }
 
+    /// Mark this placement as one whose data the terminal already holds.
+    pub const fn held(self) -> Self {
+        Self { held: true, ..self }
+    }
+
+    /// Whether the painter marked this image's data as already uploaded.
+    pub const fn is_held(self) -> bool {
+        self.held
+    }
+
     /// Rows the terminal draws for this anchor: the crop when present.
     pub const fn placed_rows(self) -> u16 {
         match self.crop {
@@ -160,8 +174,9 @@ impl ImageAnchor {
         let column = self
             .column
             .map_or_else(String::new, |column| format!(",x={column}"));
+        let held = if self.held { ",h=1" } else { "" };
         format!(
-            "{IMAGE_ANCHOR_PREFIX}v=1,p={protocol},i={},c={},r={}{crop}{column}{}",
+            "{IMAGE_ANCHOR_PREFIX}v=1,p={protocol},i={},c={},r={}{crop}{column}{held}{}",
             self.id.get(),
             self.layout.columns(),
             self.layout.rows(),
@@ -188,35 +203,31 @@ impl ImageAnchor {
         let columns = fields.next()?.strip_prefix("c=")?.parse().ok()?;
         let rows = fields.next()?.strip_prefix("r=")?.parse().ok()?;
         let mut anchor = Self::new(protocol, id, ImageLayout::new(columns, rows).ok()?);
-        let Some(field) = fields.next() else {
-            return Some(anchor);
-        };
-        if let Some(skip) = field.strip_prefix("t=") {
+        let mut field = fields.next();
+        if let Some(skip) = field.and_then(|field| field.strip_prefix("t=")) {
             let skip = skip.parse().ok()?;
             let shown = fields.next()?.strip_prefix("n=")?.parse().ok()?;
             anchor = anchor.cropped(skip, shown)?;
-            // A crop that covers the whole placement is spelled without one.
             anchor.crop?;
-            if let Some(column) = fields.next() {
-                let column: u16 = column.strip_prefix("x=")?.parse().ok()?;
-                if column == 0 {
-                    return None;
-                }
-                anchor = anchor.with_column(column);
-            }
-        } else {
-            let column: u16 = field.strip_prefix("x=")?.parse().ok()?;
+            field = fields.next();
+        }
+        if let Some(column) = field.and_then(|field| field.strip_prefix("x=")) {
+            let column: u16 = column.parse().ok()?;
             if column == 0 {
                 return None;
             }
             anchor = anchor.with_column(column);
+            field = fields.next();
+        }
+        if let Some(held) = field {
+            if held != "h=1" {
+                return None;
+            }
+            anchor = anchor.held();
         }
         fields.next().is_none().then_some(anchor)
     }
 
-    /// Find every complete, bounded anchor in a rendered line. At most the
-    /// global live-image limit is returned, so hostile text cannot create an
-    /// unbounded parse result.
     pub fn parse_all(line: &str) -> Vec<Self> {
         let mut anchors = Vec::new();
         let mut search_from = 0;

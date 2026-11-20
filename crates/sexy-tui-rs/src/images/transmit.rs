@@ -145,6 +145,18 @@ pub(super) fn kitty_transmit_header(id: ImageId, layout: ImageLayout, more: bool
     )
 }
 
+/// The source rectangle (top pixel row, pixel height) covering the rows
+/// `crop` shows. The band is proportional to the rows because the layout
+/// fitted the whole image into `layout.rows()` rows without distorting it.
+fn kitty_crop_rect(image: &TerminalImage, layout: ImageLayout, crop: ImageCrop) -> (u64, u64) {
+    let height = u64::from(image.dimensions().height());
+    let rows = u64::from(layout.rows().max(1));
+    let top = height * u64::from(crop.skip_rows()) / rows;
+    let bottom = (height * (u64::from(crop.skip_rows()) + u64::from(crop.shown_rows())) / rows)
+        .clamp(top + 1, height.max(top + 1));
+    (top, bottom - top)
+}
+
 /// Transmit and place only the rows `crop` names: a source rectangle over that
 /// band of the image, scaled into the layout's columns and the shown rows.
 /// The band is proportional to the rows because the layout fitted the whole
@@ -156,21 +168,45 @@ pub(super) fn kitty_cropped_transmit_header(
     crop: ImageCrop,
     more: bool,
 ) -> String {
-    let dimensions = image.dimensions();
-    let height = u64::from(dimensions.height());
-    let rows = u64::from(layout.rows().max(1));
-    let top = height * u64::from(crop.skip_rows()) / rows;
-    let bottom = (height * (u64::from(crop.skip_rows()) + u64::from(crop.shown_rows())) / rows)
-        .clamp(top + 1, height.max(top + 1));
+    let (top, shown_height) = kitty_crop_rect(image, layout, crop);
     format!(
-        "\x1b_Ga=T,t=d,f=100,i={},q=2,c={},r={},x=0,y={top},w={},h={},C=1,m={};",
+        "\x1b_Ga=T,t=d,f=100,i={},q=2,c={},r={},x=0,y={top},w={},h={shown_height},C=1,m={};",
         id.get(),
         layout.columns(),
         crop.shown_rows(),
-        dimensions.width(),
-        bottom - top,
+        image.dimensions().width(),
         u8::from(more),
     )
+}
+
+/// Place an image the terminal already holds, by ID, with no payload. A
+/// scroll moves placements; re-sending and re-decoding every visible PNG on
+/// every frame is what made fast scrolling fall behind in libghostty.
+/// `crop` uses the same proportional source rectangle as the transmit header.
+pub(super) fn kitty_place_header(
+    id: ImageId,
+    image: &TerminalImage,
+    layout: ImageLayout,
+    crop: Option<ImageCrop>,
+) -> String {
+    match crop {
+        None => format!(
+            "\x1b_Ga=p,i={},q=2,c={},r={},C=1\x1b\\",
+            id.get(),
+            layout.columns(),
+            layout.rows(),
+        ),
+        Some(crop) => {
+            let (top, shown_height) = kitty_crop_rect(image, layout, crop);
+            format!(
+                "\x1b_Ga=p,i={},q=2,c={},r={},x=0,y={top},w={},h={shown_height},C=1\x1b\\",
+                id.get(),
+                layout.columns(),
+                crop.shown_rows(),
+                image.dimensions().width(),
+            )
+        }
+    }
 }
 
 pub(super) fn kitty_delete_sequence(id: ImageId) -> String {

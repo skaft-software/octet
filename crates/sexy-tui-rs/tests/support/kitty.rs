@@ -24,6 +24,11 @@ pub struct Kitty {
     text: vt100::Parser,
     live: Vec<Placement>,
     transmission: Option<Placement>,
+    /// Image IDs whose data the terminal holds (libghostty keeps data until
+    /// `d=I`, a delete-all, or a screen switch).
+    data: std::collections::BTreeSet<u32>,
+    /// Completed payload transmissions (`a=T`) since construction.
+    pub transmissions: usize,
 }
 
 impl Kitty {
@@ -32,13 +37,15 @@ impl Kitty {
             text: vt100::Parser::new(rows, columns, 0),
             live: Vec::new(),
             transmission: None,
+            data: std::collections::BTreeSet::new(),
+            transmissions: 0,
         }
     }
 
     pub fn feed(&mut self, frame: &[u8]) {
         let mut remaining = frame;
         while let Some(start) = remaining.windows(3).position(|bytes| bytes == b"\x1b_G") {
-            self.text.process(&remaining[..start]);
+            self.text_segment(&remaining[..start]);
             remaining = &remaining[start + 3..];
             let end = remaining
                 .windows(2)
@@ -53,17 +60,35 @@ impl Kitty {
             let number = |key| fields.get(key).and_then(|v| v.parse::<u32>().ok());
             match fields.get("a").copied() {
                 Some("d") => match fields.get("d").copied().unwrap_or("a") {
-                    "A" | "a" => self.live.clear(),
-                    "I" | "i" => {
+                    "A" => {
+                        self.live.clear();
+                        self.data.clear();
+                    }
+                    "a" => self.live.clear(),
+                    kind @ ("I" | "i") => {
                         let image = number("i").unwrap();
                         let placement = number("p").filter(|id| *id != 0);
                         self.live.retain(|p| {
                             p.image != image || placement.is_some_and(|id| p.placement != Some(id))
                         });
+                        if kind == "I" {
+                            self.data.remove(&image);
+                            // kitty frees every image left with no placement
+                            // when a data-freeing delete arrives.
+                            let live = &self.live;
+                            self.data.retain(|id| live.iter().any(|p| p.image == *id));
+                        }
                     }
                     other => panic!("unmodelled deletion {other}"),
                 },
-                Some("T" | "p") => {
+                Some(action @ ("T" | "p")) => {
+                    if action == "p" {
+                        assert!(
+                            self.data.contains(&number("i").unwrap()),
+                            "a=p placed image {} whose data the terminal does not hold",
+                            number("i").unwrap()
+                        );
+                    }
                     // All fixed-viewport producers must suppress cursor movement.
                     assert_eq!(number("C"), Some(1));
                     let (row, column) = self.text.screen().cursor_position();
@@ -78,11 +103,17 @@ impl Kitty {
                     if number("m") == Some(1) {
                         assert!(self.transmission.replace(placement).is_none());
                     } else {
+                        if action == "T" {
+                            self.data.insert(placement.image);
+                            self.transmissions += 1;
+                        }
                         self.place(placement);
                     }
                 }
                 None if number("m") == Some(0) => {
                     let placement = self.transmission.take().expect("chunked transmission");
+                    self.data.insert(placement.image);
+                    self.transmissions += 1;
                     self.place(placement);
                 }
                 None if number("m") == Some(1) => assert!(self.transmission.is_some()),
@@ -90,11 +121,27 @@ impl Kitty {
             }
             remaining = &remaining[end + 2..];
         }
-        self.text.process(remaining);
+        self.text_segment(remaining);
+        if [b"\x1b[?1049h".as_slice(), b"\x1b[?1049l"]
+            .iter()
+            .any(|switch| frame.windows(switch.len()).any(|w| w == *switch))
+        {
+            // Each screen keeps its own images.
+            self.data.clear();
+        }
         assert!(
             self.transmission.is_none(),
             "incomplete graphics transmission"
         );
+    }
+
+    /// Text between graphics commands. A full clear frees image data in some
+    /// libghostty/kitty builds; model the conservative case, in stream order.
+    fn text_segment(&mut self, bytes: &[u8]) {
+        if bytes.windows(4).any(|w| w == b"\x1b[2J") {
+            self.data.clear();
+        }
+        self.text.process(bytes);
     }
 
     fn place(&mut self, placement: Placement) {

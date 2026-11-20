@@ -229,6 +229,12 @@ fn a_paint_before_enter_is_a_no_op() {
 }
 
 /// The internal anchor a retained renderer puts on the row a Kitty image starts.
+/// The same anchor once its data is uploaded: placed again by ID (Pi's
+/// `replacementLine`, pi-tui 1.5.1 dist/tui-alt-screen.js:251-266).
+fn held(marker: &str) -> String {
+    ImageAnchor::parse(marker).unwrap().held().marker()
+}
+
 fn anchor(id: u32, rows: u16) -> String {
     use crate::images::{ImageId, ImageLayout};
     ImageAnchor::new(
@@ -241,6 +247,11 @@ fn anchor(id: u32, rows: u16) -> String {
 
 fn delete(id: u32) -> String {
     format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
+}
+
+/// An image still on screen keeps its data: only its placements are dropped.
+fn delete_placements(id: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\")
 }
 
 /// A session that has painted `frame` once, plus the writes of later paints.
@@ -277,18 +288,21 @@ fn a_scrolled_image_is_deleted_before_it_is_placed_at_its_new_row() {
     let output = writes.borrow().clone();
 
     let deleted = output
-        .find(&delete(7))
+        .find(&delete_placements(7))
         .expect("the old placement is deleted");
-    let placed = output.find(&image).expect("the image is placed again");
+    let placed = output
+        .find(&held(&image))
+        .expect("the image is placed again by ID");
     assert!(
         deleted < placed,
         "delete must precede placement: {output:?}"
     );
     assert!(
-        output.contains(&format!("\x1b[3;1H\x1b[2K{image}")),
+        output.contains(&format!("\x1b[3;1H\x1b[2K{}", held(&image))),
         "the image is placed at its new row: {output:?}"
     );
-    assert_eq!(output.matches(&image).count(), 1, "{output:?}");
+    assert_eq!(output.matches(&held(&image)).count(), 1, "{output:?}");
+    assert!(!output.contains(&image), "data is not re-sent: {output:?}");
 }
 
 #[test]
@@ -317,12 +331,12 @@ fn changing_a_row_an_image_covers_replaces_that_image() {
     session.paint(&mut terminal, &after, 40, 6, None, false);
     let output = writes.borrow().clone();
 
-    assert!(output.contains(&delete(7)), "{output:?}");
-    assert!(output.contains(&image), "{output:?}");
+    assert!(output.contains(&delete_placements(7)), "{output:?}");
+    assert!(output.contains(&held(&image)), "{output:?}");
 }
 
 #[test]
-fn an_image_scrolled_out_of_the_window_is_deleted_and_not_replaced() {
+fn an_image_scrolled_out_of_the_window_keeps_its_data_cached_off_screen() {
     let image = anchor(7, 3);
     let before = rows(&["header", &image, "", "", "tail", "end"]);
     let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
@@ -331,7 +345,10 @@ fn an_image_scrolled_out_of_the_window_is_deleted_and_not_replaced() {
     session.paint(&mut terminal, &after, 40, 6, None, false);
     let output = writes.borrow().clone();
 
-    assert!(output.contains(&delete(7)), "{output:?}");
+    // Pi keeps off-screen uploads cached up to 16 images
+    // (pi-tui 1.5.1 dist/tui-alt-screen.js:27, 278-292).
+    assert!(output.contains(&delete_placements(7)), "{output:?}");
+    assert!(!output.contains(&delete(7)), "{output:?}");
     assert!(!output.contains(&image), "{output:?}");
 }
 
@@ -347,10 +364,10 @@ fn deleting_an_image_id_replaces_every_visible_placement_of_that_id() {
     session.paint(&mut terminal, &after, 40, 6, None, false);
     let output = writes.borrow().clone();
 
-    assert!(output.contains(&delete(7)), "{output:?}");
-    assert_eq!(output.matches(&image).count(), 1, "{output:?}");
+    assert!(output.contains(&delete_placements(7)), "{output:?}");
+    assert_eq!(output.matches(&held(&image)).count(), 1, "{output:?}");
     assert!(
-        output.contains(&format!("\x1b[1;1H\x1b[2K{image}")),
+        output.contains(&format!("\x1b[1;1H\x1b[2K{}", held(&image))),
         "the unmoved placement is placed again: {output:?}"
     );
 }

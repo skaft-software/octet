@@ -20,6 +20,7 @@ fn terminal_with_hyperlinks(supported: bool) -> OctetTerminal<Vec<u8>> {
         write_log: None,
         in_synchronized_frame_depth: 0,
         initial_frame: false,
+        held: HeldImages::default(),
     }
 }
 
@@ -65,6 +66,7 @@ fn osc8_policy_preserves_other_controls_and_every_utf8_safe_chunk_boundary() {
                 write_log: None,
                 in_synchronized_frame_depth: 0,
                 initial_frame: false,
+                held: HeldImages::default(),
             };
             backend.write(SYNC_OUTPUT_BEGIN);
             backend.write(&body[..split]);
@@ -139,6 +141,7 @@ fn filtered_hyperlink_frame_retains_write_all_and_single_flush_on_short_sink_wri
         write_log: None,
         in_synchronized_frame_depth: 0,
         initial_frame: false,
+        held: HeldImages::default(),
     };
     backend.write(SYNC_OUTPUT_BEGIN);
     backend.write("\x1b]8;;https://example.test/\x07界é\x1b]8;;\x07");
@@ -254,6 +257,7 @@ fn a_multi_row_frame_reaches_the_sink_in_one_write() {
         write_log: None,
         in_synchronized_frame_depth: 0,
         initial_frame: false,
+        held: HeldImages::default(),
     };
     // The shape of a differential repaint: cursor motion, per-row clears and
     // text, emitted through many backend calls inside one frame.
@@ -498,6 +502,7 @@ fn first_frame_batches_screen_entry_title_content_and_cursor_in_one_physical_wri
         write_log: None,
         in_synchronized_frame_depth: 0,
         initial_frame: true,
+        held: HeldImages::default(),
     };
     backend.write(SYNC_OUTPUT_BEGIN);
     backend.write("\x1b]2;octet · Ready\x07");
