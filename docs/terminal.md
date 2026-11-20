@@ -523,6 +523,14 @@ input previews use the same twelve-row limit for their selected argument, preser
 newlines. Ctrl+O expands the full retained input and collapses it again. That
 doesn't change tool execution or the separate output preview.
 
+In fullscreen with mouse capture, click a tool's header text to expand just
+that card. Click it again to return to its compact preview. Dragging still
+selects text, and links keep their own click action. Native Tern tool headers
+also toggle one card, subject to Tern's [command-output gate](tern.md#integration).
+Ctrl+O changes disclosure across the transcript and
+resets individual tool choices; Ctrl+T changes reasoning, not tool cards.
+A nested Codemode status row belongs to its parent; it is not another header.
+
 `--show-images` (or `show_images = true`) shows tool-result images inline. It's
 off by default and works on Kitty-compatible terminals. Others fall back to
 text. It never loads a URL or path, copied, plain and print output never contain

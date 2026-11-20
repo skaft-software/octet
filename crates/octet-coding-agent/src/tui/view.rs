@@ -1673,6 +1673,7 @@ pub(crate) struct PendingExtensionMessage {
 
 enum ScreenPressTarget {
     Link(String),
+    ToolCard(transcript_pointer::ToolCardHit),
     Composer(composer::mouse::ComposerPress),
     Completion(composer_pointer::CompletionHit),
     Splash,
@@ -3263,8 +3264,24 @@ impl ShellState {
         }
     }
 
-    fn show_tool_details(&self, _block: &TranscriptBlock) -> bool {
-        self.verbose_tools
+    fn show_tool_details(&self, index: usize) -> bool {
+        match self.transcript[index] {
+            TranscriptBlock::Tool(_) => self
+                .extension_transcript
+                .expanded
+                .get(&self.transcript_commit_ids[index])
+                .copied()
+                .unwrap_or(self.verbose_tools),
+            _ => self.verbose_tools,
+        }
+    }
+
+    /// A header click is a local presentation choice, not a new source result.
+    fn set_block_disclosure(&mut self, index: usize, expanded: bool) {
+        self.extension_transcript
+            .expanded
+            .insert(self.transcript_commit_ids[index], expanded);
+        self.touch_presentation_block(index);
     }
 
     fn start_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
@@ -8001,7 +8018,23 @@ impl InteractiveShell {
             let _ = self.copy_selected_plain_text();
             return;
         }
-        let pressed_link = state.pending_screen_press.take();
+        let click = state.pending_screen_press.take().filter(|press| {
+            !press.moved
+                && press.cell == (row, col)
+                && press.fence == renderer_geometry::GeometryFence::capture(&state)
+        });
+        if let Some(ScreenPress {
+            target: ScreenPressTarget::ToolCard(hit),
+            ..
+        }) = click
+        {
+            // A painted adapter header need not have a semantic copy anchor.
+            // Motion, including a displaced release, takes the drag path instead.
+            state.cancel_transcript_pointer();
+            drop(state);
+            self.toggle_painted_tool_card(row, col, hit);
+            return;
+        }
         let last_cell = state.selection_pointer_cell;
         if state.render_threaded && state.gesture_render_geometry().is_none() {
             state.cancel_transcript_pointer();
@@ -8034,16 +8067,11 @@ impl InteractiveShell {
             state.pending_selection_anchor = None;
             state.transcript_selection = None;
             state.selection_dragging = false;
-            let pressed_link = pressed_link.filter(|press| {
-                !press.moved
-                    && press.cell == (row, col)
-                    && press.fence == renderer_geometry::GeometryFence::capture(&state)
-            });
             drop(state);
             if let Some(ScreenPress {
                 target: ScreenPressTarget::Link(target),
                 ..
-            }) = pressed_link
+            }) = click
             {
                 if self.transcript_link_at_screen_cell(row, col).as_deref() == Some(target.as_str())
                 {
@@ -10169,6 +10197,8 @@ pub(crate) mod transcript_extensions;
 #[cfg(test)]
 mod transcript_link_tests;
 mod transcript_navigation;
+#[cfg(test)]
+mod transcript_tool_click_tests;
 
 #[path = "view/viewport.rs"]
 mod builtin_viewport;

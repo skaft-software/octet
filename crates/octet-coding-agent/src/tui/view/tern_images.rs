@@ -38,35 +38,32 @@ impl Write for HashWriter {
 }
 
 impl NativeImages {
-    pub(super) fn prepare(
-        &mut self,
-        shell: &ShellState,
-        supported: bool,
-        verbose: bool,
-    ) -> io::Result<()> {
+    pub(super) fn prepare(&mut self, shell: &ShellState, supported: bool) -> io::Result<()> {
         let mut retained = HashSet::new();
         for image in self.images.values_mut() {
             image.disclosed = false;
         }
-        if supported {
+        if supported && !shell.startup_pending {
             for (index, block) in shell.transcript.iter().enumerate() {
                 let TranscriptBlock::Tool(panel) = block else {
                     continue;
                 };
-                if !panel.image_rendering.enabled {
+                if !panel.image_rendering.enabled || panel.images.is_empty() {
                     continue;
                 }
+                let identity = shell.transcript_commit_ids[index];
+                let disclosed = super::tern::ToolDisclosure::for_panel(shell, index, panel).images
+                    && !super::tern::grouped_tool_hidden(panel, shell.verbose_tools)
+                    && !shell.extension_owns_tool_rows(index);
                 for (image_index, image) in panel.images.iter().enumerate() {
                     let Some(payload) = image.terminal_image() else {
                         continue;
                     };
-                    let id = format!("t{}.image{image_index}", shell.transcript_commit_ids[index]);
+                    let id = format!("t{identity}.image{image_index}");
                     retained.insert(id.clone());
-                    // Command images are captured output, not a native preview.
-                    // Do not hash, mount or transport them before global Ctrl+O.
-                    // Keep previously disclosed addresses cached across hiding so
-                    // revealing the same content does not upload it again.
-                    if matches!(panel.name.as_str(), "bash" | "exec") && !verbose {
+                    // Disclosure is checked before hashing as well as uploading.
+                    // Keep previously disclosed addresses across hiding to avoid a second upload.
+                    if !disclosed {
                         continue;
                     }
                     if let Some(image) = self.images.get_mut(&id) {
@@ -241,7 +238,7 @@ mod tests {
                 panel.finished = finished;
                 panel.is_error = is_error;
                 panel.output = text.into();
-                images.prepare(&shell, true, shell.verbose_tools).unwrap();
+                images.prepare(&shell, true).unwrap();
                 images.upload(&mut client).unwrap();
                 assert!(images.images.is_empty(), "hidden images must not be hashed");
                 assert!(images.uploaded.is_empty());
@@ -266,7 +263,7 @@ mod tests {
             let (mut client, output) = sink();
             for (step, verbose) in [false, true, false, true].into_iter().enumerate() {
                 shell.verbose_tools = verbose;
-                images.prepare(&shell, true, shell.verbose_tools).unwrap();
+                images.prepare(&shell, true).unwrap();
                 images.upload(&mut client).unwrap();
                 for id in &ids {
                     assert_eq!(images.node(id).is_some(), verbose);
@@ -292,7 +289,7 @@ mod tests {
                 }
             }
             // Transcript retirement still releases cache and upload bookkeeping.
-            images.prepare(&ShellState::default(), true, false).unwrap();
+            images.prepare(&ShellState::default(), true).unwrap();
             assert!(images.images.is_empty());
             assert!(images.uploaded.is_empty());
         }
@@ -300,24 +297,27 @@ mod tests {
 
     #[test]
     fn hiding_prepared_but_unsent_command_images_prevents_transport() {
-        let (shell, _, ids) = fixture("bash", true);
+        let (mut shell, _, ids) = fixture("bash", true);
         let mut images = NativeImages::default();
         let (mut client, output) = sink();
-        images.prepare(&shell, true, true).unwrap();
+        shell.verbose_tools = true;
+        images.prepare(&shell, true).unwrap();
         assert!(ids.iter().all(|id| images.node(id).is_some()));
         // Preparation is not permission to upload after a later hide.
-        images.prepare(&shell, true, false).unwrap();
+        shell.verbose_tools = false;
+        images.prepare(&shell, true).unwrap();
         images.upload(&mut client).unwrap();
         assert!(ids.iter().all(|id| images.node(id).is_none()));
         assert!(output.blobs().is_empty());
-        images.prepare(&shell, true, true).unwrap();
+        shell.verbose_tools = true;
+        images.prepare(&shell, true).unwrap();
         images.upload(&mut client).unwrap();
         assert_eq!(output.blobs().len(), 1);
     }
 
     #[test]
     fn noncommand_images_keep_existing_opt_in_admission_and_deduplication() {
-        for name in ["read", "other"] {
+        for name in ["read", "codemode", "other"] {
             let (mut shell, index, ids) = fixture(name, true);
             let mut images = NativeImages::default();
             let (mut client, output) = sink();
@@ -334,10 +334,10 @@ mod tests {
                 };
                 panel.finished = finished;
                 panel.is_error = is_error;
-                images.prepare(&shell, true, shell.verbose_tools).unwrap();
+                images.prepare(&shell, true).unwrap();
                 images.upload(&mut client).unwrap();
                 assert!(ids.iter().all(|id| images.node(id).is_some()));
-                assert_eq!(images.images.len(), 2, "rejected payload is not admitted");
+                assert_eq!(images.images.len(), 2);
                 assert_eq!(output.blobs().len(), 1);
             }
         }
@@ -347,11 +347,12 @@ mod tests {
     fn unsupported_disabled_and_rejected_images_remain_payload_free() {
         for name in ["bash", "exec", "read"] {
             for (enabled, supported) in [(false, false), (false, true), (true, false)] {
-                let (shell, index, ids) = fixture(name, enabled);
+                let (mut shell, index, ids) = fixture(name, enabled);
                 let mut images = NativeImages::default();
                 let (mut client, output) = sink();
                 for verbose in [false, true, false] {
-                    images.prepare(&shell, supported, verbose).unwrap();
+                    shell.verbose_tools = verbose;
+                    images.prepare(&shell, supported).unwrap();
                     images.upload(&mut client).unwrap();
                     assert!(images.images.is_empty());
                     assert!(ids.iter().all(|id| images.node(id).is_none()));
@@ -389,7 +390,8 @@ mod tests {
             let (mut shell, index, ids) = fixture("bash", true);
             let mut images = NativeImages::default();
             let (mut client, output) = sink();
-            images.prepare(&shell, true, true).unwrap();
+            shell.verbose_tools = true;
+            images.prepare(&shell, true).unwrap();
             assert!(ids.iter().all(|id| images.node(id).is_some()));
             shell.update_image_rendering(enabled, ImageCapabilities::forced(None, None));
             if rejected {
@@ -400,7 +402,7 @@ mod tests {
                     .images
                     .fill(ToolResultImage::Placeholder(ToolImagePlaceholder::Invalid));
             }
-            images.prepare(&shell, supported, true).unwrap();
+            images.prepare(&shell, supported).unwrap();
             images.upload(&mut client).unwrap();
             assert!(images.images.is_empty());
             assert!(images.uploaded.is_empty());
@@ -428,7 +430,8 @@ mod tests {
             result.running = running;
             result.exit_code = exit_code;
             for verbose in [false, true, false] {
-                images.prepare(&shell, true, verbose).unwrap();
+                shell.verbose_tools = verbose;
+                images.prepare(&shell, true).unwrap();
                 images.upload(&mut client).unwrap();
                 assert!(images.images.is_empty());
                 assert!(output.blobs().is_empty());

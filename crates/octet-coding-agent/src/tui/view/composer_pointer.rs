@@ -197,7 +197,9 @@ impl InteractiveShell {
                 }
                 return;
             }
-            ScreenPressTarget::Link(_) | ScreenPressTarget::Splash => unreachable!(),
+            ScreenPressTarget::Link(_)
+            | ScreenPressTarget::ToolCard(_)
+            | ScreenPressTarget::Splash => unreachable!(),
         };
         // Pi compatibility: packages/tui/src/components/editor.ts:655-700.
         // Only the screen's synthesized left click places a cursor. Presses,

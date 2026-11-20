@@ -294,7 +294,10 @@ wrapping `code` rails, without line numbers or a collapsible command target.
 Captured output is absent from the native tree and transport until global Ctrl+O
 requests verbose output; this gate includes command-image preparation, hashing
 and blob upload, not just image nodes. Second Ctrl+O removes the output projection
-without discarding captured source. A per-tool disclosure cannot bypass this gate.
+without discarding captured source. A tool-header click opens or closes only that
+card. It cannot bypass the command-output gate; with verbose tools off, opening
+a command with captured output shows a hint instead. Local `!` commands are not
+tool calls and continue to use only global disclosure.
 `!!` retains its existing exclusion from model context; its output can still be
 stored as non-model-visible configuration presentation metadata.
 
@@ -313,7 +316,9 @@ Codemode has an octet-owned JavaScript rail: the complete sanitized `code`
 source is a wrapping native code node, never a truncated argument envelope.
 Its literal output occupies a separate native code surface with a default
 preview of at most five source lines / 600 Unicode characters, including long
-single-line JSON. Ctrl+O reveals the complete retained output; hiding it restores
+single-line JSON. Open the Codemode header to see the complete retained output
+for just that card, or use Ctrl+O for all cards. Nested call status rows belong
+to the parent, not to separate disclosure controls. Closing the card restores
 the preview without changing source, results or execution. JSON and diff-like
 output remain literal data, not inferred Markdown or an edit diff.
 

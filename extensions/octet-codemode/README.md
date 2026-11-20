@@ -142,7 +142,8 @@ its own code surface rather than a raw generic tool-card dump.
 Nested calls appear inside the parent card in invocation order. Each row shows
 whether the call is running, succeeded, failed or was cancelled; a script that
 catches a failure can still succeed. The compact card shows the last eight
-retained calls. Ctrl+O shows the other retained rows and their error details.
+retained calls. Expand the parent header to see the other retained rows and
+their error details, or use Ctrl+O to expand all tools.
 These rows are separate from script output. Live updates require negotiated
 request progress; the final call summary does not.
 

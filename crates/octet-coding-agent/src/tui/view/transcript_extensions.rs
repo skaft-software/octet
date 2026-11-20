@@ -189,23 +189,18 @@ impl ShellState {
         }
     }
 
-    /// Only cached approved rows are consumed by either renderer. Geometry is
-    /// rechecked at paint as well as publication, including a resize before drain.
-    pub(super) fn extension_rendered(
-        &self,
-        index: usize,
-        outer_width: u16,
-    ) -> Option<RenderedTranscriptBlock> {
-        let source = self
-            .extension_transcript
-            .sources
-            .get(&self.transcript_commit_ids[index]);
-        let block = &self.transcript[index];
-        let frame = self.matching_frame(index).or_else(|| {
-            if !matches!(block, TranscriptBlock::Tool(panel)
+    fn display_frame(&self, index: usize) -> Option<&Frame> {
+        self.matching_frame(index).or_else(|| {
+            if !matches!(&self.transcript[index], TranscriptBlock::Tool(panel)
                 if panel.finished && crate::presentation::tool_display::is_shell_tool(&panel.name))
                 || self.transcript.len() - index > MAX_TRANSCRIPT_FRAMES
-                || matches!(source.map(Arc::as_ref), Some(Source::ToolResult(None)))
+                || matches!(
+                    self.extension_transcript
+                        .sources
+                        .get(&self.transcript_commit_ids[index])
+                        .map(Arc::as_ref),
+                    Some(Source::ToolResult(None))
+                )
             {
                 return None;
             }
@@ -226,7 +221,32 @@ impl ShellState {
                 && frame.response.registered
                 && self.extension_transcript.owners.contains(&frame.owner))
             .then_some(frame.as_ref())
-        });
+        })
+    }
+
+    /// Native image preparation must not hash or upload a tool's hidden body.
+    /// Inspect the paint owner's metadata without allocating a second copy of its rows.
+    pub(super) fn extension_owns_tool_rows(&self, index: usize) -> bool {
+        self.display_frame(index).is_some_and(|frame| {
+            frame.response.registered
+                && frame.response.markdown.is_none()
+                && frame.response.lines.is_some()
+        })
+    }
+
+    /// Only cached approved rows are consumed by either renderer. Geometry is
+    /// rechecked at paint as well as publication, including a resize before drain.
+    pub(super) fn extension_rendered(
+        &self,
+        index: usize,
+        outer_width: u16,
+    ) -> Option<RenderedTranscriptBlock> {
+        let source = self
+            .extension_transcript
+            .sources
+            .get(&self.transcript_commit_ids[index]);
+        let block = &self.transcript[index];
+        let frame = self.display_frame(index);
         let previous = index.checked_sub(1).and_then(|i| self.transcript.get(i));
         let plan =
             super::surface_layout::compile_surface_plan(previous, block, &self.theme, outer_width);

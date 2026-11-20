@@ -363,27 +363,63 @@ impl TernSurface {
                 self.force_focus = true;
                 self.last_key = None;
             }
-            Incoming::Event(Event::Toggle {
-                sf, id, collapsed, ..
-            }) if sf == SURFACE => {
-                let node = find_node(&self.sent.main, id)
-                    .or_else(|| find_node(&self.sent.dock, id))
-                    .or_else(|| find_node(&self.sent.layer, id));
-                if !node.is_some_and(|node| {
-                    node.p
-                        .as_ref()
-                        .and_then(|props| props.as_map().get("collapsible"))
-                        == Some(&json!(true))
-                }) {
-                    return Ok(());
-                }
-                self.collapsed.insert(id.clone(), *collapsed);
-                self.last_key = None;
-                self.main_key = None;
-            }
             _ => {}
         }
         Ok(())
+    }
+
+    fn toggle(&mut self, state: &SharedState, node_id: &str, collapsed: bool) {
+        let node = find_node(&self.sent.main, node_id)
+            .or_else(|| find_node(&self.sent.dock, node_id))
+            .or_else(|| find_node(&self.sent.layer, node_id));
+        let Some(node) = node.filter(|node| {
+            node.p
+                .as_ref()
+                .and_then(|props| props.as_map().get("collapsible"))
+                == Some(&json!(true))
+        }) else {
+            return;
+        };
+        let mut shell = state.borrow_mut();
+        // Commit IDs can be reused in a different session. A toggle from
+        // before Ctrl+O must not reinstate a discarded per-tool choice either.
+        if shell.transcript_epoch != self.owner.state.transcript_epoch
+            || (node.k == Kind::Tool && shell.verbose_tools != self.verbose)
+        {
+            return;
+        }
+        let target = node_id
+            .strip_prefix('t')
+            .and_then(|id| id.split_once('.'))
+            .and_then(|(id, suffix)| {
+                let identity = id.parse::<u64>().ok()?;
+                let index = shell
+                    .transcript_commit_ids
+                    .iter()
+                    .position(|&id| id == identity)?;
+                Some((index, suffix))
+            });
+        if node.k == Kind::Tool {
+            let Some((index, "tool")) = target else {
+                return;
+            };
+            let painted = &self.owner.state;
+            if !matches!(shell.transcript[index], TranscriptBlock::Tool(_))
+                || painted.transcript_commit_ids.get(index)
+                    != shell.transcript_commit_ids.get(index)
+                || painted.block_revisions.get(index) != shell.block_revisions.get(index)
+            {
+                return;
+            }
+            shell.set_block_disclosure(index, !collapsed);
+        } else {
+            self.collapsed.insert(node_id.into(), collapsed);
+            if let Some((index, _)) = target {
+                shell.set_block_disclosure(index, !collapsed);
+            }
+        }
+        self.last_key = None;
+        self.main_key = None;
     }
 
     pub(super) fn present(&mut self, state: &SharedState) -> io::Result<()> {
@@ -397,31 +433,11 @@ impl TernSurface {
         for message in messages {
             self.observe(&message)?;
             if let Incoming::Event(Event::Toggle {
-                sf,
-                id: node_id,
-                collapsed,
-                ..
+                sf, id, collapsed, ..
             }) = &message
             {
-                if sf == SURFACE && self.collapsed.get(node_id) == Some(collapsed) {
-                    if let Some(identity) = node_id
-                        .strip_prefix('t')
-                        .and_then(|id| id.split('.').next())
-                        .and_then(|id| id.parse::<u64>().ok())
-                    {
-                        let mut shell = state.borrow();
-                        if let Some(index) = shell
-                            .transcript_commit_ids
-                            .iter()
-                            .position(|id| *id == identity)
-                        {
-                            shell
-                                .extension_transcript
-                                .expanded
-                                .insert(identity, !collapsed);
-                            shell.touch_block(index);
-                        }
-                    }
+                if sf == SURFACE {
+                    self.toggle(state, id, *collapsed);
                 }
             }
             if let Incoming::Event(Event::Ack { sf, s }) = message {
@@ -606,11 +622,8 @@ impl TernSurface {
             .clone();
         let main_changed = self.main_key.as_ref() != Some(&main_key);
         if main_changed {
-            self.images.prepare(
-                shell,
-                self.client.supports(Kind::Image),
-                shell.verbose_tools,
-            )?;
+            self.images
+                .prepare(shell, self.client.supports(Kind::Image))?;
             self.images.upload(&mut self.client)?;
             self.brand.prepare(shell, &mut self.client)?;
         }
@@ -830,30 +843,9 @@ fn project(
                             // Keep Tern's disclosure control independent of the
                             // rows: collapsed Pi renderers still draw their own
                             // bounded summary instead of having it hidden by Tern.
-                            let mut header = tool_node(
-                                identity,
-                                panel,
-                                shell.verbose_tools,
-                                images,
-                                shell.workspace.as_deref(),
-                                collapsed,
-                                shell.theme.shows_durations(),
-                            );
-                            header.c = Some(Vec::new());
-                            header.p = Some(
-                                header
-                                    .p
-                                    .take()
-                                    .unwrap_or_default()
-                                    .set("collapsible", true)
-                                    .set("collapsed", !expanded),
-                            );
-                            out.main.push(Node::with_children(
-                                id(identity, "extension.group"),
-                                Kind::Col,
-                                Props::new(),
-                                vec![header, rows],
-                            ));
+                            let header = tool_header(identity, panel, shell, expanded);
+                            out.main
+                                .push(tool_group(identity, shell, header, vec![rows]));
                         } else {
                             out.main.push(rows);
                         }
@@ -862,8 +854,7 @@ fn project(
                 }
             }
             if let Some(node) = block_node(
-                identity,
-                block,
+                index,
                 shell,
                 images,
                 collapsed,
@@ -1077,14 +1068,14 @@ fn tighten_markdown(text: &str) -> String {
 }
 
 fn block_node(
-    identity: u64,
-    block: &TranscriptBlock,
+    index: usize,
     shell: &ShellState,
     images: &super::tern_images::NativeImages,
     collapsed: &HashMap<String, bool>,
     transformed_markdown: Option<&str>,
 ) -> Option<Node> {
-    let node = match block {
+    let identity = shell.transcript_commit_ids[index];
+    let node = match &shell.transcript[index] {
         TranscriptBlock::User { text, .. } => {
             // Tone::User retains the model-adaptive prompt wash. Octet's own
             // role avoids omp.user's private right-aligned bubble layout: the
@@ -1184,23 +1175,8 @@ fn block_node(
                 )],
             )],
         )),
-        TranscriptBlock::Tool(panel)
-            if panel.grouped_child
-                && !shell.verbose_tools
-                && !panel.is_error
-                && !matches!(panel.name.as_str(), "bash" | "exec") =>
-        {
-            None
-        }
-        TranscriptBlock::Tool(panel) => Some(tool_node(
-            identity,
-            panel,
-            shell.verbose_tools,
-            images,
-            shell.workspace.as_deref(),
-            collapsed,
-            shell.theme.shows_durations(),
-        )),
+        TranscriptBlock::Tool(panel) if grouped_tool_hidden(panel, shell.verbose_tools) => None,
+        TranscriptBlock::Tool(panel) => Some(tool_node(index, panel, shell, images)),
         TranscriptBlock::Shell(output) => Some(shell_node(identity, output, shell.verbose_tools)),
         TranscriptBlock::Notice(text) => Some(text_node(identity, text, "muted")),
         TranscriptBlock::NoticeStatus { text, tone, .. } => Some(text_node(
@@ -1271,9 +1247,7 @@ fn block_node(
         )),
     };
     node.map(|mut node| {
-        if shell.theme.is_pi_theme()
-            && matches!(block, TranscriptBlock::Tool(_) | TranscriptBlock::Shell(_))
-        {
+        if shell.theme.is_pi_theme() && node.k == Kind::Tool {
             node.p = Some(node.p.unwrap_or_default().set("frame", "card"));
         }
         node
@@ -1838,23 +1812,30 @@ fn tool_target(panel: &super::ToolPanel) -> (String, &'static str) {
     (String::new(), "text")
 }
 
-fn tool_node(
-    index: u64,
-    panel: &super::ToolPanel,
-    verbose: bool,
-    images: &super::tern_images::NativeImages,
-    workspace: Option<&std::path::Path>,
-    collapsed_overrides: &HashMap<String, bool>,
-    show_durations: bool,
-) -> Node {
-    let (target, target_kind) = tool_target(panel);
+// These native command rails (unlike ordinary tool previews) keep the full
+// command visible and gate captured bytes, including images, on verbose mode.
+fn command_rail(name: &str) -> bool {
+    matches!(name, "bash" | "exec")
+}
+
+pub(super) fn grouped_tool_hidden(panel: &super::ToolPanel, verbose: bool) -> bool {
+    panel.grouped_child && !verbose && !panel.is_error && !command_rail(&panel.name)
+}
+
+fn tool_header(index: u64, panel: &super::ToolPanel, shell: &ShellState, expanded: bool) -> Node {
+    let (target, target_kind) = if command_rail(&panel.name) || panel.name == "codemode" {
+        // These tools have a separate, wrapping source rail.
+        (String::new(), "text")
+    } else {
+        tool_target(panel)
+    };
     let href = (target_kind == "path")
         .then(|| {
             let path = std::path::Path::new(&target);
             let absolute = if path.is_absolute() {
                 path.to_path_buf()
             } else {
-                workspace?.join(path)
+                shell.workspace.as_ref()?.join(path)
             };
             url::Url::from_file_path(absolute)
                 .ok()
@@ -1869,34 +1850,103 @@ fn tool_node(
         "done"
     };
     let mut meta = Vec::new();
-    if let Some(duration) = panel.duration.filter(|_| panel.finished && show_durations) {
+    if let Some(duration) = panel
+        .duration
+        .filter(|_| panel.finished && shell.theme.shows_durations())
+    {
         meta.push(Text::Plain(format_duration(duration)));
     }
     if panel.finished
         && panel.is_error
-        && (verbose || !matches!(panel.name.as_str(), "bash" | "exec"))
+        && (!command_rail(&panel.name) || (expanded && shell.verbose_tools))
     {
         if let Some(reason) = &panel.failure_reason {
             meta.push(Text::Plain(sanitize_for_terminal(reason)));
         }
     }
 
-    // Gate command output before constructing the native tree. Keep its card
-    // expanded independently: Tern ellipsizes command targets on collapsed cards.
-    // Ctrl+O owns output disclosure; captured output stays in the semantic model.
-    let command_output = matches!(panel.name.as_str(), "bash" | "exec");
+    let mut node = octet_tern::scene::tool_card(
+        id(index, "tool"),
+        &panel.name,
+        &tool_title(&panel.display.label),
+        &target,
+        target_kind,
+        status,
+        meta,
+        Vec::new(),
+    );
+    node.p = Some(
+        node.p
+            .unwrap_or_default()
+            .role(format!("omp.tool.{}", panel.name))
+            .set("href", &href)
+            .set("frame", "inline")
+            .set("collapsed", !expanded),
+    );
+    node
+}
+
+fn tool_group(index: u64, shell: &ShellState, header: Node, mut visible: Vec<Node>) -> Node {
+    // A collapsed TSP tool hides *all* its children. Keep its real toggleable
+    // header and always-visible source/preview rails as siblings, in order.
+    visible.insert(0, header);
+    Node::with_children(
+        id(index, "tool.group"),
+        if shell.theme.is_pi_theme() {
+            Kind::Card
+        } else {
+            Kind::Col
+        },
+        Props::new(),
+        visible,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ToolDisclosure {
+    expanded: bool,
+    pub(super) images: bool,
+}
+impl ToolDisclosure {
+    pub(super) fn for_panel(shell: &ShellState, index: usize, panel: &super::ToolPanel) -> Self {
+        let explicit = shell
+            .extension_transcript
+            .expanded
+            .contains_key(&shell.transcript_commit_ids[index]);
+        let details = shell.show_tool_details(index);
+        let command = command_rail(&panel.name);
+        // Without an explicit card choice, retain live noncommand output and
+        // opt-in image previews. A header close suppresses that card's details.
+        Self {
+            expanded: details
+                || (!explicit && !panel.finished && !command && panel.name != "codemode"),
+            images: if command {
+                shell.verbose_tools && details
+            } else {
+                !explicit || details
+            },
+        }
+    }
+}
+
+fn tool_node(
+    index: usize,
+    panel: &super::ToolPanel,
+    shell: &ShellState,
+    images: &super::tern_images::NativeImages,
+) -> Node {
+    let disclosure = ToolDisclosure::for_panel(shell, index, panel);
+    let expanded = disclosure.expanded;
+    let index = shell.transcript_commit_ids[index];
+    let mut header = tool_header(index, panel, shell, expanded);
+    let command_output = command_rail(&panel.name);
+    let show_output = expanded && (!command_output || shell.verbose_tools);
     let script_output = panel.name == "codemode";
-    let collapsed = if command_output {
-        !verbose
-    } else {
-        collapsed_overrides
-            .get(&id(index, "tool"))
-            .copied()
-            .unwrap_or(!verbose && panel.finished)
-    };
     let mut body = Vec::new();
     if script_output {
-        let calls = super::codemode_render::call_spans(panel, verbose);
+        let source = super::codemode_render::source(panel).unwrap_or_default();
+        body.push(command_leaf(index, &source, "javascript"));
+        let calls = super::codemode_render::call_spans(panel, expanded);
         if !calls.is_empty() {
             body.push(Node::new(
                 id(index, "calls"),
@@ -1904,14 +1954,23 @@ fn tool_node(
                 Props::new().text("spans", calls).set("wrap", "word"),
             ));
         }
+    } else if command_output {
+        body.push(command_leaf(index, &tool_target(panel).0, "bash"));
+        if expanded && !show_output && (!panel.output.is_empty() || !panel.images.is_empty()) {
+            body.push(Node::new(
+                id(index, "capture.hint"),
+                Kind::Text,
+                Props::new().text(
+                    "spans",
+                    vec![Span::styled(
+                        "Enable verbose tools to show captured command output.",
+                        "muted",
+                    )],
+                ),
+            ));
+        }
     }
-    let compact_read = panel.name == "read"
-        && panel.finished
-        && !panel.is_error
-        && !verbose
-        && target_kind == "path";
-    // Bash stays a single text leaf even when its output resembles a diff.
-    // Changing kinds mid-stream would replace the displayed body.
+    // Shell output remains a single text leaf, even for diff-shaped output.
     let diff = (!command_output && !script_output)
         .then(|| super::tool_render::tool_diff(panel))
         .flatten();
@@ -1920,21 +1979,16 @@ fn tool_node(
         // can disclose without waiting for a re-projected child.
         body.push(octet_tern::scene::diff_block(
             id(index, "diff"),
-            &target,
+            &tool_target(panel).0,
             &diff,
         ));
-    } else if !compact_read
-        && !panel.output.trim().is_empty()
-        && (script_output || !collapsed || (panel.is_error && !command_output))
+    } else if !panel.output.trim().is_empty()
+        && (script_output || show_output || (panel.is_error && !command_output))
     {
-        // Collapsed successful tools project summary-only (header/target):
-        // mounting the full output in the same frame that flips `collapsed`
-        // paints one expanded frame before the terminal hides it. Bash failures
-        // retain their reason in metadata; full output requires disclosure.
         if script_output {
             // The failure status is the card's own line; an output that is only
             // that status leaves nothing to mount.
-            let text = super::codemode_render::output_text(panel, verbose);
+            let text = super::codemode_render::output_text(panel, expanded);
             if !text.trim().is_empty() {
                 body.push(Node::new(
                     id(index, "out"),
@@ -1958,14 +2012,15 @@ fn tool_node(
         }
     }
 
+    let mut image_rows = Vec::new();
     for (image_index, image) in panel
         .images
         .iter()
         .enumerate()
-        .filter(|_| !command_output || !collapsed)
+        .filter(|_| disclosure.images)
     {
         let image_id = format!("t{index}.image{image_index}");
-        body.push(images.node(&image_id).unwrap_or_else(|| {
+        image_rows.push(images.node(&image_id).unwrap_or_else(|| {
             Node::new(
                 image_id,
                 Kind::Text,
@@ -1979,72 +2034,47 @@ fn tool_node(
             )
         }));
     }
-    if let Some(decoration) = panel
+    let progress = panel
         .progress_decoration
         .as_ref()
-        .filter(|_| !panel.finished && (!command_output || verbose))
-    {
-        body.push(Node::new(
-            id(index, "progress"),
-            Kind::Text,
-            Props::new()
-                .text(
-                    "spans",
-                    vec![Span::styled(
-                        sanitize_for_terminal(&match decoration.detail() {
-                            Some(detail) => format!("{} · {detail}", decoration.label()),
-                            None => decoration.label().to_owned(),
-                        }),
-                        "muted",
-                    )],
-                )
-                .set("wrap", "none")
-                .set("truncate", "end"),
-        ));
+        .filter(|_| !panel.finished && (!command_output || show_output))
+        .map(|decoration| {
+            Node::new(
+                id(index, "progress"),
+                Kind::Text,
+                Props::new()
+                    .text(
+                        "spans",
+                        vec![Span::styled(
+                            sanitize_for_terminal(&match decoration.detail() {
+                                Some(detail) => format!("{} · {detail}", decoration.label()),
+                                None => decoration.label().to_owned(),
+                            }),
+                            "muted",
+                        )],
+                    )
+                    .set("wrap", "none")
+                    .set("truncate", "end"),
+            )
+        });
+    if command_output || script_output {
+        body.extend(image_rows);
+        body.extend(progress);
+        tool_group(index, shell, header, body)
+    } else {
+        // A successful path read has an inline image preview even while
+        // compact. Other native tools keep their images in the disclosed body.
+        let preview = panel.name == "read"
+            && panel.finished
+            && !panel.is_error
+            && header.p.as_ref().unwrap().as_map()["targetKind"] == "path";
+        if !preview {
+            body.append(&mut image_rows);
+        }
+        body.extend(progress);
+        header.c = Some(body);
+        tool_group(index, shell, header, image_rows)
     }
-    if script_output {
-        let source = super::codemode_render::source(panel).unwrap_or_default();
-        return command_node(
-            index,
-            "tool",
-            ("codemode", "Codemode"),
-            (&source, "javascript"),
-            status,
-            meta,
-            body,
-        );
-    }
-    if command_output {
-        return command_node(
-            index,
-            "tool",
-            (&panel.name, &tool_title(&panel.display.label)),
-            (&target, "bash"),
-            status,
-            meta,
-            body,
-        );
-    }
-    let mut node = octet_tern::scene::tool_card(
-        id(index, "tool"),
-        &panel.name,
-        &tool_title(&panel.display.label),
-        &target,
-        target_kind,
-        status,
-        meta,
-        body,
-    );
-    node.p = Some(
-        node.p
-            .unwrap_or_default()
-            .role(format!("omp.tool.{}", panel.name))
-            .set("href", &href)
-            .set("frame", "inline")
-            .set("collapsible", !compact_read && !command_output)
-            .set("collapsed", !compact_read && !command_output && collapsed),
-    );
-    node
 }
 
 fn shell_node(index: u64, shell: &super::ShellOutput, verbose: bool) -> Node {
@@ -2070,59 +2100,43 @@ fn shell_node(index: u64, shell: &super::ShellOutput, verbose: bool) -> Node {
             &sanitize_for_terminal(&shell.output),
         )]
     };
-    command_node(
+    let mut children = vec![command_leaf(
         index,
-        "shell",
-        ("bash", "Bash"),
-        (&sanitize_for_terminal(&shell.command), "bash"),
-        status,
-        meta,
-        body,
-    )
-}
-
-/// A source rail cannot collapse or ellipsize its input. The caller owns
-/// output admission: shell disclosure or a bounded Codemode output preview.
-fn command_node(
-    index: u64,
-    suffix: &str,
-    tool: (&str, &str),
-    source: (&str, &str),
-    status: &str,
-    meta: Vec<Text>,
-    mut body: Vec<Node>,
-) -> Node {
-    body.insert(
-        0,
-        Node::new(
-            id(index, "command"),
-            Kind::Code,
-            Props::new()
-                .set("text", source.0)
-                .set("lang", source.1)
-                .set("wrap", true)
-                .set("numbers", false),
-        ),
-    );
+        &sanitize_for_terminal(&shell.command),
+        "bash",
+    )];
+    children.extend(body);
     let mut node = octet_tern::scene::tool_card(
-        id(index, suffix),
-        tool.0,
-        tool.1,
+        id(index, "shell"),
+        "bash",
+        "Bash",
         "",
         "text",
         status,
         meta,
-        body,
+        children,
     );
     node.p = Some(
         node.p
             .unwrap_or_default()
-            .role(format!("omp.tool.{}", tool.0))
+            .role("omp.tool.bash")
             .set("frame", "inline")
             .set("collapsible", false)
             .set("collapsed", false),
     );
     node
+}
+
+fn command_leaf(index: u64, source: &str, language: &str) -> Node {
+    Node::new(
+        id(index, "command"),
+        Kind::Code,
+        Props::new()
+            .set("text", source)
+            .set("lang", language)
+            .set("wrap", true)
+            .set("numbers", false),
+    )
 }
 
 fn tool_title(name: &str) -> String {

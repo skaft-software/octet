@@ -246,6 +246,7 @@ fn presented_tool(
     let TranscriptBlock::Tool(panel) = &state.transcript[index] else {
         unreachable!()
     };
+    let expanded = state.show_tool_details(index);
     if panel.grouped_child
         && !state.verbose_tools
         && state
@@ -269,7 +270,7 @@ fn presented_tool(
         &state.theme,
         &state.theme.rich_renderer(),
         content_width.unwrap_or(plan.geometry.content_width),
-        state.verbose_tools,
+        expanded,
         plan.content_role,
     ))
 }
@@ -657,7 +658,7 @@ impl CopyMemoIdentity {
             width: state.transcript_cache.borrow().width,
             geometry,
             theme_epoch: state.theme_epoch,
-            verbose: state.verbose_tools,
+            verbose: state.show_tool_details(index),
         }
     }
 

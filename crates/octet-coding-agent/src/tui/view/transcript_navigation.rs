@@ -249,6 +249,11 @@ struct JumpToBottomButton {
 #[derive(Clone, Copy)]
 pub(super) struct NavigationFrame {
     size: (u16, u16),
+    /// Synchronous renderer's painted history window. The production renderer
+    /// instead publishes visible blocks with the completed terminal write.
+    history: (usize, usize),
+    cache_generation: u64,
+    fence: renderer_geometry::GeometryFence,
     scrollbar: Option<ScrollbarGeometry>,
     search_buttons_row: Option<usize>,
     jump_to_bottom: Option<JumpToBottomButton>,
@@ -356,6 +361,15 @@ impl TranscriptNavigation {
 }
 
 impl ShellState {
+    pub(super) fn painted_history_row(&self, row: u16) -> Option<usize> {
+        let frame = self.transcript_navigation.borrow().frame?;
+        let absolute = frame.history.0 + usize::from(row);
+        (absolute < frame.history.1
+            && frame.cache_generation == self.transcript_cache.borrow().generation
+            && frame.fence == renderer_geometry::GeometryFence::capture(self))
+        .then_some(absolute)
+    }
+
     pub(super) fn reset_transcript_navigation_pointer(&self) {
         self.transcript_navigation.borrow_mut().reset_pointer();
     }
@@ -616,6 +630,8 @@ impl ShellState {
         let scroll = self.scroll_from_bottom.get();
         let rows = transcript_viewport_capacity(viewport.available, scroll > 0);
         let maximum = super::viewport::max_scroll_for_available(length, viewport.available);
+        let history = viewport.history_window(scroll);
+        let fence = renderer_geometry::GeometryFence::capture(self);
         let mut nav = self.transcript_navigation.borrow_mut();
         let scrollbar = if nav.mode != TranscriptScrollbar::Hidden && rows > 0 && width > 1 {
             // A scrollable track with at least two rows needs room to move.
@@ -726,6 +742,9 @@ impl ShellState {
         };
         nav.frame = Some(NavigationFrame {
             size: self.size,
+            history: (history.start, history.end),
+            cache_generation: self.transcript_cache.borrow().generation,
+            fence,
             scrollbar,
             jump_to_bottom,
             search_buttons_row: (nav.search.is_some() && chrome.panel.len() > 1).then_some(
@@ -888,6 +907,15 @@ impl InteractiveShell {
     /// translate_input also invokes it as the common dispatch fallback.
     pub fn intercept_transcript_input(&mut self, event: &Event) -> bool {
         if let Event::Mouse(mouse) = event {
+            if !mouse.modifiers.is_empty() {
+                let mut state = self.state.borrow_mut();
+                if matches!(
+                    state.pending_screen_press.as_ref().map(|p| &p.target),
+                    Some(ScreenPressTarget::ToolCard(_))
+                ) {
+                    state.pending_screen_press = None;
+                }
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && mouse.modifiers.is_empty()
                 && super::transcript_selection::click_splash(
@@ -1033,6 +1061,13 @@ impl InteractiveShell {
         if let Event::Mouse(mouse) = event {
             let consumed = self.transcript_navigation_mouse(*mouse);
             if consumed {
+                self.render();
+                return true;
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && mouse.modifiers.is_empty()
+                && self.begin_tool_card_press(mouse.row, mouse.column)
+            {
                 self.render();
                 return true;
             }

@@ -48,9 +48,9 @@ fn codemode_native_source_and_output_preview_expand_without_replacing_nodes() {
         let root_props = root.p.as_ref().unwrap().as_map();
         assert_eq!(root.k, Kind::Tool);
         assert_eq!(root_props["role"], "omp.tool.codemode");
-        assert_eq!(root_props["collapsed"], false);
-        assert_eq!(root_props["collapsible"], false);
-        shell.state.borrow_mut().verbose_tools = true;
+        assert_eq!(root_props["collapsed"], true);
+        assert_eq!(root_props["collapsible"], true);
+        toggle(&shell, &id(identity, "tool"), false);
         surface.flush(&shell.state).unwrap();
         let full = find_node(&surface.sent.main, &output_id).unwrap();
         assert_eq!(full.p.as_ref().unwrap().as_map()["text"], result);
@@ -59,7 +59,7 @@ fn codemode_native_source_and_output_preview_expand_without_replacing_nodes() {
             .unwrap()
             .iter()
             .any(|op| matches!(op[0].as_str(), Some("del" | "add")) && op[1] == output_id));
-        shell.state.borrow_mut().verbose_tools = false;
+        toggle(&shell, &id(identity, "tool"), true);
         surface.flush(&shell.state).unwrap();
         let hidden = find_node(&surface.sent.main, &output_id).unwrap();
         assert!(hidden.p.as_ref().unwrap().as_map()["text"]
@@ -73,6 +73,84 @@ fn codemode_native_source_and_output_preview_expand_without_replacing_nodes() {
         assert_eq!(panel.output, result);
         assert_eq!(panel.args, args.to_string());
     }
+}
+
+#[test]
+fn nested_call_statuses_are_visible_before_output_and_follow_only_their_header() {
+    use octet_agent::{AgentEvent, ToolOutput, ToolProgress};
+    let (mut shell, mut surface, _) = setup(16);
+    let tool_id = ToolCallId("nested".into());
+    shell.on_agent_event(&AgentEvent::ToolStarted {
+        id: tool_id.clone(),
+        name: "codemode".into(),
+        args: json!({"code":"return 1"}),
+    });
+    let metadata = json!({"calls":[
+        {"name":"read", "status":"ok"},
+        {"name":"search", "status":"error", "error":"caught nested failure"}
+    ]});
+    shell.on_agent_event(&AgentEvent::ToolProgress {
+        id: tool_id.clone(),
+        progress: ToolProgress::PartialResult(Arc::new(
+            ToolOutput::new("")
+                .try_with_metadata(metadata.clone())
+                .unwrap(),
+        )),
+    });
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    surface.flush(&shell.state).unwrap();
+    let group = find_node(&surface.sent.main, &id(identity, "tool.group")).unwrap();
+    let children = group.c.as_deref().unwrap();
+    let ids = children
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            id(identity, "tool"),
+            id(identity, "command"),
+            id(identity, "calls")
+        ]
+    );
+    let calls = &children[2];
+    assert_eq!(calls.k, Kind::Text);
+    let spans = calls.p.as_ref().unwrap().as_map()["spans"]
+        .as_array()
+        .unwrap();
+    assert!(spans.iter().any(|span| span["s"] == "success"));
+    assert!(spans.iter().any(|span| span["s"] == "error"));
+    assert!(spans.iter().any(|span| span["t"] == "\n"));
+    assert!(!serde_json::to_string(calls)
+        .unwrap()
+        .contains("caught nested failure"));
+    toggle(&shell, &id(identity, "tool"), false);
+    surface.flush(&shell.state).unwrap();
+    assert!(
+        serde_json::to_string(find_node(&surface.sent.main, &id(identity, "calls")).unwrap())
+            .unwrap()
+            .contains("caught nested failure")
+    );
+    shell.on_agent_event(&AgentEvent::ToolFinished {
+        id: tool_id,
+        result: Ok(ToolOutput::new("literal result")
+            .try_with_metadata(metadata)
+            .unwrap()),
+        duration: Duration::from_millis(3),
+    });
+    surface.flush(&shell.state).unwrap();
+    let group = find_node(&surface.sent.main, &id(identity, "tool.group")).unwrap();
+    let children = group.c.as_ref().unwrap();
+    assert_eq!(children[2].id, id(identity, "calls"));
+    assert_eq!(children[3].id, id(identity, "out"));
+    assert_eq!(children[0].p.as_ref().unwrap().as_map()["collapsed"], false);
+    toggle(&shell, &id(identity, "tool"), true);
+    surface.flush(&shell.state).unwrap();
+    assert!(
+        !serde_json::to_string(find_node(&surface.sent.main, &id(identity, "calls")).unwrap())
+            .unwrap()
+            .contains("caught nested failure")
+    );
 }
 
 #[test]
@@ -154,7 +232,7 @@ fn native_tools_share_one_header_and_read_has_only_one_path() {
         assert_eq!(props["frame"], "inline");
         assert_eq!(props["status"], "done");
         assert_eq!(props["meta"], json!(["42ms"]));
-        assert_eq!(props["collapsible"], false);
+        assert_eq!(props["collapsible"], true);
         if name == "read" {
             assert_eq!(props["target"], "src/main.rs");
             assert!(props["href"].as_str().unwrap().ends_with("/src/main.rs"));

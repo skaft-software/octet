@@ -488,6 +488,7 @@ pub(super) fn render_block_planned(
         reasoning_renderer,
         outer_width,
         verbose_tools,
+        verbose_tools,
         spinner_frame,
         status_shimmer_frame,
         0,
@@ -506,6 +507,7 @@ pub(super) fn render_block_planned_with_rainbow(
     reasoning_renderer: &RichRenderer,
     outer_width: u16,
     verbose_tools: bool,
+    card_expanded: bool,
     spinner_frame: usize,
     status_shimmer_frame: usize,
     rainbow_strength: u16,
@@ -656,7 +658,7 @@ pub(super) fn render_block_planned_with_rainbow(
                 theme,
                 rich_renderer,
                 width,
-                verbose_tools,
+                card_expanded,
                 plan.content_role,
             );
             let lines = std::mem::take(&mut projected.lines);

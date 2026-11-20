@@ -77,6 +77,21 @@ fn ack(shell: &InteractiveShell, sequence: u64) {
             s: sequence,
         }));
 }
+fn toggle(shell: &InteractiveShell, id: &str, collapsed: bool) {
+    shell
+        .state
+        .native()
+        .lock()
+        .unwrap()
+        .messages
+        .push_back(Incoming::Event(Event::Toggle {
+            sf: SURFACE.into(),
+            id: id.into(),
+            collapsed,
+            key: None,
+        }));
+}
+
 fn walk(nodes: &[Node], visit: &mut impl FnMut(&Node)) {
     for node in nodes {
         visit(node);
@@ -362,29 +377,21 @@ fn settled_reasoning_duration_is_optional_in_native_transcript() {
     let mut reasoning = AssistantBlock::streaming_reasoning("retained trace");
     reasoning.reasoning_elapsed = Some(Duration::from_secs(10));
     reasoning.finish_reasoning();
-    let block = TranscriptBlock::Reasoning(Box::new(reasoning));
+    let index = state.push_block(TranscriptBlock::Reasoning(Box::new(reasoning)));
     let images = super::super::tern_images::NativeImages::default();
     let collapsed = HashMap::new();
-    assert!(block_node(1, &block, &state, &images, &collapsed, None).is_none());
+    assert!(block_node(index, &state, &images, &collapsed, None).is_none());
     state.theme.set_duration_preference(Some(true));
-    let node = block_node(1, &block, &state, &images, &collapsed, None).unwrap();
+    let node = block_node(index, &state, &images, &collapsed, None).unwrap();
     assert!(serde_json::to_string(&node)
         .unwrap()
         .contains("Thought for 10s"));
     state.theme.set_duration_preference(Some(false));
-    let TranscriptBlock::Reasoning(mut reasoning) = block else {
+    let TranscriptBlock::Reasoning(reasoning) = &mut state.transcript[index] else {
         unreachable!()
     };
     reasoning.reasoning_expanded = true;
-    let node = block_node(
-        1,
-        &TranscriptBlock::Reasoning(reasoning),
-        &state,
-        &images,
-        &collapsed,
-        None,
-    )
-    .unwrap();
+    let node = block_node(index, &state, &images, &collapsed, None).unwrap();
     let text = serde_json::to_string(&node).unwrap();
     assert!(text.contains("retained trace"));
     assert!(!text.contains("Thought for"));
@@ -732,6 +739,72 @@ fn captured_command_images_are_not_transported_before_disclosure() {
 }
 
 #[test]
+fn native_image_disclosure_is_per_card_within_existing_transport_policy() {
+    use super::super::{summarize_tool, ToolPanel};
+    use crate::hydrate::ToolResultImage;
+    use octet_ai::ToolCallId;
+    use sexy_tui_rs::images::{ImageCapabilities, TerminalImage};
+    // Distinct payloads: an accidental sibling upload cannot hide behind deduplication.
+    let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x4c\x01\x00\x3b";
+    for name in ["bash", "powershell", "codemode", "read"] {
+        let (mut shell, mut surface, output) = setup(16);
+        let mut ids = Vec::new();
+        let capture = name == "bash";
+        {
+            let mut state = shell.state.borrow_mut();
+            state.update_image_rendering(true, ImageCapabilities::forced(None, None));
+            let args = json!({"path":"pixel", "command":"capture", "code":"return image"});
+            for (index, bytes) in [PNG, gif.as_slice()].into_iter().enumerate() {
+                let mut panel = ToolPanel::new(
+                    ToolCallId(format!("call-{index}")),
+                    name.into(),
+                    args.to_string(),
+                    summarize_tool(name, &args),
+                    "captured".into(),
+                    true,
+                    false,
+                    None,
+                    None,
+                );
+                panel.images.push(ToolResultImage::Ready {
+                    image: Arc::new(TerminalImage::from_slice(bytes).unwrap()),
+                    id: None,
+                });
+                let index = state.push_block(TranscriptBlock::Tool(Box::new(panel)));
+                ids.push(state.transcript_commit_ids[index]);
+            }
+        }
+        surface.flush(&shell.state).unwrap();
+        let shown = |surface: &TernSurface| {
+            ids.iter()
+                .map(|&i| find_node(&surface.sent.main, &id(i, "image0")).is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&surface), [!capture; 2]);
+        assert_eq!(output.blobs().len(), if capture { 0 } else { 2 });
+        toggle(&shell, &id(ids[0], "tool"), false);
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(shown(&surface), [!capture; 2]);
+        assert_eq!(output.blobs().len(), if capture { 0 } else { 2 });
+        toggle(&shell, &id(ids[0], "tool"), true);
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(shown(&surface), [false, !capture]);
+        assert!(!shell.verbose_tools());
+        toggle(&shell, &id(ids[1], "tool"), false);
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(shown(&surface), [false, !capture]);
+        assert_eq!(output.blobs().len(), if capture { 0 } else { 2 });
+        shell.toggle_disclosure();
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(shown(&surface), [true; 2]);
+        toggle(&shell, &id(ids[1], "tool"), true);
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(shown(&surface), [true, false]);
+        assert_eq!(output.blobs().len(), 2);
+    }
+}
+
+#[test]
 fn validated_images_upload_once_with_payload_free_nodes_and_policy_fallbacks() {
     use super::super::{summarize_tool, ToolPanel};
     use crate::hydrate::ToolResultImage;
@@ -977,14 +1050,7 @@ fn completed_tool_uses_native_diff_and_retains_disclosure_gestures() {
         true
     );
     ack(&shell, 1);
-    surface
-        .observe(&Incoming::Event(Event::Toggle {
-            sf: SURFACE.into(),
-            id: id(identity, "tool"),
-            collapsed: false,
-            key: None,
-        }))
-        .unwrap();
+    toggle(&shell, &id(identity, "tool"), false);
     surface.flush(&shell.state).unwrap();
     assert!(output.last_frame()["ops"]
         .as_array()
@@ -1310,8 +1376,8 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
     let props = tool.p.as_ref().unwrap().as_map();
-    assert_eq!(props["collapsed"], false);
-    assert_eq!(props["collapsible"], false);
+    assert_eq!(props["collapsed"], true);
+    assert_eq!(props["collapsible"], true);
     assert_eq!(tool.k, Kind::Tool);
     assert_eq!(props["role"], "omp.tool.bash");
     assert_eq!(props["target"], "");
@@ -1343,7 +1409,7 @@ fn bash_is_summary_only_from_first_progress_through_completion() {
     // output child mounted — the completion must not paint one expanded
     // frame before the terminal hides it.
     let tool = find_node(&surface.sent.main, &id(identity, "tool")).unwrap();
-    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], false);
+    assert_eq!(tool.p.as_ref().unwrap().as_map()["collapsed"], true);
     assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
     let ops = output.last_frame()["ops"].clone();
     let ops = ops.as_array().unwrap();
@@ -1374,8 +1440,8 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
     use super::super::{summarize_tool, ToolPanel};
     use octet_ai::ToolCallId;
     for name in ["bash", "exec"] {
-        let (shell, mut surface, output) = setup(16);
-        shell.state.borrow_mut().verbose_tools = true;
+        let (mut shell, mut surface, output) = setup(16);
+        shell.set_verbose_tools(true);
         let args = json!({"command":"git diff"});
         let index = shell
             .state
@@ -1429,21 +1495,26 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
             }
         }
         // Collapsing mid-run removes the projection, never the captured source.
-        shell.state.borrow_mut().verbose_tools = false;
+        shell.set_verbose_tools(false);
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
-        surface
-            .observe(&Incoming::Event(Event::Toggle {
-                sf: SURFACE.into(),
-                id: id(identity, "tool"),
-                collapsed: false,
-                key: None,
-            }))
-            .unwrap();
+        toggle(&shell, &id(identity, "tool"), false);
         surface.flush(&shell.state).unwrap();
-        // Native toggles cannot mount hidden output or truncate command input.
+        // A card can open while compact, but only verbose mode admits
+        // captured command bytes to Tern. The command itself never truncates.
+        assert_eq!(
+            find_node(&surface.sent.main, &id(identity, "tool"))
+                .unwrap()
+                .p
+                .as_ref()
+                .unwrap()
+                .as_map()["collapsed"],
+            false
+        );
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
-        shell.state.borrow_mut().verbose_tools = true;
+        assert!(find_node(&surface.sent.main, &id(identity, "capture.hint")).is_some());
+        assert!(!shell.verbose_tools());
+        shell.set_verbose_tools(true);
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
         {
@@ -1469,16 +1540,10 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
             leaf.p.as_ref().unwrap().as_map()["spans"][0]["t"],
             "final captured failure"
         );
-        surface
-            .observe(&Incoming::Event(Event::Toggle {
-                sf: SURFACE.into(),
-                id: id(identity, "tool"),
-                collapsed: true,
-                key: None,
-            }))
-            .unwrap();
+        toggle(&shell, &id(identity, "tool"), true);
         surface.flush(&shell.state).unwrap();
-        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_some());
+        assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
+        assert!(shell.verbose_tools());
         assert_eq!(
             find_node(&surface.sent.main, &id(identity, "tool"))
                 .unwrap()
@@ -1486,9 +1551,9 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
                 .as_ref()
                 .unwrap()
                 .as_map()["collapsed"],
-            false
+            true
         );
-        shell.state.borrow_mut().verbose_tools = false;
+        shell.set_verbose_tools(false);
         surface.flush(&shell.state).unwrap();
         assert!(find_node(&surface.sent.main, &id(identity, "out")).is_none());
         let state = shell.state.borrow();
@@ -1497,6 +1562,95 @@ fn verbose_commands_patch_one_cursorless_text_leaf_and_use_ctrl_o_disclosure() {
         };
         assert_eq!(panel.output, "final captured failure");
     }
+}
+
+#[test]
+fn tool_header_toggles_are_per_commit_and_never_toggle_the_local_shell() {
+    use super::super::{summarize_tool, ShellOutput, ToolPanel};
+    use octet_ai::ToolCallId;
+    let (mut shell, mut surface, _) = setup(32);
+    let mut ids = Vec::new();
+    {
+        let mut state = shell.state.borrow_mut();
+        for (call, name, finished) in [
+            ("first", "read", true),
+            ("second", "read", false),
+            ("extension", "example_search", false),
+        ] {
+            let args = json!({"path": call});
+            let index = state.push_block(TranscriptBlock::Tool(Box::new(ToolPanel::new(
+                ToolCallId(call.into()),
+                name.into(),
+                args.to_string(),
+                summarize_tool(name, &args),
+                format!("{call} result"),
+                finished,
+                false,
+                None,
+                None,
+            ))));
+            ids.push(state.transcript_commit_ids[index]);
+        }
+        let index = state.push_block(TranscriptBlock::Shell(Box::new(ShellOutput {
+            id: "local".into(),
+            command: "echo local".into(),
+            output: "local result".into(),
+            exit_code: 0,
+            running: false,
+        })));
+        ids.push(state.transcript_commit_ids[index]);
+    }
+    let shown = |surface: &TernSurface| {
+        ids.iter()
+            .map(|&identity| find_node(&surface.sent.main, &id(identity, "out")).is_some())
+            .collect::<Vec<_>>()
+    };
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [false, true, true, false]);
+    // Running non-command tools start open without choosing for their siblings.
+    toggle(&shell, &id(ids[1], "tool"), true);
+    toggle(&shell, &id(ids[2], "tool"), true);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [false; 4]);
+    for (index, collapsed, visible) in [
+        (0, false, [true, false, false, false]),
+        (1, false, [true, true, false, false]),
+        (0, true, [false, true, false, false]),
+        (2, false, [false, true, true, false]),
+    ] {
+        toggle(&shell, &id(ids[index], "tool"), collapsed);
+        surface.flush(&shell.state).unwrap();
+        assert_eq!(shown(&surface), visible);
+        assert!(!shell.verbose_tools());
+    }
+    toggle(&shell, &id(ids[3], "shell"), false);
+    toggle(&shell, &id(ids[0], "out"), false);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [false, true, true, false]);
+    shell.toggle_thinking();
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [false, true, true, false]);
+    shell.toggle_disclosure();
+    // The previous compact frame cannot restore an override after Ctrl+O.
+    toggle(&shell, &id(ids[0], "tool"), true);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [true; 4]);
+    toggle(&shell, &id(ids[2], "tool"), true);
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [true, true, false, true]);
+    shell.toggle_disclosure();
+    surface.flush(&shell.state).unwrap();
+    assert_eq!(shown(&surface), [false, true, true, false]);
+    // A new revision (or a new session reusing the numeric ID) also fences
+    // toggles from the previously sent tool header.
+    shell.state.borrow_mut().touch_block(0);
+    toggle(&shell, &id(ids[0], "tool"), false);
+    surface.flush(&shell.state).unwrap();
+    assert!(!shell.state.borrow().show_tool_details(0));
+    shell.state.borrow_mut().transcript_epoch += 1;
+    toggle(&shell, &id(ids[0], "tool"), false);
+    surface.flush(&shell.state).unwrap();
+    assert!(!shell.state.borrow().show_tool_details(0));
 }
 
 #[test]

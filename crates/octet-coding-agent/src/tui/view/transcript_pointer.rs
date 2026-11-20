@@ -6,7 +6,124 @@ use super::*;
 pub(super) const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 const COPY_NOTICE_DURATION: Duration = Duration::from_millis(1500);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ToolCardHit {
+    index: usize,
+    id: u64,
+}
+
+impl InteractiveShell {
+    fn owns_ansi_mouse(&self) -> bool {
+        self.capture_mouse
+            && !self
+                .state
+                .native()
+                .lock()
+                .expect("native mailbox poisoned")
+                .accepting_input
+    }
+
+    pub(super) fn begin_tool_card_press(&mut self, row: u16, col: u16) -> bool {
+        if !self.owns_ansi_mouse() {
+            return false;
+        }
+        let Some(hit) = self.state.borrow().painted_tool_card(row, col) else {
+            return false;
+        };
+        // Preserve the normal drag/copy anchor, even on a disclosure target.
+        self.begin_transcript_selection(row, col, false);
+        let mut state = self.state.borrow_mut();
+        if state.pending_screen_press.is_none() {
+            state.pending_screen_press = Some(ScreenPress {
+                cell: (row, col),
+                target: ScreenPressTarget::ToolCard(hit),
+                moved: false,
+                fence: renderer_geometry::GeometryFence::capture(&state),
+            });
+        }
+        true
+    }
+
+    pub(super) fn toggle_painted_tool_card(&self, row: u16, col: u16, hit: ToolCardHit) {
+        if !self.owns_ansi_mouse() {
+            return;
+        }
+        let mut state = self.state.borrow_mut();
+        if state.painted_tool_card(row, col) != Some(hit) {
+            return;
+        }
+        let expanded = !state.show_tool_details(hit.index);
+        state.set_block_disclosure(hit.index, expanded);
+    }
+}
+
 impl ShellState {
+    /// Hit the painted header, not the copy projection: an adapter can supply
+    /// a non-copyable label, and a pad or body row can map to the same offset.
+    fn painted_tool_card(&self, row: u16, col: u16) -> Option<ToolCardHit> {
+        if !self.application_viewport_requested
+            || self.startup_pending
+            || self.panel.is_some()
+            || self.overlay.is_some()
+            || self.tool_input_prompt.is_some()
+            || self.extension_ui.remote_fullscreen_overlay
+            || self.transcript_search_active()
+        {
+            return None;
+        }
+        let cache;
+        let (index, id, local, rows, surface, line) = if self.render_threaded {
+            // A disclosure must not acquire authority from stale or merely
+            // prepared geometry, even if the same cell is a copyable position.
+            let frame = self
+                .pointer_render_geometry()
+                .filter(|frame| frame.is_current(self))?;
+            frame.navigation_frame?;
+            let absolute = frame.visible_start + usize::from(row);
+            let line = frame.visible_lines.get(usize::from(row))?;
+            let block = frame
+                .blocks
+                .iter()
+                .find(|b| (b.start..b.start + b.rows).contains(&absolute))?;
+            (
+                block.index,
+                block.id,
+                absolute - block.start,
+                block.rows,
+                block.surface,
+                line,
+            )
+        } else {
+            let absolute = self.painted_history_row(row)?;
+            cache = self.transcript_cache.borrow();
+            let index = cache.blocks_in_rows(absolute, absolute + 1).next()?;
+            (
+                index,
+                self.transcript_commit_ids[index],
+                absolute - cache.block_starts[index],
+                cache.block_lengths[index],
+                cache.block_geometries[index],
+                &cache.lines[absolute],
+            )
+        };
+        if surface.content_row(local, rows) != Some(0)
+            || self.transcript_commit_ids.get(index) != Some(&id)
+            || !matches!(self.transcript[index], TranscriptBlock::Tool(_))
+            || sexy_tui_rs::hyperlink_at_column(line, usize::from(col)).is_some()
+        {
+            return None;
+        }
+        let left = usize::from(surface.content_left);
+        let header =
+            sexy_tui_rs::slice_by_column(line, left, usize::from(surface.content_width), true);
+        let plain = strip_terminal_sequences(&header);
+        let start = left + visible_width(&plain[..plain.len() - plain.trim_start().len()]);
+        let end = left + visible_width(plain.trim_end());
+        (start..end)
+            .contains(&usize::from(col))
+            .then_some(ToolCardHit { index, id })
+    }
+
     /// Displace both the retained range and its pending gesture before another
     /// surface selects. Pi compatibility: packages/tui/src/tui-alt-screen.ts:
     /// 1335-1405 has one screen-level range; component clicks clear it at 1372.

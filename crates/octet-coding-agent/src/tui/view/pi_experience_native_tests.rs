@@ -80,31 +80,36 @@ fn native_pi_cards_and_editor_rules_preserve_input_and_disclosure_ownership() {
                 None,
                 None,
             )));
+            let index = state.push_block(block);
+            let identity = state.transcript_commit_ids[index];
             let node = block_node(
-                1,
-                &block,
+                index,
                 &state,
                 &super::super::tern_images::NativeImages::default(),
                 &HashMap::new(),
                 None,
             )
             .unwrap();
-            assert_eq!(node.p.as_ref().unwrap().as_map()["frame"], json!("card"));
+            // The Pi card still frames its entire source and preview. Only
+            // its header is a toggle, so closing it cannot hide the command.
+            assert_eq!(node.k, Kind::Card);
+            let children = node.c.as_deref().unwrap();
+            let header = find_node(children, &id(identity, "tool")).unwrap();
+            let props = header.p.as_ref().unwrap().as_map();
+            assert_eq!(props["collapsible"], true);
+            assert_eq!(props["collapsed"], true);
             if name == "bash" {
-                assert_eq!(
-                    node.p.as_ref().unwrap().as_map()["collapsible"],
-                    json!(false)
-                );
-                assert!(find_node(node.c.as_deref().unwrap(), "t1.command").is_some());
-                assert!(find_node(node.c.as_deref().unwrap(), "t1.out").is_none());
+                assert!(find_node(children, &id(identity, "command")).is_some());
+                assert!(find_node(children, &id(identity, "out")).is_none());
             }
         }
         let assistant = TranscriptBlock::Assistant(Box::new(
             super::super::AssistantBlock::finalized("Unboxed reply".into()),
         ));
+        let index = state.push_block(assistant);
+        let identity = state.transcript_commit_ids[index];
         let node = block_node(
-            2,
-            &assistant,
+            index,
             &state,
             &super::super::tern_images::NativeImages::default(),
             &HashMap::new(),
@@ -114,7 +119,7 @@ fn native_pi_cards_and_editor_rules_preserve_input_and_disclosure_ownership() {
         assert_eq!(node.k, Kind::Col);
         assert_eq!(node.c.as_ref().unwrap()[0].k, Kind::Col);
         assert_eq!(
-            find_node(node.c.as_deref().unwrap(), "t2.assistant.md")
+            find_node(node.c.as_deref().unwrap(), &id(identity, "assistant.md"))
                 .unwrap()
                 .k,
             Kind::Md

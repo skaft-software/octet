@@ -457,6 +457,7 @@ pub(super) fn render_working_status(state: &ShellState, width: u16) -> Vec<Strin
         reasoning,
         width,
         false,
+        false,
         state.event_spinner_frame,
         state.status_shimmer_frame,
         state.status_rainbow_strength(),
