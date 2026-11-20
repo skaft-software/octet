@@ -704,8 +704,8 @@ mod tests {
             Some("storage_unavailable")
         );
         drop(store);
-        assert!(
-            BulkStore::new(&temp.path().canonicalize().unwrap(), BulkLimits::default()).is_ok()
-        );
+        crate::extension_bulk::tests::reopen_after_drop(|| {
+            BulkStore::new(&temp.path().canonicalize().unwrap(), BulkLimits::default())
+        });
     }
 }
