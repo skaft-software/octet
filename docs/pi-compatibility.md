@@ -5,15 +5,16 @@ extensions, skills, prompt templates, themes and custom UI with a native Rust
 agent. Enable the optional `octet-pi-compat` adapter to bring your Pi setup.
 
 We're working toward full compatibility with existing Pi setups. The adapter
-follows **Pi 1.4's public extension API**, works with managed Pi installs from
+follows **Pi 1.6's public extension API**, works with managed Pi installs from
 1.0.2 through 1.x (`PI_SUPPORTED_RANGE` is `>=1.0.2 <2.0.0`), and needs Node
 22.19+. Rust still owns the agent loop, sessions, permissions and terminal; the
 adapter loads extension code, not a second Pi agent. Ordinary octet use does not
 need Node.
 
-**Pi 1.5.0 is supported.** The adapter resolves version-specific Pi helpers from
-the installed Pi for the version it detects (1.0.2 and 1.5.0 are inventoried, and
-1.5.0 is the module surface that answers when no installed Pi does), and a symbol
+**Pi 1.6.0 is supported.** The adapter resolves version-specific Pi helpers from
+the installed Pi for the version it detects (1.0.2, 1.5.0, 1.5.2 and 1.6.0 are
+inventoried, and 1.6.0 is the module surface that answers when no installed Pi
+does), and a symbol
 missing from the active inventory fails loudly naming the symbol and the version
 rather than becoming `undefined`. A release newer than the newest inventory is
 diagnosed and reuses the nearest older one; a release below 1.0.2, a pre-release,
@@ -25,7 +26,7 @@ Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
 For implementation details, see the [adapter README](../extensions/octet-pi-compat/README.md).
-The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.5
+The adapter uses the jiti 2.7.0 and TypeBox 1.3.27 that Pi 1.0.2 through 1.6
 ship, and pi-tui 1.0.2's components.
 Compatibility concerns public extensions, not Pi's private internals or complete CLI.
 

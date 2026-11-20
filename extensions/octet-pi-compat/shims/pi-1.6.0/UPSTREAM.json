@@ -1,0 +1,51 @@
+{
+  "version": "1.6.0",
+  "reference": {
+    "repository": "earendil-works/pi",
+    "tag": "v1.6.0",
+    "commit": "faac585884ae2c013a6b1400f3e9e77f10b34bac"
+  },
+  "distribution": "reviewed managed Pi npm distribution",
+  "manifest": "../manifests/1.6.0.json",
+  "sha256": {
+    "pi-agent-core/dist/index.js": "40cb358d7f05594e9b67845a78ae50ad05e8375f0cfa8cee8a74801556c09afd",
+    "pi-agent-core/package.json": "63f6c2c9904b6fc790467d3fd1228d5cad0325bac8638e239a03aed7e83a3616",
+    "pi-ai/dist/auth/credential-store.js": "7e47b1a35815d04d9798ba7d8b9870409eeb522c36752c97a4c67416caaf2358",
+    "pi-ai/dist/compat.js": "df55dca273cb2a7053187b7b29d0fe5b91966a5099ab02d2efe38bb31c3f9738",
+    "pi-ai/dist/env-api-keys.js": "08f297d487f11a3de954fc9f94e3475c5c60fb54e6e15a8e5c643bad8980018b",
+    "pi-ai/dist/index.js": "dae2e8973404eab96233f9c36a99f0981fbb14205f07fec1b0bcbc84f476fffe",
+    "pi-ai/dist/legacy-api-aliases.js": "1b0f1077431ce2d8eeea25172e721c58e6fc1c1a396a731ffb62f2b54672bd12",
+    "pi-ai/dist/models-store.js": "bbce61b3123d849c711a64051b37166a2180ba379bc6c8e20b360f08787d2b5d",
+    "pi-ai/dist/models.js": "f23dda9e5a472f9556c9b834d924504b771af8275d17a49496100a4f4b91e2dc",
+    "pi-ai/dist/oauth.js": "bcdee371a91250a4d60f56b272d03959c9f6c401e73c3a1065d0a0dd002eec1a",
+    "pi-ai/dist/providers/all.js": "659c1eac079ce2bd0f695afa092c3aae16322bd25edb316cb0c2be225fc2badf",
+    "pi-ai/dist/providers/faux.js": "f9ec087321994cf3ffe15165a5745dc66caf1b1c29197817b82e6dba32148320",
+    "pi-ai/dist/session-resources.js": "9228618eeaebc6b5a1746d28d1859b1e23f0f65e978dc9f6e20eb29d65b17e2a",
+    "pi-ai/dist/utils/identity.js": "32b45824054a8a6125a7f3caedd9ff1c594f1a109fd2af4fa1b5729f4578ab62",
+    "pi-ai/dist/utils/json-parse.js": "ffb5960ed8ba38a01ea338e129dbca589088c211c9da623ffb61102a1d27ce56",
+    "pi-ai/dist/utils/models-error.js": "7c8f802c2c77671f4b1721a07f3fefd007a2b332b222cd644ba285b3a74d9693",
+    "pi-ai/dist/utils/streaming-json.js": "3691cb5d87570a0f3491cb58df90ad6d6e345066d70d4bda89c986b5ec646baf",
+    "pi-ai/dist/utils/string-enum.js": "069199a4c608591902c42ffa782e47b7e4bec80a68cb85474000506b4885bd2c",
+    "pi-ai/dist/utils/validation.js": "5d26e3a8b3621d895f96f94b917b69c3ffc0f5b882cd1a899ed490ebca284e3f",
+    "pi-ai/package.json": "d5c0803c4fbabe9559ce471a5adb0a6bc26ebae2e2391130f1de9fc7e97eec48",
+    "pi-coding-agent/dist/core/extensions/loader.js": "062931f1fcbea5a248040b3b1b2b1c83a6930e3c18d179e0c5cac910dcac576a",
+    "pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js": "dd44b3076d4ca95193e7c985b6f210c4170f22715e42ba8a4916e4fd5f8d0125",
+    "pi-coding-agent/dist/core/extensions/virtual-modules.js": "941f8647becc71fd241eac0fb19d3206f38f055f85721e5215a8473832d42f5a",
+    "pi-coding-agent/dist/core/tools/index.js": "16a517a54e2aa1386fada22cbef63205ca11463394f95fd20d74bee6fb2898a3",
+    "pi-coding-agent/dist/index.js": "4569157e6038be9840fa514db4b00a27fd0be9e3622cc7b49a281de6c027d7ff",
+    "pi-coding-agent/package.json": "ea92c5541390fa391ed7157f153a44e931b4aef52f811ebf25cfb0bbafcdb9bb",
+    "pi-schema/dist/explain.js": "0f890b69886da371e9f8b02cc5a1725c2e2bf6c916663eb0d0afce6c385e125c",
+    "pi-schema/dist/index.js": "2dff58fcad6a5ccf851fabf3367f5c931e9da6a6ee655a04b750d5a2c9278f9e",
+    "pi-schema/package.json": "177c64f16d671183f4493429754a56b998379205023f6820e057859ec90d64de",
+    "pi-tui/dist/index.js": "a0b6f2274522c6371c9ae512fb1fa55dbaab17d70333f22a21793645a5b2bd48",
+    "pi-tui/package.json": "46cdc7232becbfd7deb052c0421a2437e56568a4b8c997d60f27eb165217a770"
+  },
+  "notes": [
+    "Same extension module routes and inert-helper locations as 1.5.2 (every routed symbol re-checked against the managed install).",
+    "Breaking for extensions: Component.render() returns readonly string[] and Container.render() returns a cached array while its children are unchanged; code that changes render output in place must copy it first (packages/tui/CHANGELOG.md 1.6.0).",
+    "A pi.events listener's throw or rejection is reported as that extension's events:<channel> error (core/extensions/loader.ts).",
+    "pi.exec reports 128 + the signal number for a command a signal ended (core/exec.ts).",
+    "Extension entry paths are canonicalized before import (core/extensions/loader.ts).",
+    "pi-ai adds the session-resources subpath; extensions do not resolve it (virtual-modules.ts is unchanged)."
+  ]
+}

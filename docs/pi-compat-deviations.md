@@ -6,7 +6,7 @@ behavior may differ for its own users. This register records every such
 deviation, the decision, and its state, so a rewrite difference can never again
 be mistaken for "compatible enough".
 
-Target reference: Pi `1.5.0` (`~/github/earendil-works/pi`). The extension API
+Target reference: Pi `1.6.0` (`~/github/earendil-works/pi`). The extension API
 ledger ([pi-extension-api.md](pi-extension-api.md)) records member-level
 coverage; this file records *behavioral divergence*.
 

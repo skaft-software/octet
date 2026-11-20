@@ -3,9 +3,9 @@
 One JSON file per supported Pi release (`<version>.json`). Together they are the
 adapter's only description of a Pi release: `lib/pi-modules.mjs`,
 `lib/pi-manifests.mjs`, `lib/installed-pi.mjs` and `shims/local-pi.mjs` read
-them, and nothing else names a Pi version or a version range. Adding 1.6 is
-adding `1.6.0.json`; the supported range, the module table, the aliases and the
-inert-helper routes all follow.
+them, and nothing else names a Pi version or a version range. Adding a release
+is adding `<version>.json` (1.5.2 and 1.6.0 were added this way); the supported
+range, the module table, the aliases and the inert-helper routes all follow.
 
 A manifest is deliberately small. It is **not** a copy of Pi's export list.
 
@@ -71,11 +71,10 @@ Symbol entries:
 `lib/pi-manifests.mjs`:
 
 1. an exact manifest for the installed version wins;
-2. a version newer than the highest manifest reuses the nearest older manifest
-   **within the same major**, and says so once on stderr
-   (`[pi-compat manifest] installed Pi 1.6.0 has no manifest; using 1.5.0 routes
-   and classifications unverified`) — an untested release is diagnosed, not
-   refused;
+2. any other version reuses the nearest older manifest **within the same
+   major**, and says so once on stderr (`[pi-compat manifest] installed Pi 1.6.1
+   has no manifest; using 1.6.0 routes and classifications unverified`) — an
+   untested release is diagnosed, not refused;
 3. a version below the oldest manifest, in another major series, or not
    `x.y.z` (no leading zeros) resolves to nothing and is refused with the
    supported range and shipped manifests named.

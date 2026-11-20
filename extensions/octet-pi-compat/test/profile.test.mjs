@@ -10,7 +10,7 @@ const version = async name => JSON.parse(await readFile(new URL(`../node_modules
 
 test('dependencies are the exact versions Pi ships', async () => {
   // The shims emulate the highest manifest this build ships (shims/manifests/).
-  assert.equal(PI_VERSION, '1.5.0');
+  assert.equal(PI_VERSION, '1.6.0');
   // TUI components stay on Pi 1.0.2's pi-tui; TypeBox stays the pinned 1.x that
   // Pi 1.5's coding agent still builds its extension view with.
   assert.equal(await version('@earendil-works/pi-tui'), '1.0.2');

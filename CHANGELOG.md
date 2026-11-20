@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
+
 ### Fixed
 
 - Open Pi custom components that pass `blocked`, and report octet as waiting on you until they close.

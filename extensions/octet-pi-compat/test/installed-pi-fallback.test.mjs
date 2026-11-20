@@ -202,7 +202,7 @@ test('installed mode fails loudly for a missing, unsupported, or inconsistent Pi
 });
 
 test('installed mode accepts every release a manifest governs, and diagnoses a substituted one', t => {
-  for (const version of ['1.0.2', '1.1.0', '1.4.0', '1.4.9', '1.5.0']) {
+  for (const version of ['1.0.2', '1.1.0', '1.4.0', '1.4.9', '1.5.0', '1.5.2', '1.6.0']) {
     const result = run([fixture('denied.ts')], { mode: 'installed', env: fakeInstall(t, { version }) });
     assert.equal(result.status, 0, `${version}: ${result.stderr}`);
     assert.match(describe(result.metadata, 'trust'), /^unsupported_feature pi-coding-agent\.ProjectTrustStore/);
@@ -211,11 +211,11 @@ test('installed mode accepts every release a manifest governs, and diagnoses a s
   assert.equal(piReleaseSupported('1.0.2'), true);
   assert.equal(piReleaseSupported('1.5.0'), true);
   // A release newer than the highest manifest reuses it, and says so on stderr.
-  const untested = run([fixture('denied.ts')], { mode: 'installed', env: fakeInstall(t, { version: '1.6.0' }) });
+  const untested = run([fixture('denied.ts')], { mode: 'installed', env: fakeInstall(t, { version: '1.6.1' }) });
   assert.equal(untested.status, 0, untested.stderr);
-  assert.match(untested.stderr, /\[pi-compat manifest\] installed Pi 1\.6\.0 has no manifest; using 1\.5\.0 routes and classifications unverified/);
+  assert.match(untested.stderr, /\[pi-compat manifest\] installed Pi 1\.6\.1 has no manifest; using 1\.6\.0 routes and classifications unverified/);
   for (const version of ['1.0.1', '1.4.0-rc.1', '01.4.0', '1.4', '', '2.0.0']) assert.equal(piReleaseSupported(version), false, version);
-  assert.deepEqual(PI_MANIFEST_VERSIONS, ['1.0.2', '1.5.0']);
+  assert.deepEqual(PI_MANIFEST_VERSIONS, ['1.0.2', '1.5.0', '1.5.2', '1.6.0']);
   assert.equal(PI_SUPPORTED_RANGE, '>=1.0.2 <2.0.0');
 });
 

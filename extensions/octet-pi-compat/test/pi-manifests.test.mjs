@@ -42,7 +42,7 @@ const runShim = (agent, body) => spawnSync(process.execPath, ['--input-type=modu
   ${body}`], { encoding: 'utf8', env: { ...process.env, OCTET_PI_AGENT_DIR: agent } });
 
 test('every shipped manifest parses as schema 1 for its own release', () => {
-  assert.deepEqual(PI_MANIFEST_VERSIONS, ['1.0.2', '1.5.0']);
+  assert.deepEqual(PI_MANIFEST_VERSIONS, ['1.0.2', '1.5.0', '1.5.2', '1.6.0']);
   for (const [version, manifest] of Object.entries(manifests)) {
     assert.equal(manifest.schema, 1);
     assert.equal(manifest.pi, version);
@@ -93,9 +93,9 @@ test('every shim export is classified, and no shim binding is undefined', () => 
 test('the supported range and the emulated surface come from the manifests', () => {
   assert.equal(PI_SUPPORTED_RANGE, '>=1.0.2 <2.0.0');
   assert.equal(piSupportedRange(), PI_SUPPORTED_RANGE);
-  assert.equal(PI_VERSION, '1.5.0');
+  assert.equal(PI_VERSION, '1.6.0');
   assert.deepEqual(PI_PREFIXES, ['@earendil-works', '@mariozechner']);
-  assert.deepEqual(Object.keys(PI_MODULES).sort(), Object.keys(manifests['1.5.0'].routes).sort());
+  assert.deepEqual(Object.keys(PI_MODULES).sort(), Object.keys(manifests['1.6.0'].routes).sort());
   for (const prefix of PI_PREFIXES) for (const specifier of Object.keys(PI_MODULES)) assert.match(emulatedPiAliases()[`${prefix}/${specifier}`], /\.mjs$/);
   assert.equal(piModule('@earendil-works/pi-ai/models').shim, 'ai');
   assert.equal(piModule('@earendil-works/pi-ai/providers/anthropic').unmapped, true);
@@ -105,11 +105,14 @@ test('release resolution: exact manifest, diagnosed nearest older, unsupported o
   assert.equal(piRelease('1.0.2').exact, true);
   assert.equal(piRelease('1.5.0').exact, true);
   assert.equal(piReleaseTested('1.5.0'), true);
-  const untested = piRelease('1.6.0');
+  for (const version of ['1.5.2', '1.6.0']) assert.equal(piReleaseTested(version), true, version);
+  const untested = piRelease('1.6.1');
   assert.equal(untested.exact, false);
-  assert.equal(untested.substitutedFrom, '1.5.0');
-  assert.equal(piReleaseTested('1.6.0'), false);
-  assert.equal(piRelease('1.9.9').substitutedFrom, '1.5.0');
+  assert.equal(untested.substitutedFrom, '1.6.0');
+  assert.equal(piReleaseTested('1.6.1'), false);
+  // A release between manifests reuses the nearest older one, diagnosed.
+  assert.equal(piRelease('1.5.1').substitutedFrom, '1.5.0');
+  assert.equal(piRelease('1.9.9').substitutedFrom, '1.6.0');
   for (const version of ['1.0.1', '1.0.0', '2.0.0', '0.99.2', '1.4.0-rc.1', '01.4.0', '1.4', '', 'v1.5.0']) {
     assert.equal(piRelease(version), null, version);
     assert.equal(piReleaseSupported(version), false, version);
@@ -141,6 +144,18 @@ test('the 1.5.0 manifest captures what moved between releases', () => {
       .filter(([, entry]) => entry.fallback).map(([symbol]) => `${pkg}.${symbol}`));
     assert.deepEqual(fallbacks.sort(), ['ai.validateToolArguments', 'ai.validateToolCall']);
   }
+});
+
+test('the 1.5.2 and 1.6.0 manifests keep the 1.5.0 routes and classifications and record what changed', () => {
+  for (const version of ['1.5.2', '1.6.0']) {
+    assert.deepEqual(manifests[version].routes, manifests['1.5.0'].routes, version);
+    assert.deepEqual(manifests[version].symbols, manifests['1.5.0'].symbols, version);
+  }
+  assert.equal(manifests['1.5.2'].delta.from, '1.5.0');
+  assert.deepEqual(manifests['1.5.2'].delta.added['1.5.1']['type-only'],
+    ['MarkdownMessageType', 'MarkdownTransformerOptions', 'MarkdownTransformerRegistration']);
+  assert.equal(manifests['1.6.0'].delta.from, '1.5.2');
+  assert.match(manifests['1.6.0'].delta.behavior['1.6.0'][0], /readonly string\[\]/);
 });
 
 test('a routed symbol resolves to a file that exports it on the matching install', t => {

@@ -1,0 +1,49 @@
+{
+  "version": "1.5.2",
+  "reference": {
+    "repository": "earendil-works/pi",
+    "tag": "v1.5.2",
+    "commit": "b4afdddf44e059c67ccf5097e5317d913521b470"
+  },
+  "distribution": "reviewed managed Pi npm distribution",
+  "manifest": "../manifests/1.5.2.json",
+  "sha256": {
+    "pi-agent-core/dist/index.js": "40cb358d7f05594e9b67845a78ae50ad05e8375f0cfa8cee8a74801556c09afd",
+    "pi-agent-core/package.json": "95152a1095f4677284afde73dcf7a8a1525f46be0831177611526c14cea2ccec",
+    "pi-ai/dist/auth/credential-store.js": "7e47b1a35815d04d9798ba7d8b9870409eeb522c36752c97a4c67416caaf2358",
+    "pi-ai/dist/compat.js": "df55dca273cb2a7053187b7b29d0fe5b91966a5099ab02d2efe38bb31c3f9738",
+    "pi-ai/dist/env-api-keys.js": "c215e1a8f43c8504820c396410e087dee1680cf7b94909e67bd0f9020a16ce67",
+    "pi-ai/dist/index.js": "dae2e8973404eab96233f9c36a99f0981fbb14205f07fec1b0bcbc84f476fffe",
+    "pi-ai/dist/legacy-api-aliases.js": "1b0f1077431ce2d8eeea25172e721c58e6fc1c1a396a731ffb62f2b54672bd12",
+    "pi-ai/dist/models-store.js": "bbce61b3123d849c711a64051b37166a2180ba379bc6c8e20b360f08787d2b5d",
+    "pi-ai/dist/models.js": "f23dda9e5a472f9556c9b834d924504b771af8275d17a49496100a4f4b91e2dc",
+    "pi-ai/dist/oauth.js": "bcdee371a91250a4d60f56b272d03959c9f6c401e73c3a1065d0a0dd002eec1a",
+    "pi-ai/dist/providers/all.js": "659c1eac079ce2bd0f695afa092c3aae16322bd25edb316cb0c2be225fc2badf",
+    "pi-ai/dist/providers/faux.js": "f9ec087321994cf3ffe15165a5745dc66caf1b1c29197817b82e6dba32148320",
+    "pi-ai/dist/session-resources.js": "9228618eeaebc6b5a1746d28d1859b1e23f0f65e978dc9f6e20eb29d65b17e2a",
+    "pi-ai/dist/utils/identity.js": "32b45824054a8a6125a7f3caedd9ff1c594f1a109fd2af4fa1b5729f4578ab62",
+    "pi-ai/dist/utils/json-parse.js": "ffb5960ed8ba38a01ea338e129dbca589088c211c9da623ffb61102a1d27ce56",
+    "pi-ai/dist/utils/models-error.js": "7c8f802c2c77671f4b1721a07f3fefd007a2b332b222cd644ba285b3a74d9693",
+    "pi-ai/dist/utils/streaming-json.js": "3691cb5d87570a0f3491cb58df90ad6d6e345066d70d4bda89c986b5ec646baf",
+    "pi-ai/dist/utils/string-enum.js": "069199a4c608591902c42ffa782e47b7e4bec80a68cb85474000506b4885bd2c",
+    "pi-ai/dist/utils/validation.js": "5d26e3a8b3621d895f96f94b917b69c3ffc0f5b882cd1a899ed490ebca284e3f",
+    "pi-ai/package.json": "db02f15488aa28c3cce6bbdeabab7d3a43eaea8b293a9688570bc0b43b15f1b0",
+    "pi-coding-agent/dist/core/extensions/loader.js": "55e794b969dd4692a553b21767fe876537fe06083586816f62848e76c553ef7c",
+    "pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js": "dd44b3076d4ca95193e7c985b6f210c4170f22715e42ba8a4916e4fd5f8d0125",
+    "pi-coding-agent/dist/core/extensions/virtual-modules.js": "941f8647becc71fd241eac0fb19d3206f38f055f85721e5215a8473832d42f5a",
+    "pi-coding-agent/dist/core/tools/index.js": "16a517a54e2aa1386fada22cbef63205ca11463394f95fd20d74bee6fb2898a3",
+    "pi-coding-agent/dist/index.js": "4569157e6038be9840fa514db4b00a27fd0be9e3622cc7b49a281de6c027d7ff",
+    "pi-coding-agent/package.json": "18b422b7d80f2caa2551d253c0a8409e1caa54b954bfb7d18252e507bb8a0318",
+    "pi-schema/dist/explain.js": "0f890b69886da371e9f8b02cc5a1725c2e2bf6c916663eb0d0afce6c385e125c",
+    "pi-schema/dist/index.js": "2dff58fcad6a5ccf851fabf3367f5c931e9da6a6ee655a04b750d5a2c9278f9e",
+    "pi-schema/package.json": "b0297552afe555ceb41c87632e3b43aa73a68cf8b8a8847a9383587567b09401",
+    "pi-tui/dist/index.js": "a0b6f2274522c6371c9ae512fb1fa55dbaab17d70333f22a21793645a5b2bd48",
+    "pi-tui/package.json": "a69278408dbc23c0c6efe4079c99b012c14cf2bea78167b72334cdbe319ad4ec"
+  },
+  "notes": [
+    "Same extension module routes and inert-helper locations as 1.5.0 (every routed symbol re-checked against the managed install).",
+    "pi-coding-agent adds the MarkdownMessageType, MarkdownTransformerOptions and MarkdownTransformerRegistration types: registerMarkdownTransformer(transformer, { messageTypes }) selects the Markdown surfaces a transformer runs on (1.5.1).",
+    "ctx.ui.custom({ blocked }) overlays report blocked program status until done() (1.5.1).",
+    "pi-ai adds the lazy-oauth and lazy-bedrock-provider subpaths; extensions do not resolve them (virtual-modules.ts is unchanged)."
+  ]
+}
