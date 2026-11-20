@@ -336,7 +336,7 @@ fn changing_a_row_an_image_covers_replaces_that_image() {
 }
 
 #[test]
-fn an_image_scrolled_out_of_the_window_keeps_its_data_cached_off_screen() {
+fn an_image_scrolled_out_of_the_window_frees_its_data() {
     let image = anchor(7, 3);
     let before = rows(&["header", &image, "", "", "tail", "end"]);
     let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
@@ -345,11 +345,39 @@ fn an_image_scrolled_out_of_the_window_keeps_its_data_cached_off_screen() {
     session.paint(&mut terminal, &after, 40, 6, None, false);
     let output = writes.borrow().clone();
 
-    // Pi keeps off-screen uploads cached up to 16 images
-    // (pi-tui 1.5.1 dist/tui-alt-screen.js:27, 278-292).
-    assert!(output.contains(&delete_placements(7)), "{output:?}");
-    assert!(!output.contains(&delete(7)), "{output:?}");
+    // No off-screen cache: kitty may free data left without a placement, so
+    // an image that leaves the viewport is freed and re-sent when it returns.
+    assert!(output.contains(&delete(7)), "{output:?}");
+    assert!(!output.contains(&delete_placements(7)), "{output:?}");
     assert!(!output.contains(&image), "{output:?}");
+
+    clear_writes(&writes);
+    session.paint(&mut terminal, &before, 40, 6, None, false);
+    let output = writes.borrow().clone();
+    assert!(output.contains(&image), "re-entry sends data: {output:?}");
+    assert!(!output.contains(&held(&image)), "{output:?}");
+}
+
+#[test]
+fn a_leaving_image_is_freed_before_a_moving_image_loses_its_placement() {
+    // kitty frees every image without a placement when a data-freeing delete
+    // arrives, so the moving image must still be placed when 7 is freed.
+    let leaving = anchor(7, 2);
+    let moving = anchor(8, 2);
+    let before = rows(&[&leaving, "", "text", &moving, "", "end"]);
+    let (mut session, mut terminal, writes, _) = painted(&before, (40, 6));
+
+    let after = rows(&["text", "", &moving, "", "end", "more"]);
+    session.paint(&mut terminal, &after, 40, 6, None, false);
+    let output = writes.borrow().clone();
+
+    let freed = output.find(&delete(7)).expect("7 left the window");
+    let moved = output
+        .find(&delete_placements(8))
+        .expect("8 moved inside the window");
+    assert!(freed < moved, "{output:?}");
+    assert!(output.contains(&held(&moving)), "{output:?}");
+    assert!(!output.contains(&delete(8)), "{output:?}");
 }
 
 #[test]

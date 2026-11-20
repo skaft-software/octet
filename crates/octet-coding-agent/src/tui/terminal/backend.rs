@@ -6,7 +6,7 @@
 #![allow(missing_docs)]
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
@@ -52,10 +52,6 @@ const MAX_ENCODED_IMAGES: usize = 64;
 pub(crate) struct TerminalImageStore {
     images: Arc<Mutex<HashMap<u32, Arc<TerminalImage>>>>,
     encoded: Arc<Mutex<HashMap<EncodedImageKey, Arc<[u8]>>>>,
-    /// Bumped on every registration, so a payload sent for an earlier image
-    /// under the same ID is never placed by ID in place of the new one.
-    generations: Arc<Mutex<HashMap<u32, u64>>>,
-    next_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TerminalImageStore {
@@ -65,13 +61,6 @@ impl TerminalImageStore {
             .lock()
             .expect("terminal image store mutex poisoned")
             .insert(id.get(), image);
-        let generation = self
-            .next_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.generations
-            .lock()
-            .expect("terminal image store mutex poisoned")
-            .insert(id.get(), generation);
         // A re-registered ID must not serve bytes encoded from the old payload.
         self.encoded
             .lock()
@@ -99,13 +88,14 @@ impl TerminalImageStore {
             .cloned()
     }
 
-    /// The registration generation of an image ID, read with its payload.
-    fn generation(&self, id: ImageId) -> Option<u64> {
-        self.generations
+    /// Keep only IDs whose image is still registered. `ImageRegistry` never
+    /// reuses an ID, so a live ID always names the payload that was sent.
+    fn retain_live(&self, ids: &mut HashSet<u32>) {
+        let images = self
+            .images
             .lock()
-            .expect("terminal image store mutex poisoned")
-            .get(&id.get())
-            .copied()
+            .expect("terminal image store mutex poisoned");
+        ids.retain(|id| images.contains_key(id));
     }
 
     /// Number of retained encoded placements. Test-observable so the bound is
@@ -359,9 +349,9 @@ pub struct OctetTerminal<W: FrameSink = Stdout> {
     in_synchronized_frame_depth: usize,
     /// Visible setup belongs to the first frame, not raw-mode acquisition.
     initial_frame: bool,
-    /// Kitty images this terminal has been sent, by ID and registration
-    /// generation. Confirmed only after the frame carrying the payload is
-    /// written, and forgotten on any failed write or screen switch.
+    /// Kitty images this terminal has been sent, by ID. Confirmed only after
+    /// the frame carrying the payload is written, and forgotten on any failed
+    /// write or screen switch.
     held: HeldImages,
 }
 
@@ -370,8 +360,10 @@ pub struct OctetTerminal<W: FrameSink = Stdout> {
 /// set agrees, otherwise the full payload is sent again.
 #[derive(Default)]
 pub(crate) struct HeldImages {
-    confirmed: HashMap<u32, u64>,
-    pending: Vec<(u32, u64)>,
+    /// At most the live registered images: pruned whenever a payload is
+    /// confirmed, the only way an ID is added.
+    confirmed: HashSet<u32>,
+    pending: Vec<u32>,
 }
 
 /// SGR 1006 and 1016 have identical byte shapes but different coordinate units.
@@ -568,9 +560,6 @@ impl<W: FrameSink> OctetTerminal<W> {
     }
 
     fn append_image_anchor(&mut self, anchor: ImageAnchor) {
-        // Generation first: a re-registration between these reads can then
-        // only cause one extra resend, never a stale payload marked as held.
-        let generation = self.image_store.generation(anchor.id());
         let Some(image) = self.image_store.get(anchor.id()) else {
             return;
         };
@@ -600,11 +589,10 @@ impl<W: FrameSink> OctetTerminal<W> {
             })
         };
         // The painter says the terminal holds this image and this adapter
-        // confirmed sending exactly this payload: move it, don't resend it.
+        // confirmed sending its payload: move it, don't resend it.
         if anchor.is_held()
             && anchor.protocol() == ImageProtocol::Kitty
-            && generation.is_some()
-            && self.held.confirmed.get(&key.id) == generation.as_ref()
+            && self.held.confirmed.contains(&key.id)
         {
             let encoder = ImageProtocolEncoder::new(anchor.protocol(), ImageLimits::default());
             let Ok(place) =
@@ -634,8 +622,8 @@ impl<W: FrameSink> OctetTerminal<W> {
             return;
         }
         let record_sent = |held: &mut HeldImages| {
-            if let (ImageProtocol::Kitty, Some(generation)) = (anchor.protocol(), generation) {
-                held.pending.push((key.id, generation));
+            if anchor.protocol() == ImageProtocol::Kitty {
+                held.pending.push(key.id);
             }
         };
         // A visible image is re-emitted on every frame that touches its row, and
@@ -734,7 +722,10 @@ impl<W: FrameSink> OctetTerminal<W> {
         }
         if self.out.write_frame(&self.pending).is_ok() {
             let delivered = std::mem::take(&mut self.held.pending);
-            self.held.confirmed.extend(delivered);
+            if !delivered.is_empty() {
+                self.held.confirmed.extend(delivered);
+                self.image_store.retain_live(&mut self.held.confirmed);
+            }
         } else {
             // The terminal may not have received a payload; resend everything.
             self.held = HeldImages::default();

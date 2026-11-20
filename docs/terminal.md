@@ -544,10 +544,10 @@ above the viewport. Only the visible image rows are placed, leaving the composer
 and footer outside the placement. One fullscreen placement tracker handles native
 image anchors and raw Kitty graphics rows: scrolling, cropping and redraws retire
 old placements before placing images at their current rows. On Kitty-compatible
-terminals, scrolling reuses uploaded image data by ID, even for up to 16 recently
-offscreen images. Eviction, a full redraw, a screen change or an unconfirmed
-write can require a fresh upload. Status updates away from an image leave its
-placement alone. Pi-compatible composer/footer components
+terminals, scrolling reuses the data of images that stay on screen by ID. An
+image that leaves the viewport is freed and sent again when it returns, as are
+visible images after a full redraw, a screen change or an unconfirmed write.
+Status updates away from an image leave its placement alone. Pi-compatible composer/footer components
 share this terminal painter; they do not write a separate graphics frame.
 Terminal-specific pixels still require separate qualification; protocol and
 retained-row tests are not Rex or Ghostty verification.

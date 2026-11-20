@@ -62,6 +62,13 @@ pub(crate) fn terminal(
     size: TerminalSize,
     image_store: TerminalImageStore,
 ) -> (impl Terminal, Frames) {
+    graphics_terminal(size, image_store)
+}
+
+fn graphics_terminal(
+    size: TerminalSize,
+    image_store: TerminalImageStore,
+) -> (GraphicsTerminal, Frames) {
     let frames = Frames::default();
     (
         GraphicsTerminal(OctetTerminal {
@@ -242,7 +249,7 @@ fn kitty_graphics_scroll_places_held_images_without_resending_data() {
         ImageAnchor::new(ImageProtocol::Kitty, second, layout).marker()
     );
     document[18] = "Click  computer use click".into();
-    let mut uploaded: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut previous: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     // Scroll down and back up one row per frame, like a wheel burst.
     for start in (0..22).chain((0..22).rev()) {
         let mut window = sexy_tui_rs::images::crop_anchors_to_window(&document, start, start + 8);
@@ -274,9 +281,9 @@ fn kitty_graphics_scroll_places_held_images_without_resending_data() {
             .iter()
             .map(|(_, anchor)| anchor.id().get())
             .collect();
-        // Pi parity: data is sent the first time an image is shown on this
-        // screen; re-entering from the off-screen cache only places it.
-        let first_shown = ids.difference(&uploaded).count();
+        // Data is sent when an image enters the viewport; an image that stays
+        // on screen is only placed again by ID.
+        let entering = ids.difference(&previous).count();
         let before = model.transmissions;
         for frame in frames.lock().unwrap().drain(..) {
             model.feed(&frame);
@@ -284,10 +291,10 @@ fn kitty_graphics_scroll_places_held_images_without_resending_data() {
         model.assert_placements(&expected);
         assert_eq!(
             model.transmissions - before,
-            first_shown,
-            "frame at row {start}: only images shown for the first time may send data (visible {ids:?}, uploaded {uploaded:?})"
+            entering,
+            "frame at row {start}: only images entering the viewport send data (visible {ids:?}, previous {previous:?})"
         );
-        uploaded.extend(ids);
+        previous = ids;
     }
     // A full redraw may free image data, so every visible image is sent again
     // and none is placed by ID (the model rejects a=p without data).
@@ -317,4 +324,108 @@ fn kitty_graphics_scroll_places_held_images_without_resending_data() {
         model.feed(&frame);
     }
     model.assert_placements(&[]);
+}
+
+// More images than any off-screen cache scrolled out and back. A data-freeing
+// delete (d=I) makes kitty free every image left without a placement, so an
+// image whose data was kept off screen can be gone when it scrolls back; placing
+// it by ID would leave it blank (q=2 hides the error). Every re-entry must send
+// data, and frames that only move or crop resident images must send none.
+#[test]
+fn kitty_graphics_scroll_past_many_images_never_places_freed_data() {
+    use sexy_tui_rs::{AltScreenOptions, AlternateScreen, ImageLayout};
+    const IMAGES: usize = 18;
+    let store = TerminalImageStore::default();
+    let layout = ImageLayout::new(20, 4).unwrap();
+    let mut document = vec![String::new(); IMAGES * 6 + 8];
+    for index in 0..IMAGES {
+        let id = ImageId::new(100 + index as u32).unwrap();
+        store.register(
+            id,
+            Arc::new(
+                TerminalImage::from_bytes(include_bytes!("fixtures/screenshot.png").to_vec())
+                    .unwrap(),
+            ),
+        );
+        document[index * 6 + 1] = format!(
+            "  {}",
+            ImageAnchor::new(ImageProtocol::Kitty, id, layout).marker()
+        );
+        document[index * 6 + 5] = format!("caption {index}");
+    }
+    let (mut terminal, frames) = terminal(Arc::new(Mutex::new((40, 10))), store);
+    let mut screen = AlternateScreen::new(AltScreenOptions {
+        synchronized_output: true,
+        ..AltScreenOptions::default()
+    });
+    let mut model = model::Kitty::new(10, 40);
+    screen.enter(&mut terminal);
+    for frame in frames.lock().unwrap().drain(..) {
+        model.feed(&frame);
+    }
+    let last = document.len() - 8;
+    let mut previous = std::collections::BTreeSet::new();
+    for start in (0..=last).chain((0..=last).rev()).chain(0..=last) {
+        let mut window = sexy_tui_rs::images::crop_anchors_to_window(&document, start, start + 8);
+        window.resize(8, String::new());
+        window.push("composer".into());
+        window.push("footer".into());
+        screen.paint(&mut terminal, &window, 40, 10, None, false);
+        let visible: std::collections::BTreeSet<u32> = window
+            .iter()
+            .flat_map(|line| ImageAnchor::parse_all(line))
+            .map(|anchor| anchor.id().get())
+            .collect();
+        let entering = visible.difference(&previous).count();
+        let (transmissions, bytes) = (model.transmissions, model.payload_bytes);
+        for frame in frames.lock().unwrap().drain(..) {
+            model.feed(&frame);
+        }
+        assert_eq!(
+            model.transmissions - transmissions,
+            entering,
+            "row {start}: only images entering the viewport send data"
+        );
+        if entering == 0 {
+            assert_eq!(
+                model.payload_bytes, bytes,
+                "row {start}: moving or cropping resident images retransmits no payload"
+            );
+        }
+        previous = visible;
+    }
+    screen.exit(&mut terminal, &[], true);
+    for frame in frames.lock().unwrap().drain(..) {
+        model.feed(&frame);
+    }
+    model.assert_placements(&[]);
+}
+
+// Held IDs are bookkeeping for images still registered: releasing images must
+// shrink it, however many images a long session shows.
+#[test]
+fn held_image_ids_stay_bounded_by_live_images() {
+    use sexy_tui_rs::ImageLayout;
+    let store = TerminalImageStore::default();
+    let (mut terminal, _frames) = graphics_terminal(Arc::new(Mutex::new((40, 10))), store.clone());
+    let layout = ImageLayout::new(4, 2).unwrap();
+    for n in 1..=50 {
+        let id = ImageId::new(n).unwrap();
+        store.register(
+            id,
+            Arc::new(
+                TerminalImage::from_bytes(include_bytes!("fixtures/screenshot.png").to_vec())
+                    .unwrap(),
+            ),
+        );
+        terminal.write(&format!(
+            "\x1b[1;1H{}",
+            ImageAnchor::new(ImageProtocol::Kitty, id, layout).marker()
+        ));
+        if n > 3 {
+            store.release(ImageId::new(n - 3).unwrap());
+        }
+        let held = terminal.0.held.confirmed.len();
+        assert!(held <= 4, "{held} held IDs after {n} images, 4 live");
+    }
 }

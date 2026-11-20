@@ -29,6 +29,9 @@ pub struct Kitty {
     data: std::collections::BTreeSet<u32>,
     /// Completed payload transmissions (`a=T`) since construction.
     pub transmissions: usize,
+    /// Base64 image payload bytes received since construction, across every
+    /// chunk. A frame that only moves or crops resident images adds none.
+    pub payload_bytes: usize,
 }
 
 impl Kitty {
@@ -39,6 +42,7 @@ impl Kitty {
             transmission: None,
             data: std::collections::BTreeSet::new(),
             transmissions: 0,
+            payload_bytes: 0,
         }
     }
 
@@ -53,6 +57,7 @@ impl Kitty {
                 .expect("complete graphics command in frame");
             let command = std::str::from_utf8(&remaining[..end]).unwrap();
             let header = command.split(';').next().unwrap();
+            self.payload_bytes += command.split_once(';').map_or(0, |(_, data)| data.len());
             let fields: BTreeMap<_, _> = header
                 .split(',')
                 .filter_map(|field| field.split_once('='))
