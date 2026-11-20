@@ -33,6 +33,21 @@ function resultFallback(result, expanded) {
   if (shown.length < lines.length) text += theme.fg('muted', `\n... (${lines.length - shown.length} more lines; expand tools to view)`);
   return new Text(text, 0, 0);
 }
+// Pi 1.6.0 core/extensions/types.ts MarkdownMessageType and loader.ts DEFAULT_MARKDOWN_MESSAGE_TYPES.
+const MARKDOWN_TYPES = ['user', 'assistant', 'assistant-thinking', 'custom', 'summary', 'changelog'];
+const DEFAULT_MARKDOWN_TYPES = ['user', 'assistant', 'assistant-thinking'];
+
+function markdownSurfaces(options) {
+  if (options === undefined) return new Set(DEFAULT_MARKDOWN_TYPES);
+  if (!options || typeof options !== 'object' || Array.isArray(options)) invalid('Markdown transformer options');
+  fields(options, ['messageTypes'], 'Markdown transformer options');
+  const types = options.messageTypes;
+  if (types === undefined) return new Set(DEFAULT_MARKDOWN_TYPES);
+  if (!Array.isArray(types) || types.length > MARKDOWN_TYPES.length * 4) invalid('Markdown transformer messageTypes');
+  for (const type of types) if (!MARKDOWN_TYPES.includes(type)) invalid(`Markdown transformer messageType ${JSON.stringify(String(type)).slice(0, 64)}`);
+  return new Set(types);
+}
+
 function markdown(text) {
   bounded(text, 'render Markdown', 262144, { controls: true });
   // Preserve approved SGR. Validate source lines without imposing the frame's
@@ -64,7 +79,7 @@ export class TranscriptRenderers {
     update.timer.unref?.();
   }
   api(factory) {
-    const register = (kind, customType, callback) => {
+    const register = (kind, customType, callback, markdownTypes) => {
       if (this.runtime.stopping) throw rpcError(-32002, 'renderer runtime is retired');
       this.runtime.scope.getStore()?.controller.signal.throwIfAborted();
       if (this.runtime.loaded) this.runtime.assertOwner(this.runtime.current(factory));
@@ -74,7 +89,7 @@ export class TranscriptRenderers {
       if (kind === 'tool') {
         if (entries.tool.length >= 1024) invalid('tool renderer registration limit');
         entries.tool.push(callback);
-      } else if (kind === 'markdown') entries.markdown = callback; // Last registration per extension wins.
+      } else if (kind === 'markdown') entries.markdown = { callback, types: markdownTypes }; // Last registration per extension wins.
       else {
         bounded(customType, 'renderer customType', 128);
         if (!entries[kind].has(customType) && entries.message.size + entries.entry.size >= 1024) invalid('renderer registration limit');
@@ -90,7 +105,7 @@ export class TranscriptRenderers {
       registerToolRenderer: callback => register('tool', undefined, callback),
       registerMessageRenderer: (customType, callback) => register('message', customType, callback),
       registerEntryRenderer: (customType, callback) => register('entry', customType, callback),
-      registerMarkdownTransformer: callback => register('markdown', undefined, callback),
+      registerMarkdownTransformer: (callback, options) => register('markdown', undefined, callback, markdownSurfaces(options)),
     };
   }
   ordered() { return [...this.factories].sort(([a], [b]) => a - b); }
@@ -209,14 +224,16 @@ export class TranscriptRenderers {
     fields(request, request?.kind === 'markdown' ? ['kind', 'text', 'message_type', 'is_streaming']
       : request?.kind === 'message' ? ['kind', 'message', 'expanded', 'output_pad'] : ['kind', 'entry', 'expanded'], 'transcript render content');
     if (request.kind === 'markdown') {
-      if (!['user', 'assistant', 'assistant-thinking'].includes(request.message_type)) invalid('Markdown message type');
+      if (!MARKDOWN_TYPES.includes(request.message_type)) invalid('Markdown message type');
       const context = { messageType: request.message_type, isStreaming: boolean(request.is_streaming, 'Markdown streaming'), availableWidth: params.width };
       let text = markdown(request.text), registered = false;
       for (const [factory, entries] of this.ordered()) {
-        if (!entries.markdown) continue;
+        // Pi 1.6.0 core/extensions/runner.ts getMarkdownTransformers(): a transformer leaves the Markdown of
+        // surfaces it did not register for unchanged.
+        if (!entries.markdown?.types.has(request.message_type)) continue;
         registered = true;
         let result;
-        try { result = this.call(store, factory, () => entries.markdown(text, context)); }
+        try { result = this.call(store, factory, () => entries.markdown.callback(text, context)); }
         catch (error) { this.live(store); this.runtime.reportCallbackError?.('Markdown transformer', factory, error); continue; } // Pi keeps current Markdown after a callback exception.
         if (typeof result === 'string') text = markdown(result);
       }

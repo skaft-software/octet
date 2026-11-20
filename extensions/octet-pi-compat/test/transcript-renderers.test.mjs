@@ -157,6 +157,24 @@ test('Markdown uses latest transformer per extension and chains in load order wi
   assert.deepEqual(seen[0].context, {messageType: 'assistant-thinking', isStreaming: true, availableWidth: 31});
 });
 
+test('Markdown transformers run only on the surfaces they registered for (Pi 1.6 messageTypes)', t => {
+  const h = harness(t);
+  h.registry.api(0).registerMarkdownTransformer(text => `${text}:default`);
+  h.registry.api(1).registerMarkdownTransformer(text => `${text}:summary`, {messageTypes: ['summary', 'custom']});
+  h.registry.api(2).registerMarkdownTransformer(text => `${text}:all`, {});
+  assert.deepEqual(h.render('markdown', 'a', {messageType: 'assistant'}), {registered: true, lines: null, markdown: 'a:default:all'});
+  assert.deepEqual(h.render('markdown', 'b', {messageType: 'summary'}), {registered: true, lines: null, markdown: 'b:summary'});
+  assert.deepEqual(h.render('markdown', 'c', {messageType: 'custom'}), {registered: true, lines: null, markdown: 'c:summary'});
+  assert.deepEqual(h.render('markdown', 'd', {messageType: 'changelog'}), {registered: false, lines: null, markdown: 'd'});
+  // A later registration replaces the earlier one together with its surfaces.
+  h.registry.api(1).registerMarkdownTransformer(text => `${text}:user`, {messageTypes: ['user']});
+  assert.equal(h.render('markdown', 'e', {messageType: 'summary'}).markdown, 'e');
+  assert.equal(h.render('markdown', 'f', {messageType: 'user'}).markdown, 'f:default:user:all');
+  for (const options of [{messageTypes: ['thinking']}, {messageTypes: 'user'}, {surfaces: ['user']}, null, []]) {
+    assert.throws(() => h.registry.api(3).registerMarkdownTransformer(text => text, options), undefined, JSON.stringify(options));
+  }
+});
+
 test('Markdown preserves current text across exceptions/nonstring returns and accepts empty replacement', t => {
   const h = harness(t);
   h.registry.api(0).registerMarkdownTransformer(() => {throw new Error('ordinary callback failure');});
