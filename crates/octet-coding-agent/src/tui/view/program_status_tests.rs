@@ -360,3 +360,40 @@ fn foreground_reload_results_never_settle_an_active_parent_run() {
         );
     }
 }
+
+#[test]
+fn an_open_blocked_extension_surface_reports_a_question() {
+    let mut shell = InteractiveShell::test_shell();
+    let run = shell.begin_run("fixture");
+    let mount = |blocked| crate::extensions::remote_ui::MountView {
+        id: "region.0".into(),
+        surface_id: "question".into(),
+        title: "Question".into(),
+        placement: octet_agent::ExtensionRemoteUiPlacement::Fullscreen,
+        columns: 80,
+        rows: 24,
+        mouse_capture: false,
+        blocked,
+        native_editor: false,
+    };
+    use octet_agent::ExtensionRemoteUiBlockedKind as Kind;
+    shell.state.borrow_mut().extension_ui.remote.mounts = vec![mount(None)];
+    assert_eq!(activity(&shell.state.borrow()), ProgramStatus::Working);
+    shell.state.borrow_mut().extension_ui.remote.mounts = vec![
+        mount(Some(Kind::Auth)),
+        mount(None),
+        mount(Some(Kind::Question)),
+    ];
+    assert_eq!(
+        activity(&shell.state.borrow()),
+        ProgramStatus::Blocked(BlockedKind::Question)
+    );
+    shell.state.borrow_mut().extension_ui.remote.mounts.pop();
+    assert_eq!(
+        activity(&shell.state.borrow()),
+        ProgramStatus::Blocked(BlockedKind::Auth)
+    );
+    shell.state.borrow_mut().extension_ui.remote.mounts.clear();
+    assert_eq!(activity(&shell.state.borrow()), ProgramStatus::Working);
+    shell.interrupt_run(run);
+}

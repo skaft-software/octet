@@ -78,6 +78,24 @@ pub struct ExtensionRemoteUiOpenRequest {
     /// Request host-owned mouse reporting while a fullscreen lease has focus.
     #[serde(default)]
     pub mouse_capture: bool,
+    /// Report the program as blocked on the user while the surface is open
+    /// (Pi `ctx.ui.custom({ blocked })`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<ExtensionRemoteUiBlockedKind>,
+}
+
+/// What an open extension surface waits on, as Pi's `BlockedStatus.kind`
+/// (pi-tui 1.6.0 src/program-status.ts:16). Pi's message is not carried: octet's
+/// program status never exports surface text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionRemoteUiBlockedKind {
+    /// An approval.
+    Permission,
+    /// A question or choice.
+    Question,
+    /// A sign-in.
+    Auth,
 }
 
 /// Extension request to close a host-rendered fullscreen surface.
@@ -356,6 +374,9 @@ pub enum ExtensionRemoteUiOperation {
         /// Request host-owned mouse reporting for this fullscreen lease.
         #[serde(default)]
         mouse_capture: bool,
+        /// Report the program as blocked on the user while the surface is open.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked: Option<ExtensionRemoteUiBlockedKind>,
     },
     /// Close the matching fullscreen surface.
     Close {
@@ -373,6 +394,7 @@ impl ExtensionRemoteUiOperation {
                 title,
                 placement,
                 mouse_capture,
+                ..
             } => {
                 if *mouse_capture && *placement != ExtensionRemoteUiPlacement::Fullscreen {
                     return Err(invalid(
@@ -1322,6 +1344,7 @@ mod tests {
                     title: "Demo".into(),
                     placement: ExtensionRemoteUiPlacement::Fullscreen,
                     mouse_capture: false,
+                    blocked: None,
                 },
                 parent,
             )
@@ -1388,6 +1411,7 @@ mod tests {
             title: "🦀".repeat(MAX_EXTENSION_REMOTE_UI_TITLE_BYTES / 4),
             placement: ExtensionRemoteUiPlacement::Footer,
             mouse_capture: false,
+            blocked: None,
         };
         operation.validate().unwrap();
         if let ExtensionRemoteUiOperation::Open { title, .. } = &mut operation {
@@ -1420,6 +1444,37 @@ mod tests {
     }
 
     #[test]
+    fn remote_ui_open_carries_pi_blocked_kinds_only() {
+        let open = |extra: serde_json::Value| {
+            let mut value =
+                serde_json::json!({"parent_request_id":7, "surface_id":"demo", "title":"Demo"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<ExtensionRemoteUiOpenRequest>(value)
+        };
+        assert_eq!(open(serde_json::json!({})).unwrap().blocked, None);
+        for (wire, kind) in [
+            ("permission", ExtensionRemoteUiBlockedKind::Permission),
+            ("question", ExtensionRemoteUiBlockedKind::Question),
+            ("auth", ExtensionRemoteUiBlockedKind::Auth),
+        ] {
+            assert_eq!(
+                open(serde_json::json!({"blocked": wire})).unwrap().blocked,
+                Some(kind)
+            );
+        }
+        for wire in [
+            serde_json::json!("waiting"),
+            serde_json::json!(true),
+            serde_json::json!({"kind":"question"}),
+        ] {
+            assert!(open(serde_json::json!({"blocked": wire})).is_err());
+        }
+    }
+
+    #[test]
     fn remote_ui_mouse_capture_is_explicit_fullscreen_and_geometry_bounded() {
         let request: ExtensionRemoteUiOpenRequest = serde_json::from_value(serde_json::json!({
             "parent_request_id":7, "surface_id":"demo", "title":"Demo"
@@ -1435,6 +1490,7 @@ mod tests {
                 title: request.title,
                 placement: request.placement,
                 mouse_capture: request.mouse_capture,
+                blocked: None,
             };
             assert!(operation.validate().is_err());
         }
@@ -1465,6 +1521,7 @@ mod tests {
             title: "Demo".into(),
             placement: ExtensionRemoteUiPlacement::Fullscreen,
             mouse_capture: true,
+            blocked: None,
         };
         let pending = mailbox
             .reserve(ExtensionRequestId::Number(1), owner("one"), capture, None)
@@ -1489,6 +1546,7 @@ mod tests {
             title: "Demo".into(),
             placement: ExtensionRemoteUiPlacement::Fullscreen,
             mouse_capture: false,
+            blocked: None,
         };
         let pending = mailbox
             .reserve(
@@ -1603,6 +1661,7 @@ mod tests {
                             title: "Demo".into(),
                             placement: ExtensionRemoteUiPlacement::Footer,
                             mouse_capture: false,
+                            blocked: None,
                         },
                         Some(7),
                     )
@@ -1618,6 +1677,7 @@ mod tests {
                     title: "Demo".into(),
                     placement: ExtensionRemoteUiPlacement::Footer,
                     mouse_capture: false,
+                    blocked: None,
                 },
                 Some(8),
             )
@@ -1740,6 +1800,7 @@ mod tests {
                     title: "Editor".into(),
                     placement: ExtensionRemoteUiPlacement::Editor,
                     mouse_capture: false,
+                    blocked: None,
                 },
                 None,
             )

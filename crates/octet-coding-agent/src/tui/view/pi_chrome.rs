@@ -272,6 +272,7 @@ mod tests {
                     24
                 },
                 mouse_capture: false,
+                blocked: None,
                 native_editor: false,
             });
             let components = Arc::make_mut(&mut remote.components);
@@ -333,6 +334,7 @@ mod tests {
                     columns: 80,
                     rows: 24,
                     mouse_capture: false,
+                    blocked: None,
                     native_editor: placement == Placement::Editor,
                 });
             Arc::make_mut(&mut state.extension_ui.remote.components)

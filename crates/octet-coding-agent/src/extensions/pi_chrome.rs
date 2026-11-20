@@ -399,6 +399,7 @@ mod tests {
                         24
                     },
                     mouse_capture: false,
+                    blocked: None,
                     native_editor: false,
                 });
                 let components = Arc::make_mut(&mut remote.components);

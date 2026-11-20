@@ -116,3 +116,32 @@ test('pi.events listener faults are reported for the listener, never thrown to t
   assert.doesNotMatch(JSON.stringify(notices) + peer.stderr(), new RegExp(secret));
   await peer.close();
 });
+
+test('ui.custom blocked reports only Pi\'s kind on ui/open and validates it', async t => {
+  const [entry] = fixtures(t, [`export default pi => {
+    const component = done => ({ render: () => ['ask'], handleInput: () => done('ok'), invalidate() {} });
+    pi.registerCommand('ask', { async handler(args, ctx) {
+      const kind = String(args).trim();
+      const blocked = kind === 'plain' ? undefined : { kind, message: '${secret}' };
+      try { await ctx.ui.custom((_tui, _theme, _keys, done) => component(done), { overlay: true, ...(blocked ? { blocked } : {}) }); }
+      catch (error) { ctx.ui.notify('refused ' + error.message); }
+    } });
+  };`]);
+  const peer = launch(t, [entry]); await peer.init(); await peer.start();
+  const asked = peer.command('ask', ['question']);
+  const open = await peer.wait(f => f.method === 'ui/open');
+  assert.equal(open.params.blocked, 'question');
+  await asked.response;
+  peer.notify('ui/key', { surface_id: open.params.surface_id, key: 'Enter', kind: 'press', modifiers: [] });
+  await peer.wait(f => f.method === 'ui/close');
+  const plain = peer.command('ask', ['plain']);
+  const second = await peer.wait(f => f.method === 'ui/open' && f.params.surface_id !== open.params.surface_id);
+  assert.equal(Object.hasOwn(second.params, 'blocked'), false);
+  await plain.response;
+  peer.notify('ui/key', { surface_id: second.params.surface_id, key: 'Enter', kind: 'press', modifiers: [] });
+  await peer.wait(f => f.method === 'ui/close' && f.params.surface_id === second.params.surface_id);
+  await peer.command('ask', ['waiting']).response;
+  await peer.wait(f => f.method === 'notification' && /^refused .*blocked kind/.test(f.params.message));
+  assert.doesNotMatch(JSON.stringify(peer.seen.filter(f => f.method?.startsWith('ui/'))), new RegExp(secret));
+  await peer.close();
+});

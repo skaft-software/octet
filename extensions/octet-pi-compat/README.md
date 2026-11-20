@@ -407,7 +407,9 @@ host-owned, an active native search query bypasses listeners, and input beyond t
 [`docs/pi-extension-api.md`](../../docs/pi-extension-api.md) row 23 for the
 deliberate differences from Pi's unbounded, blocking chain.
 - `ctx.ui.custom`, footer/header/widget/editor factories, safe component focus,
-  input listeners and overlay composition. Custom factories receive a read-only
+  input listeners and overlay composition. `custom({ blocked })` reports octet as
+  blocked on that kind (OSC 7501) until `done()`, as in Pi 1.6; the message is
+  not exported. Custom factories receive a read-only
   snapshot of the actual native keybindings, including user overrides and reloads;
   missing snapshots/actions refuse rather than inventing Pi defaults. Host Ctrl+D
   and fullscreen Ctrl+G rescue remain reserved. Editor components occupy only the

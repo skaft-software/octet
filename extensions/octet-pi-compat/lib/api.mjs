@@ -358,13 +358,20 @@ export function createContext(runtime, store, replaced = false) {
     // would wait for a foreground surface that print/plain runs never create, and
     // the hook round trip would time out instead of returning Pi's value.
     if (!uiAvailable()) return Promise.resolve(undefined);
-    runtime.require('remote_ui'); foreground(); fields(options, ['overlay', 'overlayOptions', 'onHandle'], 'ui.custom options');
+    runtime.require('remote_ui'); foreground(); fields(options, ['overlay', 'overlayOptions', 'onHandle', 'blocked'], 'ui.custom options');
     if (typeof factory !== 'function') invalid('ui.custom factory');
     if (options.overlay !== undefined && typeof options.overlay !== 'boolean') invalid('ui.custom overlay');
     if (options.onHandle !== undefined && typeof options.onHandle !== 'function') invalid('ui.custom onHandle');
+    // Pi BlockedStatus { kind, message } (interactive-mode.ts:3151-3225). Only the kind reaches the host:
+    // octet's program status never exports surface text.
+    if (options.blocked !== undefined) {
+      fields(options.blocked, ['kind', 'message'], 'ui.custom blocked');
+      if (!['permission', 'question', 'auth'].includes(options.blocked.kind)) invalid('ui.custom blocked kind');
+      if (options.blocked.message !== undefined) bounded(options.blocked.message, 'ui.custom blocked message', 4096, { controls: true });
+    }
     let finish, reject;
     const result = new Promise((resolve, fail) => { finish = resolve; reject = fail; });
-    const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions ?? (() => undefined)) : undefined, onHandle: options.onHandle });
+    const mounting = runtime.ui.mount(store, 'fullscreen', 'Pi component', factory, { done: finish, reject, overlayOptions: options.overlay ? (options.overlayOptions ?? (() => undefined)) : undefined, onHandle: options.onHandle, blocked: options.blocked?.kind });
     runtime.track(mounting, store);
     userAnswer(result);
     return Promise.all([mounting, result]).then(([, value]) => value);

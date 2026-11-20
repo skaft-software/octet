@@ -53,6 +53,9 @@ pub(crate) struct MountView {
     pub(crate) columns: u16,
     pub(crate) rows: u16,
     pub(crate) mouse_capture: bool,
+    /// Pi `ctx.ui.custom({ blocked })`: the program waits on the user while
+    /// this surface is open.
+    pub(crate) blocked: Option<octet_agent::ExtensionRemoteUiBlockedKind>,
     pub(crate) native_editor: bool,
 }
 
@@ -422,6 +425,7 @@ impl RemoteUi {
                 title,
                 placement,
                 mouse_capture,
+                blocked,
             } => {
                 if mouse_capture && placement != ExtensionRemoteUiPlacement::Fullscreen {
                     return Err((
@@ -508,6 +512,7 @@ impl RemoteUi {
                         rows,
                         native_editor: false,
                         mouse_capture,
+                        blocked,
                     },
                     revision: None,
                     held: (self.handoff_pending

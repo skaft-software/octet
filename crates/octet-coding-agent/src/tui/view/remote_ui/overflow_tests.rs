@@ -56,6 +56,7 @@ fn projection(size: (u16, u16), widget_rows: usize, footer_rows: usize) -> Proje
                 size.1
             },
             mouse_capture: false,
+            blocked: None,
             native_editor: false,
         });
     }

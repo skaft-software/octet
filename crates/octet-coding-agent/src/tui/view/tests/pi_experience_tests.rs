@@ -283,6 +283,7 @@ fn fullscreen_live_frames_stay_inside_the_terminal() {
                         columns: width,
                         rows: height,
                         mouse_capture: false,
+                        blocked: None,
                         native_editor: false,
                     }],
                     chrome: None,

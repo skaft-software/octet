@@ -41,6 +41,7 @@ fn open_editor(state: &ProtocolReadState) {
                 title: "Editor".into(),
                 placement: crate::ExtensionRemoteUiPlacement::Editor,
                 mouse_capture: false,
+                blocked: None,
             },
             Some(7),
         )
@@ -193,6 +194,7 @@ fn editor_checkpoint_plain_calls_and_nonmatching_owners_keep_live_parent_lifetim
                             title: "Not an editor".into(),
                             placement: crate::ExtensionRemoteUiPlacement::Fullscreen,
                             mouse_capture: false,
+                            blocked: None,
                         },
                         Some(7),
                     )
@@ -220,6 +222,7 @@ fn editor_checkpoint_plain_calls_and_nonmatching_owners_keep_live_parent_lifetim
                                     title: "Editor".into(),
                                     placement: crate::ExtensionRemoteUiPlacement::Editor,
                                     mouse_capture: false,
+                                    blocked: None,
                                 },
                                 Some(7),
                             )

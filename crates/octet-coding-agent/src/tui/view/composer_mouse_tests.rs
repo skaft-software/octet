@@ -446,6 +446,7 @@ fn composer_click_preserves_custom_editor_native_mirror_and_list_region_ownershi
             columns: 40,
             rows: 24,
             mouse_capture: false,
+            blocked: None,
             native_editor: false,
         }],
         ..Projection::default()

@@ -441,6 +441,7 @@ pub(super) fn handle_protocol_line(line: &[u8], state: &ProtocolReadState) -> Re
                         title: request.title,
                         placement: request.placement,
                         mouse_capture: request.mouse_capture,
+                        blocked: request.blocked,
                     },
                 )?;
             }

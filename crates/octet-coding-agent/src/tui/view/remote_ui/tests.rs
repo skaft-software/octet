@@ -25,6 +25,7 @@ fn projection(size: (u16, u16), entries: &[(Placement, &str)]) -> Projection {
                 size.1
             },
             mouse_capture: false,
+            blocked: None,
             native_editor: false,
         });
     }

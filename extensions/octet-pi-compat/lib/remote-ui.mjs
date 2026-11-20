@@ -323,12 +323,12 @@ export class RemoteTUI {
 
 export class RemoteUI {
   constructor(runtime) { this.runtime = runtime; this.chromeSnapshot = new ChromeSnapshot(runtime); this.surfaces = new Map(); this.slots = new Map(); this.counter = 0; }
-  async mount(store, placement, title, factory, { done, reject, slot, overlayOptions, onHandle } = {}) {
+  async mount(store, placement, title, factory, { done, reject, slot, overlayOptions, onHandle, blocked } = {}) {
     this.runtime.require('remote_ui'); this.runtime.assertOwner(store);
     if (this.surfaces.size >= 16) throw rpcError(-32012, 'bounds_exceeded remote surfaces');
     if (slot) await this.clearSlot(store, slot);
     const surface = {
-      id: `pi-${++this.counter}`, runtime: this.runtime, placement, store, closed: false, opened: false, revision: 0, scheduled: false,
+      id: `pi-${++this.counter}`, runtime: this.runtime, placement, store, closed: false, opened: false, revision: 0, scheduled: false, blocked,
       columns: 80, rows: 24, resolve: done, reject, ready: false, dirty: false, initialInputs: [],
       phase: 'admitting', desiredMouseCapture: Boolean(store.mouseCapture), requestedMouseCapture: false, admittedMouseCapture: false,
     };
@@ -411,6 +411,7 @@ export class RemoteUI {
     surface.requestedMouseCapture = capture;
     const geometry = await this.runtime.hostCall('ui/open', {
       surface_id: surface.id, title, placement: surface.placement, mouse_capture: capture,
+      ...(surface.blocked ? { blocked: surface.blocked } : {}),
     }, surface.store);
     // Observed retirement already restored the host lease; never revive it or
     // send a duplicate close because an earlier successful ACK arrived late.

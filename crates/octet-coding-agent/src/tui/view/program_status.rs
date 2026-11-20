@@ -46,6 +46,24 @@ fn activity_with_foreground(
     if state.tool_input_prompt.is_some() {
         return ProgramStatus::Blocked(BlockedKind::Question);
     }
+    // Pi 1.6.0 ctx.ui.custom `blocked` (interactive-mode.ts:3151-3225): a surface
+    // waits on the user from mount until `done()`, also while hidden; the most
+    // recently opened one is on top, as Pi reports its top dialog.
+    if let Some(kind) = state
+        .extension_ui
+        .remote
+        .mounts
+        .iter()
+        .rev()
+        .find_map(|mount| mount.blocked)
+    {
+        use octet_agent::ExtensionRemoteUiBlockedKind as Kind;
+        return ProgramStatus::Blocked(match kind {
+            Kind::Permission => BlockedKind::Permission,
+            Kind::Question => BlockedKind::Question,
+            Kind::Auth => BlockedKind::Auth,
+        });
+    }
     if let Some(status) = foreground {
         return status;
     }
