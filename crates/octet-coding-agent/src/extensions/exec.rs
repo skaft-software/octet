@@ -107,6 +107,22 @@ async fn execute(
     .await
 }
 
+// Pi 1.6.0 packages/coding-agent/src/core/exec.ts:151-158: a command a signal
+// ended reports 128 + the signal number, like a shell (143 for SIGTERM), so a
+// timeout, abort or crash never reads as success; no code and no signal is 1.
+#[cfg(not(windows))]
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
+}
+
+// Pi spawns an already-aborted command and stops it with SIGTERM
+// (exec.ts:89-97), so a cancellation before start reports what that does.
+const CANCELLED_BEFORE_START_CODE: i32 = 128 + 15;
+
 async fn execute_with_frontend(
     config: &Config,
     principal: &str,
@@ -174,10 +190,12 @@ async fn execute_with_frontend(
     };
     tokio::select! {
         result = broker.authorize(&intent, progress.as_ref()) => { result?; }
-        _ = abandoned => return Ok(serde_json::json!({"stdout":"", "stderr":"", "code":0, "killed":true})),
+        _ = abandoned => return Ok(serde_json::json!({"stdout":"", "stderr":"", "code":CANCELLED_BEFORE_START_CODE, "killed":true})),
     }
     if cancelled() {
-        return Ok(serde_json::json!({"stdout":"", "stderr":"", "code":0, "killed":true}));
+        return Ok(
+            serde_json::json!({"stdout":"", "stderr":"", "code":CANCELLED_BEFORE_START_CODE, "killed":true}),
+        );
     }
     #[cfg(windows)]
     anyhow::bail!("direct exec process-group supervision is unavailable on Windows");
@@ -237,7 +255,7 @@ async fn execute_with_frontend(
             };
             let (status, stdout, stderr) = tokio::try_join!(wait, async { capture(stdout, output_limit).await.map_err(std::io::Error::other) },
                 async { capture(stderr, output_limit).await.map_err(std::io::Error::other) })?;
-            Ok::<_, anyhow::Error>(serde_json::json!({"stdout":stdout, "stderr":stderr, "code":status.code().unwrap_or(0), "killed":killed}))
+            Ok::<_, anyhow::Error>(serde_json::json!({"stdout":stdout, "stderr":stderr, "code":exit_code(status), "killed":killed}))
         }.await;
         // Kill remaining descendants even after the leader exits; cancellation
         // or a pipe/read failure must never detach a process tree.
@@ -324,5 +342,34 @@ mod tests {
         .unwrap();
         assert_eq!(result["stdout"], "partial");
         assert_eq!(result["killed"], true);
+        // A timeout stops the command with SIGTERM: 128 + 15, never success.
+        assert_eq!(result["code"], 143);
+
+        let crashed = execute(
+            &config,
+            "test",
+            1,
+            &request(dir.path(), "kill -KILL $$"),
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(crashed["code"], 137);
+        assert_eq!(crashed["killed"], false);
+
+        let cancelled = execute(
+            &config,
+            "test",
+            1,
+            &request(dir.path(), "touch ran"),
+            || true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cancelled,
+            serde_json::json!({"stdout":"", "stderr":"", "code":143, "killed":true})
+        );
+        assert!(!dir.path().join("ran").exists());
     }
 }
