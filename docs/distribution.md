@@ -17,7 +17,7 @@ repository. Don't recreate the old name.
 
 ## Package identities
 
-The distribution target is **0.10.5**.
+The distribution target is **0.10.6**, a source candidate, not a published release.
 The distribution version does not change independent API and schema versions. The [0.7.6 release](releases/v0.7.6.md)
 keeps its historical version-matched assets and channel evidence.
 
@@ -30,7 +30,7 @@ keeps its historical version-matched assets and channel evidence.
 | Canonical TypeScript source package | `@skaft-software/octet-extension-api-v03` |
 | Executable bundles | `octet-codemode`, `octet-computer-use`, `octet-mcp`, `octet-pi-compat`, `octet-subagents`, `octet-web-search` |
 | Product environment and roots | `OCTET_*`, `~/.octet`, project `.octet`; packaged docs `share/octet` |
-| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.5`; installed compatibility `requires_octet = "=0.10.5"`; independent Rust SDK remains `0.8.2` |
+| Product, Python/TypeScript SDK source and six bundle distribution versions | `0.10.6`; installed compatibility `requires_octet = "=0.10.6"`; independent Rust SDK remains `0.8.2` |
 | Independent contracts | current extension API `0.4`, retained `0.1` / `0.2` and canonical `0.3`; native-host protocol `1`; schema revisions remain independent |
 | Source/release repository | `skaft-software/octet`; v0.7.0 signatures retain `skaft-software/ygg` |
 | Website | `https://octet.skaft.org`; deployment is separate from native publication |

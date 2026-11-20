@@ -6,7 +6,7 @@
 
 ## octet 0.10.5
 
-The commands below install the published octet **0.10.5** release.
+The commands below install the published octet **0.10.5** release. The **0.10.6 release candidate** is source only.
 
 Install the native agent below, then
 [enable the optional Pi adapter](pi-compatibility.md). The
@@ -121,7 +121,7 @@ send the notes or the command to the model.
 
 ## Build from a checkout
 
-This checkout targets octet 0.10.5. Check `octet --version`,
+This checkout targets the octet 0.10.6 release candidate. Check `octet --version`,
 and use matching source extension manifests from this checkout. A source build isn't a signed
 release artifact and doesn't replace an installed binary.
 
@@ -182,7 +182,7 @@ reference](cli.md#packages).
 | `octet-pi-compat` | [Pi 1.0.2 compatibility adapter](pi-compatibility.md). Enabling the stock bridge automatically mirrors and executes enabled Pi factories with OS permissions; not blanket parity. |
 
 The six source executable-bundle manifests declare API `0.4`, distribution
-version `0.10.5`, and require octet `=0.10.5`. Older bundles stay pinned to their host.
+version `0.10.6`, and require octet `=0.10.6`. Published bundles stay pinned to their host.
 Distribution and host versions are independent boundaries, and an API number
 doesn't bypass the exact host pin. See [current authoring](extensions.md) for
 the Python API 0.4 process recipe and the retained API 0.3 conformance example.

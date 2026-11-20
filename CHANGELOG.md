@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-11-20
+
 ### Added
 
 - Archive Pi v3 transcripts as private HTML with `octet sessions import --transcript-only`, without replaying provider state.

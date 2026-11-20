@@ -21,6 +21,7 @@ or another major series is refused. Nothing silently downgrades Pi.
 
 See the [v0.10.5 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.5)
 for downloads and the [release notes](releases/v0.10.5.md) for changes.
+This checkout describes the v0.10.6 source candidate.
 Pi support requires octet 0.10.3 or later; v0.9.6 does not ship the adapter.
 
 For API coverage and known gaps, see the [API ledger](pi-extension-api.md).
