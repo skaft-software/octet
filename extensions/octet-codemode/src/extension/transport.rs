@@ -49,9 +49,43 @@ impl Delivery {
         *self.0.lock().unwrap() = State::Settled;
     }
 }
-struct Frame {
-    data: Vec<u8>,
-    delivery: Option<Arc<Delivery>>,
+enum Frame {
+    Message(Vec<u8>, Option<Arc<Delivery>>),
+    Progress,
+}
+
+const MESSAGE_SLOTS: usize = 128;
+
+#[derive(Default)]
+struct Outbox {
+    messages: AtomicUsize,
+    bytes: AtomicUsize,
+    // A single replaceable snapshot and FIFO wakeup, separate from the 128
+    // reliable slots / 8 MiB. Never hold the lock during a pipe write.
+    progress: Mutex<Option<Value>>,
+}
+impl Outbox {
+    fn write(&self, frame: Frame, output: &mut impl Write) -> std::io::Result<()> {
+        let mut write = |data: &[u8]| output.write_all(data).and_then(|_| output.flush());
+        match frame {
+            Frame::Message(data, delivery) => {
+                self.messages.fetch_sub(1, Ordering::Relaxed);
+                let result = if delivery.is_none_or(|d| d.begin()) {
+                    write(&data)
+                } else {
+                    Ok(())
+                };
+                self.bytes.fetch_sub(data.len(), Ordering::Relaxed);
+                result
+            }
+            Frame::Progress => {
+                let latest = self.progress.lock().unwrap().take().unwrap();
+                let mut data = serde_json::to_vec(&latest)?;
+                data.push(b'\n');
+                write(&data)
+            }
+        }
+    }
 }
 
 pub(super) fn reader() -> Result<mpsc::Receiver<Result<Vec<u8>>>> {
@@ -93,17 +127,17 @@ pub(super) fn reader() -> Result<mpsc::Receiver<Result<Vec<u8>>>> {
 
 pub(super) struct Writer {
     sender: RefCell<Option<blocking::SyncSender<Frame>>>,
-    bytes: Arc<AtomicUsize>,
+    outbox: Arc<Outbox>,
     done: RefCell<Option<oneshot::Receiver<()>>>,
     failure: watch::Sender<Option<String>>,
 }
 impl Writer {
     pub fn new() -> Result<(Self, watch::Receiver<Option<String>>)> {
-        let (sender, receiver) = blocking::sync_channel::<Frame>(128);
+        let (sender, receiver) = blocking::sync_channel(MESSAGE_SLOTS + 1);
         let (done_tx, done) = oneshot::channel();
         let (failure, failures) = watch::channel(None);
-        let bytes = Arc::new(AtomicUsize::new(0));
-        let written = bytes.clone();
+        let outbox = Arc::new(Outbox::default());
+        let pump = outbox.clone();
         let failed = failure.clone();
         std::thread::Builder::new()
             .name("codemode-stdout".into())
@@ -111,13 +145,7 @@ impl Writer {
                 let output = std::io::stdout();
                 let mut output = output.lock();
                 while let Ok(frame) = receiver.recv() {
-                    let result = if frame.delivery.as_ref().is_none_or(|d| d.begin()) {
-                        output.write_all(&frame.data).and_then(|_| output.flush())
-                    } else {
-                        Ok(())
-                    };
-                    written.fetch_sub(frame.data.len(), Ordering::Relaxed);
-                    if let Err(error) = result {
+                    if let Err(error) = pump.write(frame, &mut output) {
                         failed.send_replace(Some(error.to_string()));
                         break;
                     }
@@ -127,7 +155,7 @@ impl Writer {
         Ok((
             Self {
                 sender: RefCell::new(Some(sender)),
-                bytes,
+                outbox,
                 done: RefCell::new(Some(done)),
                 failure,
             },
@@ -136,17 +164,17 @@ impl Writer {
     }
     #[cfg(test)]
     pub fn gated_for_test() -> (Self, TestWriter) {
-        let (sender, receiver) = blocking::sync_channel(128);
+        let (sender, receiver) = blocking::sync_channel(MESSAGE_SLOTS + 1);
         let (failure, _) = watch::channel(None);
-        let bytes = Arc::new(AtomicUsize::new(0));
+        let outbox = Arc::new(Outbox::default());
         (
             Self {
                 sender: RefCell::new(Some(sender)),
-                bytes: bytes.clone(),
+                outbox: outbox.clone(),
                 done: RefCell::new(None),
                 failure,
             },
-            TestWriter { receiver, bytes },
+            TestWriter { receiver, outbox },
         )
     }
     pub fn send(&self, value: &Value, delivery: Option<Arc<Delivery>>) -> Result<()> {
@@ -156,7 +184,11 @@ impl Writer {
         }
         data.push(b'\n');
         let size = data.len();
+        if self.outbox.messages.load(Ordering::Relaxed) >= MESSAGE_SLOTS {
+            return self.exhausted();
+        }
         let reserve = self
+            .outbox
             .bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n + size <= 8 * FRAME_BYTES).then_some(n + size)
@@ -164,15 +196,29 @@ impl Writer {
         if reserve.is_err() {
             return self.exhausted();
         }
+        self.outbox.messages.fetch_add(1, Ordering::Relaxed);
         let sender = self.sender.borrow();
         let sent = sender
             .as_ref()
-            .is_some_and(|s| s.try_send(Frame { data, delivery }).is_ok());
+            .is_some_and(|s| s.try_send(Frame::Message(data, delivery)).is_ok());
         if !sent {
-            self.bytes.fetch_sub(size, Ordering::Relaxed);
+            self.outbox.messages.fetch_sub(1, Ordering::Relaxed);
+            self.outbox.bytes.fetch_sub(size, Ordering::Relaxed);
             return self.exhausted();
         }
         Ok(())
+    }
+    pub fn progress(&self, value: Value) {
+        let mut pending = self.outbox.progress.lock().unwrap();
+        if pending.is_some()
+            || self
+                .sender
+                .borrow()
+                .as_ref()
+                .is_some_and(|s| s.try_send(Frame::Progress).is_ok())
+        {
+            *pending = Some(value);
+        }
     }
     fn exhausted(&self) -> Result<()> {
         self.failure.send_replace(Some(
@@ -201,7 +247,7 @@ impl Writer {
 #[cfg(test)]
 pub(super) struct TestWriter {
     receiver: blocking::Receiver<Frame>,
-    bytes: Arc<AtomicUsize>,
+    outbox: Arc<Outbox>,
 }
 #[cfg(test)]
 impl TestWriter {
@@ -209,12 +255,9 @@ impl TestWriter {
         self.receiver
             .try_iter()
             .filter_map(|frame| {
-                self.bytes.fetch_sub(frame.data.len(), Ordering::Relaxed);
-                frame
-                    .delivery
-                    .as_ref()
-                    .is_none_or(|d| d.begin())
-                    .then(|| serde_json::from_slice(&frame.data).unwrap())
+                let mut bytes = Vec::new();
+                self.outbox.write(frame, &mut bytes).unwrap();
+                (!bytes.is_empty()).then(|| serde_json::from_slice(&bytes).unwrap())
             })
             .collect()
     }
@@ -223,6 +266,20 @@ impl TestWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_burst_coalesces_without_taking_any_message_slots() {
+        let (writer, gate) = Writer::gated_for_test();
+        for update in 0..512 {
+            writer.progress(Value::from(update));
+        }
+        for _ in 0..MESSAGE_SLOTS {
+            writer.send(&Value::Null, None).unwrap();
+        }
+        let frames = gate.drain();
+        assert_eq!(frames.len(), MESSAGE_SLOTS + 1);
+        assert_eq!(frames[0], 511);
+        assert!(frames[1..].iter().all(Value::is_null));
+    }
     #[test]
     fn cancellation_skips_queued_frames_and_follows_started_frames_once() {
         let queued = Delivery::new();

@@ -317,6 +317,16 @@ pub(super) fn render_tool(
         }
     }
 
+    // A script can succeed after catching a nested failure. Keep the call
+    // ledger on its parent card, even when the theme hides successful output.
+    if panel.name == "codemode" {
+        output_lines.append(super::codemode_render::project_calls(
+            panel,
+            theme,
+            nested_width,
+            verbose_tools,
+        ));
+    }
     if !quiet_summary || panel.is_error {
         match panel.name.as_str() {
             "codemode" => output_lines.append(super::codemode_render::project_output(

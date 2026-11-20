@@ -827,10 +827,11 @@ async fn codemode_bundle_runs_vendored_vm_through_host_transport() {
     std::fs::create_dir(&standalone).unwrap();
     std::fs::write(
         standalone.join(EXTENSION_MANIFEST_FILENAME),
-        r#"name = "octet-codemode"
-version = "0.9.6"
+        format!(
+            r#"name = "octet-codemode"
+version = "{version}"
 api_version = "0.4"
-requires_octet = "=0.9.6"
+requires_octet = "={version}"
 [entrypoint]
 command = "octet-codemode"
 args = ["serve", "--engine", "wasi"]
@@ -842,6 +843,8 @@ network = false
 tools = ["codemode"]
 commands = ["codemode"]
 "#,
+            version = env!("CARGO_PKG_VERSION")
+        ),
     )
     .unwrap();
     let bundle_binary = standalone.join("octet-codemode");
@@ -925,6 +928,7 @@ commands = ["codemode"]
     let cancel = CancellationToken::default();
     let connection = read_std_lock(&process.inner.connection).clone();
     let (started, _operation) = oneshot::channel();
+    let (progress, mut updates) = ToolProgressSink::bounded_channel();
     let run = process.call_tool_controlled(
         connection,
         definition,
@@ -932,7 +936,7 @@ commands = ["codemode"]
         json!({"code":"store('never',1);await tools.echo({});"}),
         process.current_context_for_resource_owner("acceptance-cancel"),
         cancel.clone(),
-        ToolProgressSink::null().with_composition(waiting.clone()),
+        progress.with_composition(waiting.clone()),
         started,
     );
     tokio::pin!(run);
@@ -941,6 +945,22 @@ commands = ["codemode"]
         result = &mut run => panic!("completed before waiting: {result:?}"),
         _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("runner did not call host"),
     }
+    // A real host must admit this snapshot *while* the nested call is held,
+    // before the runner can return a final ledger. No output parts are needed.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(update) = updates.recv().await {
+            if let crate::tool::ToolProgress::PartialResult(result) = update {
+                let call = &result.metadata().unwrap()["calls"][0];
+                assert_eq!(call["name"], "echo");
+                assert_eq!(call["status"], "running");
+                assert!(result.text.is_empty());
+                return;
+            }
+        }
+        panic!("progress channel closed before the running call reached the host");
+    })
+    .await
+    .expect("host did not receive the nested call");
     cancel.cancel();
     assert!(run.await.is_err());
     assert!(lock_std_mutex(&waiting.writes).is_empty());

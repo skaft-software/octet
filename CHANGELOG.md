@@ -5,6 +5,7 @@
 ### Added
 
 - Archive Pi v3 transcripts as private HTML with `octet sessions import --transcript-only`, without replaying provider state.
+- Watch nested tool calls run and finish inside their Codemode card, including failures the script catches.
 
 ### Fixed
 

@@ -385,6 +385,90 @@ class EngineCases:
         b.handler = None
         self.assertFalse((await b.run('return "recovered";'))["is_error"])
 
+    async def test_live_nested_calls_keep_invocation_order_and_caught_error(self):
+        b = await self.broker(lambda m: HOLD if m["method"] == "composition/call" else None)
+        parent = await b.start_code('text("script-only-output"); const rs=await Promise.allSettled('
+                                    '[tools.first({key:1}), tools.second({key:2})]);'
+                                    'return rs.map(r=>r.status);')
+        await b.wait(lambda _: len(b.calls) == 2)
+
+        def snapshot(m):
+            if m.get("method") == "$/progress" and m["params"]["request_id"] == parent:
+                event = m["params"]["event"]
+                if event["type"] == "partial_result":
+                    return event["result"]
+            return None
+
+        async def statuses(*expected):
+            message = await b.wait(lambda m: (s := snapshot(m)) is not None and
+                                   [r["status"] for r in s["metadata"]["calls"]] == list(expected))
+            result = snapshot(message)
+            self.assertEqual(result["content"], [])
+            self.assertFalse(result.get("is_error", False))
+            self.assertEqual(result["metadata"]["calls_omitted"], 0)
+            rows = result["metadata"]["calls"]
+            self.assertEqual([(r["id"], r["name"]) for r in rows],
+                             [(f"{parent}/1", "first"), (f"{parent}/2", "second")])
+            self.assertEqual([json.loads(r["args"]) for r in rows], [{"key": 1}, {"key": 2}])
+            return rows
+
+        await statuses("running", "running")
+        calls = {m["params"]["name"]: m for m in b.calls}
+        await b.deny(calls["second"])
+        rows = await statuses("running", "error")  # first is still held; no parent result yet
+        self.assertIsInstance(rows[1]["duration_ms"], int)
+        self.assertFalse(any(m.get("id") == parent for m in b.messages))
+        await b.respond(calls["first"], {"value": {"nested-only-output": PNG}})
+        final = (await b.wait(lambda m: m.get("id") == parent))["result"]
+        await statuses("ok", "error")
+        self.assertFalse(final["is_error"], text(final))
+        self.assertIn('["fulfilled","rejected"]', text(final))
+        self.assertEqual([r["status"] for r in final["metadata"]["calls"]], ["ok", "error"])
+        updates = [m["params"] for m in b.messages if m.get("method") == "$/progress"]
+        sequences = [p["sequence"] for p in updates]
+        self.assertEqual(sequences, sorted(set(sequences)))
+        for private in ("script-only-output", "nested-only-output", PNG):
+            self.assertNotIn(private, dumps(updates))
+
+    async def test_live_call_tail_stays_bounded_at_script_limit(self):
+        b = await self.broker()
+        result = await b.run('const pad=String.fromCharCode(34).repeat(1024);'
+                             'return (await Promise.all(Array.from({length:256}, (_,i)=>'
+                             'tools.second({pad,i})))).length;')
+        self.assertTrue(text(result).endswith("\n256"), text(result))
+        self.assertEqual(sorted(m["params"]["arguments"]["i"] for m in b.calls), list(range(256)))
+        final = result["metadata"]
+        self.assertEqual(final["call_count"], 256)
+        self.assertEqual(len(final["calls"]) + final["calls_omitted"], 256)
+        self.assertGreater(final["calls_omitted"], 0)  # the final byte bound, not the live row cap
+        self.assertLessEqual(len(dumps(final).encode()), 64 * 1024)
+        updates = [m["params"]["event"]["result"] for m in b.messages if m.get("method") == "$/progress"
+                   and m["params"]["event"]["type"] == "partial_result"]
+        last = updates[-1]["metadata"]
+        self.assertEqual(last["calls_omitted"] + len(last["calls"]), 256)
+        self.assertGreater(last["calls_omitted"], 0)
+        self.assertGreater(len(last["calls"]), 8)  # expansion works while the parent is running
+        for update in updates:
+            self.assertEqual(update["content"], [])
+            metadata = update["metadata"]
+            self.assertLessEqual(len(dumps(metadata).encode()), 64 * 1024)
+            rows, omitted = metadata["calls"], metadata["calls_omitted"]
+            self.assertLessEqual(omitted + len(rows), 256)
+            self.assertEqual([row["id"] for row in rows],
+                             [f"2/{ordinal}" for ordinal in range(omitted + 1, omitted + len(rows) + 1)])
+
+    async def test_nested_calls_without_progress_negotiation(self):
+        b = await self.broker(initialize=False)
+        init = await b.request("initialize", offer(("tool_composition_v1",)))
+        features = (await b.wait(lambda m: m.get("id") == init))["result"]["protocol"]["features"]
+        self.assertNotIn("request_progress", features)
+        result = await b.run('return await tools.second({value:3});')
+        self.assertFalse(result["is_error"], text(result))
+        self.assertTrue(text(result).endswith("\n6"))
+        self.assertEqual(result["metadata"]["calls"][0]["status"], "ok")
+        self.assertEqual(len(b.calls), 1)
+        self.assertFalse(any(m.get("method") == "$/progress" for m in b.messages))
+
     async def test_rejected_host_effects_and_invalid_guest_arguments(self):
         b = await self.broker(lambda m: HOLD if m["method"] == "composition/call" else None)
         id_ = await b.start_code('return (await Promise.allSettled([tools.first({}),tools.second({})])).map(x=>x.status);')
@@ -501,6 +585,7 @@ class EngineCases:
             prior, commits = len(b.calls), len(b.commits)
             result = await b.run('store("terminal",true);for(let i=0;i<20;i++)tools.first({value:i});' + ending)
             self.assertEqual(result["is_error"], fails, text(result))
+            self.assertEqual([r["status"] for r in result["metadata"]["calls"]], ["cancelled"] * 20)
             self.assertEqual(len(b.commits) - commits, 0 if fails else 1)
             self.assertLessEqual(len(b.calls) - prior, 4)
             for call in b.calls[prior:]:

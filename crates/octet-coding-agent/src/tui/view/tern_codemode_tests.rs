@@ -308,6 +308,56 @@ fn safe_boundary_controls_share_native_queue_chrome_without_input_authority() {
 }
 
 #[test]
+fn codemode_native_partial_ledger_is_not_script_output() {
+    use octet_agent::{AgentEvent, ToolOutput, ToolProgress};
+    let (mut shell, mut surface, _) = setup(10);
+    let call = ToolCallId("live-ledger".into());
+    shell.on_agent_event(&AgentEvent::ToolStarted {
+        id: call.clone(),
+        name: "codemode".into(),
+        args: json!({"code":"return 1"}),
+    });
+    shell.on_agent_event(&AgentEvent::ToolProgress {
+        id: call.clone(),
+        progress: ToolProgress::PartialResult(Arc::new(ToolOutput::new("").try_with_metadata(json!({"calls":[
+            {"name":"read", "status":"running"}, {"name":"search", "status":"error", "error":"caught failure"}
+        ]})).unwrap())),
+    });
+    surface.flush(&shell.state).unwrap();
+    let identity = shell.state.borrow().transcript_commit_ids[0];
+    let ledger = id(identity, "calls");
+    let node = find_node(&surface.sent.main, &ledger).unwrap();
+    assert_eq!(node.k, Kind::Text);
+    let spans = node.p.as_ref().unwrap().as_map()["spans"]
+        .as_array()
+        .unwrap();
+    assert!(spans.iter().any(|s| s["t"] == "…" && s["s"] == "warning"));
+    assert!(spans.iter().any(|s| s["t"] == "✗" && s["s"] == "error"));
+    assert!(!serde_json::to_string(node)
+        .unwrap()
+        .contains("caught failure"));
+    let out = id(identity, "out");
+    assert!(find_node(&surface.sent.main, &out).is_none());
+    // A final result replaces, rather than perpetuating, a partial snapshot.
+    shell.on_agent_event(&AgentEvent::ToolFinished {
+        id: call,
+        result: Ok(ToolOutput::new("literal result")),
+        duration: Duration::from_millis(3),
+    });
+    surface.flush(&shell.state).unwrap();
+    assert!(find_node(&surface.sent.main, &ledger).is_none());
+    assert_eq!(
+        find_node(&surface.sent.main, &out)
+            .unwrap()
+            .p
+            .as_ref()
+            .unwrap()
+            .as_map()["text"],
+        "literal result"
+    );
+}
+
+#[test]
 fn codemode_failure_with_only_the_status_mounts_no_empty_output_block() {
     // The failure reason is already the card's status; an output that is just
     // that line (or blank) must not mount an empty code block.

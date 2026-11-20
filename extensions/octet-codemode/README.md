@@ -139,6 +139,13 @@ reveals the retained output. Preview elision does not discard captured data or
 change the model-visible result, tool approvals or execution. Native output has
 its own code surface rather than a raw generic tool-card dump.
 
+Nested calls appear inside the parent card in invocation order. Each row shows
+whether the call is running, succeeded, failed or was cancelled; a script that
+catches a failure can still succeed. The compact card shows the last eight
+retained calls. Ctrl+O shows the other retained rows and their error details.
+These rows are separate from script output. Live updates require negotiated
+request progress; the final call summary does not.
+
 ## Performance
 
 `bench/benchmark.py` drives the same fixture host and the same scripts through

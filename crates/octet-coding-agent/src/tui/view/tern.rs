@@ -1895,6 +1895,16 @@ fn tool_node(
             .unwrap_or(!verbose && panel.finished)
     };
     let mut body = Vec::new();
+    if script_output {
+        let calls = super::codemode_render::call_spans(panel, verbose);
+        if !calls.is_empty() {
+            body.push(Node::new(
+                id(index, "calls"),
+                Kind::Text,
+                Props::new().text("spans", calls).set("wrap", "word"),
+            ));
+        }
+    }
     let compact_read = panel.name == "read"
         && panel.finished
         && !panel.is_error

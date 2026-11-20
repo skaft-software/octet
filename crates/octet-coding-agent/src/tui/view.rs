@@ -5575,6 +5575,10 @@ impl InteractiveShell {
                             panel.output.clear();
                             bounded_live_append(&mut panel.output, &result.text);
                             panel.display.mark_media_read(result.media_kinds());
+                            if panel.name == "codemode" {
+                                panel.codemode_details =
+                                    result.metadata().and_then(codemode_render::details);
+                            }
                         }
                         ToolProgress::Confirmation(request) => {
                             bounded_live_append(
@@ -5680,6 +5684,8 @@ impl InteractiveShell {
                             panel.diff = presentation_diff_metadata(output);
                         }
                         Err(error) => {
+                            // A transport error is not a final ledger of nested outcomes.
+                            panel.codemode_details = None;
                             panel.output.clear();
                             panel.output.push_str(&error.message);
                         }

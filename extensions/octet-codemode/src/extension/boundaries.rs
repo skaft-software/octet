@@ -13,6 +13,8 @@ pub(super) const FRAME_BYTES: usize = MIB;
 pub(super) use crate::IPC_BYTES;
 pub(super) const CAPTURE_BYTES: usize = 16 * MIB;
 pub(super) const OUTPUT_BYTES: usize = 50 * 1024;
+// Leave room for the envelope under the host's 64 KiB metadata limit.
+pub(super) const CALL_METADATA_BYTES: usize = 60 * 1024;
 pub(super) const MAX_HOST_FILE_BYTES: usize = 8 * MIB;
 pub(super) const MAX_CALLS: u64 = 256;
 pub(super) const LOCAL_TIMEOUT_MS: u64 = 25000;
@@ -693,7 +695,7 @@ pub(super) fn format_result(output: Output, scratch: &mut Scratch) -> Value {
     let mut used = metadata.to_string().len();
     for call in calls {
         let size = call.to_string().len() + 1;
-        if used + size > 60 * 1024 {
+        if used + size > CALL_METADATA_BYTES {
             metadata["calls_omitted"] = json!(metadata["calls_omitted"].as_u64().unwrap() + 1);
         } else {
             metadata["calls"].as_array_mut().unwrap().push(call);

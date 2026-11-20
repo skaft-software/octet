@@ -231,18 +231,37 @@ impl Runtime {
             json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":head(message,4096)}}),
         );
     }
-    fn progress(&self, parent: u64, message: &str) -> Result<()> {
-        if !self.feature("request_progress") {
-            return Ok(());
+    fn progress(&self, parent: u64, event: impl FnOnce() -> Value) {
+        // content_parts is required at initialization; request_progress is optional.
+        if !self.feature("request_progress") || self.lost.get() {
+            return;
         }
-        let mut active = self.active.borrow_mut();
-        if let Some(parent_state) = active.get_mut(&parent) {
-            if !parent_state.cancel.cancelled.get() {
-                parent_state.sequence += 1;
-                self.send(json!({"jsonrpc":"2.0","method":"$/progress","params":{"request_id":parent,"sequence":parent_state.sequence,"event":{"type":"status","message":message}}}))?;
+        if let Some(state) = self.active.borrow_mut().get_mut(&parent) {
+            if !state.cancel.cancelled.get() {
+                state.sequence += 1;
+                self.writer.progress(json!({"jsonrpc":"2.0","method":"$/progress","params":{"request_id":parent,"sequence":state.sequence,"event":event()}}));
             }
         }
-        Ok(())
+    }
+    fn call_progress(&self, parent: u64, calls: &[Value]) {
+        // Pi 1.5.2 pi-coding-agent/dist/extensions/codemode/execute.js:444-445,
+        // 455-479 publishes empty content + ordered call records on start/settle.
+        // Eight rows is the *renderer's* compact preview, not the wire limit:
+        // an expanded card can show older active calls too. Keep the most recent
+        // contiguous suffix that fits, reserving space for the metadata envelope.
+        self.progress(parent, || {
+            let mut remaining = CALL_METADATA_BYTES;
+            let retained = calls.iter().rev().take_while(|row| {
+                if let Some(left) = remaining.checked_sub(row.to_string().len() + 1) {
+                    remaining = left;
+                    true
+                } else {
+                    false
+                }
+            }).count();
+            let omit = calls.len() - retained;
+            json!({"type":"partial_result","result":{"content":[],"metadata":{"calls":&calls[omit..],"calls_omitted":omit}}})
+        });
     }
     async fn request(
         self: &Rc<Self>,
@@ -571,14 +590,14 @@ impl Runtime {
         let mut ok = false;
         let mut error = None;
         let result: Result<()> = async {
-            self.progress(parent, "Preparing frozen tool snapshot")?;
+            self.progress(parent, || json!({"type":"status","message":"Preparing frozen tool snapshot"}));
             let context = bounded(&cancel, deadline, self.request(parent, "composition/context", json!({}))).await?;
             validate_context(&context)?;
             timeout_ms = timeout_ms.min(context["limits"]["timeout_ms"].as_u64().unwrap());
             max_calls = max_calls.min(context["limits"]["max_calls"].as_u64().unwrap());
             deadline = started + Duration::from_millis(timeout_ms);
             checkpoint(&cancel, deadline).await?;
-            self.progress(parent, &format!("Running JavaScript ({}; deadline {timeout_ms} ms, up to {max_calls} calls)", self.engine))?;
+            self.progress(parent, || json!({"type":"status","message":format!("Running JavaScript ({}; deadline {timeout_ms} ms, up to {max_calls} calls)", self.engine)}));
             let done = self
                 .guest(parent, &source.code, context, cancel.clone(), deadline, max_calls, &mut captured, calls.clone())
                 .await?;
@@ -621,7 +640,7 @@ impl Runtime {
                 }
                 if !sets.is_empty() || !deletes.is_empty() {
                     checkpoint(&cancel, deadline).await?;
-                    self.progress(parent, "Persisting successful branch-scoped store writes")?;
+                    self.progress(parent, || json!({"type":"status","message":"Persisting successful branch-scoped store writes"}));
                     let ack = bounded(&cancel, deadline, self.request(parent,"composition/store",json!({"set":sets,"delete":deletes}))).await?;
                     ensure!(ack == json!({}), "Invalid composition/store acknowledgement");
                 }
@@ -728,19 +747,17 @@ impl Runtime {
         if Instant::now() >= deadline {
             return Err(TimedOut.into());
         }
-        let tools = Rc::new(
-            context["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|t| {
-                    (
-                        t["name"].as_str().unwrap().to_owned(),
-                        t.get("output_schema").is_some(),
-                    )
-                })
-                .collect::<HashMap<_, _>>(),
-        );
+        let tools = context["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["name"].as_str().unwrap().to_owned(),
+                    t.get("output_schema").is_some(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let timeout_ms = deadline
             .saturating_duration_since(Instant::now())
             .as_millis()
@@ -833,7 +850,7 @@ struct ScriptRun<'a> {
     deadline: Instant,
     timeout_ms: u64,
     max_calls: u64,
-    tools: Rc<HashMap<String, bool>>,
+    tools: HashMap<String, bool>,
     cancel: Rc<Cancellation>,
     limiter: Rc<Semaphore>,
     tasks: JoinSet<()>,
@@ -842,6 +859,28 @@ struct ScriptRun<'a> {
 }
 
 impl ScriptRun<'_> {
+    // Assign the ledger slot while reading the guest pipe, not when the
+    // executor happens to poll a nested task. Settlements update that slot.
+    fn start_call(&self, event: &Value, ordinal: u64) -> Result<(usize, bool)> {
+        ensure!(
+            ordinal <= self.max_calls,
+            "Script exceeded {} nested tool calls",
+            self.max_calls
+        );
+        let name = event["name"]
+            .as_str()
+            .context("Unknown or unavailable guest tool")?;
+        let structured = self
+            .tools
+            .get(name)
+            .filter(|_| event["target"] == "tool")
+            .context("Unknown or unavailable guest tool")?;
+        let mut calls = self.calls.borrow_mut();
+        let index = calls.len();
+        calls.push(json!({"id":format!("{}/{ordinal}", self.parent),"name":name,"args":head(event["args"].as_str().unwrap_or("null"),200),"status":"running"}));
+        self.runtime.call_progress(self.parent, &calls);
+        Ok((index, *structured))
+    }
     /// Start one script and drive the warm runner until it reports a terminal
     /// event. Cancellation and the deadline are observed between frames; the
     /// script's VM is never left running by a dropped future.
@@ -907,15 +946,14 @@ impl ScriptRun<'_> {
                     let input = input.clone();
                     let cancel = self.cancel.clone();
                     let limiter = self.limiter.clone();
-                    let tools = self.tools.clone();
+                    let admission = self.start_call(&event, count);
                     let calls = self.calls.clone();
-                    let (parent, deadline, max_calls) =
-                        (self.parent, self.deadline, self.max_calls);
+                    let (parent, deadline) = (self.parent, self.deadline);
                     self.tasks.spawn_local(async move {
                         runtime
                             .settle(
-                                parent, event, count, max_calls, tools, input, script, cancel,
-                                limiter, deadline, calls,
+                                parent, event, admission, input, script, cancel, limiter, deadline,
+                                calls,
                             )
                             .await;
                     });
@@ -993,9 +1031,7 @@ impl Runtime {
         self: Rc<Self>,
         parent: u64,
         event: Value,
-        ordinal: u64,
-        max_calls: u64,
-        tools: Rc<HashMap<String, bool>>,
+        admission: Result<(usize, bool)>,
         input: Rc<Mutex<ChildStdin>>,
         script: u64,
         cancel: Rc<Cancellation>,
@@ -1004,23 +1040,32 @@ impl Runtime {
         calls: Rc<RefCell<Vec<Value>>>,
     ) {
         let started = Instant::now();
-        let mut record = None;
-        let result: Result<Value> = bounded(&cancel,deadline,async {
-            ensure!(ordinal <= max_calls, "Script exceeded {max_calls} nested tool calls");
-            let name = event["name"].as_str().context("Unknown or unavailable guest tool")?;
-            ensure!(event["target"] == "tool" && tools.contains_key(name), "Unknown or unavailable guest tool");
+        let record = admission.as_ref().ok().map(|(index, _)| *index);
+        let result: Result<Value> = bounded(&cancel, deadline, async {
+            let (_, structured) = admission?;
+            let name = event["name"].as_str().unwrap();
             let args = event["args"].as_str().unwrap_or("null");
-            record = Some(calls.borrow().len());
-            calls.borrow_mut().push(json!({"id":format!("{parent}/{ordinal}"),"name":name,"args":head(args,200),"status":"running"}));
             let args = loads(args.as_bytes())?;
             ensure!(args.is_object(), "Tool {name} arguments must be an object");
             let _permit = limiter.acquire().await?;
             cancel.check()?;
-            if Instant::now() >= deadline { return Err(TimedOut.into()); }
-            let value = self.request(parent,"composition/call",json!({"name":name,"arguments":args})).await?;
-            ensure!(tools[name] || value.is_string(), "Host returned a non-text value for schema-less tool {name}");
+            if Instant::now() >= deadline {
+                return Err(TimedOut.into());
+            }
+            let value = self
+                .request(
+                    parent,
+                    "composition/call",
+                    json!({"name":name,"arguments":args}),
+                )
+                .await?;
+            ensure!(
+                structured || value.is_string(),
+                "Host returned a non-text value for schema-less tool {name}"
+            );
             Ok(value)
-        }).await;
+        })
+        .await;
         let cancelled = result.as_ref().is_err_and(|e| e.is::<Cancelled>());
         if let Some(index) = record {
             let mut calls = calls.borrow_mut();
@@ -1038,6 +1083,7 @@ impl Runtime {
                     row["error"] = json!(head(&error.to_string(), 500));
                 }
             }
+            self.call_progress(parent, &calls);
         }
         if cancelled {
             return;

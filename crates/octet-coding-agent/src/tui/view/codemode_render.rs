@@ -71,28 +71,29 @@ pub(crate) fn details(metadata: &Value) -> Option<Arc<CodemodeDetails>> {
     Some(Arc::new(details))
 }
 
-fn pi_calls(panel: &ToolPanel, theme: &OctetTheme, width: u16, expanded: bool) -> ToolRows {
-    let mut rows = ToolRows::default();
+// Pi 1.5.2 pi-coding-agent/dist/extensions/codemode/renderer.js:31-57,89-115
+// renders one row per invocation, not one per line of JS or per completion.
+// The host owns both terminal surfaces; they style the same sanitized rows.
+fn call_lines<T>(
+    panel: &ToolPanel,
+    expanded: bool,
+    unicode: bool,
+    style: impl Fn(&'static str, &str) -> T,
+) -> Vec<Vec<T>> {
+    let mut rows = Vec::new();
     let Some(details) = &panel.codemode_details else {
         return rows;
     };
-    if details.calls.is_empty() && details.omitted == 0 {
-        return rows;
-    }
-    rows.decoration(String::new());
     let first = if expanded {
         0
     } else {
         details.calls.len().saturating_sub(PI_CALL_ROWS)
     };
     if first > 0 {
-        rows.decoration(fit_line(
-            &subdued_text(
-                theme,
-                &format!("... ({first} earlier calls, ctrl+o to expand)"),
-            ),
-            width,
-        ));
+        rows.push(vec![style(
+            "muted",
+            &format!("... ({first} earlier calls, ctrl+o to expand)"),
+        )]);
     }
     for call in &details.calls[first..] {
         let (icon, ascii, role) = match call.status {
@@ -101,44 +102,81 @@ fn pi_calls(panel: &ToolPanel, theme: &OctetTheme, width: u16, expanded: bool) -
             CallStatus::Error => ("✗", "x", "error"),
             CallStatus::Cancelled => ("⊘", "-", "muted"),
         };
-        let mut line = format!(
-            "{} {}",
-            theme.fg(role, if theme.unicode() { icon } else { ascii }),
-            theme.fg("tool_title", &call.name)
-        );
+        let mut line = vec![
+            style(role, if unicode { icon } else { ascii }),
+            style("tool_title", &format!(" {}", call.name)),
+        ];
         if !call.args.is_empty() {
             let args = if expanded {
                 call.args.clone()
             } else {
                 truncate_to_width(&call.args, 80, Some("..."))
             };
-            line.push_str(&format!(" {}", subdued_text(theme, &args)));
+            line.push(style("muted", &format!(" {args}")));
         }
         if let Some(ms) = call.duration_ms {
             let duration = crate::presentation::format_duration(Duration::from_millis(ms));
-            line.push_str(&format!(" {}", theme.dim(&duration)));
+            line.push(style("dim", &format!(" {duration}")));
         }
-        for row in wrap_hanging(&line, "", "", width) {
-            rows.decoration(row);
-        }
-        if expanded {
-            if let Some(error) = &call.error {
-                for line in error.lines() {
-                    for row in wrap_hanging(&theme.fg("error", line), "  ", "  ", width) {
-                        rows.decoration(row);
-                    }
-                }
-            }
+        rows.push(line);
+        if let Some(error) = call.error.as_ref().filter(|_| expanded) {
+            rows.extend(
+                error
+                    .lines()
+                    .map(|line| vec![style("error", &format!("    {line}"))]),
+            );
         }
     }
     if details.omitted > 0 {
-        rows.decoration(fit_line(
-            &subdued_text(
-                theme,
-                &format!("... ({} calls not retained)", details.omitted),
-            ),
-            width,
-        ));
+        rows.push(vec![style(
+            "muted",
+            &format!("... ({} calls not retained)", details.omitted),
+        )]);
+    }
+    rows
+}
+
+pub(super) fn call_spans(panel: &ToolPanel, expanded: bool) -> Vec<octet_tern::wire::Span> {
+    use octet_tern::wire::Span;
+    let mut spans = Vec::new();
+    for line in call_lines(panel, expanded, true, |role, text| {
+        Span::styled(
+            text,
+            if role == "tool_title" {
+                "toolTitle"
+            } else {
+                role
+            },
+        )
+    }) {
+        if !spans.is_empty() {
+            spans.push(Span::new("\n"));
+        }
+        spans.extend(line);
+    }
+    spans
+}
+
+pub(super) fn project_calls(
+    panel: &ToolPanel,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+) -> ToolRows {
+    let mut rows = ToolRows::default();
+    for line in call_lines(panel, expanded, theme.unicode(), |role, text| {
+        if role == "dim" {
+            theme.dim(text)
+        } else {
+            theme.fg(role, text)
+        }
+    }) {
+        if rows.lines.is_empty() {
+            rows.decoration(String::new());
+        }
+        for row in wrap_hanging(&line.concat(), "", "", width) {
+            rows.decoration(row);
+        }
     }
     rows
 }
@@ -359,7 +397,7 @@ fn project_pi_output(
     width: u16,
     expanded: bool,
 ) -> ToolRows {
-    let mut result = pi_calls(panel, theme, width, expanded);
+    let mut result = ToolRows::default();
     if !panel.finished {
         return result;
     }
@@ -472,6 +510,73 @@ mod tests {
             Some(reason.into()),
             None,
         )
+    }
+
+    #[test]
+    fn codemode_parent_shows_nested_outcomes_separately_from_its_output() {
+        use crate::tui::theme::test_theme_from_source;
+        use crate::tui::view::InteractiveShell;
+        use octet_agent::{AgentEvent, ToolOutput, ToolProgress};
+        use serde_json::json;
+
+        for theme in [
+            test_theme(),
+            test_theme_from_source("[tokens]\nquiet_tool_summaries = true\n"),
+        ] {
+            let mut shell = InteractiveShell::test_shell_with_theme(theme.clone());
+            let id = ToolCallId("mixed".into());
+            shell.on_agent_event(&AgentEvent::ToolStarted {
+                id: id.clone(),
+                name: "codemode".into(),
+                args: json!({"code":"return 'recovered'"}),
+            });
+            let snapshot = |status, text| {
+                ToolOutput::new(text)
+                    .try_with_metadata(json!({"calls":[
+                        {"name":"first","status":status,"args":"{}"},
+                        {"name":"second","status":"error","args":"{}","error":"caught failure"}
+                    ]}))
+                    .unwrap()
+            };
+            let rows = |shell: &InteractiveShell, expanded| {
+                let state = shell.state.borrow();
+                let block = &state.transcript[state.tool_panels[&id]];
+                let renderer = theme.rich_renderer();
+                strip_terminal_sequences(
+                    &render_block(None, block, &theme, &renderer, &renderer, 100, expanded)
+                        .join("\n"),
+                )
+            };
+            shell.on_agent_event(&AgentEvent::ToolProgress {
+                id: id.clone(),
+                progress: ToolProgress::PartialResult(Arc::new(snapshot("running", ""))),
+            });
+            let live = rows(&shell, false);
+            assert!(
+                live.find("… first")
+                    .zip(live.find("✗ second"))
+                    .is_some_and(|(a, b)| a < b),
+                "{live}"
+            );
+            shell.on_agent_event(&AgentEvent::ToolFinished {
+                id: id.clone(),
+                result: Ok(snapshot("ok", "recovered")),
+                duration: Duration::from_secs(1),
+            });
+            let compact = rows(&shell, false);
+            assert!(
+                compact.contains("✓ first") && compact.contains("✗ second"),
+                "{compact}"
+            );
+            assert!(!compact.contains("… first") && !compact.contains("caught failure"));
+            assert!(rows(&shell, true).contains("caught failure"));
+            let state = shell.state.borrow();
+            let TranscriptBlock::Tool(panel) = &state.transcript[state.tool_panels[&id]] else {
+                panic!("parent tool")
+            };
+            assert!(panel.finished && !panel.is_error);
+            assert_eq!(panel.output, "recovered");
+        }
     }
 
     #[test]
