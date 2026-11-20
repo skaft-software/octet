@@ -1942,16 +1942,18 @@ async fn responses_restart_compact_and_post_checkpoint_replay_stay_exact_end_to_
     assert_eq!(compact.headers["x-client-request-id"], "lifecycle-session");
 
     let post_checkpoint_body = request_json(responses[2]);
+    assert!(post_checkpoint_body.get("instructions").is_none());
+    let post_input = post_checkpoint_body["input"].as_array().unwrap();
+    assert_eq!(post_input[0]["role"], "developer");
     assert_eq!(
-        post_checkpoint_body["instructions"],
+        post_input[0]["content"][0]["text"],
         "CURRENT POST-CHECKPOINT INSTRUCTIONS"
     );
-    let post_input = post_checkpoint_body["input"].as_array().unwrap();
-    assert_eq!(post_input[0], compact_output[0]);
-    assert_eq!(post_input[1], compact_output[1]);
-    assert_eq!(post_input[1]["encrypted_content"], "encrypted-checkpoint");
+    assert_eq!(post_input[1], compact_output[0]);
+    assert_eq!(post_input[2], compact_output[1]);
+    assert_eq!(post_input[2]["encrypted_content"], "encrypted-checkpoint");
     assert_eq!(
-        post_input[1]["future_compaction_field"],
+        post_input[2]["future_compaction_field"],
         serde_json::json!([1, 2, 3])
     );
 }

@@ -614,8 +614,10 @@ async fn system_hook_and_direct_instructions_share_checkpoint_admission() {
         }
         if let Some(sent) = requests.first() {
             let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+            assert!(body.get("instructions").is_none());
+            assert_eq!(body["input"][0]["role"], "developer");
             assert_eq!(
-                body["instructions"].as_str().unwrap(),
+                body["input"][0]["content"][0]["text"].as_str().unwrap(),
                 "system instruction ".repeat(1000)
             );
             assert!(body["input"]

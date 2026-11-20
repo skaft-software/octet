@@ -22,8 +22,6 @@ pub(super) struct ResponsesRequest {
     #[serde(skip_serializing)]
     pub(super) input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) previous_response_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) context_management: Option<serde_json::Value>,

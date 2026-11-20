@@ -412,10 +412,23 @@ fn compacted_replay_base_replaces_prior_system_input_verbatim() {
     ));
     let parts = build_request(&model, &req).unwrap();
     let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
-    assert_eq!(body["input"][0]["id"], "leading-preserved-output");
-    assert_eq!(body["input"][1], compacted);
-    assert_eq!(body["instructions"], "current instructions");
-    assert!(!body["input"].to_string().contains("current instructions"));
+    // GPT-6.2 bills top-level `instructions` uncached on every request, so the
+    // refreshed system prompt leads `input` as a developer message instead.
+    assert_eq!(body["input"][0]["role"], "developer");
+    assert_eq!(
+        body["input"][0]["content"][0]["text"],
+        "current instructions"
+    );
+    assert_eq!(body["input"][1]["id"], "leading-preserved-output");
+    assert_eq!(body["input"][2], compacted);
+    assert!(body.get("instructions").is_none());
+    assert_eq!(
+        body["input"]
+            .to_string()
+            .matches("current instructions")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -459,7 +472,6 @@ fn owned_responses_input_moves_through_both_tree_boundaries() {
         let dto = ResponsesRequest {
             model: "model".to_owned(),
             input,
-            instructions: None,
             previous_response_id: None,
             context_management: None,
             tools: None,
@@ -561,8 +573,10 @@ fn raw_replay_and_lite_rebuild_without_mutating_opaque_input() {
             assert!(body.get("instructions").is_none());
             assert!(body.get("tools").is_none());
         } else {
-            assert_eq!(body["input"], serde_json::Value::Array(expected));
-            assert_eq!(body["instructions"], "fresh instructions");
+            assert_eq!(&body["input"].as_array().unwrap()[1..], expected.as_slice());
+            assert_eq!(body["input"][0]["role"], "developer");
+            assert_eq!(body["input"][0]["content"][0]["text"], "fresh instructions");
+            assert!(body.get("instructions").is_none());
             assert_eq!(body["tools"][0]["name"], "read");
             assert_eq!(body["parallel_tool_calls"], true);
         }

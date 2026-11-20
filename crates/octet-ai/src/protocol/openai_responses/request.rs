@@ -112,15 +112,24 @@ pub(super) fn responses_lite_prefix(
         role: "developer".to_owned(),
         tools: map_responses_lite_tools(model, tools)?,
     })];
-    if let Some(instructions) = instructions.filter(|instructions| !instructions.is_empty()) {
-        prefix.push(opaque_input_item(ResponsesInputItem::Message {
-            role: "developer".to_owned(),
-            content: vec![ResponsesContentPart::InputText {
-                text: instructions.to_owned(),
-            }],
-        }));
-    }
+    prefix.extend(developer_instructions_item(instructions));
     Ok(prefix)
+}
+
+/// A nonempty system prompt as a leading developer input message.
+fn developer_instructions_item(
+    instructions: Option<&str>,
+) -> Option<crate::responses::ResponsesItem> {
+    instructions
+        .filter(|instructions| !instructions.is_empty())
+        .map(|instructions| {
+            opaque_input_item(ResponsesInputItem::Message {
+                role: "developer".to_owned(),
+                content: vec![ResponsesContentPart::InputText {
+                    text: instructions.to_owned(),
+                }],
+            })
+        })
 }
 
 pub(super) fn responses_reasoning_effort(effort: crate::types::ReasoningEffort) -> &'static str {
@@ -556,15 +565,24 @@ pub(crate) fn build_request(
         .into());
     }
     validate_async_input(model, &input, &req.tools)?;
-    let instructions = if responses_lite {
+    // The system prompt rides in a leading developer message, never top-level
+    // `instructions`: from GPT-6.2 the API appends `instructions` after `input`
+    // and bills them uncached on every request (developers.openai.com
+    // api/docs/guides/prompt-caching). Codex CLI prepends its base instructions
+    // the same way (codex-rs/core/src/client.rs:1240-1250).
+    let prefix = if responses_lite {
         input.strip_image_details_for_responses_lite();
-        let mut items = responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools)?;
+        responses_lite_prefix(model, refresh_instructions.as_deref(), &req.tools)?
+    } else {
+        developer_instructions_item(refresh_instructions.as_deref())
+            .into_iter()
+            .collect()
+    };
+    if !prefix.is_empty() {
+        let mut items = prefix;
         items.extend(input.into_items());
         input = crate::responses::ResponsesInput::new(items);
-        None
-    } else {
-        refresh_instructions
-    };
+    }
     let mut wire_input = into_wire_input(input);
     if !responses_lite {
         map_grammar_replay(
@@ -578,7 +596,6 @@ pub(crate) fn build_request(
     let responses_req = ResponsesRequest {
         model: model.spec.api_name.clone(),
         input: wire_input,
-        instructions,
         previous_response_id: responses_options
             .and_then(|options| options.previous_response_id.clone()),
         context_management: responses_options

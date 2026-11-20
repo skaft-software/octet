@@ -890,6 +890,10 @@ Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
   sends the valid uncompressed body. These come from the provider
   [declarations](../crates/octet-ai/src/providers/declarations.json),
   not from the Responses codec itself.
+- Ordinary Responses requests send the system prompt as the leading developer
+  input message, including the refreshed prompt after native compaction, not as
+  top-level `instructions`. From GPT-6.2, OpenAI bills top-level `instructions`
+  at the uncached rate on every request.
 - Explicit Responses Lite selection in `octet-ai` applies to ordinary and native
   compact requests; the coding product's Codex route does not select it. Lite
   sends its header, tool schemas and developer instructions as input items,
