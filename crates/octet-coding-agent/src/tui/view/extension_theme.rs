@@ -177,6 +177,9 @@ impl InteractiveShell {
             .unwrap_or_else(|| match self.state.borrow().theme.source() {
                 crate::tui::theme::ThemeSource::CompiledCards => "Cards".into(),
                 crate::tui::theme::ThemeSource::CompiledStill => "Still".into(),
+                crate::tui::theme::ThemeSource::CompiledDock => "Dock".into(),
+                crate::tui::theme::ThemeSource::CompiledBrief => "Brief".into(),
+                crate::tui::theme::ThemeSource::CompiledChill => "Chill".into(),
                 crate::tui::theme::ThemeSource::CompiledPi => "pi".into(),
                 crate::tui::theme::ThemeSource::File(path) => path
                     .file_stem()

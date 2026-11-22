@@ -536,7 +536,14 @@ fn render_panel_item(
     let inset = " ".repeat(usize::from(
         PresentationLayout::new(&state.theme, width).inset,
     ));
-    let prefix = if is_selected {
+    // Zed marks the selected menu row with a fill across the whole row, not
+    // a marker chevron: list rows highlight like element_hover
+    // (crates/ui/src/components/list.rs; agent popovers follow it). A theme
+    // opts into that presentation by setting `picker_selected_bg`.
+    let selected_fill = is_selected
+        .then(|| state.theme.role_rgb("picker_selected_bg"))
+        .flatten();
+    let prefix = if is_selected && selected_fill.is_none() {
         // Every picker follows the active model's adaptive shell accent. In a
         // model picker this is the active model, not the focused candidate's
         // provider colour; choosing the candidate updates the shell afterward.
@@ -556,13 +563,29 @@ fn render_panel_item(
         })
     );
     let style_label = |label: String| {
-        if is_selected {
+        if is_selected && selected_fill.is_some() {
+            // The row fill carries the selection; the label stays plain.
+            state.theme.fg("foreground", &label)
+        } else if is_selected {
             state.theme.bold(&state.theme.fg("model_accent", &label))
         } else if menu_labels {
             state.theme.bold(&label)
         } else {
             label
         }
+    };
+    let paint_selected = |mut lines: Vec<String>| -> Vec<String> {
+        let Some(background) = selected_fill else {
+            return lines;
+        };
+        for row in &mut lines {
+            let padding = usize::from(width).saturating_sub(visible_width(row));
+            if padding > 0 {
+                row.push_str(&" ".repeat(padding));
+            }
+            *row = state.theme.paint_row_background(background, row);
+        }
+        lines
     };
 
     if stacked {
@@ -591,6 +614,7 @@ fn render_panel_item(
             // Keep every item in a model list on the same two-row rhythm.
             lines.push(String::new());
         }
+        let lines = paint_selected(lines);
         return PanelItemRender {
             lines,
             label_complete: !item.trim().is_empty() && visible_width(&item) <= available,
@@ -619,7 +643,7 @@ fn render_panel_item(
         line.push_str(&subdued_text(&state.theme, &description));
     }
     PanelItemRender {
-        lines: vec![fit_line(&line, width)],
+        lines: paint_selected(vec![fit_line(&line, width)]),
         label_complete: !item.trim().is_empty() && visible_width(&item) <= rendered_label_width,
         sanitized_label: item,
     }
@@ -667,6 +691,15 @@ impl PanelRenderOutput {
     }
 }
 
+/// The `slim_picker_headers` presentation: menus drop their purpose
+/// sentences (and the session picker its scope/sort chrome) so the title,
+/// the filter field, and the list carry the panel, like a popover.
+fn slim_picker_headers(theme: &OctetTheme) -> bool {
+    theme
+        .resolve::<bool>("slim_picker_headers")
+        .unwrap_or(false)
+}
+
 /// How many rows the active panel needs (capped so it cannot squeeze the
 /// transcript to zero).
 #[cfg(test)]
@@ -694,6 +727,7 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
                 .map(|_| searched_indices_for_action(items, descriptions, action, filter));
             let body = filtered.len().max(1);
             let show_purpose = !confirmation
+                && !slim_picker_headers(&state.theme)
                 && select_list_purpose(surface, action, width).is_some()
                 && max_panel >= 4;
             let border_min_rows = if show_purpose { 6 } else { 5 };
@@ -770,7 +804,9 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
             let border_rows = usize::from(
                 state.theme.layout_for_width(width).show_panel_borders && max_panel >= 6,
             ) * 2;
-            let chrome_rows = 4 + usize::from(picker.surface.purpose.is_some());
+            let chrome_rows = 4 + usize::from(
+                !slim_picker_headers(&state.theme) && picker.surface.purpose.is_some(),
+            );
             let available_rows = max_panel.saturating_sub(chrome_rows + border_rows);
             let row_height =
                 usize::from(session_rows_are_stacked(state, width, available_rows)) + 1;
@@ -781,9 +817,10 @@ fn panel_rows(state: &ShellState, width: u16) -> usize {
             let border_rows = usize::from(
                 state.theme.layout_for_width(width).show_panel_borders && max_panel >= 5,
             ) * 2;
-            let chrome_rows = 2
-                + usize::from(picker.surface.purpose.is_some())
-                + usize::from(
+            let chrome_rows =
+                2 + usize::from(
+                    !slim_picker_headers(&state.theme) && picker.surface.purpose.is_some(),
+                ) + usize::from(
                     !matches!(
                         &picker.surface.lifecycle,
                         OrdinarySurfaceLifecycle::Empty(_)
@@ -903,7 +940,10 @@ fn render_panel_output_with_limit(
             // At three rows the title, filter, and focusable item are the
             // minimum usable picker; purpose yields until a fourth row exists.
             let purpose = select_list_purpose(surface, action, width);
-            let show_purpose = !confirmation && purpose.is_some() && max_rows >= 4;
+            let show_purpose = !confirmation
+                && !slim_picker_headers(&state.theme)
+                && purpose.is_some()
+                && max_rows >= 4;
             let border_min_rows = if show_purpose { 6 } else { 5 };
             let show_borders = !confirmation
                 && state.theme.layout_for_width(width).show_panel_borders
@@ -948,6 +988,10 @@ fn render_panel_output_with_limit(
                 ));
             }
             let show_footer = !confirmation
+                && state
+                    .theme
+                    .resolve::<bool>("panel_footer_hints")
+                    .unwrap_or(true)
                 && max_rows >= lines.len().saturating_add(2 + usize::from(show_borders));
             let max_body = max_rows
                 .saturating_sub(lines.len() + usize::from(show_borders) + usize::from(show_footer));

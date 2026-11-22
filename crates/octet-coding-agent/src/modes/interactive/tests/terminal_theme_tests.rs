@@ -208,6 +208,12 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
         ("cards.toml", "Cards", ThemeSource::CompiledCards),
         ("Still", "Still", ThemeSource::CompiledStill),
         ("still.json", "Still", ThemeSource::CompiledStill),
+        ("Dock", "Dock", ThemeSource::CompiledDock),
+        ("dock.toml", "Dock", ThemeSource::CompiledDock),
+        ("Brief", "Brief", ThemeSource::CompiledBrief),
+        ("brief.toml", "Brief", ThemeSource::CompiledBrief),
+        ("Chill", "Chill", ThemeSource::CompiledChill),
+        ("chill.toml", "Chill", ThemeSource::CompiledChill),
         ("pi", "pi", ThemeSource::CompiledPi),
         ("PI.json", "pi", ThemeSource::CompiledPi),
     ] {
@@ -241,7 +247,7 @@ fn direct_theme_name_loads_only_valid_selectable_files() {
 async fn direct_builtin_theme_selection_matches_picker_and_startup() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = terminal_theme_test_config(directory.path().to_owned());
-    for name in ["Still", "Cards", "pi"] {
+    for name in ["Still", "Cards", "Dock", "Brief", "Chill", "pi"] {
         let mut shell = InteractiveShell::test_shell();
         let mut input = EventStream::from_stream(tokio_stream::empty());
         assert_eq!(
@@ -265,6 +271,9 @@ async fn direct_builtin_theme_selection_matches_picker_and_startup() {
             match name {
                 "Still" => ThemeSource::CompiledStill,
                 "Cards" => ThemeSource::CompiledCards,
+                "Dock" => ThemeSource::CompiledDock,
+                "Brief" => ThemeSource::CompiledBrief,
+                "Chill" => ThemeSource::CompiledChill,
                 "pi" => ThemeSource::CompiledPi,
                 _ => unreachable!(),
             },

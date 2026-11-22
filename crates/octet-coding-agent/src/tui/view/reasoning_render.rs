@@ -1139,6 +1139,44 @@ pub(super) fn format_thought_duration(elapsed: Duration) -> String {
     }
 }
 
+/// The `working_dots` presentation: a small bouncing-dots spinner and a
+/// plain label, separated by dots — Zed marks generation this way
+/// (crates/ui/src/components/spinner.rs `Dots` variant, agent
+/// thread_view.rs:8519-8606) rather than a swept word in parentheses.
+fn working_dots_status_line(
+    theme: &OctetTheme,
+    reasoning: &AssistantBlock,
+    label: &str,
+    shimmer_frame: usize,
+) -> String {
+    let position = if theme.capabilities().animation {
+        (shimmer_frame / 2) % 3
+    } else {
+        // Reduced motion keeps a steady centre dot.
+        1
+    };
+    let (active, inactive) = if theme.unicode() {
+        ("•", "·")
+    } else {
+        ("*", ".")
+    };
+    let dots = (0..3)
+        .map(|index| if index == position { active } else { inactive })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let spinner = theme.fg("muted", &dots);
+    let plain_label = theme.fg("foreground", label);
+    let separator = super::semantic_separator(theme);
+    if reasoning.retry_activity.is_some() {
+        return format!("{spinner} {plain_label}{separator}Esc to interrupt");
+    }
+    let Some(started_at) = reasoning.activity_started_at else {
+        return format!("{spinner} {plain_label}");
+    };
+    let elapsed = format_run_elapsed(Duration::from_secs(started_at.elapsed().as_secs()));
+    format!("{spinner} {plain_label}{separator}{elapsed}{separator}Esc to interrupt")
+}
+
 fn activity_status_line(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
@@ -1146,6 +1184,9 @@ fn activity_status_line(
     shimmer_frame: usize,
     rainbow_strength: u16,
 ) -> String {
+    if theme.resolve::<bool>("working_dots").unwrap_or(false) {
+        return working_dots_status_line(theme, reasoning, label, shimmer_frame);
+    }
     let label = activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength);
     if reasoning.retry_activity.is_some() {
         return format!("{label} {}", subdued_text(theme, "(Esc to interrupt)"));
@@ -1189,18 +1230,29 @@ pub(super) fn collapsed_reasoning_lines_sized(
     // The live transcript tail shows either Thinking or Working, with the
     // shared run timer. Only Thinking with detail needs a second row.
     if reasoning.thinking_slot {
-        let status = activity_status_line(theme, reasoning, "Thinking", shimmer_frame, 0);
+        let mut status = activity_status_line(theme, reasoning, "Thinking", shimmer_frame, 0);
         let mut detail = reasoning.reasoning_heading.clone().unwrap_or_default();
-        if !reasoning.reasoning_expanded {
+        if theme.resolve::<bool>("working_dots").unwrap_or(false) {
+            // Zed discloses a thinking block with a chevron on its header
+            // (crates/agent_ui/src/conversation_view/thread_view.rs:8673-8777),
+            // not a connector-and-parentheses hint row: the label carries the
+            // collapsed chevron and only a real heading occupies the detail
+            // row, unadorned.
+            if !reasoning.text.trim().is_empty() {
+                status.push(' ');
+                status.push_str(&subdued_text(theme, theme.glyph("collapsed")));
+            }
+        } else if !reasoning.reasoning_expanded {
             if !detail.is_empty() {
                 detail.push(' ');
             }
             detail.push_str(&format!("({REASONING_EXPAND_HINT})"));
+            detail = format!("{} {detail}", activity_elbow(theme));
         }
         let detail = if detail.is_empty() {
             String::new()
         } else {
-            subdued_text(theme, &format!("{} {detail}", activity_elbow(theme)))
+            subdued_text(theme, &detail)
         };
         return vec![status, detail];
     }
@@ -1213,15 +1265,30 @@ pub(super) fn collapsed_reasoning_lines_sized(
         if let Some(label) = &reasoning.hidden_thinking_label {
             return vec![subdued_text(theme, label)];
         }
+        // Zed keeps a small "Thinking" header on every settled thought chunk
+        // between calls (crates/agent_ui/src/conversation_view/thread_view.rs:
+        // 8673-8777). A theme opts its settled rows into that label with
+        // `settled_thinking_labels`, so a segment stays visible even when no
+        // duration was recorded for it.
+        let settled_label = theme
+            .resolve::<bool>("settled_thinking_labels")
+            .unwrap_or(false);
         return reasoning
             .reasoning_elapsed
             .filter(|_| theme.shows_durations())
-            .map_or_else(Vec::new, |elapsed| {
-                vec![subdued_text(
-                    theme,
-                    &format!("Thought for {}", format_thought_duration(elapsed)),
-                )]
-            });
+            .map_or_else(
+                || {
+                    settled_label
+                        .then(|| vec![subdued_text(theme, "Thinking")])
+                        .unwrap_or_default()
+                },
+                |elapsed| {
+                    vec![subdued_text(
+                        theme,
+                        &format!("Thought for {}", format_thought_duration(elapsed)),
+                    )]
+                },
+            );
     }
     if !reasoning.status_activity {
         return Vec::new();

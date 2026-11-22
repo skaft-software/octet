@@ -175,8 +175,12 @@ fn transcript_stable_rows(state: &ShellState, acknowledged: Option<CommitCursor>
         };
         let block_end = block_start.saturating_add(block_len);
         if transcript_block_is_final_at(state, index) {
-            let expandable_read = state.theme.layout().tool_cards
+            let expandable_read = (state.theme.layout().tool_cards
                 == crate::tui::theme_schema::ToolCardLayout::Pi
+                || state
+                    .theme
+                    .resolve::<bool>("read_number_gutter")
+                    .unwrap_or(false))
                 && matches!(block, TranscriptBlock::Tool(panel)
                     if panel.name == "read" && !panel.is_error && !panel.output.trim().is_empty());
             if !expandable_read && finalized_block_rows_are_stable(block) {
@@ -317,6 +321,33 @@ mod tests {
     use super::super::{
         AssistantBlock, CompactionBlock, ShellOutput, ToolPanel, COMPACT_EXEC_OUTPUT_ROWS,
     };
+
+    #[test]
+    fn read_gutter_theme_keeps_read_blocks_disclosure_sensitive() {
+        let mut state = ShellState::default();
+        state.theme =
+            crate::tui::theme::test_theme_from_source("[colors]\nread_number_gutter = true");
+        state.push_block(finalized_tool(
+            "read",
+            serde_json::json!({"path": "a.txt"}),
+            "a.txt:1-2/2 hash=h\n1: alpha\n2: beta\ntruncated=false",
+            false,
+        ));
+        state.rendered_transcript(80);
+        // The block is final, but its rows change with Ctrl+O under the
+        // gutter token, so no partial physical prefix may be pinned.
+        assert_eq!(transcript_stable_rows(&state, None), 0);
+        // Without the token the same block keeps its historical stability.
+        let mut plain = ShellState::default();
+        plain.push_block(finalized_tool(
+            "read",
+            serde_json::json!({"path": "a.txt"}),
+            "a.txt:1-2/2 hash=h\n1: alpha\n2: beta\ntruncated=false",
+            false,
+        ));
+        plain.rendered_transcript(80);
+        assert!(transcript_stable_rows(&plain, None) > 0);
+    }
 
     #[test]
     fn exploration_summary_is_not_committed_before_failure_settles() {

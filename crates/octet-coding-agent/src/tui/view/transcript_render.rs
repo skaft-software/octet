@@ -81,7 +81,10 @@ fn nest_tool_output(
                 return row;
             }
             // The final duration is a sibling of the result, not part of it.
+            // A `flat_tool_cards` theme keeps its output free of connector
+            // stems and elbows: plain indentation only.
             let prefix = if theme.layout().tool_cards == ToolCardLayout::Octet
+                && !theme.resolve::<bool>("flat_tool_cards").unwrap_or(false)
                 && indent > 0
                 && (first_content_row || duration_row == Some(index))
             {
@@ -133,7 +136,10 @@ fn append_nested_tool_output(
         return;
     }
 
-    if theme.layout().tool_cards == ToolCardLayout::Octet && tool_output_indent(theme, width) > 0 {
+    if theme.layout().tool_cards == ToolCardLayout::Octet
+        && !theme.resolve::<bool>("flat_tool_cards").unwrap_or(false)
+        && tool_output_indent(theme, width) > 0
+    {
         let stem = subdued_text(theme, theme.glyph("vertical"));
         for continuation in header.iter_mut().skip(1) {
             if let Some(rest) = continuation.strip_prefix(' ') {
@@ -172,6 +178,17 @@ pub(super) fn render_tool(
     } else if let Some(command) = panel.display.shell_command.as_deref() {
         if pi {
             super::bash_render::project_pi_bash_call(panel, command, theme, width, content_role)
+        } else if theme.resolve::<bool>("flat_tool_cards").unwrap_or(false) {
+            // A flat card: muted label stacked above the command, output
+            // nested without connector stems.
+            super::bash_render::project_labeled_bash_call(
+                panel,
+                command,
+                rich_renderer,
+                theme,
+                width,
+                verbose_tools,
+            )
         } else {
             project_bash_row(
                 command,
@@ -351,6 +368,34 @@ pub(super) fn render_tool(
                     output_lines.append(ToolRows::literal(rows, text, 0));
                 }
             }
+            // Zed renders read_file output as a numbered code block with a
+            // right-aligned muted gutter (crates/agent_ui/src/conversation_view/
+            // thread_view.rs:442-541). octet's read tool already numbers body
+            // lines as "N: text" between a path header and a truncated footer,
+            // so this projects the existing numbers into a decoration gutter:
+            // the numbers align in one column and copy text keeps the source
+            // form. Gated by `read_number_gutter`, so default themes keep the
+            // literal rows.
+            "read"
+                if verbose_tools
+                    && !panel.is_error
+                    && theme.resolve::<bool>("read_number_gutter").unwrap_or(false) =>
+            {
+                let text = sanitize_for_terminal(&panel.output);
+                if let Some(rows) = numbered_read_rows(&text, theme, nested_width) {
+                    output_lines.decoration(String::new());
+                    output_lines.append(rows);
+                } else if !text.trim().is_empty() {
+                    let rows = text
+                        .lines()
+                        .flat_map(|line| {
+                            wrap_hanging(&theme.fg("tool_output", line), "", "", nested_width)
+                        })
+                        .collect();
+                    output_lines.decoration(String::new());
+                    output_lines.append(ToolRows::literal(rows, text, 0));
+                }
+            }
             "edit" | "write" if !panel.is_error && tool_diff(panel).is_some() => {
                 output_lines.append(project_diff(
                     panel,
@@ -374,10 +419,17 @@ pub(super) fn render_tool(
     // packages/coding-agent/src/core/tools/render-utils.ts:142-163 prefers the
     // recorded final duration; renderers/bash.ts:91 puts it after result output.
     let mut duration_row = None;
-    if let Some(duration) = panel
-        .duration
-        .filter(|_| panel.finished && theme.shows_durations() && !(pi && panel.name == "read"))
-    {
+    if let Some(duration) = panel.duration.filter(|_| {
+        panel.finished
+                && theme.shows_durations()
+                // Pi omits read timing; a `plain_read_tools` theme keeps its
+                // one-line read rows sleek the same way.
+                && !(panel.name == "read"
+                    && (pi
+                        || theme
+                            .resolve::<bool>("plain_read_tools")
+                            .unwrap_or(false)))
+    }) {
         let template = theme
             .resolve::<String>("tool_duration")
             .unwrap_or_else(|| "Took {duration}".into());
@@ -407,6 +459,9 @@ pub(super) fn render_tool(
     for row in output_lines.copy_rows.iter_mut().flatten() {
         row.left = row.left.saturating_add(indent);
     }
+    // Everything produced above is the card header; nested output appended
+    // below is body. A theme's card header tint paints exactly this prefix.
+    let header_rows = lines.lines.len();
     let mut painted = std::mem::take(&mut lines.lines);
     append_nested_tool_output(
         &mut painted,
@@ -417,6 +472,7 @@ pub(super) fn render_tool(
     );
     lines.append(output_lines);
     lines.lines = painted;
+    lines.header_rows = header_rows;
     lines
 }
 
@@ -550,6 +606,7 @@ pub(super) fn render_block_planned_with_rainbow(
     );
     let mut geometry = plan.geometry;
     let mut tool_copy = None;
+    let mut tool_header_rows = 0;
     let mut lines = match block {
         TranscriptBlock::User {
             text,
@@ -661,6 +718,7 @@ pub(super) fn render_block_planned_with_rainbow(
                 card_expanded,
                 plan.content_role,
             );
+            tool_header_rows = projected.header_rows;
             let lines = std::mem::take(&mut projected.lines);
             tool_copy = Some(std::sync::Arc::new(projected));
             finish_transcript_block(lines)
@@ -741,6 +799,8 @@ pub(super) fn render_block_planned_with_rainbow(
                 ),
                 width,
             )];
+            // The command row is the shell card's whole header.
+            tool_header_rows = 1;
             let nested_width = width
                 .saturating_sub(tool_output_indent(theme, width))
                 .max(1);
@@ -851,6 +911,7 @@ pub(super) fn render_block_planned_with_rainbow(
         prompt_color,
         collapsed_reasoning,
         marker,
+        tool_header_rows,
     );
     if let Some(line) = component_line {
         let row = &mut lines[plan.geometry.transition_rows + plan.geometry.leading_rows];
@@ -879,6 +940,71 @@ pub(super) fn render_block_planned_with_rainbow(
         geometry,
         tool_copy,
     }
+}
+
+/// Project a read tool's numbered output into Zed-style gutter rows.
+///
+/// The read tool already returns `path:1-3/3 hash=…`, a contiguous run of
+/// `N: text` body lines, and trailing `truncated=…` metadata. When that shape
+/// holds, the numbers move into one right-aligned muted decoration column and
+/// the text keeps its own column, matching Zed's numbered read output
+/// (crates/agent_ui/src/conversation_view/thread_view.rs:442-541). Any other
+/// shape returns `None` so the literal presentation stays.
+fn numbered_read_rows(text: &str, theme: &OctetTheme, width: u16) -> Option<ToolRows> {
+    let mut lines = text.lines();
+    let header = lines.next()?;
+    let mut numbered: Vec<(usize, &str)> = Vec::new();
+    let mut footer: Vec<&str> = Vec::new();
+    for line in lines {
+        if footer.is_empty() {
+            let split = line.split_once(": ").and_then(|(number, rest)| {
+                number
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .map(|number| (number, rest))
+            });
+            match split {
+                Some((number, rest))
+                    if numbered
+                        .as_slice()
+                        .last()
+                        .is_none_or(|(previous, _)| previous.checked_add(1) == Some(number)) =>
+                {
+                    numbered.push((number, rest));
+                }
+                _ => footer.push(line),
+            }
+        } else {
+            footer.push(line);
+        }
+    }
+    if numbered.is_empty() {
+        return None;
+    }
+    let digits = numbered
+        .as_slice()
+        .last()
+        .map_or(1, |(number, _)| number.to_string().len());
+    let gutter_width = u16::try_from(digits + 1).ok()?;
+    let continuation = " ".repeat(usize::from(gutter_width));
+    let mut rows = Vec::new();
+    rows.extend(wrap_hanging(&theme.fg("muted", header), "", "", width));
+    for (number, rest) in &numbered {
+        let prefix = theme.fg("muted", &format!("{number:>digits$} "));
+        rows.extend(wrap_hanging(
+            &theme.fg("tool_output", rest),
+            &prefix,
+            &continuation,
+            width,
+        ));
+    }
+    for line in &footer {
+        rows.extend(wrap_hanging(&theme.fg("muted", line), "", "", width));
+    }
+    // Copy text keeps the tool's source form; the gutter is decoration, so
+    // copy alignment starts at the text column.
+    Some(ToolRows::literal(rows, text.to_owned(), gutter_width))
 }
 
 #[cfg(test)]

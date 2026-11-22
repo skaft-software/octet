@@ -282,6 +282,146 @@ fn resize_defers_exactly_one_transcript_reflow_to_the_render_thread() {
 }
 
 #[test]
+fn suggestions_above_opens_the_list_over_the_composer() {
+    // A `suggestions_above` theme renders the input suggestion list above
+    // the composer, like a dropdown opening upward; the default keeps it
+    // below.
+    for (source, above) in [
+        ("[colors]\nsuggestions_above = true", true),
+        ("[colors]\n", false),
+    ] {
+        let theme = crate::tui::theme::test_theme_from_source(source);
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(80, 20);
+        shell.apply_edit(EditAction::Char('/'));
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, 80, Instant::now());
+        assert!(!chrome.suggestions.is_empty(), "suggestions render");
+        assert_eq!(chrome.suggestions_above, above);
+        let mut lines = Vec::new();
+        crate::tui::view::builtin_shell_chrome::append_chrome(&mut lines, chrome, 0);
+        let suggestion_row = lines
+            .iter()
+            .position(|row| row.contains("/new"))
+            .expect("a suggestion row");
+        let composer_row = lines
+            .iter()
+            .position(|row| row.contains(sexy_tui_rs::CURSOR_MARKER))
+            .expect("the composer draft row");
+        if above {
+            assert!(
+                suggestion_row < composer_row,
+                "list opens above the composer: {lines:?}"
+            );
+        } else {
+            assert!(
+                composer_row < suggestion_row,
+                "default keeps the list below: {lines:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn suggestions_keep_status_holds_the_model_row_while_the_list_is_open() {
+    // The historical behavior reclaims the status row for the suggestion
+    // list; a `suggestions_keep_status` theme keeps the model/status row
+    // visible instead.
+    for (source, keeps) in [
+        ("[colors]\nsuggestions_keep_status = true", true),
+        ("[colors]\n", false),
+    ] {
+        let theme = crate::tui::theme::test_theme_from_source(source);
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(80, 20);
+        shell.state.borrow_mut().model_display = "Test Model".into();
+        shell.apply_edit(EditAction::Char('/'));
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, 80, Instant::now());
+        assert!(!chrome.suggestions.is_empty(), "suggestions render");
+        assert_eq!(chrome.footer_spans.is_empty(), !keeps);
+        let mut lines = Vec::new();
+        crate::tui::view::builtin_shell_chrome::append_chrome(&mut lines, chrome, 0);
+        let joined = strip_terminal_sequences(&lines.join("\n"));
+        if keeps {
+            assert!(joined.contains("Test Model"), "{joined}");
+        } else {
+            assert!(!joined.contains("Test Model"), "{joined}");
+        }
+    }
+}
+
+#[test]
+fn suggestions_bg_fills_the_popup_like_the_composer() {
+    // A `suggestions_bg` theme paints the suggestion rows as one filled
+    // card whose fill span matches the shaded composer's exactly — same
+    // start column, same width — with the alignment prefix left unpainted.
+    // The default keeps plain rows.
+    let columns_with_fill = |row: &str, width: u16| -> Vec<u16> {
+        let mut terminal = vt100::Parser::new(1, width, 0);
+        terminal.process(row.as_bytes());
+        (0..width)
+            .filter(|column| {
+                !matches!(
+                    terminal.screen().cell(0, *column).expect("cell").bgcolor(),
+                    vt100::Color::Default
+                )
+            })
+            .collect()
+    };
+    for (source, filled) in [
+        (
+            "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#24252a\"\nsuggestions_bg = \"#24252a\"\ncontent_max_width = 80",
+            true,
+        ),
+        (
+            "[colors]\ncomposer = \"shaded\"\ncomposer_bg = \"#24252a\"\ncontent_max_width = 80",
+            false,
+        ),
+    ] {
+        let theme = crate::tui::theme::test_theme_from_source(source);
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(120, 24);
+        shell.apply_edit(EditAction::Char('/'));
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, 120, Instant::now());
+        assert!(!chrome.suggestions.is_empty(), "suggestions render");
+        if filled {
+            let composer = chrome
+                .composer
+                .iter()
+                .find(|row| row.contains("\u{1b}[48;2;36;37;42m"))
+                .expect("the shaded composer fill");
+            let composer_columns = columns_with_fill(composer, 120);
+            // The box opens with one blank cushion row before the words.
+            assert!(
+                strip_terminal_sequences(&chrome.suggestions[0])
+                    .trim()
+                    .is_empty(),
+                "top cushion row: {:?}",
+                chrome.suggestions[0]
+            );
+            for row in &chrome.suggestions {
+                let columns = columns_with_fill(row, 120);
+                assert!(
+                    columns.first() == composer_columns.first()
+                        && columns.last() == composer_columns.last(),
+                    "popup fill must align with the input box: {row:?} vs {composer:?}"
+                );
+            }
+        } else {
+            assert!(
+                chrome
+                    .suggestions
+                    .iter()
+                    .all(|row| columns_with_fill(row, 120).is_empty()),
+                "default keeps plain rows"
+            );
+        }
+    }
+}
+
+#[test]
 fn slash_popup_keeps_selection_visible_across_paging_filtering_and_resize() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 14);

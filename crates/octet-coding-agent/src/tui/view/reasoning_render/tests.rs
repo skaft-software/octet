@@ -35,6 +35,12 @@ fn thinking_slot(text: &str) -> AssistantBlock {
     slot
 }
 
+fn working_slot(text: &str) -> AssistantBlock {
+    let mut slot = thinking_slot(text);
+    slot.activity_started_at = Some(Instant::now());
+    slot
+}
+
 fn render_reasoning(
     reasoning: &AssistantBlock,
     renderer: &RichRenderer,
@@ -1865,6 +1871,84 @@ fn settled_thinking_duration_follows_preference_without_hiding_the_trace() {
     reasoning.reasoning_expanded = true;
     let expanded = render_reasoning(&reasoning, &renderer, &theme, 80);
     assert!(strip_terminal_sequences(&expanded.join("\n")).contains("retained private trace"));
+}
+
+#[test]
+fn working_dots_spinner_replaces_the_swept_parenthesized_label() {
+    // Zed marks generation with a small bouncing-dots spinner and a plain
+    // label; `working_dots` opts a theme into that row instead of the swept
+    // `Working (0s · Esc to interrupt)` form. Disclosure moves onto the
+    // label as a chevron — no `└ (Ctrl+T to expand)` connector row.
+    let theme = theme::test_theme_from_source("[colors]\nworking_dots = true");
+    let renderer = theme.reasoning_renderer();
+    let slot = working_slot("private detail");
+    let rows = render_reasoning(&slot, &renderer, &theme, 80);
+    assert!(
+        rows.len() == 1 || rows[1].trim().is_empty(),
+        "no connector hint row: {rows:?}"
+    );
+    let first = strip_terminal_sequences(&rows[0]);
+    assert!(first.contains("Thinking"), "{first}");
+    assert!(first.contains("Esc to interrupt"), "{first}");
+    assert!(
+        first.contains("· ·") || first.contains(". ."),
+        "the dots spinner is missing: {first}"
+    );
+    assert!(
+        first.contains(theme.glyph("collapsed")),
+        "expandable thinking carries a chevron: {first}"
+    );
+    assert!(
+        !first.contains('('),
+        "no parentheses in the dots row: {first}"
+    );
+    // A real heading still occupies the detail row, unadorned.
+    let mut headed = working_slot("## Optimizing the parser\n\nprivate detail");
+    headed.reasoning_heading = Some("Optimizing the parser".into());
+    let rows = render_reasoning(&headed, &renderer, &theme, 80);
+    let second = strip_terminal_sequences(&rows[1]);
+    assert_eq!(second.trim(), "Optimizing the parser", "{second:?}");
+    // The default theme keeps the historical swept form and connector row.
+    let bare = theme::test_theme();
+    let renderer = bare.reasoning_renderer();
+    let rows = render_reasoning(&working_slot("private detail"), &renderer, &bare, 80);
+    let text = strip_terminal_sequences(&rows.join("\n"));
+    assert!(text.contains("Thinking ("), "{text}");
+    assert!(text.contains("Ctrl+T to expand"), "{text}");
+}
+
+#[test]
+fn settled_thinking_labels_keep_segments_visible_without_durations() {
+    // Between tool calls, a settled reasoning segment can arrive without a
+    // recorded duration (for example a rehydrated turn). Zed still shows its
+    // "Thinking" header; `settled_thinking_labels` opts a theme into that
+    // label, while the default theme keeps the historical empty row.
+    let label_theme = theme::test_theme_from_source(
+        "[colors]\nsettled_thinking_labels = true\nshow_durations = true",
+    );
+    let mut reasoning = AssistantBlock::streaming_reasoning("private segment");
+    reasoning.finish_reasoning();
+    reasoning.reasoning_elapsed = None;
+    let renderer = label_theme.reasoning_renderer();
+    let settled = render_reasoning(&reasoning, &renderer, &label_theme, 80);
+    assert_eq!(
+        strip_terminal_sequences(&settled.join("\n")),
+        "Thinking",
+        "a durationless segment keeps a visible label"
+    );
+    // With a duration and durations shown, the timed summary still wins.
+    reasoning.reasoning_elapsed = Some(Duration::from_secs(4));
+    let timed = render_reasoning(&reasoning, &renderer, &label_theme, 80);
+    assert_eq!(
+        strip_terminal_sequences(&timed.join("\n")),
+        "Thought for 4s"
+    );
+    // The default theme hides durationless segments exactly as before.
+    let mut bare = theme::test_theme();
+    bare.set_duration_preference(Some(true));
+    reasoning.reasoning_elapsed = None;
+    let renderer = bare.reasoning_renderer();
+    assert!(render_reasoning(&reasoning, &renderer, &bare, 80).is_empty());
 }
 
 #[test]

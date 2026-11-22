@@ -40,8 +40,8 @@ pub(crate) use discovery::{
 // The suite pins theme resolution against a real resource root, so these two
 // stay reachable through this module's glob.
 use discovery::{
-    cards_theme_for, compiled_file_theme_for, discover_themes, read_theme_file_bounded,
-    resolved_theme_resource, still_theme_for,
+    brief_theme_for, cards_theme_for, chill_theme_for, compiled_file_theme_for, discover_themes,
+    dock_theme_for, read_theme_file_bounded, resolved_theme_resource, still_theme_for,
 };
 // Only the test-only `available_themes` names it here.
 #[cfg(test)]
@@ -97,17 +97,47 @@ pub const STILL_THEME_NAME: &str = "Still";
 /// The embedded source for [`STILL_THEME_NAME`].
 const STILL_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Still.toml");
 
+/// Stable selector for the compiled-in `Dock` theme. The file is embedded at
+/// build time from `examples/themes/Dock.toml` and validated by
+/// `dock_example_theme_is_valid_for_every_background_profile`, so the shipped
+/// example and this built-in can never drift apart.
+pub const DOCK_THEME_NAME: &str = "Dock";
+
+/// The embedded source for [`DOCK_THEME_NAME`].
+const DOCK_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Dock.toml");
+
+/// Stable selector for the compiled-in `Brief` theme. The file is embedded at
+/// build time from `examples/themes/Brief.toml` and validated by
+/// `brief_example_theme_is_valid_for_every_background_profile`, so the shipped
+/// example and this built-in can never drift apart.
+pub const BRIEF_THEME_NAME: &str = "Brief";
+
+/// The embedded source for [`BRIEF_THEME_NAME`].
+const BRIEF_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Brief.toml");
+
+/// Stable selector for the compiled-in `Chill` theme. The file is embedded at
+/// build time from `examples/themes/Chill.toml` and validated by
+/// `chill_example_theme_is_valid_for_every_background_profile`, so the shipped
+/// example and this built-in can never drift apart.
+pub const CHILL_THEME_NAME: &str = "Chill";
+
+/// The embedded source for [`CHILL_THEME_NAME`].
+const CHILL_THEME_SOURCE: &str = include_str!("../../../../examples/themes/Chill.toml");
+
 /// Compiles one embedded file theme for a single terminal profile.
 type CompiledFileTheme = fn(TerminalCapabilities, TerminalBackground) -> anyhow::Result<OctetTheme>;
 
 /// Every selector answered by a compiled-in file theme rather than a discovered
 /// file, in the order they are offered in the `/theme` picker. A built-in
 /// selector always wins over a discovered file of the same stem, and the stem is
-/// reserved so a user's `Cards.toml` or `Still.toml` can neither shadow, nor be
-/// shadowed by, the built-in it selects.
+/// reserved so a user's `Cards.toml`, `Dock.toml` or `Still.toml` can neither
+/// shadow, nor be shadowed by, the built-in it selects.
 const COMPILED_FILE_THEMES: &[(&str, CompiledFileTheme)] = &[
     (CARDS_THEME_NAME, cards_theme_for),
     (STILL_THEME_NAME, still_theme_for),
+    (DOCK_THEME_NAME, dock_theme_for),
+    (BRIEF_THEME_NAME, brief_theme_for),
+    (CHILL_THEME_NAME, chill_theme_for),
     (PI_THEME_NAME, pi_theme_for),
 ];
 
@@ -118,6 +148,12 @@ pub enum ThemeSource {
     CompiledCards,
     /// The compiled-in `Still` theme, embedded from `examples/themes/Still.toml`.
     CompiledStill,
+    /// The compiled-in `Dock` theme, embedded from `examples/themes/Dock.toml`.
+    CompiledDock,
+    /// The compiled-in `Brief` theme, embedded from `examples/themes/Brief.toml`.
+    CompiledBrief,
+    /// The compiled-in `Chill` theme, embedded from `examples/themes/Chill.toml`.
+    CompiledChill,
     /// Pi 1.0's generated system palette, independent of extension enablement.
     CompiledPi,
     File(PathBuf),
@@ -771,6 +807,9 @@ impl OctetTheme {
             ThemeSource::CompiledDefault
             | ThemeSource::CompiledCards
             | ThemeSource::CompiledStill
+            | ThemeSource::CompiledDock
+            | ThemeSource::CompiledBrief
+            | ThemeSource::CompiledChill
             | ThemeSource::CompiledPi => None,
         }
     }
@@ -1006,6 +1045,9 @@ impl OctetTheme {
             }
             ThemeSource::CompiledCards => cards_theme_for(self.capabilities, self.background),
             ThemeSource::CompiledStill => still_theme_for(self.capabilities, self.background),
+            ThemeSource::CompiledDock => dock_theme_for(self.capabilities, self.background),
+            ThemeSource::CompiledBrief => brief_theme_for(self.capabilities, self.background),
+            ThemeSource::CompiledChill => chill_theme_for(self.capabilities, self.background),
             ThemeSource::CompiledPi => pi_theme_for(self.capabilities, self.background)
                 .map(|theme| theme.with_terminal_colors(self.terminal_colors)),
             ThemeSource::File(path) => {
@@ -1447,7 +1489,12 @@ impl OctetTheme {
                 // every model-emitted grapheme visible while sexy-tui retains
                 // the original source as semantic copy text.
                 code_overflow: CodeOverflow::Wrap,
-                code_borders: !self.is_compiled_default(),
+                // `code_borders` opts a file theme out of the drawn code box
+                // for the compiled default's quiet single-fill look; without
+                // the token, file themes keep their historical borders.
+                code_borders: self
+                    .resolve::<bool>("code_borders")
+                    .unwrap_or(!self.is_compiled_default()),
                 syntax_highlighting: true,
                 tables: true,
                 stable_block_geometry: true,

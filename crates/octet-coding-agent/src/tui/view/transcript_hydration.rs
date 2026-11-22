@@ -370,6 +370,134 @@ mod tests {
     }
 
     #[test]
+    fn turn_tallies_collapse_a_silent_stretch_into_one_counting_row() {
+        use crate::hydrate::ToolActivityGroup;
+        // A `turn_tallies` theme shows one row per silent stretch of work:
+        // commands, edits, and settled thoughts counted together, the
+        // individual calls hidden until Ctrl+O.
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\nturn_tallies = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        state.push_block(TranscriptBlock::User {
+            text: "fix it".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        });
+        let bash = ToolCallId("bash-one".into());
+        let edit = ToolCallId("edit-one".into());
+        let group = ToolActivityGroup {
+            member_ids: vec![bash.clone()],
+            commands: 1,
+            ..Default::default()
+        };
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::ToolActivityGroup(group),
+                TranscriptItem::ToolCall {
+                    id: bash.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "rg fixture"}),
+                },
+            ],
+        );
+        // A different class of work joins the same tally instead of sealing
+        // it into a second summary row.
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::ToolCall {
+                id: edit.clone(),
+                name: "edit".into(),
+                args: serde_json::json!({"path": "src/lib.rs"}),
+            }],
+        );
+        // One reasoning segment settles inside the turn.
+        state.turn_thoughts += 1;
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::ToolResult {
+                    id: bash.clone(),
+                    text: "found".into(),
+                    is_error: false,
+                    duration: None,
+                    diff: None,
+                    images: Vec::new(),
+                },
+                TranscriptItem::ToolResult {
+                    id: edit.clone(),
+                    text: "ok".into(),
+                    is_error: false,
+                    duration: None,
+                    diff: None,
+                    images: Vec::new(),
+                },
+            ],
+        );
+        state.seal_activity_group();
+        let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(
+            compact.contains("1 command · 1 edit · 1 thought"),
+            "{compact}"
+        );
+        assert!(!compact.contains("rg fixture"), "{compact}");
+        // Exactly one tally row: two separators join its three counts.
+        assert_eq!(compact.matches(" · ").count(), 2, "{compact}");
+        // A non-tally quiet theme keeps one summary per activity class.
+        let mut plain = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        plain.push_block(TranscriptBlock::User {
+            text: "fix it".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        });
+        let group = ToolActivityGroup {
+            member_ids: vec![bash.clone()],
+            commands: 1,
+            ..Default::default()
+        };
+        append_hydrated_items(
+            &mut plain,
+            [
+                TranscriptItem::ToolActivityGroup(group),
+                TranscriptItem::ToolCall {
+                    id: bash.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "rg fixture"}),
+                },
+                TranscriptItem::ToolCall {
+                    id: edit.clone(),
+                    name: "edit".into(),
+                    args: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            ],
+        );
+        append_hydrated_items(
+            &mut plain,
+            [TranscriptItem::ToolResult {
+                id: bash.clone(),
+                text: "found".into(),
+                is_error: false,
+                duration: None,
+                diff: None,
+                images: Vec::new(),
+            }],
+        );
+        plain.seal_activity_group();
+        let compact = strip_terminal_sequences(&plain.rendered_transcript(100).join("\n"));
+        assert!(compact.contains("Ran 1 Command"), "{compact}");
+    }
+
+    #[test]
     fn grouped_exploration_replays_mixed_results_and_expands_child_details() {
         use crate::hydrate::ToolActivityGroup;
         // `quiet_tool_summaries` gates all activity grouping.

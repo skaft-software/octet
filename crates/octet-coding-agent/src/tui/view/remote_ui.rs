@@ -90,6 +90,7 @@ fn composed_chrome(
             pending: Vec::new(),
             subagents: Vec::new(),
             suggestions: Vec::new(),
+            suggestions_above: false,
             error: Vec::new(),
             transcript_rows: usize::from(state.size.1.max(1)),
         };

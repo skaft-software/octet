@@ -465,7 +465,7 @@ fn default_tool_image_reservation_keeps_following_rows_physically_empty() {
     let mut content = vec![anchor.clone()];
     content.extend(vec![String::new(); 15]);
     let rows = super::surface_frame::decorate_surface_with_frame(
-        content, &plan, &theme, 80, None, false, None,
+        content, &plan, &theme, 80, None, false, None, 0,
     );
     let start = rows.iter().position(|row| row.contains(&anchor)).unwrap();
     for (offset, row) in rows[start + 1..start + 16].iter().enumerate() {

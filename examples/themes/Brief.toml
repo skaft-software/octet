@@ -1,0 +1,300 @@
+# Brief — condensed-work theme for octet.
+#
+# The quiet instrument: when a stretch of work produces no answer text, it
+# collapses to one tally row — `1 command · 2 edits · 1 thought` — and the
+# transcript stays a conversation between you, the answers, and short counts
+# of everything in between.
+#
+# How the look is built (theme-file supported):
+# - `quiet_tool_summaries` groups tool calls; `turn_tallies` merges every
+#   class in the silent stretch into that one counting row, thoughts
+#   included, and hides the individual calls until Ctrl+O.
+# - Thinking is never shown inline: it is counted. The live status row is a
+#   small bouncing-dots spinner with a plain label.
+# - No status dots, no durations, no drawn code boxes: code sits on a quiet
+#   single-fill well.
+# - One restrained violet accent; model colouring stays off so the page
+#   reads monochrome.
+#
+# Use:
+#   octet --theme Brief
+#   OCTET_THEME=Brief octet
+#   /theme Brief   (inside the TUI; /theme reload previews edits)
+
+[metadata]
+name = "Brief"
+description = "Condensed work: silent turns collapse to one counting row"
+author = "octet"
+version = "1"
+terminal = "light-dark"
+adaptive = false
+
+[colors]
+# Base text and neutral chrome. "default" inherits the terminal.
+foreground = "default"
+muted = "#8b909a"
+dim = "#6e7480"
+border = "#3a3b40"
+border_idle = "#3a3b40"
+border_focused = "#7c6cf0"
+
+# One restrained accent; muted signal colours.
+accent = "#7c6cf0"
+success = "#74a37f"
+info = "default"
+error = "#cf7079"
+warning = "#c49a54"
+
+# The startup splash follows the compact mark in the neutral accent.
+splash_compact = true
+splash = "#7c6cf0"
+
+# Tool calls group into tally rows; Ctrl+O reveals the individual calls.
+quiet_tool_summaries = true
+# One row per silent stretch: commands, edits, reads, searches and thoughts
+# are counted together instead of summarized per class.
+turn_tallies = true
+# Thinking is counted, never shown inline; Ctrl+T still expands a trace.
+thinking_expanded = false
+# The live status row is a small bouncing-dots spinner with a plain label.
+working_dots = true
+# No `Took <duration>` rows and no margin status dots.
+show_durations = false
+margin_markers = false
+# Code blocks use the quiet single-fill well, not a drawn box.
+code_borders = false
+# Prompt rows keep the plain canvas; the chevron stays neutral.
+prompt_wash = false
+
+# Markdown chrome. Code sits in a quiet single-fill well.
+md_heading = "default"
+md_link = "#7c6cf0"
+md_code = "#c6cad2"
+md_code_block = "default"
+md_code_bg = "#1d1e22"
+md_code_inline_bg = "default"
+md_quote = "default"
+md_quote_border = "#3a3b40"
+md_hr = "#3a3b40"
+md_list_bullet = "#8b909a"
+
+# Syntax highlighting. Quiet structure, colour where it aids reading.
+syntax_comment = "#6b7280"
+syntax_keyword = "#b695f0"
+syntax_function = "#8ab4f8"
+syntax_variable = "#cdd2da"
+syntax_string = "#9dc98a"
+syntax_number = "#d19a66"
+syntax_type = "#e0c07b"
+syntax_operator = "#96a0ad"
+syntax_punctuation = "#8b929b"
+
+# Context-report legend (each category keeps its own channel).
+context_system = "#4aa8c7"
+context_skills = "#d19a35"
+context_tools = "#7f9fd4"
+context_messages = "#d8dee8"
+context_pending = "#d47d3f"
+context_framing = "#73808f"
+context_adjustment = "#a978c5"
+context_tokenizer_adjustment = "#c36f99"
+context_output = "#df6f7c"
+context_free = "#52c878"
+context_buffer = "#8678ba"
+
+# Monochrome identity: no per-model colours, one neutral accent.
+model_accent = "#7c6cf0"
+model_assistant = "default"
+model.use_lab_color = "false"
+
+# Semantic roles. Restrained: bold headings, italic emphasis, underline links.
+[roles.heading]
+bold = true
+
+[roles.strong]
+bold = true
+
+[roles.emphasis]
+italic = true
+
+[roles.quote]
+dim = true
+
+[roles.link]
+underline = true
+
+[glyphs]
+top_left = "╭"
+top_right = "╮"
+bottom_left = "╰"
+bottom_right = "╯"
+horizontal = "─"
+vertical = "│"
+branch = "│"
+last_branch = "└"
+rail = "│"
+prompt = "›"
+shell = "$"
+success = "✓"
+warning = "!"
+note = "i"
+error = "×"
+interrupt = "■"
+pending = "·"
+reasoning = "·"
+collapsed = "▸"
+expanded = "▾"
+separator = " · "
+ellipsis = "…"
+bullet = "-"
+wordmark = "octet"
+
+[glyphs_ascii]
+top_left = "+"
+top_right = "+"
+bottom_left = "+"
+bottom_right = "+"
+horizontal = "-"
+vertical = "|"
+branch = "|-"
+last_branch = "`-"
+rail = "|"
+prompt = ">"
+shell = "$"
+success = "+"
+warning = "!"
+note = "i"
+error = "x"
+interrupt = "!"
+pending = "."
+reasoning = "."
+collapsed = "[+]"
+expanded = "[-]"
+separator = " | "
+ellipsis = "..."
+bullet = "-"
+wordmark = "octet"
+
+# Transcript surfaces. Everything plain: the tally row carries the work.
+[surfaces.user]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.assistant]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.reasoning]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.tool]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.notice]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.outcome]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.shell]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.compaction]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[layout]
+density = "comfortable"
+show_header = false
+show_footer = true
+show_status_line = true
+show_reasoning = true
+show_panel_borders = true
+prompt_padding = false
+transcript_inset = 2
+composer_padding = 1
+narrow_breakpoint = 64
+narrow_show_header = false
+narrow_show_footer = true
+narrow_show_status_line = true
+narrow_show_reasoning = true
+narrow_show_panel_borders = false
+
+# Background overlays. `dark` restates the base design; `light` swaps in
+# paper fills and darker text-safe hues.
+[variants.dark.colors]
+muted = "#8b909a"
+dim = "#6e7480"
+border = "#3a3b40"
+border_idle = "#3a3b40"
+border_focused = "#7c6cf0"
+accent = "#7c6cf0"
+success = "#74a37f"
+error = "#cf7079"
+warning = "#c49a54"
+md_link = "#7c6cf0"
+md_code = "#c6cad2"
+md_code_bg = "#1d1e22"
+md_quote_border = "#3a3b40"
+md_hr = "#3a3b40"
+md_list_bullet = "#8b909a"
+syntax_comment = "#6b7280"
+syntax_keyword = "#b695f0"
+syntax_function = "#8ab4f8"
+syntax_variable = "#cdd2da"
+syntax_string = "#9dc98a"
+syntax_number = "#d19a66"
+syntax_type = "#e0c07b"
+syntax_operator = "#96a0ad"
+syntax_punctuation = "#8b929b"
+model_accent = "#7c6cf0"
+splash = "#7c6cf0"
+
+[variants.light.colors]
+muted = "#667085"
+dim = "#8a8f98"
+border = "#d8d9de"
+border_idle = "#d8d9de"
+border_focused = "#6a54e8"
+accent = "#6a54e8"
+success = "#2e7d4f"
+error = "#a33a45"
+warning = "#8a5f00"
+md_link = "#6a54e8"
+md_code = "#5b616a"
+md_code_bg = "#f2f3f6"
+md_quote_border = "#d8d9de"
+md_hr = "#d8d9de"
+md_list_bullet = "#667085"
+syntax_comment = "#8a8f98"
+syntax_keyword = "#7c53d6"
+syntax_function = "#2f6fdb"
+syntax_variable = "#383a42"
+syntax_string = "#4a8a4e"
+syntax_number = "#a86a1f"
+syntax_type = "#a07c1f"
+syntax_operator = "#5b616a"
+syntax_punctuation = "#667085"
+model_accent = "#6a54e8"
+splash = "#6a54e8"

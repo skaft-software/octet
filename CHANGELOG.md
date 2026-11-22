@@ -4,10 +4,17 @@
 
 ### Added
 
+- New built-in `Dock` theme: panel-style chat with soft message bands, every tool call listed with its command, and a shaded composer (`/theme Dock`).
+- New built-in `Brief` theme: silent stretches of work collapse to one counting row (`1 command · 2 edits · 1 thought`), thoughts included (`/theme Brief`).
+- New built-in `Chill` theme: Dock's panel look with Brief's counting rows (`/theme Chill`).
+- Framed composers now paint `composer_bg`, and a theme's `composer_placeholder` shows a muted hint in an empty draft.
+- New theme tokens: `read_number_gutter`, `flat_tool_cards`, `code_borders`, `working_dots`, `turn_tallies`.
+- New menu and composer tokens: `suggestions_above`, `suggestions_keep_status`, `suggestions_bg`, `panel_footer_hints`, `slim_picker_headers`.
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
 
 ### Fixed
 
+- Open the `@` file completion list level with the composer's input column instead of pinned to the terminal's left edge.
 - Open Pi custom components that pass `blocked`, and report octet as waiting on you until they close.
 - Report a Pi `pi.exec` command ended by a signal with exit code 128 plus the signal number, so a timeout or crash never reads as success.
 - Run a Pi Markdown transformer only on the message types it registers for with `messageTypes`.
