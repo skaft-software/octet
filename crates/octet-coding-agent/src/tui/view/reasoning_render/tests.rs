@@ -1875,10 +1875,8 @@ fn settled_thinking_duration_follows_preference_without_hiding_the_trace() {
 
 #[test]
 fn working_dots_spinner_replaces_the_swept_parenthesized_label() {
-    // Zed marks generation with a small bouncing-dots spinner and a plain
-    // label; `working_dots` opts a theme into that row instead of the swept
-    // `Working (0s · Esc to interrupt)` form. Disclosure moves onto the
-    // label as a chevron — no `└ (Ctrl+T to expand)` connector row.
+    // `working_dots` replaces the swept parenthesized form with a dots
+    // spinner and chevron disclosure on the label.
     let theme = theme::test_theme_from_source("[colors]\nworking_dots = true");
     let renderer = theme.reasoning_renderer();
     let slot = working_slot("private detail");
@@ -1902,13 +1900,11 @@ fn working_dots_spinner_replaces_the_swept_parenthesized_label() {
         !first.contains('('),
         "no parentheses in the dots row: {first}"
     );
-    // A real heading still occupies the detail row, unadorned.
     let mut headed = working_slot("## Optimizing the parser\n\nprivate detail");
     headed.reasoning_heading = Some("Optimizing the parser".into());
     let rows = render_reasoning(&headed, &renderer, &theme, 80);
     let second = strip_terminal_sequences(&rows[1]);
     assert_eq!(second.trim(), "Optimizing the parser", "{second:?}");
-    // The default theme keeps the historical swept form and connector row.
     let bare = theme::test_theme();
     let renderer = bare.reasoning_renderer();
     let rows = render_reasoning(&working_slot("private detail"), &renderer, &bare, 80);
@@ -1919,10 +1915,8 @@ fn working_dots_spinner_replaces_the_swept_parenthesized_label() {
 
 #[test]
 fn settled_thinking_labels_keep_segments_visible_without_durations() {
-    // Between tool calls, a settled reasoning segment can arrive without a
-    // recorded duration (for example a rehydrated turn). Zed still shows its
-    // "Thinking" header; `settled_thinking_labels` opts a theme into that
-    // label, while the default theme keeps the historical empty row.
+    // A settled segment can arrive without a recorded duration; the token
+    // keeps it visible while the default theme hides it.
     let label_theme = theme::test_theme_from_source(
         "[colors]\nsettled_thinking_labels = true\nshow_durations = true",
     );
@@ -1936,14 +1930,12 @@ fn settled_thinking_labels_keep_segments_visible_without_durations() {
         "Thinking",
         "a durationless segment keeps a visible label"
     );
-    // With a duration and durations shown, the timed summary still wins.
     reasoning.reasoning_elapsed = Some(Duration::from_secs(4));
     let timed = render_reasoning(&reasoning, &renderer, &label_theme, 80);
     assert_eq!(
         strip_terminal_sequences(&timed.join("\n")),
         "Thought for 4s"
     );
-    // The default theme hides durationless segments exactly as before.
     let mut bare = theme::test_theme();
     bare.set_duration_preference(Some(true));
     reasoning.reasoning_elapsed = None;

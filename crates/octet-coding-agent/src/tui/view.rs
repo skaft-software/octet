@@ -857,14 +857,12 @@ struct ActivityGroupView {
     failures: Vec<String>,
     open: bool,
     kind: crate::hydrate::ToolActivityKind,
-    /// Thoughts already settled when this group opened, so a turn split by
-    /// public text never counts one thought in two tally rows.
+    /// Thoughts already settled when this group opened, so one thought is
+    /// never counted in two tally rows.
     base_thoughts: usize,
 }
 
-/// The `turn_tallies` label: one row per silent stretch of work, counting
-/// what happened — `1 command · 2 edits · 1 thought` — instead of naming a
-/// single activity class.
+/// The `turn_tallies` label: one counting row per silent stretch of work.
 fn tally_label(
     group: &crate::hydrate::ToolActivityGroup,
     failures: &[String],
@@ -1988,9 +1986,8 @@ pub(crate) struct ShellState {
     active_reasoning: Option<usize>,
     /// Run liveness is composer-adjacent chrome, never streamed reasoning.
     working_status: Option<Box<AssistantBlock>>,
-    /// Reasoning segments settled since the last user prompt. Feeds the
-    /// `turn_tallies` label's thought count; reset when a new prompt opens
-    /// the next turn.
+    /// Reasoning segments settled since the last user prompt, for the
+    /// `turn_tallies` thought count.
     turn_thoughts: usize,
     /// Stable identity boundary, so settlement visits only this run's blocks.
     run_transcript_start: u64,
@@ -2841,8 +2838,7 @@ impl ShellState {
     }
 
     fn push_block(&mut self, mut block: TranscriptBlock) -> usize {
-        // A new prompt opens the next turn: its tally counts only the
-        // reasoning that settles after it.
+        // A new prompt opens the next turn.
         if matches!(block, TranscriptBlock::User { .. }) {
             self.turn_thoughts = 0;
         }
@@ -3419,9 +3415,7 @@ impl ShellState {
 
     fn extend_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
         if let Some(position) = self.activity_groups.iter().rposition(|view| view.open) {
-            // A `turn_tallies` theme counts every class in one row, so a
-            // different-kind call merges into the open tally instead of
-            // sealing it and starting a second summary.
+            // A `turn_tallies` theme merges every class into the open tally.
             if self.theme.resolve::<bool>("turn_tallies").unwrap_or(false)
                 || self.activity_groups[position].kind == group.kind()
             {

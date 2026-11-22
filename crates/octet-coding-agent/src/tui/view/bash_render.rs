@@ -413,9 +413,7 @@ pub(super) fn project_pi_bash_call(
 }
 
 /// A flat command card: a small muted tool label stacked above the command
-/// itself, matching Zed's terminal tool header
-/// (crates/agent_ui/src/conversation_view/thread_view.rs:9133-9198 stacks the
-/// tool label above the command it runs). Selected by `flat_tool_cards`.
+/// it runs. Selected by `flat_tool_cards`.
 pub(super) fn project_labeled_bash_call(
     panel: &ToolPanel,
     command: &str,
@@ -586,8 +584,6 @@ mod tests {
             "tool_output",
         );
         let rows = plain_rows(&rendered.lines);
-        // A small muted label, the command under it, output indented without
-        // connector stems or elbows, and no duration row.
         assert_eq!(rows[0], "Bash");
         assert_eq!(rows[1], "$ cargo test --lib");
         assert!(
@@ -604,7 +600,6 @@ mod tests {
             !rows.iter().any(|row| row.contains("Took")),
             "flat cards show no timing: {rows:?}"
         );
-        // The label is decoration: copy text is the command and its output.
         assert!(
             rendered.text.starts_with("$ cargo test --lib"),
             "{:?}",

@@ -1,11 +1,9 @@
 # Dock — panel-style chat theme for octet.
 #
-# Visual direction informed by the Zed editor's agent panel (look only, no
-# source code; Zed is GPL-3.0): https://github.com/zed-industries/zed
-# Zed's panel look is whitespace and subtle elevation, not drawn outlines, so
+# The panel look is whitespace and subtle elevation, not drawn outlines, so
 # this theme never draws box borders: user messages and working-set tool
 # calls sit on one soft single-tone band spanning the reading column (the
-# pane's width, never the whole window), command cards stack a small muted
+# column's width, never the whole window), command cards stack a small muted
 # label above the command with plain indented output, read calls are sleek
 # plain one-liners, and the composer is a borderless shaded rectangle.
 #
@@ -13,8 +11,8 @@
 # - `prompt_wash = false` keeps prompt bands on the neutral fill while the
 #   chevron keeps each turn's stored model colour (provenance survives
 #   model switches). `model.use_lab_color = "true"` keeps that adaptive.
-# - `content_max_width = 80` centres a narrow reading column, like Zed's
-#   side panel; `density = "airy"` gives the panel's vertical rhythm.
+# - `content_max_width = 80` centres a narrow reading column;
+#   `density = "airy"` gives the panel's vertical rhythm.
 # - Working-set tool calls keep their own visible row on one single-tone
 #   soft band; output collapses until Ctrl+O. Read calls are plain one-line
 #   rows without fills or durations. Thinking stays collapsed to one
@@ -61,9 +59,9 @@ splash_compact = true
 # field on a panel. No rules, no box.
 composer = "shaded"
 composer_bg = "#24252a"
-suggestions_bg = "#24252a"
 # The command/file suggestion popups share the input box's fill, so they
 # read as one surface with the composer.
+suggestions_bg = "#24252a"
 # Muted hint painted where an empty draft would be (paint-only, never part
 # of the draft or a submission).
 composer_placeholder = "Message octet — @ to include context, / for commands"
@@ -74,15 +72,13 @@ prompt_wash = false
 # fills stop at the column edge with the terminal canvas beside them.
 surface_bleed = false
 # Read calls render as sleek one-line rows with no fill and no duration
-# row, the way Zed lists read/search tools plainly; working-set calls
-# (commands, edits) keep their soft band.
+# row; working-set calls (commands, edits) keep their soft band.
 plain_read_tools = true
 # Flat command cards: a small muted `Bash` label stacked above the
 # command, and nested output indents without connector stems or elbows.
 flat_tool_cards = true
 # No command-hint footers in menus: pickers and the composer's slash
-# popup carry themselves, like Zed's popovers. The accent marker names the
-# selected row.
+# popup carry themselves. The accent marker names the selected row.
 panel_footer_hints = false
 # Slim menu headers everywhere: no purpose sentences under titles, no scope
 # suffix or sort display on the session picker.
@@ -92,28 +88,26 @@ slim_picker_headers = true
 # visible while it is open.
 suggestions_above = true
 suggestions_keep_status = true
-# No `Took <duration>` rows anywhere: Zed shows no completed-call timings.
+# No `Took <duration>` rows anywhere.
 show_durations = false
-# Every tool call keeps its own row, as Zed's panel lists each command;
-# only the output collapses (Ctrl+O expands). Expanded read output projects
-# its line numbers into one right-aligned muted gutter, Zed-style, instead
-# of inline `N: ` prefixes.
+# Every tool call keeps its own row; only the output collapses (Ctrl+O
+# expands). Expanded read output projects its line numbers into one
+# right-aligned muted gutter instead of inline `N: ` prefixes.
 quiet_tool_summaries = false
 read_number_gutter = true
 # Reasoning collapses to one `Thinking` line; Ctrl+T expands. Settled
 # segments between calls keep a subdued `Thinking` label even when no
-# duration was recorded, the way Zed headers every thought chunk.
+# duration was recorded.
 thinking_expanded = false
 settled_thinking_labels = true
 # The live status row uses a small bouncing-dots spinner and a plain label
-# with dot separators, the way Zed marks generation, instead of the swept
-# word-in-parentheses form.
+# with dot separators instead of the swept word-in-parentheses form.
 working_dots = true
 # No margin status dots: the panel look carries state in text, not glyphs.
 margin_markers = false
 
 # Code blocks use the quiet single-fill look: muted language label on the
-# well, no drawn border box — the surface Zed's edit cards render code on.
+# well, no drawn border box.
 code_borders = false
 # Centre transcript and composer in a narrow reading column, like a pane.
 content_max_width = 80

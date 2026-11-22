@@ -536,10 +536,8 @@ fn render_panel_item(
     let inset = " ".repeat(usize::from(
         PresentationLayout::new(&state.theme, width).inset,
     ));
-    // Zed marks the selected menu row with a fill across the whole row, not
-    // a marker chevron: list rows highlight like element_hover
-    // (crates/ui/src/components/list.rs; agent popovers follow it). A theme
-    // opts into that presentation by setting `picker_selected_bg`.
+    // `picker_selected_bg` fills the selected row instead of the accent
+    // marker.
     let selected_fill = is_selected
         .then(|| state.theme.role_rgb("picker_selected_bg"))
         .flatten();
@@ -692,8 +690,7 @@ impl PanelRenderOutput {
 }
 
 /// The `slim_picker_headers` presentation: menus drop their purpose
-/// sentences (and the session picker its scope/sort chrome) so the title,
-/// the filter field, and the list carry the panel, like a popover.
+/// sentences and scope/sort chrome; the title, filter, and list remain.
 fn slim_picker_headers(theme: &OctetTheme) -> bool {
     theme
         .resolve::<bool>("slim_picker_headers")

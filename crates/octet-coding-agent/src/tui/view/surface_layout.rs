@@ -259,11 +259,8 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         kind
     };
     let resolved = theme.surface_for_width(surface_kind, outer_width);
-    // Zed lists read calls as sleek one-line rows with no card behind them
-    // (crates/agent_ui/src/conversation_view/thread_view.rs:9757-9777: read
-    // and search tools use the plain layout, only working-set tools get
-    // cards). A theme opts its read calls into that plain row with
-    // `plain_read_tools`.
+    // `plain_read_tools` renders read calls as plain one-line rows with no
+    // card behind them.
     let plain_read_tool = matches!(block, TranscriptBlock::Tool(panel)
         if panel.name == "read")
         && theme.resolve::<bool>("plain_read_tools").unwrap_or(false);
@@ -430,12 +427,9 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     // them on a wide screen. Borderless filled chrome extends its fill to the
     // terminal edges while the text inside stays in the reading column. Cards
     // keep their own border, and a heading or bottom row is rendered without
-    // the fill, so neither bleeds. A content-width surface is deliberately a
-    // floating island that hugs its text — the way Zed's agent panel cards
-    // float on the pane (crates/agent_ui/src/conversation_view/thread_view.rs:
-    // 7322-7495) — so it never bleeds either. A theme may also opt its fills
-    // back into the reading column with `surface_bleed = false`: bands then
-    // span the column like a panel pane instead of the whole window.
+    // the fill, so neither bleeds. A content-width surface hugs its text and
+    // never bleeds; `surface_bleed = false` opts fills back into the reading
+    // column.
     let bleeds = presentation.capped
         && theme.resolve::<bool>("surface_bleed").unwrap_or(true)
         && resolved.width == ThemeSurfaceWidth::Full
@@ -463,8 +457,7 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     };
     let content_role = if plain_read_tool {
         // A plain read row borrows no surface fill: `surface.tool` may still
-        // carry a background for banded working-set calls, and the header
-        // label would paint it onto the bare canvas.
+        // carry one for banded working-set calls.
         "text"
     } else {
         state_role
@@ -886,8 +879,7 @@ mod tests {
                 "gutter column must be shared by every numbered row: {plain:?}"
             );
         }
-        // The numbers are decoration: semantic copy keeps the tool's source
-        // (behind the card's `Read` label prefix, which is copy text too).
+        // The numbers are decoration: copy keeps the tool's source form.
         let copy = rendered
             .tool_copy
             .as_ref()
@@ -928,8 +920,7 @@ mod tests {
         let renderer = bare.rich_renderer();
         let rendered =
             render_block_planned(None, &block, &bare, &renderer, &renderer, 80, true, 0, 0);
-        // Without the token the default theme keeps its historical compact
-        // read card: the header row only, with no body rows either way.
+        // Without the token the default theme keeps its header-only read card.
         assert!(
             !rendered
                 .lines

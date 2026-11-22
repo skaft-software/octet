@@ -474,8 +474,7 @@ octet --theme Dock
 OCTET_THEME=Dock octet
 ```
 
-`Dock` is a panel-style chat theme, informed by the Zed editor's agent panel
-(the look, not its source). User messages and working-set tool calls sit on
+`Dock` is a panel-style chat theme. User messages and working-set tool calls sit on
 one soft single-tone band spanning the reading column — elevation without an
 outline, filling the pane's width rather than the whole window
 (`surface_bleed = false`). Read calls are sleek plain one-line rows with no
@@ -505,8 +504,7 @@ it. It's offered in `/theme` after `Still`.
 <details>
 <summary>Dock provenance, tokens and validation</summary>
 
-The visual direction is credited in the theme file's header comment; no Zed
-source is used or included. `prompt_wash = false` keeps cards neutral,
+`prompt_wash = false` keeps cards neutral,
 `model.use_lab_color = "true"` keeps the chevron, composer marker and shimmer
 model-adaptive, and `splash_model_adaptive` with `splash_compact` give it the
 compact 8×2 startup mark. The `Dock` stem is reserved, so a local `Dock.toml`

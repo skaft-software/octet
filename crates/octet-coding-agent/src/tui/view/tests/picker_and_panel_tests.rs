@@ -401,9 +401,7 @@ fn session_picker_selected_row_takes_the_theme_fill() {
 
 #[test]
 fn decluttered_picker_drops_rules_and_hint_footers() {
-    // The Dock popover look: no rules around the panel, no command-hint
-    // footer, and a slim header — just the title, the filter field, and the
-    // list.
+    // No rules around the panel, no hint footer, and a slim header.
     let theme = crate::tui::theme::test_theme_from_source(
         "[colors]\npanel_footer_hints = false\nslim_picker_headers = true\n[layout]\nshow_panel_borders = false",
     );
@@ -483,7 +481,6 @@ fn slim_headers_apply_to_every_menu_kind() {
         !rendered.contains("Pick a model to use"),
         "no purpose sentence: {rendered}"
     );
-    // The default theme keeps the purpose sentence.
     let mut surface = OrdinarySurfaceMetadata::new("Pick a model");
     surface.purpose = Some("Pick a model to use for new turns".into());
     let mut bare = InteractiveShell::test_shell();
@@ -503,7 +500,7 @@ fn slim_headers_apply_to_every_menu_kind() {
         .join("\n");
     assert!(rendered.contains("Pick a model to use"), "{rendered}");
 
-    // The slash popup below the composer drops its hint footer row.
+    // The slash popup drops its hint footer row too.
     shell.close_panel();
     shell.state.borrow_mut().editor.set_text("/");
     let suggestions = input_overlays::render_slash_suggestions(&shell.state.borrow(), 80, 6);
@@ -545,8 +542,7 @@ fn session_picker_hides_advanced_filter_hints_until_used() {
 
 #[test]
 fn picker_selected_bg_fills_the_selected_row_without_a_marker() {
-    // Zed highlights the selected menu row with a fill across the row rather
-    // than a marker chevron; `picker_selected_bg` opts a theme into that.
+    // `picker_selected_bg` fills the selected row instead of a marker chevron.
     let theme =
         crate::tui::theme::test_theme_from_source("[colors]\npicker_selected_bg = \"#2d2e35\"");
     let mut shell = InteractiveShell::test_shell_with_theme(theme);

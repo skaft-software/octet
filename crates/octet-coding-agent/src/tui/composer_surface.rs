@@ -658,8 +658,8 @@ fn render_composer_box(
     let inner_width = geometry.inner_width();
 
     let paint_rule = |text: &str| paint_composer_rule(state, text);
-    // `composer_bg` fills the shaded rectangle, and the framed box when the
-    // theme sets one; a frame without the token stays border-only.
+    // `composer_bg` fills the shaded rectangle and a framed box; a frame
+    // without the token stays border-only.
     let frame_bg = matches!(chrome, ComposerChrome::Shaded | ComposerChrome::Framed)
         .then(|| theme.role_rgb("composer_bg"))
         .flatten();
@@ -693,8 +693,8 @@ fn render_composer_box(
     // shaded composer in the middle of the terminal, with unpainted columns
     // beside it. The fill reaches the terminal edges instead, while the draft
     // stays inside the column. A theme that only insets its content keeps the
-    // historical inset rectangle. `surface_bleed = false` opts the composer
-    // into the reading column too, matching banded transcript surfaces.
+    // historical inset rectangle; `surface_bleed = false` keeps the fill
+    // inside the reading column too.
     let bleeds = layout.capped && theme.resolve::<bool>("surface_bleed").unwrap_or(true);
     // One padding cell inside the fill, on both sides of the draft.
     //
@@ -774,12 +774,8 @@ fn render_composer_box(
     };
 
     if editor.layout_text().is_empty() {
-        // A theme's `composer_placeholder` token paints a muted hint where the
-        // first draft row would otherwise be empty. It is paint-only: the
-        // placeholder never enters the draft, a submission, or copy text.
-        // Wording follows Zed's agent-panel placeholder
-        // (crates/agent_ui/src/conversation_view.rs:3903-3917): the product
-        // name, then the two discovery triggers.
+        // A theme's `composer_placeholder` paints a muted hint on an empty
+        // draft; it is paint-only and never enters the draft.
         let placeholder = theme
             .resolve::<String>("composer_placeholder")
             .filter(|hint| !hint.trim().is_empty())
@@ -1561,8 +1557,6 @@ mod tests {
             plain_top.contains(state.theme.glyph("top_left")),
             "framed top border missing: {plain_top:?}"
         );
-        // The frame interior carries the fill; the inset columns beside the
-        // frame stay on the terminal canvas, unlike a shaded composer.
         let painted = shaded_columns(&rows[1], width);
         assert!(
             !painted.is_empty(),
@@ -1574,7 +1568,6 @@ mod tests {
             "columns left of the frame must stay unpainted: {:?}",
             rows[1]
         );
-        // A framed theme without `composer_bg` keeps its border-only look.
         let mut plain = crate::tui::view::ShellState::default();
         plain.theme = crate::tui::theme::test_theme_from_source(
             "[colors]\ncomposer = \"framed\"\n[layout]\ntranscript_inset = 6\ncomposer_padding = 1",
@@ -1603,13 +1596,11 @@ mod tests {
             state.editor.text().is_empty(),
             "the placeholder is paint-only and must not enter the draft"
         );
-        // Typing replaces the hint with the draft.
         state.editor.set_text("hello");
         let rows = render_composer_surface(&state, 80, Instant::now());
         let plain = sexy_tui_rs::strip_terminal_sequences(&rows[1]).to_owned();
         assert!(plain.contains("hello"), "{plain:?}");
         assert!(!plain.contains(hint), "{plain:?}");
-        // Themes without the token keep the historical empty draft row.
         let mut bare = crate::tui::view::ShellState::default();
         bare.model_display = "Test Model".into();
         let rows = render_composer_surface(&bare, 80, Instant::now());

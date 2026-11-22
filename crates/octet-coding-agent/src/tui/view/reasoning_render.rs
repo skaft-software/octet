@@ -1139,10 +1139,8 @@ pub(super) fn format_thought_duration(elapsed: Duration) -> String {
     }
 }
 
-/// The `working_dots` presentation: a small bouncing-dots spinner and a
-/// plain label, separated by dots — Zed marks generation this way
-/// (crates/ui/src/components/spinner.rs `Dots` variant, agent
-/// thread_view.rs:8519-8606) rather than a swept word in parentheses.
+/// The `working_dots` presentation: a small bouncing-dots spinner with a
+/// plain label, separated by dots.
 fn working_dots_status_line(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
@@ -1233,11 +1231,8 @@ pub(super) fn collapsed_reasoning_lines_sized(
         let mut status = activity_status_line(theme, reasoning, "Thinking", shimmer_frame, 0);
         let mut detail = reasoning.reasoning_heading.clone().unwrap_or_default();
         if theme.resolve::<bool>("working_dots").unwrap_or(false) {
-            // Zed discloses a thinking block with a chevron on its header
-            // (crates/agent_ui/src/conversation_view/thread_view.rs:8673-8777),
-            // not a connector-and-parentheses hint row: the label carries the
-            // collapsed chevron and only a real heading occupies the detail
-            // row, unadorned.
+            // The label carries the collapsed chevron; only a real heading
+            // occupies the detail row.
             if !reasoning.text.trim().is_empty() {
                 status.push(' ');
                 status.push_str(&subdued_text(theme, theme.glyph("collapsed")));
@@ -1265,11 +1260,8 @@ pub(super) fn collapsed_reasoning_lines_sized(
         if let Some(label) = &reasoning.hidden_thinking_label {
             return vec![subdued_text(theme, label)];
         }
-        // Zed keeps a small "Thinking" header on every settled thought chunk
-        // between calls (crates/agent_ui/src/conversation_view/thread_view.rs:
-        // 8673-8777). A theme opts its settled rows into that label with
-        // `settled_thinking_labels`, so a segment stays visible even when no
-        // duration was recorded for it.
+        // `settled_thinking_labels` keeps a subdued label on settled
+        // segments without a recorded duration.
         let settled_label = theme
             .resolve::<bool>("settled_thinking_labels")
             .unwrap_or(false);

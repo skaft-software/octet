@@ -205,8 +205,8 @@ fn slash_suggestion_footer(
 }
 
 /// Paint the input suggestion rows with a theme's `suggestions_bg` fill,
-/// padded to the reading column so the popup reads as one card level with
-/// the composer. Themes that do not set the token keep plain rows.
+/// padded to the reading column like the composer. Themes without the token
+/// keep plain rows.
 fn paint_suggestion_rows(
     state: &ShellState,
     mut lines: Vec<String>,
@@ -217,10 +217,8 @@ fn paint_suggestion_rows(
         return lines;
     };
     let layout = crate::tui::layout::PresentationLayout::new(&state.theme, width);
-    // The painted region matches the shaded composer's fill span exactly: a
-    // bleeding composer fills the whole terminal width, and a column-bounded
-    // one starts at the reading column's inset and spans the column, with
-    // the popup's alignment prefix left on the terminal canvas.
+    // The painted region matches the shaded composer's fill span: the whole
+    // terminal width when it bleeds, otherwise the reading column.
     let bleeds = layout.capped && state.theme.resolve::<bool>("surface_bleed").unwrap_or(true);
     let fill_width = if bleeds {
         usize::from(width)
@@ -278,9 +276,8 @@ pub(super) fn render_slash_suggestions(
     let popup_prefix = " ".repeat(usize::from(layout.inset + inner_inset));
 
     // Keep one compact hint row below the choices when the theme shows it.
-    // Moving the metadata to the footer makes autocomplete read as an inline
-    // continuation of the composer rather than a second panel with its own
-    // heading.
+    // The footer makes autocomplete read as an inline continuation of the
+    // composer.
     let show_footer = state
         .theme
         .resolve::<bool>("panel_footer_hints")
@@ -356,8 +353,7 @@ pub(super) fn render_slash_suggestions(
             width,
         ));
     }
-    // A `panel_footer_hints = false` theme drops the compact hint row too:
-    // the marked selection carries the popup, like the pickers.
+    // A `panel_footer_hints = false` theme drops the compact hint row too.
     if show_footer {
         let footer =
             slash_suggestion_footer(state, popup_width, start, end, suggestions.len(), item_rows);
@@ -401,9 +397,8 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
         return Vec::new();
     }
     let layout = crate::tui::layout::PresentationLayout::new(&state.theme, width);
-    // The file marker and path continue the composer marker and draft text
-    // columns, including the shaded/framed chrome's inner cushion, so the
-    // list opens level with the input box rather than at the terminal edge.
+    // The list opens level with the composer's input column, not the
+    // terminal edge.
     let inner_inset: u16 = match state.theme.resolve::<String>("composer").as_deref() {
         Some("shaded") => 1,
         Some("framed") => 2,

@@ -205,8 +205,7 @@ fn picker_scope_text(theme: &OctetTheme, picker: &PickerState) -> String {
     } else {
         subdued_text(theme, all)
     };
-    // A slim picker header omits the sort display; the sort key still
-    // changes with Ctrl+S, it just stops occupying the header.
+    // A slim picker header omits the sort display.
     if theme
         .resolve::<bool>("slim_picker_headers")
         .unwrap_or(false)
@@ -591,8 +590,8 @@ pub(super) fn session_rows_are_stacked(state: &ShellState, width: u16, body_rows
     body_rows >= 2 && PresentationLayout::new(&state.theme, width).picker == PickerLayout::Stacked
 }
 
-/// Fill a selected picker item's rows edge to edge, the way Zed highlights a
-/// hovered menu row. Themes opt in with `picker_selected_bg`.
+/// Fill a selected picker item's rows edge to edge. Themes opt in with
+/// `picker_selected_bg`.
 fn paint_selected_rows(
     state: &ShellState,
     fill: Option<(u8, u8, u8)>,
@@ -878,9 +877,7 @@ pub(super) fn render_session_picker(
         lines.push(picker_filter_line(state, picker, width));
     }
     // Keep one body row for the selected session or explicit lifecycle state.
-    // At short heights, footer hints yield before that semantic content. A
-    // `panel_footer_hints = false` theme omits them entirely, leaving the
-    // Zed-like search field and list.
+    // At short heights, footer hints yield before that semantic content.
     let remaining_border_rows = usize::from(show_borders);
     let reserve_body_row = usize::from(max_rows > lines.len() + remaining_border_rows);
     let hint_rows = if state
@@ -1007,7 +1004,6 @@ pub(super) fn render_message_picker(
     }
     // Keep one body row for the focused message or explicit empty state. At a
     // constrained height the action footer yields rather than hiding status.
-    // A `panel_footer_hints = false` theme omits it entirely.
     let can_show_footer = state
         .theme
         .resolve::<bool>("panel_footer_hints")

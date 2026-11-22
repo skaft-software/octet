@@ -27,8 +27,7 @@ pub(super) struct ShellChrome {
     pub(super) pending: Vec<String>,
     pub(super) subagents: Vec<String>,
     pub(super) suggestions: Vec<String>,
-    /// A `suggestions_above` theme opens the input suggestion list above the
-    /// composer instead of below it, like a dropdown opening upward.
+    /// A `suggestions_above` theme opens the suggestion list above the composer.
     pub(super) suggestions_above: bool,
     pub(super) error: Vec<String>,
     pub(super) transcript_rows: usize,
@@ -373,8 +372,7 @@ fn shell_chrome_with_composer_rows(
 
     // Let autocomplete reuse the status row, including in a short terminal
     // where that reclaimed row is what makes a choice plus its hint fit. A
-    // `suggestions_keep_status` theme keeps its model/status row while the
-    // list is open instead.
+    // `suggestions_keep_status` theme keeps its status row instead.
     let keep_status = state
         .theme
         .resolve::<bool>("suggestions_keep_status")
@@ -548,8 +546,7 @@ fn render_chrome_composer(
             .collect::<Vec<_>>()
             .join(sexy_tui_rs::CURSOR_MARKER);
         if width >= 12 && chrome == "framed" {
-            // A filled frame opens with its background run before the rail,
-            // so match the plain form after styles are stripped.
+            // A filled frame opens with its background run before the rail.
             if let Some(content) = line.strip_prefix(&left_border) {
                 *line = format!("{}{content}", " ".repeat(visible_width(&left_border)));
             }
@@ -638,8 +635,7 @@ pub(super) fn append_chrome(lines: &mut Vec<String>, chrome: ShellChrome, separa
     lines.extend(chrome.subagents);
     lines.extend(chrome.pending);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
-    // well as in the application-owned viewport above: below by default, or
-    // above the composer when the theme opens the list upward.
+    // well as in the application-owned viewport above.
     if chrome.suggestions_above {
         lines.extend(chrome.suggestions);
         lines.extend(chrome.composer);

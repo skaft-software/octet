@@ -81,8 +81,7 @@ fn nest_tool_output(
                 return row;
             }
             // The final duration is a sibling of the result, not part of it.
-            // A `flat_tool_cards` theme keeps its output free of connector
-            // stems and elbows: plain indentation only.
+            // A `flat_tool_cards` theme drops the connector stems and elbows.
             let prefix = if theme.layout().tool_cards == ToolCardLayout::Octet
                 && !theme.resolve::<bool>("flat_tool_cards").unwrap_or(false)
                 && indent > 0
@@ -179,8 +178,7 @@ pub(super) fn render_tool(
         if pi {
             super::bash_render::project_pi_bash_call(panel, command, theme, width, content_role)
         } else if theme.resolve::<bool>("flat_tool_cards").unwrap_or(false) {
-            // A flat card: muted label stacked above the command, output
-            // nested without connector stems.
+            // A flat card: muted label above the command, no stems.
             super::bash_render::project_labeled_bash_call(
                 panel,
                 command,
@@ -368,14 +366,9 @@ pub(super) fn render_tool(
                     output_lines.append(ToolRows::literal(rows, text, 0));
                 }
             }
-            // Zed renders read_file output as a numbered code block with a
-            // right-aligned muted gutter (crates/agent_ui/src/conversation_view/
-            // thread_view.rs:442-541). octet's read tool already numbers body
-            // lines as "N: text" between a path header and a truncated footer,
-            // so this projects the existing numbers into a decoration gutter:
-            // the numbers align in one column and copy text keeps the source
-            // form. Gated by `read_number_gutter`, so default themes keep the
-            // literal rows.
+            // `read_number_gutter` projects the read tool's existing `N:`
+            // line numbers into one right-aligned muted gutter; copy text
+            // keeps the source form.
             "read"
                 if verbose_tools
                     && !panel.is_error
@@ -422,8 +415,7 @@ pub(super) fn render_tool(
     if let Some(duration) = panel.duration.filter(|_| {
         panel.finished
                 && theme.shows_durations()
-                // Pi omits read timing; a `plain_read_tools` theme keeps its
-                // one-line read rows sleek the same way.
+                // Pi and `plain_read_tools` themes omit read timing.
                 && !(panel.name == "read"
                     && (pi
                         || theme
@@ -933,14 +925,10 @@ pub(super) fn render_block_planned_with_rainbow(
     }
 }
 
-/// Project a read tool's numbered output into Zed-style gutter rows.
-///
-/// The read tool already returns `path:1-3/3 hash=…`, a contiguous run of
-/// `N: text` body lines, and trailing `truncated=…` metadata. When that shape
-/// holds, the numbers move into one right-aligned muted decoration column and
-/// the text keeps its own column, matching Zed's numbered read output
-/// (crates/agent_ui/src/conversation_view/thread_view.rs:442-541). Any other
-/// shape returns `None` so the literal presentation stays.
+/// Project a read tool's numbered output into one right-aligned muted
+/// gutter column. Recognizes the tool's `path:…` header, a contiguous
+/// `N: text` run, and trailing metadata; any other shape returns `None`
+/// so the literal presentation stays.
 fn numbered_read_rows(text: &str, theme: &OctetTheme, width: u16) -> Option<ToolRows> {
     let mut lines = text.lines();
     let header = lines.next()?;
@@ -993,8 +981,7 @@ fn numbered_read_rows(text: &str, theme: &OctetTheme, width: u16) -> Option<Tool
     for line in &footer {
         rows.extend(wrap_hanging(&theme.fg("muted", line), "", "", width));
     }
-    // Copy text keeps the tool's source form; the gutter is decoration, so
-    // copy alignment starts at the text column.
+    // The gutter is decoration; copy alignment starts at the text column.
     Some(ToolRows::literal(rows, text.to_owned(), gutter_width))
 }
 

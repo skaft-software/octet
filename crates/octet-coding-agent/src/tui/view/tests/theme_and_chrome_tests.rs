@@ -283,9 +283,8 @@ fn resize_defers_exactly_one_transcript_reflow_to_the_render_thread() {
 
 #[test]
 fn suggestions_above_opens_the_list_over_the_composer() {
-    // A `suggestions_above` theme renders the input suggestion list above
-    // the composer, like a dropdown opening upward; the default keeps it
-    // below.
+    // `suggestions_above` opens the list above the composer; the default
+    // keeps it below.
     for (source, above) in [
         ("[colors]\nsuggestions_above = true", true),
         ("[colors]\n", false),
@@ -324,9 +323,8 @@ fn suggestions_above_opens_the_list_over_the_composer() {
 
 #[test]
 fn suggestions_keep_status_holds_the_model_row_while_the_list_is_open() {
-    // The historical behavior reclaims the status row for the suggestion
-    // list; a `suggestions_keep_status` theme keeps the model/status row
-    // visible instead.
+    // The default reclaims the status row for the suggestion list; a
+    // `suggestions_keep_status` theme keeps it visible instead.
     for (source, keeps) in [
         ("[colors]\nsuggestions_keep_status = true", true),
         ("[colors]\n", false),
@@ -353,10 +351,8 @@ fn suggestions_keep_status_holds_the_model_row_while_the_list_is_open() {
 
 #[test]
 fn suggestions_bg_fills_the_popup_like_the_composer() {
-    // A `suggestions_bg` theme paints the suggestion rows as one filled
-    // card whose fill span matches the shaded composer's exactly — same
-    // start column, same width — with the alignment prefix left unpainted.
-    // The default keeps plain rows.
+    // A `suggestions_bg` theme paints the popup as one card matching the
+    // composer's fill span; the default keeps plain rows.
     let columns_with_fill = |row: &str, width: u16| -> Vec<u16> {
         let mut terminal = vt100::Parser::new(1, width, 0);
         terminal.process(row.as_bytes());
