@@ -28,7 +28,7 @@
 name = "Dock"
 description = "A panel-style chat with soft message bands, quiet tools, and a shaded composer"
 author = "octet"
-version = "2"
+version = "1"
 terminal = "light-dark"
 adaptive = false
 
