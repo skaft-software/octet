@@ -418,6 +418,42 @@ fn suggestions_bg_fills_the_popup_like_the_composer() {
 }
 
 #[test]
+fn path_suggestions_open_level_with_the_composer_input_column() {
+    // The `@` file popup opens level with the composer's input column — the
+    // reading column inset plus the chrome's inner cushion — instead of the
+    // terminal's left edge.
+    for (composer, inner_inset) in [("shaded", 1), ("framed", 2), ("boxed", 0)] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("alpha.txt"), "one").unwrap();
+        std::fs::write(directory.path().join("beta.txt"), "two").unwrap();
+        let theme = crate::tui::theme::test_theme_from_source(&format!(
+            "[colors]\ncomposer = \"{composer}\"\ncontent_max_width = 80"
+        ));
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(120, 24);
+        for ch in ['@', '.', '/'] {
+            shell.apply_edit(EditAction::Char(ch));
+        }
+        {
+            let mut state = shell.state.borrow_mut();
+            state.workspace = Some(directory.path().to_owned());
+        }
+        let state = shell.state.borrow();
+        let rows = crate::tui::view::input_overlays::render_input_suggestions(&state, 120, 6);
+        assert!(!rows.is_empty(), "{composer}: path suggestions render");
+        let layout = crate::tui::layout::PresentationLayout::new(&state.theme, 120);
+        let prefix = " ".repeat(usize::from(layout.inset + inner_inset));
+        for row in &rows {
+            let plain = strip_terminal_sequences(row);
+            assert!(
+                plain.starts_with(&prefix),
+                "{composer}: popup must start at the input column: {plain:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn slash_popup_keeps_selection_visible_across_paging_filtering_and_resize() {
     let mut shell = InteractiveShell::test_shell();
     shell.set_size(80, 14);
