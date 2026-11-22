@@ -134,6 +134,11 @@ pub(super) fn append_hydrated_items(
                 )));
             }
             TranscriptItem::Reasoning(text) => {
+                // A replayed segment settles with its block; count it so a
+                // rehydrated turn's tally matches its live one.
+                if !text.is_empty() {
+                    state.turn_thoughts += 1;
+                }
                 let expanded = state.thinking_expanded();
                 state.push_block(TranscriptBlock::Reasoning(Box::new(
                     AssistantBlock::finalized_reasoning(text).with_reasoning_expanded(expanded),
@@ -372,9 +377,8 @@ mod tests {
     #[test]
     fn turn_tallies_collapse_a_silent_stretch_into_one_counting_row() {
         use crate::hydrate::ToolActivityGroup;
-        // A `turn_tallies` theme shows one row per silent stretch of work:
-        // commands, edits, and settled thoughts counted together, the
-        // individual calls hidden until Ctrl+O.
+        // A `turn_tallies` theme collapses a silent stretch of work into one
+        // counting row, with the individual calls hidden until Ctrl+O.
         let mut state = ShellState {
             theme: crate::tui::theme::test_theme_from_source(
                 "[colors]\nquiet_tool_summaries = true\nturn_tallies = true\n[surfaces.tool]\nchrome = \"plain\"",
@@ -405,8 +409,7 @@ mod tests {
                 },
             ],
         );
-        // A different class of work joins the same tally instead of sealing
-        // it into a second summary row.
+        // A different class of work joins the same tally.
         append_hydrated_items(
             &mut state,
             [TranscriptItem::ToolCall {
@@ -416,7 +419,10 @@ mod tests {
             }],
         );
         // One reasoning segment settles inside the turn.
-        state.turn_thoughts += 1;
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::Reasoning("a private segment".into())],
+        );
         append_hydrated_items(
             &mut state,
             [
