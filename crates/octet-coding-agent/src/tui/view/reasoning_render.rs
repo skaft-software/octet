@@ -1140,12 +1140,14 @@ pub(super) fn format_thought_duration(elapsed: Duration) -> String {
 }
 
 /// The `working_dots` presentation: a small bouncing-dots spinner with a
-/// plain label, separated by dots.
+/// plain label, separated by dots. `disclosure` attaches the collapsed
+/// chevron to the label.
 fn working_dots_status_line(
     theme: &OctetTheme,
     reasoning: &AssistantBlock,
     label: &str,
     shimmer_frame: usize,
+    disclosure: bool,
 ) -> String {
     let position = if theme.capabilities().animation {
         (shimmer_frame / 2) % 3
@@ -1164,15 +1166,18 @@ fn working_dots_status_line(
         .join(" ");
     let spinner = theme.fg("muted", &dots);
     let plain_label = theme.fg("foreground", label);
+    let chevron = disclosure
+        .then(|| format!(" {}", theme.fg("muted", theme.glyph("collapsed"))))
+        .unwrap_or_default();
     let separator = super::semantic_separator(theme);
     if reasoning.retry_activity.is_some() {
-        return format!("{spinner} {plain_label}{separator}Esc to interrupt");
+        return format!("{spinner} {plain_label}{chevron}{separator}Esc to interrupt");
     }
     let Some(started_at) = reasoning.activity_started_at else {
-        return format!("{spinner} {plain_label}");
+        return format!("{spinner} {plain_label}{chevron}");
     };
     let elapsed = format_run_elapsed(Duration::from_secs(started_at.elapsed().as_secs()));
-    format!("{spinner} {plain_label}{separator}{elapsed}{separator}Esc to interrupt")
+    format!("{spinner} {plain_label}{chevron}{separator}{elapsed}{separator}Esc to interrupt")
 }
 
 fn activity_status_line(
@@ -1181,9 +1186,10 @@ fn activity_status_line(
     label: &str,
     shimmer_frame: usize,
     rainbow_strength: u16,
+    disclosure: bool,
 ) -> String {
     if theme.resolve::<bool>("working_dots").unwrap_or(false) {
-        return working_dots_status_line(theme, reasoning, label, shimmer_frame);
+        return working_dots_status_line(theme, reasoning, label, shimmer_frame, disclosure);
     }
     let label = activity_shimmer_label(theme, reasoning, label, shimmer_frame, rainbow_strength);
     if reasoning.retry_activity.is_some() {
@@ -1228,16 +1234,14 @@ pub(super) fn collapsed_reasoning_lines_sized(
     // The live transcript tail shows either Thinking or Working, with the
     // shared run timer. Only Thinking with detail needs a second row.
     if reasoning.thinking_slot {
-        let mut status = activity_status_line(theme, reasoning, "Thinking", shimmer_frame, 0);
+        // The label carries the collapsed chevron when a trace waits behind
+        // it; only a real heading occupies the detail row.
+        let disclosure = !reasoning.text.trim().is_empty();
+        let status =
+            activity_status_line(theme, reasoning, "Thinking", shimmer_frame, 0, disclosure);
         let mut detail = reasoning.reasoning_heading.clone().unwrap_or_default();
-        if theme.resolve::<bool>("working_dots").unwrap_or(false) {
-            // The label carries the collapsed chevron; only a real heading
-            // occupies the detail row.
-            if !reasoning.text.trim().is_empty() {
-                status.push(' ');
-                status.push_str(&subdued_text(theme, theme.glyph("collapsed")));
-            }
-        } else if !reasoning.reasoning_expanded {
+        if !theme.resolve::<bool>("working_dots").unwrap_or(false) && !reasoning.reasoning_expanded
+        {
             if !detail.is_empty() {
                 detail.push(' ');
             }
@@ -1327,6 +1331,7 @@ pub(super) fn collapsed_reasoning_lines_sized(
             label,
             shimmer_frame,
             rainbow_strength,
+            false,
         )];
         lines.extend(hidden());
         return lines;
@@ -1353,6 +1358,7 @@ pub(super) fn collapsed_reasoning_lines_sized(
             }),
             shimmer_frame,
             rainbow_strength,
+            false,
         );
         let mut lines = vec![status];
         // File themes render the collapsed Thinking hint on a second row.
@@ -1377,6 +1383,7 @@ pub(super) fn collapsed_reasoning_lines_sized(
             label,
             shimmer_frame,
             0,
+            false,
         )];
     }
 
@@ -1389,6 +1396,7 @@ pub(super) fn collapsed_reasoning_lines_sized(
             .unwrap_or("Thinking"),
         shimmer_frame,
         0,
+        false,
     )];
     if reasoning.show_reasoning_hint {
         if reasoning.reasoning_heading.is_none()

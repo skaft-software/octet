@@ -1812,7 +1812,7 @@ fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
                 "Retrying 2/3 (Esc to interrupt)"
             };
             assert_eq!(
-                activity_status_line(&theme, &working, &label, 0, 0),
+                activity_status_line(&theme, &working, &label, 0, 0, false),
                 expected
             );
         }
