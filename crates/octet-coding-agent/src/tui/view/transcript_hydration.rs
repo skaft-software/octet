@@ -504,6 +504,151 @@ mod tests {
     }
 
     #[test]
+    fn turn_tallies_append_failed_calls_to_the_counting_row() {
+        use crate::hydrate::ToolActivityGroup;
+        // A failed call keeps its count in the tally and the row carries the
+        // failure count plus each reason on its own lines.
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\nturn_tallies = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        state.push_block(TranscriptBlock::User {
+            text: "fix it".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        });
+        let edit = ToolCallId("edit-one".into());
+        let group = ToolActivityGroup {
+            member_ids: vec![edit.clone()],
+            edited_files: 1,
+            ..Default::default()
+        };
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::ToolActivityGroup(group),
+                TranscriptItem::ToolCall {
+                    id: edit.clone(),
+                    name: "edit".into(),
+                    args: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            ],
+        );
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::ToolResult {
+                id: edit.clone(),
+                text: "permission denied".into(),
+                is_error: true,
+                duration: None,
+                diff: None,
+                images: Vec::new(),
+            }],
+        );
+        state.seal_activity_group();
+        let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        assert!(compact.contains("1 edit · 1 failed"), "{compact}");
+        assert!(compact.contains("× edit:"), "{compact}");
+        assert!(compact.contains("permission denied"), "{compact}");
+        assert!(!compact.contains("src/lib.rs"), "{compact}");
+    }
+
+    #[test]
+    fn turn_tallies_count_only_thoughts_settled_since_the_row_opened() {
+        use crate::hydrate::ToolActivityGroup;
+        // Each tally counts only the reasoning settled inside its own
+        // stretch: a thought from before the row opened belongs to no
+        // tally, and two rows never double-count one thought.
+        let mut state = ShellState {
+            theme: crate::tui::theme::test_theme_from_source(
+                "[colors]\nquiet_tool_summaries = true\nturn_tallies = true\n[surfaces.tool]\nchrome = \"plain\"",
+            ),
+            ..Default::default()
+        };
+        state.push_block(TranscriptBlock::User {
+            text: "fix it".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        });
+        let first = ToolCallId("bash-one".into());
+        let second = ToolCallId("bash-two".into());
+        // A thought settles before any tally row exists.
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::Reasoning("before the work".into()),
+                TranscriptItem::ToolActivityGroup(ToolActivityGroup {
+                    member_ids: vec![first.clone()],
+                    commands: 1,
+                    ..Default::default()
+                }),
+                TranscriptItem::ToolCall {
+                    id: first.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "ls"}),
+                },
+            ],
+        );
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::ToolResult {
+                id: first.clone(),
+                text: "ok".into(),
+                is_error: false,
+                duration: None,
+                diff: None,
+                images: Vec::new(),
+            }],
+        );
+        // Public answer text seals the first stretch...
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::Assistant("partial answer".into())],
+        );
+        // ...and a second stretch opens, with its own thought inside it.
+        append_hydrated_items(
+            &mut state,
+            [
+                TranscriptItem::ToolActivityGroup(ToolActivityGroup {
+                    member_ids: vec![second.clone()],
+                    commands: 1,
+                    ..Default::default()
+                }),
+                TranscriptItem::ToolCall {
+                    id: second.clone(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "ls"}),
+                },
+                TranscriptItem::Reasoning("inside the second stretch".into()),
+            ],
+        );
+        append_hydrated_items(
+            &mut state,
+            [TranscriptItem::ToolResult {
+                id: second.clone(),
+                text: "ok".into(),
+                is_error: false,
+                duration: None,
+                diff: None,
+                images: Vec::new(),
+            }],
+        );
+        state.seal_activity_group();
+        let compact = strip_terminal_sequences(&state.rendered_transcript(100).join("\n"));
+        // Two tally rows, each counting its own command.
+        assert_eq!(compact.matches("1 command").count(), 2, "{compact}");
+        // Only the second row counts a thought; the leading one belongs
+        // to neither row.
+        assert!(compact.contains("1 command · 1 thought"), "{compact}");
+        assert_eq!(compact.matches("thought").count(), 1, "{compact}");
+        assert!(compact.contains("partial answer"), "{compact}");
+    }
+
+    #[test]
     fn grouped_exploration_replays_mixed_results_and_expands_child_details() {
         use crate::hydrate::ToolActivityGroup;
         // `quiet_tool_summaries` gates all activity grouping.
