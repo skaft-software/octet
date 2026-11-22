@@ -4,6 +4,11 @@ use super::contract::ProviderDeclaration;
 use super::models::{static_models, StaticModelPreset};
 use crate::{ModalitySet, Protocol, ReasoningCapability, ReasoningControl};
 
+/// Providers outside the OpenCode compatibility family whose inventories
+/// publish identifiers only, leaving their pinned records as the reviewed
+/// reasoning contract.
+const PINNED_REASONING_PROVIDERS: &[&str] = &["zai-coding-cn"];
+
 impl ProviderDeclaration {
     /// A declaration-owned wire contract may supplement a genuinely discovered
     /// sparse route. This is not a models.dev-derived encoding or inventory.
@@ -27,12 +32,22 @@ impl ProviderDeclaration {
     /// onto the declared route's own wire primitive (Gemini `thinkingLevel`,
     /// Anthropic adaptive or budget thinking, Chat/Responses effort). Records
     /// that cannot be mapped exactly leave the model without a capability.
+    ///
+    /// The Z.AI coding endpoint publishes the same identifiers-only inventory
+    /// (its `/models` entries carry no reasoning fields for any GLM release),
+    /// so its models fail the same way. The provider-scoped pinned record
+    /// carries the reviewed contract instead: GLM-5.3 accepts
+    /// `reasoning_effort` low/high/max and always reasons
+    /// (docs.z.ai/guides/llm/glm-5.3), so the pinned fallback is keyed to
+    /// that host here rather than in the agent loop.
     pub fn pinned_reasoning_for(
         &self,
         api_name: &str,
         protocol: Protocol,
     ) -> Option<ReasoningCapability> {
-        if self.compatibility != super::contract::CompatibilityProfile::OpenCode {
+        if self.compatibility != super::contract::CompatibilityProfile::OpenCode
+            && !PINNED_REASONING_PROVIDERS.contains(&self.id)
+        {
             return None;
         }
         let record = crate::model_metadata::model_capability_metadata(self.id, api_name)?;
