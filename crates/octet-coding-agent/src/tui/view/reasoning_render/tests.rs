@@ -1874,6 +1874,38 @@ fn settled_thinking_duration_follows_preference_without_hiding_the_trace() {
 }
 
 #[test]
+fn working_dots_reduced_motion_keeps_a_steady_centre_dot() {
+    // Without animation the dots hold a steady centre dot instead of
+    // bouncing, so every frame renders the same spinner.
+    let steady_theme = theme::test_theme_source_with(
+        "[colors]\nworking_dots = true",
+        TerminalCapabilities {
+            animation: false,
+            ..TerminalCapabilities::test(true, true, ColorDepth::TrueColor)
+        },
+        TerminalBackground::Dark,
+    );
+    let slot = working_slot("private detail");
+    let steady = collapsed_reasoning_lines_at(&steady_theme, &slot, 0, 0)[0].clone();
+    assert!(steady.contains("· • ·"), "{steady:?}");
+    for frame in [1usize, 2, 3, 5, 7] {
+        assert_eq!(
+            collapsed_reasoning_lines_at(&steady_theme, &slot, frame, 0)[0],
+            steady,
+            "frame {frame} must not animate"
+        );
+    }
+    // With animation the dots move: frame 0 lights the first dot instead.
+    let animated_theme = theme::test_theme_source_with(
+        "[colors]\nworking_dots = true",
+        TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        TerminalBackground::Dark,
+    );
+    let bouncing = collapsed_reasoning_lines_at(&animated_theme, &slot, 0, 0)[0].clone();
+    assert!(bouncing.contains("• · ·"), "{bouncing:?}");
+}
+
+#[test]
 fn working_dots_spinner_replaces_the_swept_parenthesized_label() {
     // `working_dots` replaces the swept parenthesized form with a dots
     // spinner and chevron disclosure on the label.

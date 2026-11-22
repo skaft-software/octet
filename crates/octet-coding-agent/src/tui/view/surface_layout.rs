@@ -838,6 +838,53 @@ mod tests {
     }
 
     #[test]
+    fn plain_read_tools_stay_plain_for_errored_reads() {
+        // An errored read keeps the plain one-line presentation — no band
+        // fill and no duration row — while the failure stays visible.
+        let theme = test_theme_source_with(
+            "[colors]\nplain_read_tools = true\nshow_durations = true\n[roles.\"surface.tool\"]\nbackground = \"#24252a\"\n[surfaces.tool]\nchrome = \"band\"\npadding = 1",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let renderer = theme.rich_renderer();
+        let mut panel = ToolPanel::new(
+            octet_ai::ToolCallId("plain-read-error".into()),
+            "read".into(),
+            serde_json::json!({"path": "a.txt"}).to_string(),
+            summarize_tool("read", &serde_json::json!({"path": "a.txt"})),
+            "permission denied".into(),
+            true,
+            true,
+            Some("permission denied".into()),
+            None,
+        );
+        panel.duration = Some(std::time::Duration::from_millis(812));
+        let block = TranscriptBlock::Tool(Box::new(panel));
+        let rows =
+            render_block_planned(None, &block, &theme, &renderer, &renderer, 80, true, 0, 0).lines;
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect();
+        assert!(
+            text.iter().any(|row| row.contains("Read")),
+            "read header row missing: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("permission denied")),
+            "the failure stays visible: {text:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("\u{1b}[48;2;36;37;42m")),
+            "an errored read keeps the plain presentation: {rows:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("Took")),
+            "an errored read shows no duration row: {text:?}"
+        );
+    }
+
+    #[test]
     fn read_number_gutter_aligns_numbers_and_keeps_source_copy() {
         let theme = test_theme_from_source("[colors]\nread_number_gutter = true");
         let body = (9..=11)

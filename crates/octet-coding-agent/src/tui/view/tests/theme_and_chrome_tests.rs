@@ -418,6 +418,46 @@ fn suggestions_bg_fills_the_popup_like_the_composer() {
 }
 
 #[test]
+fn suggestions_above_also_holds_in_the_fullscreen_viewport() {
+    // The application-owned viewport orders chrome the same way the
+    // terminal-owned path does: the list opens over the composer, and the
+    // default keeps it below.
+    for (source, above) in [
+        ("[colors]\nsuggestions_above = true", true),
+        ("[colors]\n", false),
+    ] {
+        let theme = crate::tui::theme::test_theme_from_source(source);
+        let mut shell = InteractiveShell::test_shell_with_theme(theme);
+        shell.set_size(80, 20);
+        shell.apply_edit(EditAction::Char('/'));
+        let state = shell.state.borrow();
+        let chrome = shell_chrome(&state, 80, Instant::now());
+        assert!(!chrome.suggestions.is_empty(), "suggestions render");
+        let mut lines = Vec::new();
+        crate::tui::view::shell_chrome::append_viewport_chrome(&mut lines, chrome);
+        let suggestion_row = lines
+            .iter()
+            .position(|row| row.contains("/new"))
+            .expect("a suggestion row");
+        let composer_row = lines
+            .iter()
+            .position(|row| row.contains(sexy_tui_rs::CURSOR_MARKER))
+            .expect("the composer draft row");
+        if above {
+            assert!(
+                suggestion_row < composer_row,
+                "viewport opens the list above the composer: {lines:?}"
+            );
+        } else {
+            assert!(
+                composer_row < suggestion_row,
+                "viewport default keeps the list below: {lines:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn path_suggestions_open_level_with_the_composer_input_column() {
     // The `@` file popup opens level with the composer's input column — the
     // reading column inset plus the chrome's inner cushion — instead of the
