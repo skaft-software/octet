@@ -16,10 +16,6 @@ pub(in crate::tui::view) struct ToolRows {
     pub(in crate::tui::view) lines: Vec<String>,
     pub(in crate::tui::view) text: String,
     pub(in crate::tui::view) copy_rows: Vec<Option<ToolCopyRow>>,
-    /// How many of the leading `lines` are the card's header rows (command,
-    /// label, and value) rather than nested output. Decorative only: a theme
-    /// may tint exactly these rows on a card surface. Copy text is unchanged.
-    pub(in crate::tui::view) header_rows: usize,
 }
 
 impl ToolRows {
@@ -95,7 +91,6 @@ impl ToolRows {
             lines,
             text,
             copy_rows,
-            header_rows: 0,
         }
     }
 

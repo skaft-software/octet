@@ -118,7 +118,6 @@ fn render_surface_content_line(
     prompt_color: Option<&str>,
     _collapsed_reasoning: bool,
     marker: Option<&str>,
-    header_fill: Option<(u8, u8, u8)>,
 ) -> String {
     // Event breathing/promotion rows are host spacing, not rail/card cushions.
     // In particular a reserved Working row must remain byte-visibly blank.
@@ -159,12 +158,6 @@ fn render_surface_content_line(
             );
             let inner = if wash_prompt {
                 paint_prompt(inner, inner_width)
-            } else if let Some(bg) = header_fill {
-                // A card header strip keeps the row's own text runs (the tool
-                // label already carries `tool_header`) and swaps only the fill,
-                // the way Zed's agent panel tints its tool-card headers
-                // (crates/agent_ui/src/conversation_view/thread_view.rs:12521-12526).
-                theme.paint_row_background(bg, &inner)
             } else {
                 theme.apply_semantic_role_layered(content_role, &inner)
             };
@@ -182,8 +175,6 @@ fn render_surface_content_line(
             );
             let painted = if wash_prompt {
                 paint_prompt(inner, plan.frame_width)
-            } else if let Some(bg) = header_fill {
-                theme.paint_row_background(bg, &inner)
             } else {
                 theme.apply_semantic_role_layered(content_role, &inner)
             };
@@ -261,7 +252,6 @@ pub(super) fn cushion_row_is_painted(
         theme,
         prompt_color,
         false,
-        None,
         None,
     ))
 }
@@ -492,7 +482,6 @@ pub(super) fn event_margin_marker_with_frame(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn decorate_surface_with_frame(
     content: Vec<String>,
     plan: &SurfacePlan<'_>,
@@ -501,7 +490,6 @@ pub(super) fn decorate_surface_with_frame(
     prompt_color: Option<&str>,
     collapsed_reasoning: bool,
     marker: Option<String>,
-    header_rows: usize,
 ) -> Vec<String> {
     let mut rows = Vec::with_capacity(
         plan.geometry.transition_rows
@@ -515,21 +503,6 @@ pub(super) fn decorate_surface_with_frame(
     let has_bottom_row = plan.chrome == ThemeSurfaceChrome::Card;
     let leading_padding_rows = plan.geometry.leading_rows - usize::from(has_heading_row);
     let trailing_padding_rows = plan.geometry.trailing_rows - usize::from(has_bottom_row);
-    // A theme's `tool_card_header_bg` tints exactly the leading header rows
-    // of a tool or shell card or band (command/label/value, before nested
-    // output) — Zed paints its terminal-tool command on a header strip
-    // (crates/agent_ui/src/conversation_view/thread_view.rs:9133-9198).
-    // Cushions and body keep the surface fill; structure never relies on the
-    // tint alone.
-    let header_fill = if matches!(
-        plan.chrome,
-        ThemeSurfaceChrome::Card | ThemeSurfaceChrome::Band
-    ) && matches!(plan.kind, "tool" | "shell")
-    {
-        theme.role_rgb("tool_card_header_bg")
-    } else {
-        None
-    };
 
     rows.extend(std::iter::repeat_n(
         String::new(),
@@ -539,15 +512,7 @@ pub(super) fn decorate_surface_with_frame(
         rows.push(styled_surface_heading(plan, theme));
     }
     rows.extend(std::iter::repeat_n(
-        render_surface_content_line(
-            "",
-            plan,
-            theme,
-            prompt_color,
-            collapsed_reasoning,
-            None,
-            None,
-        ),
+        render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning, None),
         leading_padding_rows,
     ));
     // A bleeding surface paints its own leading columns, so the event marker
@@ -560,9 +525,8 @@ pub(super) fn decorate_surface_with_frame(
     } else {
         None
     };
-    rows.extend(content.iter().enumerate().map(|(index, line)| {
+    rows.extend(content.iter().map(|line| {
         let row_marker = if bleeds { marker.take() } else { None };
-        let row_header_fill = (index < header_rows).then_some(header_fill).flatten();
         render_surface_content_line(
             line,
             plan,
@@ -570,19 +534,10 @@ pub(super) fn decorate_surface_with_frame(
             prompt_color,
             collapsed_reasoning,
             row_marker,
-            row_header_fill,
         )
     }));
     rows.extend(std::iter::repeat_n(
-        render_surface_content_line(
-            "",
-            plan,
-            theme,
-            prompt_color,
-            collapsed_reasoning,
-            None,
-            None,
-        ),
+        render_surface_content_line("", plan, theme, prompt_color, collapsed_reasoning, None),
         trailing_padding_rows,
     ));
     if let Some(bottom) = surface_bottom_row(plan, theme) {
@@ -644,15 +599,7 @@ pub(super) fn decorate_surface_content_suffix(
     let mut rows = content_tail
         .iter()
         .map(|line| {
-            render_surface_content_line(
-                line,
-                plan,
-                theme,
-                prompt_color,
-                collapsed_reasoning,
-                None,
-                None,
-            )
+            render_surface_content_line(line, plan, theme, prompt_color, collapsed_reasoning, None)
         })
         .map(|line| {
             if line.is_empty() {
@@ -670,7 +617,6 @@ pub(super) fn decorate_surface_content_suffix(
                 theme,
                 prompt_color,
                 collapsed_reasoning,
-                None,
                 None,
             );
             if line.is_empty() {

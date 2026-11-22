@@ -321,8 +321,6 @@ impl ShellState {
             None,
             false,
             marker,
-            // Extension rows arrive pre-styled; no host header tint applies.
-            0,
         );
         Some(RenderedTranscriptBlock {
             tool_copy: None,

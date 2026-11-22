@@ -459,9 +459,6 @@ pub(super) fn render_tool(
     for row in output_lines.copy_rows.iter_mut().flatten() {
         row.left = row.left.saturating_add(indent);
     }
-    // Everything produced above is the card header; nested output appended
-    // below is body. A theme's card header tint paints exactly this prefix.
-    let header_rows = lines.lines.len();
     let mut painted = std::mem::take(&mut lines.lines);
     append_nested_tool_output(
         &mut painted,
@@ -472,7 +469,6 @@ pub(super) fn render_tool(
     );
     lines.append(output_lines);
     lines.lines = painted;
-    lines.header_rows = header_rows;
     lines
 }
 
@@ -606,7 +602,6 @@ pub(super) fn render_block_planned_with_rainbow(
     );
     let mut geometry = plan.geometry;
     let mut tool_copy = None;
-    let mut tool_header_rows = 0;
     let mut lines = match block {
         TranscriptBlock::User {
             text,
@@ -718,7 +713,6 @@ pub(super) fn render_block_planned_with_rainbow(
                 card_expanded,
                 plan.content_role,
             );
-            tool_header_rows = projected.header_rows;
             let lines = std::mem::take(&mut projected.lines);
             tool_copy = Some(std::sync::Arc::new(projected));
             finish_transcript_block(lines)
@@ -799,8 +793,6 @@ pub(super) fn render_block_planned_with_rainbow(
                 ),
                 width,
             )];
-            // The command row is the shell card's whole header.
-            tool_header_rows = 1;
             let nested_width = width
                 .saturating_sub(tool_output_indent(theme, width))
                 .max(1);
@@ -911,7 +903,6 @@ pub(super) fn render_block_planned_with_rainbow(
         prompt_color,
         collapsed_reasoning,
         marker,
-        tool_header_rows,
     );
     if let Some(line) = component_line {
         let row = &mut lines[plan.geometry.transition_rows + plan.geometry.leading_rows];

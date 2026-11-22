@@ -705,66 +705,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_card_header_tint_paints_only_the_header_rows() {
-        for chrome in ["card", "band"] {
-            let theme = test_theme_source_with(
-                &format!(
-                    "[colors]\ntool_card_header_bg = \"#2a2b31\"\n[roles.\"surface.tool\"]\nbackground = \"#24252a\"\n[surfaces.tool]\nchrome = \"{chrome}\"\npadding = 1"
-                ),
-                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-                TerminalBackground::Dark,
-            );
-            let block = tool(
-                "bash",
-                serde_json::json!({"command": "printf fixture"}),
-                "one\ntwo\nthree".into(),
-                None,
-            );
-            let renderer = theme.rich_renderer();
-            let rendered =
-                render_block_planned(None, &block, &theme, &renderer, &renderer, 80, true, 0, 0);
-            let header_row = rendered
-                .lines
-                .iter()
-                .find(|row| row.contains("printf"))
-                .unwrap_or_else(|| panic!("{chrome}: bash command header row missing"));
-            assert!(
-                header_row.contains("\u{1b}[48;2;42;43;49m"),
-                "{chrome}: header row must carry the header tint: {header_row:?}"
-            );
-            for body in ["one", "three"] {
-                let row = rendered
-                    .lines
-                    .iter()
-                    .find(|row| strip_terminal_sequences(row).contains(body))
-                    .unwrap_or_else(|| panic!("{chrome}: body row {body} missing"));
-                assert!(
-                    !row.contains("\u{1b}[48;2;42;43;49m"),
-                    "{chrome}: body row must keep the fill: {row:?}"
-                );
-            }
-            // Without the token the surface renders exactly as before.
-            let plain = test_theme_source_with(
-                &format!(
-                    "[roles.\"surface.tool\"]\nbackground = \"#24252a\"\n[surfaces.tool]\nchrome = \"{chrome}\"\npadding = 1"
-                ),
-                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
-                TerminalBackground::Dark,
-            );
-            let renderer = plain.rich_renderer();
-            let rendered =
-                render_block_planned(None, &block, &plain, &renderer, &renderer, 80, true, 0, 0);
-            assert!(
-                !rendered
-                    .lines
-                    .iter()
-                    .any(|row| row.contains("\u{1b}[48;2;42;43;49m")),
-                "{chrome}: untinted theme grew a header fill"
-            );
-        }
-    }
-
-    #[test]
     fn content_width_bands_hug_their_text_and_never_bleed() {
         let theme = test_theme_source_with(
             "[colors]\ncontent_max_width = 80\n[roles.\"surface.user\"]\nbackground = \"#24252a\"\n[surfaces.user]\nchrome = \"band\"\nwidth = \"content\"\npadding = 1",

@@ -670,8 +670,6 @@ fn dock_example_theme_is_valid_for_every_background_profile() {
             theme.resolve::<String>("plain_read_tools").as_deref(),
             Some("true")
         );
-        // One single-tone band: no header tint above the fill.
-        assert_eq!(theme.resolve::<String>("tool_card_header_bg"), None);
         // No margin status dots: state lives in text, not glyphs.
         assert_eq!(
             theme.resolve::<String>("margin_markers").as_deref(),
