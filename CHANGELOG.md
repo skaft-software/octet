@@ -4,6 +4,7 @@
 
 ### Added
 
+- Show the GLM-5.3 family's thinking levels (low, high, max) on the Z.AI coding provider via its pinned models.dev record.
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
 
 ### Fixed
