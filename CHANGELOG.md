@@ -11,6 +11,7 @@
 - New theme tokens: `read_number_gutter`, `plain_read_tools`, `flat_tool_cards`, `turn_tallies`, `settled_thinking_labels`, `working_dots`, `code_borders`.
 - New menu and composer tokens: `suggestions_above`, `suggestions_keep_status`, `suggestions_bg`, `panel_footer_hints`, `slim_picker_headers`.
 - New surface tokens: `surface_bleed` keeps band fills inside the reading column, and `picker_selected_bg` fills the selected picker row.
+- Show the GLM-5.3 family's thinking levels (low, high, max) on the Z.AI coding provider via its pinned models.dev record.
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
 
 ### Changed
