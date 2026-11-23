@@ -259,6 +259,11 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         kind
     };
     let resolved = theme.surface_for_width(surface_kind, outer_width);
+    // `plain_read_tools` renders read calls as plain one-line rows with no
+    // card behind them.
+    let plain_read_tool = matches!(block, TranscriptBlock::Tool(panel)
+        if panel.name == "read")
+        && theme.resolve::<bool>("plain_read_tools").unwrap_or(false);
     // File themes paint full-width user surfaces (bands/rails/cards) that
     // would otherwise start one gutter left of every marker-aligned block.
     // Reserve the shared gutter so prompt cards align edge to edge with
@@ -324,6 +329,11 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         ThemeSurfaceHeading::None
     };
     let mut padding = resolved.padding;
+    if plain_read_tool {
+        chrome = ThemeSurfaceChrome::Plain;
+        heading = ThemeSurfaceHeading::None;
+        padding = 0;
+    }
 
     let overhead_for = |chrome: ThemeSurfaceChrome, padding: u16| -> u16 {
         let horizontal_padding = padding.saturating_mul(2);
@@ -417,8 +427,12 @@ pub(super) fn compile_surface_plan_for_render<'a>(
     // them on a wide screen. Borderless filled chrome extends its fill to the
     // terminal edges while the text inside stays in the reading column. Cards
     // keep their own border, and a heading or bottom row is rendered without
-    // the fill, so neither bleeds.
+    // the fill, so neither bleeds. A content-width surface hugs its text and
+    // never bleeds; `surface_bleed = false` opts fills back into the reading
+    // column.
     let bleeds = presentation.capped
+        && theme.resolve::<bool>("surface_bleed").unwrap_or(true)
+        && resolved.width == ThemeSurfaceWidth::Full
         && matches!(chrome, ThemeSurfaceChrome::Band | ThemeSurfaceChrome::Rail)
         && !has_heading_row
         && !has_bottom_row;
@@ -441,9 +455,15 @@ pub(super) fn compile_surface_plan_for_render<'a>(
         TranscriptBlock::Shell(_) => Some("surface.shell.success"),
         _ => None,
     };
-    let content_role = state_role
-        .filter(|role| theme.has_semantic_style(role))
-        .unwrap_or_else(|| surface_roles(surface_kind, theme).0);
+    let content_role = if plain_read_tool {
+        // A plain read row borrows no surface fill: `surface.tool` may still
+        // carry one for banded working-set calls.
+        "text"
+    } else {
+        state_role
+            .filter(|role| theme.has_semantic_style(role))
+            .unwrap_or_else(|| surface_roles(surface_kind, theme).0)
+    };
     // Row counts are decided below, once the neighbouring seams are known; the
     // draft only needs what the painter reads to answer "is my cushion filled?".
     let mut surface = SurfacePlan {
@@ -675,6 +695,345 @@ mod tests {
             assert_eq!((tool.frame_left, tool.frame_width), tool_expected);
             assert_eq!(text_column(&prompt, width), text_column(&prose, width));
         }
+    }
+
+    #[test]
+    fn content_width_bands_hug_their_text_and_never_bleed() {
+        let theme = test_theme_source_with(
+            "[colors]\ncontent_max_width = 80\n[roles.\"surface.user\"]\nbackground = \"#24252a\"\n[surfaces.user]\nchrome = \"band\"\nwidth = \"content\"\npadding = 1",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let prompt = TranscriptBlock::User {
+            text: "hi".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        // A capped theme with a full-width band would bleed to the edges; a
+        // content band floats and stops where its text stops.
+        let plan = compile_surface_plan(None, &prompt, &theme, 160);
+        assert_eq!(plan.bleed_left, 0);
+        assert_eq!(plan.bleed_right, 0);
+        assert!(plan.frame_width < 80, "band must hug short text");
+        let renderer = theme.rich_renderer();
+        let rows = render_block_planned(
+            None, &prompt, &theme, &renderer, &renderer, 160, false, 0, 0,
+        )
+        .lines;
+        let painted = rows
+            .iter()
+            .find(|row| row.contains("\u{1b}[48;2;36;37;42m"))
+            .expect("band fill row");
+        assert!(
+            visible_width(painted) < 160,
+            "band must not span the terminal: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn surface_bleed_false_keeps_bands_inside_the_reading_column() {
+        let source = "[colors]\ncontent_max_width = 80\nsurface_bleed = false\n[roles.\"surface.user\"]\nbackground = \"#24252a\"\n[surfaces.user]\nchrome = \"band\"\nwidth = \"full\"\npadding = 1";
+        let prompt = TranscriptBlock::User {
+            text: "hello there".into(),
+            model_lab: None,
+            prompt_color: None,
+            persisted: true,
+        };
+        for bleed in ["true", "false"] {
+            let theme = test_theme_source_with(
+                &source.replace("surface_bleed = false", &format!("surface_bleed = {bleed}")),
+                TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+                TerminalBackground::Dark,
+            );
+            let plan = compile_surface_plan(None, &prompt, &theme, 160);
+            let renderer = theme.rich_renderer();
+            let rows = render_block_planned(
+                None, &prompt, &theme, &renderer, &renderer, 160, false, 0, 0,
+            )
+            .lines;
+            let painted_width = rows
+                .iter()
+                .find(|row| row.contains("\u{1b}[48;2;36;37;42m"))
+                .map(|row| visible_width(row.as_str()))
+                .unwrap_or_default();
+            if bleed == "true" {
+                assert!(plan.bleed_left > 0 && plan.bleed_right > 0);
+                assert_eq!(painted_width, 160, "legacy themes keep edge-to-edge fills");
+            } else {
+                assert_eq!((plan.bleed_left, plan.bleed_right), (0, 0));
+                // The band spans the centred reading column — gutter prefix
+                // plus frame stay inside the window, never edge to edge.
+                assert!(
+                    (80..160).contains(&painted_width),
+                    "band must fill the column region only: {painted_width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plain_read_tools_render_one_sleek_line_without_fill_or_duration() {
+        let theme = test_theme_source_with(
+            "[colors]\nplain_read_tools = true\nshow_durations = true\n[roles.\"surface.tool\"]\nbackground = \"#24252a\"\n[surfaces.tool]\nchrome = \"band\"\npadding = 1",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let renderer = theme.rich_renderer();
+        let panel = |name: &str, args: serde_json::Value, output: &str| {
+            let mut panel = ToolPanel::new(
+                octet_ai::ToolCallId(format!("plain-{name}")),
+                name.into(),
+                args.to_string(),
+                summarize_tool(name, &args),
+                output.into(),
+                true,
+                false,
+                None,
+                None,
+            );
+            panel.duration = Some(std::time::Duration::from_millis(812));
+            TranscriptBlock::Tool(Box::new(panel))
+        };
+        let read = panel(
+            "read",
+            serde_json::json!({"path": "a.txt"}),
+            "a.txt:1-2/2 hash=h\n1: alpha\n2: beta\ntruncated=false",
+        );
+        let rows =
+            render_block_planned(None, &read, &theme, &renderer, &renderer, 80, false, 0, 0).lines;
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect();
+        assert!(
+            text.iter().any(|row| row.contains("Read")),
+            "read header row missing: {text:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("\u{1b}[48;2;36;37;42m")),
+            "plain read rows must carry no band fill: {rows:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("Took")),
+            "plain read rows must omit the duration decoration: {text:?}"
+        );
+        // A working-set call keeps its band and its duration row.
+        let bash = panel(
+            "bash",
+            serde_json::json!({"command": "printf fixture"}),
+            "one",
+        );
+        let rows =
+            render_block_planned(None, &bash, &theme, &renderer, &renderer, 80, false, 0, 0).lines;
+        assert!(
+            rows.iter().any(|row| row.contains("\u{1b}[48;2;36;37;42m")),
+            "bash keeps its soft band"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| strip_terminal_sequences(row).contains("Took")),
+            "bash keeps its duration row"
+        );
+    }
+
+    #[test]
+    fn plain_read_tools_stay_plain_for_errored_reads() {
+        // An errored read keeps the plain one-line presentation — no band
+        // fill and no duration row — while the failure stays visible.
+        let theme = test_theme_source_with(
+            "[colors]\nplain_read_tools = true\nshow_durations = true\n[roles.\"surface.tool\"]\nbackground = \"#24252a\"\n[surfaces.tool]\nchrome = \"band\"\npadding = 1",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            TerminalBackground::Dark,
+        );
+        let renderer = theme.rich_renderer();
+        let mut panel = ToolPanel::new(
+            octet_ai::ToolCallId("plain-read-error".into()),
+            "read".into(),
+            serde_json::json!({"path": "a.txt"}).to_string(),
+            summarize_tool("read", &serde_json::json!({"path": "a.txt"})),
+            "permission denied".into(),
+            true,
+            true,
+            Some("permission denied".into()),
+            None,
+        );
+        panel.duration = Some(std::time::Duration::from_millis(812));
+        let block = TranscriptBlock::Tool(Box::new(panel));
+        let rows =
+            render_block_planned(None, &block, &theme, &renderer, &renderer, 80, true, 0, 0).lines;
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect();
+        assert!(
+            text.iter().any(|row| row.contains("Read")),
+            "read header row missing: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("permission denied")),
+            "the failure stays visible: {text:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("\u{1b}[48;2;36;37;42m")),
+            "an errored read keeps the plain presentation: {rows:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("Took")),
+            "an errored read shows no duration row: {text:?}"
+        );
+    }
+
+    #[test]
+    fn read_number_gutter_aligns_numbers_and_keeps_source_copy() {
+        let theme = test_theme_from_source("[colors]\nread_number_gutter = true");
+        let body = (9..=11)
+            .map(|number| format!("{number}: line {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = format!("a.txt:9-11/40 hash=h\n{body}\ntruncated=false");
+        let block = tool(
+            "read",
+            serde_json::json!({"path": "a.txt"}),
+            output.clone(),
+            None,
+        );
+        let renderer = theme.rich_renderer();
+        let rendered =
+            render_block_planned(None, &block, &theme, &renderer, &renderer, 80, true, 0, 0);
+        let plain = rendered
+            .lines
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect::<Vec<_>>();
+        // Numbers right-align in one decoration column: two digits for 9..=11,
+        // so `9` gains a leading space while `10` and `11` do not.
+        for (number, cell) in [
+            (9usize, " 9 line 9"),
+            (10, "10 line 10"),
+            (11, "11 line 11"),
+        ] {
+            let row = plain
+                .iter()
+                .find(|row| row.contains(cell))
+                .unwrap_or_else(|| panic!("line {number} row missing: {plain:?}"));
+            assert_eq!(
+                row.find(cell),
+                plain
+                    .iter()
+                    .find(|row| row.contains("11 line 11"))
+                    .and_then(|row| row.find("11 line 11")),
+                "gutter column must be shared by every numbered row: {plain:?}"
+            );
+        }
+        // The numbers are decoration: copy keeps the tool's source form.
+        let copy = rendered
+            .tool_copy
+            .as_ref()
+            .expect("read rows carry copy alignment");
+        assert!(
+            copy.text.ends_with(&output),
+            "{:?} must end with the source",
+            copy.text
+        );
+        assert!(copy.text.contains("9: line 9"));
+        // A non-numbered body keeps the literal presentation, and a theme
+        // without the token keeps inline `N: ` prefixes.
+        let unnumbered = tool(
+            "read",
+            serde_json::json!({"path": "b.txt"}),
+            "b.txt:1-1/1 hash=h\nplain text\ntruncated=false".into(),
+            None,
+        );
+        let rendered = render_block_planned(
+            None,
+            &unnumbered,
+            &theme,
+            &renderer,
+            &renderer,
+            80,
+            true,
+            0,
+            0,
+        );
+        assert!(
+            rendered
+                .lines
+                .iter()
+                .any(|row| strip_terminal_sequences(row).contains("plain text")),
+            "unnumbered read output must still render"
+        );
+        let bare = test_theme();
+        let renderer = bare.rich_renderer();
+        let rendered =
+            render_block_planned(None, &block, &bare, &renderer, &renderer, 80, true, 0, 0);
+        // Without the token the default theme keeps its header-only read card.
+        assert!(
+            !rendered
+                .lines
+                .iter()
+                .any(|row| strip_terminal_sequences(row).contains("9: line 9")),
+            "default theme must keep its header-only read card"
+        );
+    }
+
+    #[test]
+    fn code_borders_false_renders_a_single_fill_code_well() {
+        let theme =
+            test_theme_from_source("[colors]\ncode_borders = false\nmd_code_bg = \"#1b1c20\"");
+        let prose = TranscriptBlock::Assistant(Box::new(super::super::AssistantBlock::finalized(
+            "```rust\nfn main() {}\n```".into(),
+        )));
+        let renderer = theme.rich_renderer();
+        let rows =
+            render_block_planned(None, &prose, &theme, &renderer, &renderer, 80, false, 0, 0).lines;
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| strip_terminal_sequences(row).to_owned())
+            .collect();
+        // The quiet look: a muted language label on the fill, the code under
+        // it, and no drawn border box.
+        assert!(
+            text.iter()
+                .any(|row| row.trim().trim_start_matches('•').trim() == "rust"),
+            "muted language label missing: {text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row.contains("fn main()")),
+            "code missing: {text:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| {
+                let plain = strip_terminal_sequences(row);
+                plain.contains('╭')
+                    || plain.contains('┌')
+                    || plain.contains('└')
+                    || plain.ends_with('┐')
+                    || plain.ends_with('╮')
+            }),
+            "no drawn code box: {text:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("\u{1b}[48;2;27;28;32m")),
+            "the code well must carry its fill: {rows:?}"
+        );
+        // A file theme without the token keeps its historical borders.
+        let bordered = test_theme_from_source("[colors]\nmd_code_bg = \"#1b1c20\"");
+        let renderer = bordered.rich_renderer();
+        let rows = render_block_planned(
+            None, &prose, &bordered, &renderer, &renderer, 80, false, 0, 0,
+        )
+        .lines;
+        assert!(
+            rows.iter().any(|row| {
+                let plain = strip_terminal_sequences(row);
+                plain.contains('╭') || plain.contains('┌')
+            }),
+            "file themes keep drawn code borders without the token: {:?}",
+            rows.iter()
+                .map(|row| strip_terminal_sequences(row).to_owned())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

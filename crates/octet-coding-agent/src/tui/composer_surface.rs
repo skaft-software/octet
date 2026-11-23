@@ -658,7 +658,9 @@ fn render_composer_box(
     let inner_width = geometry.inner_width();
 
     let paint_rule = |text: &str| paint_composer_rule(state, text);
-    let shaded_bg = (chrome == ComposerChrome::Shaded)
+    // `composer_bg` fills the shaded rectangle and a framed box; a frame
+    // without the token stays border-only.
+    let frame_bg = matches!(chrome, ComposerChrome::Shaded | ComposerChrome::Framed)
         .then(|| theme.role_rgb("composer_bg"))
         .flatten();
     let ruled = matches!(chrome, ComposerChrome::Boxed | ComposerChrome::Framed);
@@ -670,8 +672,8 @@ fn render_composer_box(
     let hidden_below = total_lines.saturating_sub(end);
     let render_rule = |count, above| overflow_rule(theme, paint_rule, terminal_width, count, above);
     let frame_rule = |left: &str, right: &str, count, above| -> String {
-        format!(
-            "{frame_prefix}{}{}{}",
+        let rule = format!(
+            "{}{}{}",
             paint_rule(left),
             overflow_rule(
                 theme,
@@ -681,14 +683,19 @@ fn render_composer_box(
                 above
             ),
             paint_rule(right),
-        )
+        );
+        match frame_bg {
+            Some(bg) => format!("{frame_prefix}{}", theme.paint_row_background(bg, &rule)),
+            None => format!("{frame_prefix}{rule}"),
+        }
     };
     // A theme that caps its reading column would otherwise float a narrow
     // shaded composer in the middle of the terminal, with unpainted columns
     // beside it. The fill reaches the terminal edges instead, while the draft
     // stays inside the column. A theme that only insets its content keeps the
-    // historical inset rectangle.
-    let bleeds = layout.capped;
+    // historical inset rectangle; `surface_bleed = false` keeps the fill
+    // inside the reading column too.
+    let bleeds = layout.capped && theme.resolve::<bool>("surface_bleed").unwrap_or(true);
     // One padding cell inside the fill, on both sides of the draft.
     //
     // A capped theme keeps its draft on the reading column, so the column offset
@@ -699,7 +706,7 @@ fn render_composer_box(
         let painted = format!("{lead} {row} ");
         let padding = fill_width.saturating_sub(visible_width(&painted));
         let padded = format!("{painted}{}", " ".repeat(padding));
-        match shaded_bg {
+        match frame_bg {
             Some(bg) => theme.paint_row_background(bg, &padded),
             None => padded,
         }
@@ -711,7 +718,14 @@ fn render_composer_box(
             }
             ComposerChrome::Framed => {
                 let vertical = paint_rule(theme.glyph("vertical"));
-                fit_line(&format!("{frame_prefix}{vertical} {row} {vertical}"), width)
+                let frame = format!("{vertical} {row} {vertical}");
+                match frame_bg {
+                    Some(bg) => {
+                        let filled = theme.paint_row_background(bg, &frame);
+                        fit_line(&format!("{frame_prefix}{filled}"), width)
+                    }
+                    None => fit_line(&format!("{frame_prefix}{frame}"), width),
+                }
             }
             ComposerChrome::Shaded if bleeds => {
                 fit_line(&paint_shaded(&frame_prefix, &row, terminal_width), width)
@@ -760,12 +774,19 @@ fn render_composer_box(
     };
 
     if editor.layout_text().is_empty() {
+        // A theme's `composer_placeholder` paints a muted hint on an empty
+        // draft; it is paint-only and never enters the draft.
+        let placeholder = theme
+            .resolve::<String>("composer_placeholder")
+            .filter(|hint| !hint.trim().is_empty())
+            .map(|hint| theme.fg("muted", hint.trim()));
         for index in 0..content_rows {
             if index == 0 {
-                lines.push(finish_row(render_row(&format!(
-                    "{}{cursor_marker}",
-                    composer_prefix(state, true)
-                ))));
+                let row = match &placeholder {
+                    Some(hint) => format!("{}{cursor_marker} {hint}", composer_prefix(state, true)),
+                    None => format!("{}{cursor_marker}", composer_prefix(state, true)),
+                };
+                lines.push(finish_row(render_row(&row)));
             } else {
                 lines.push(finish_row(render_row("")));
             }
@@ -1519,6 +1540,72 @@ mod tests {
                 "{width}: {prompt:?}"
             );
         }
+    }
+
+    #[test]
+    fn framed_composer_fills_its_frame_when_a_bg_is_set() {
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"framed\"\ncomposer_bg = \"#24252a\"\n[layout]\ntranscript_inset = 6\ncomposer_padding = 1",
+        );
+        state.model_display = "Test Model".into();
+        let width = 48;
+        let rows = render_composer_surface(&state, width, Instant::now());
+        assert!(rows.len() >= 3, "{rows:?}");
+        let plain_top = sexy_tui_rs::strip_terminal_sequences(&rows[0]).to_owned();
+        assert!(
+            plain_top.contains(state.theme.glyph("top_left")),
+            "framed top border missing: {plain_top:?}"
+        );
+        let painted = shaded_columns(&rows[1], width);
+        assert!(
+            !painted.is_empty(),
+            "framed composer must fill its interior: {:?}",
+            rows[1]
+        );
+        assert!(
+            !painted.contains(&0),
+            "columns left of the frame must stay unpainted: {:?}",
+            rows[1]
+        );
+        let mut plain = crate::tui::view::ShellState::default();
+        plain.theme = crate::tui::theme::test_theme_from_source(
+            "[colors]\ncomposer = \"framed\"\n[layout]\ntranscript_inset = 6\ncomposer_padding = 1",
+        );
+        plain.model_display = "Test Model".into();
+        let rows = render_composer_surface(&plain, width, Instant::now());
+        assert!(
+            shaded_columns(&rows[1], width).is_empty(),
+            "border-only frame grew a fill: {:?}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn composer_placeholder_hints_an_empty_draft_and_never_enters_it() {
+        let hint = "Message octet — @ to include context, / for commands";
+        let mut state = crate::tui::view::ShellState::default();
+        state.theme = crate::tui::theme::test_theme_from_source(&format!(
+            "[colors]\ncomposer_placeholder = \"{hint}\""
+        ));
+        state.model_display = "Test Model".into();
+        let rows = render_composer_surface(&state, 80, Instant::now());
+        let plain = sexy_tui_rs::strip_terminal_sequences(&rows[1]).to_owned();
+        assert!(plain.contains(hint), "{plain:?}");
+        assert!(
+            state.editor.text().is_empty(),
+            "the placeholder is paint-only and must not enter the draft"
+        );
+        state.editor.set_text("hello");
+        let rows = render_composer_surface(&state, 80, Instant::now());
+        let plain = sexy_tui_rs::strip_terminal_sequences(&rows[1]).to_owned();
+        assert!(plain.contains("hello"), "{plain:?}");
+        assert!(!plain.contains(hint), "{plain:?}");
+        let mut bare = crate::tui::view::ShellState::default();
+        bare.model_display = "Test Model".into();
+        let rows = render_composer_surface(&bare, 80, Instant::now());
+        let plain = sexy_tui_rs::strip_terminal_sequences(&rows[1]).to_owned();
+        assert!(!plain.contains("Message octet"), "{plain:?}");
     }
 
     #[test]

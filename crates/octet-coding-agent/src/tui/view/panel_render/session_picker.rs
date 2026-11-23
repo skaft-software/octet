@@ -205,6 +205,20 @@ fn picker_scope_text(theme: &OctetTheme, picker: &PickerState) -> String {
     } else {
         subdued_text(theme, all)
     };
+    // A slim picker header omits the sort display.
+    if theme
+        .resolve::<bool>("slim_picker_headers")
+        .unwrap_or(false)
+    {
+        return format!(
+            "{current} | {all}  {}",
+            if picker.named_only {
+                "Name: Named"
+            } else {
+                "Name: All"
+            },
+        );
+    }
     format!(
         "{current} | {all}  {}  Sort: {}",
         if picker.named_only {
@@ -221,10 +235,17 @@ fn picker_header_line(state: &ShellState, picker: &PickerState, width: u16) -> S
     let plan = PresentationLayout::new(&state.theme, width);
     let inset = usize::from(plan.inset);
     let width = usize::from(plan.content_width);
-    let left = state.theme.bold(&panel_cell(
-        &picker_header_title(picker),
-        state.theme.unicode(),
-    ));
+    // A slim picker header drops the scope suffix from the title.
+    let title = if state
+        .theme
+        .resolve::<bool>("slim_picker_headers")
+        .unwrap_or(false)
+    {
+        picker.surface.title.clone()
+    } else {
+        picker_header_title(picker)
+    };
+    let left = state.theme.bold(&panel_cell(&title, state.theme.unicode()));
     let right = picker_scope_text(&state.theme, picker);
     let right = sexy_tui_rs::truncate_to_width(&right, width, Some(state.theme.glyph("ellipsis")));
     let gap = width
@@ -569,6 +590,27 @@ pub(super) fn session_rows_are_stacked(state: &ShellState, width: u16, body_rows
     body_rows >= 2 && PresentationLayout::new(&state.theme, width).picker == PickerLayout::Stacked
 }
 
+/// Fill a selected picker item's rows edge to edge. Themes opt in with
+/// `picker_selected_bg`.
+fn paint_selected_rows(
+    state: &ShellState,
+    fill: Option<(u8, u8, u8)>,
+    mut rows: Vec<String>,
+    width: u16,
+) -> Vec<String> {
+    let Some(background) = fill else {
+        return rows;
+    };
+    for row in &mut rows {
+        let padding = usize::from(width).saturating_sub(visible_width(row));
+        if padding > 0 {
+            row.push_str(&" ".repeat(padding));
+        }
+        *row = state.theme.paint_row_background(background, row);
+    }
+    rows
+}
+
 fn render_picker_row(
     state: &ShellState,
     meta: &crate::session_store::SessionMeta,
@@ -585,7 +627,10 @@ fn render_picker_row(
     let inset = " ".repeat(usize::from(
         PresentationLayout::new(&state.theme, width).inset,
     ));
-    let cursor = if selected {
+    let selected_fill = selected
+        .then(|| state.theme.role_rgb("picker_selected_bg"))
+        .flatten();
+    let cursor = if selected && selected_fill.is_none() {
         format!(
             "{inset}{} ",
             state.theme.fg("model_accent", state.theme.glyph("prompt"))
@@ -603,7 +648,7 @@ fn render_picker_row(
     } else {
         label
     };
-    let label = if selected {
+    let label = if selected && selected_fill.is_none() {
         state.theme.bold(&label)
     } else {
         label
@@ -615,13 +660,18 @@ fn render_picker_row(
         let detail_prefix = format!("{inset}  ");
         let detail_width = usize::from(width).saturating_sub(visible_width(&detail_prefix));
         let detail = sexy_tui_rs::truncate_to_width(&right, detail_width, Some(ellipsis));
-        return vec![
-            fit_line(&format!("{cursor}{label}"), width),
-            fit_line(
-                &format!("{detail_prefix}{}", subdued_text(&state.theme, &detail)),
-                width,
-            ),
-        ];
+        return paint_selected_rows(
+            state,
+            selected_fill,
+            vec![
+                fit_line(&format!("{cursor}{label}"), width),
+                fit_line(
+                    &format!("{detail_prefix}{}", subdued_text(&state.theme, &detail)),
+                    width,
+                ),
+            ],
+            width,
+        );
     }
 
     let right_width = visible_width(&right);
@@ -635,14 +685,19 @@ fn render_picker_row(
         .saturating_sub(visible_width(&label))
         .saturating_sub(right_width)
         .max(1);
-    vec![fit_line(
-        &format!(
-            "{cursor}{label}{}{}",
-            " ".repeat(spacing),
-            subdued_text(&state.theme, &right)
-        ),
+    paint_selected_rows(
+        state,
+        selected_fill,
+        vec![fit_line(
+            &format!(
+                "{cursor}{label}{}{}",
+                " ".repeat(spacing),
+                subdued_text(&state.theme, &right)
+            ),
+            width,
+        )],
         width,
-    )]
+    )
 }
 
 fn tree_prefix(index: usize, total: usize, unicode: bool) -> &'static str {
@@ -676,7 +731,10 @@ fn render_message_item(
     };
     let display = panel_cell(&display, state.theme.unicode());
     let prefix = tree_prefix(index, total, state.theme.unicode());
-    let cursor = if selected {
+    let selected_fill = selected
+        .then(|| state.theme.role_rgb("picker_selected_bg"))
+        .flatten();
+    let cursor = if selected && selected_fill.is_none() {
         format!(
             "{} ",
             state.theme.fg("model_accent", state.theme.glyph("prompt"))
@@ -692,25 +750,30 @@ fn render_message_item(
         available.max(1),
         Some(state.theme.glyph("ellipsis")),
     );
-    let display = if selected {
+    let display = if selected && selected_fill.is_none() {
         state.theme.bold(&display)
     } else {
         display
     };
-    vec![
-        fit_line(
-            &format!("{cursor}{}{display}", subdued_text(&state.theme, prefix)),
-            width,
-        ),
-        fit_line(
-            &subdued_text(
-                &state.theme,
-                &format!("  Message {} of {}", index + 1, total),
+    paint_selected_rows(
+        state,
+        selected_fill,
+        vec![
+            fit_line(
+                &format!("{cursor}{}{display}", subdued_text(&state.theme, prefix)),
+                width,
             ),
-            width,
-        ),
-        String::new(),
-    ]
+            fit_line(
+                &subdued_text(
+                    &state.theme,
+                    &format!("  Message {} of {}", index + 1, total),
+                ),
+                width,
+            ),
+            String::new(),
+        ],
+        width,
+    )
 }
 
 /// Why `/resume` shows no session row, derived from the picker's own state at
@@ -795,7 +858,11 @@ pub(super) fn render_session_picker(
         lines.push(subdued_text(&state.theme, rule));
     }
     lines.push(picker_header_line(state, picker, width));
-    if max_rows >= 4 {
+    let slim_header = state
+        .theme
+        .resolve::<bool>("slim_picker_headers")
+        .unwrap_or(false);
+    if max_rows >= 4 && !slim_header {
         if let Some(purpose) = picker.surface.purpose.as_deref() {
             lines.push(fit_line(
                 &format!(
@@ -813,7 +880,15 @@ pub(super) fn render_session_picker(
     // At short heights, footer hints yield before that semantic content.
     let remaining_border_rows = usize::from(show_borders);
     let reserve_body_row = usize::from(max_rows > lines.len() + remaining_border_rows);
-    let hint_rows = max_rows.saturating_sub(lines.len() + remaining_border_rows + reserve_body_row);
+    let hint_rows = if state
+        .theme
+        .resolve::<bool>("panel_footer_hints")
+        .unwrap_or(true)
+    {
+        max_rows.saturating_sub(lines.len() + remaining_border_rows + reserve_body_row)
+    } else {
+        0
+    };
     if hint_rows > 0 {
         let (first, second) = picker_hints(state, picker, width);
         lines.push(first);
@@ -906,7 +981,12 @@ pub(super) fn render_message_picker(
             .bold(&panel_cell(&picker.surface.title, state.theme.unicode())),
         width,
     ));
-    if let Some(purpose) = picker.surface.purpose.as_deref() {
+    if let Some(purpose) = picker
+        .surface
+        .purpose
+        .as_deref()
+        .filter(|_| !super::slim_picker_headers(&state.theme))
+    {
         lines.push(fit_line(
             &subdued_text(&state.theme, &panel_cell(purpose, state.theme.unicode())),
             width,
@@ -924,7 +1004,11 @@ pub(super) fn render_message_picker(
     }
     // Keep one body row for the focused message or explicit empty state. At a
     // constrained height the action footer yields rather than hiding status.
-    let can_show_footer = max_rows >= lines.len().saturating_add(2 + border_rows);
+    let can_show_footer = state
+        .theme
+        .resolve::<bool>("panel_footer_hints")
+        .unwrap_or(true)
+        && max_rows >= lines.len().saturating_add(2 + border_rows);
     if can_show_footer {
         let navigation = "Up/Down";
         lines.push(panel_action_footer(

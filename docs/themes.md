@@ -29,14 +29,17 @@ shows each file stem and its optional metadata name and description, and typing
 filters it. Selecting a file previews it, and confirming saves its file stem
 (for example `theme = "mine"`) in your user config, leaving other settings
 intact. `/theme mine` (or `/theme mine.toml`) picks a discovered, valid file
-directly; `/theme Cards`, `/theme Still` and `/theme pi` pick the built-ins
+directly; `/theme Cards`, `/theme Still`, `/theme Dock`, `/theme Brief`,
+`/theme Chill` and `/theme pi` pick the
+built-ins
 described below. Cancelling restores the active theme without touching your
 config or session. The first-run picker still shows only Auto, Light and Dark.
 
 Discovery goes global, then trusted project, then explicit path, and the later
 one wins. When two files share a stem, only the winner shows, even if it's
 invalid. Files that fail bounded reads or schema validation are left out of the
-list. The stems `auto`, `light`, `dark`, `default`, `Cards`, `Still` and `pi` are
+list. The stems `auto`, `light`, `dark`, `default`, `Cards`, `Still`, `Dock`,
+`Brief`, `Chill` and `pi` are
 reserved for built-in selectors and never show up as file choices.
 
 `--theme` and `OCTET_THEME` take the built-in choices, or a named file at
@@ -82,7 +85,7 @@ and no-color terminals leave the prompt unpainted on the terminal canvas.
 One top-level token changes that. `prompt_wash = false` keeps prompt rows on the
 surface's own fill (a `[roles."surface.user"]` background, a band, or the
 terminal canvas) while the chevron keeps its prompt color. Unset means the
-model-color wash. `Cards` and `Still` set it to `false`. Unknown background
+model-color wash. `Cards`, `Still` and `Dock` set it to `false`. Unknown background
 profiles are always unpainted, so `prompt_wash` never invents a fill where the
 terminal could be light, dark or custom.
 
@@ -160,9 +163,11 @@ its presentation policy:
 | Area | Native theme controls |
 | --- | --- |
 | Tool/activity gutter | `[colors] margin_markers`, `event_marker_gutter`, `tool_dot_breathing`, `tool_dot_dim`, `tool_dot_bright` |
-| Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg`; `[layout] working_indicator`, `composer_effort_color`, `composer_show_prompt`; `[glyphs]` border characters |
-| Prompt/tool fill and padding | `prompt_wash`, `[roles."surface.user"]`, `[roles."surface.tool"]`, tool/shell state roles, `[surfaces.user]`, `[surfaces.tool]` |
-| Thinking/tool text and animation | `[roles.thinking]`, `[roles.tool_header]`, `[roles.scroll_hint]`; `[colors] activity_shimmer`, `thinking_spinner` |
+| Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg` (fills `framed` and `shaded` chrome), `composer_placeholder`, `suggestions_above` (input suggestion list opens over the composer), `suggestions_keep_status` (model/status row stays visible while the list is open), `suggestions_bg` (fills the suggestion popups); `[layout] working_indicator`, `composer_effort_color`, `composer_show_prompt`; `[glyphs]` border characters |
+| Pickers and panels | `[colors] picker_selected_bg` (optional: fills the selected row instead of the accent marker), `panel_footer_hints` (command-hint footers, including the slash popup's), `slim_picker_headers` (no purpose sentences, scope suffix, or sort display); `[layout] show_panel_borders` |
+| Prompt/tool fill and padding | `prompt_wash`, `[roles."surface.user"]`, `[roles."surface.tool"]`, tool/shell state roles, `[surfaces.user]`, `[surfaces.tool]`, `surface_bleed` (keeps band fills inside the reading column), `plain_read_tools` (read calls as plain one-line rows without fills or durations) |
+| Markdown/code blocks | `[colors] code_borders` (drawn code box, default for file themes), `md_code_bg`, `md_code_border`, `md_code`, syntax `syntax_*` |
+| Thinking/tool text and animation | `[roles.thinking]`, `[roles.tool_header]`, `[roles.scroll_hint]`; `[colors] activity_shimmer`, `thinking_spinner`, `working_dots` (bouncing-dots spinner row with chevron thinking disclosure) |
 | Spacing and narrow layouts | `[layout] density`, `transcript_inset`, `block_padding_x`, `tool_body_indent`, `composer_padding`, `narrow_*`; per-surface `padding`, `narrow_padding`, `marker_gutter`, `prompt_marker` |
 | Model colors | `[model] use_lab_color` and per-family colors |
 
@@ -190,6 +195,11 @@ Both settings are boolean tokens in the theme's `[colors]` table:
 | --- | --- | --- |
 | `quiet_tool_summaries` | `false` | Groups consecutive read-only tool calls into one summary row such as `Explored 3 files · 1 command`, with edits, web, MCP and other activity summarized the same way. `Still` sets it. Press Ctrl+O to open the individual calls. |
 | `thinking_expanded` | `false` | Shows the model's thinking trace as it streams, and when you resume a session, instead of a collapsed `Thinking` line. Pi profiles default to it, as Pi does; explicit overrides win. |
+| `read_number_gutter` | `false` | Projects a read call's `N:` line numbers into one right-aligned muted gutter when its output is expanded, instead of inline prefixes. `Dock` sets it. The numbers are decoration and never enter copied text. |
+| `plain_read_tools` | `false` | Renders read calls as sleek one-line rows: no band fill behind them and no duration row, while commands and edits keep their surfaces. `Dock` sets it. |
+| `turn_tallies` | `false` | Collapses each silent stretch of work into one counting row — `1 command · 2 edits · 1 thought` — merging every activity class and settled thoughts. Needs `quiet_tool_summaries`. `Brief` sets it. |
+| `flat_tool_cards` | `false` | Stacks a small muted tool label above the command (`Bash` / `$ cmd`) and nests output with plain indentation, without connector stems or elbows. `Dock` sets it. |
+| `settled_thinking_labels` | `false` | Keeps a subdued `Thinking` label row on every settled reasoning segment between calls, even when no duration was recorded for it. `Dock` sets it. |
 
 The compiled default theme collapses thinking to a single `Thinking` line; Ctrl+T
 shows it. A theme that sets `thinking_expanded = true` starts every thinking
@@ -451,6 +461,126 @@ liveness behavior also applies to the default theme. The `Still` stem is
 reserved, and `still_example_theme_is_valid_for_every_background_profile` in
 `crates/octet-coding-agent/src/tui/theme.rs` validates the embedded file for
 every terminal-background profile.
+
+</details>
+
+### Dock
+
+`examples/themes/Dock.toml` is compiled in the same way, as the built-in
+`Dock` selector:
+
+```console
+octet --theme Dock
+OCTET_THEME=Dock octet
+```
+
+`Dock` is a panel-style chat theme. User messages and working-set tool calls sit on
+one soft single-tone band spanning the reading column — elevation without an
+outline, filling the pane's width rather than the whole window
+(`surface_bleed = false`). Read calls are sleek plain one-line rows with no
+fill and no duration (`plain_read_tools`); command cards stack a small muted
+`Bash` label above the `$ command` with plain indented output and no connector
+bars (`flat_tool_cards`), and no completed-call timings anywhere. Thinking
+collapses to one `Thinking` line with a chevron disclosure (`working_dots`;
+Ctrl+T still expands), margin status dots are off,
+expanded read output gains a right-aligned number gutter, and the live status
+row is a small bouncing-dots spinner with a plain label. Pickers (`/resume`,
+`/model`, `/theme`, …) keep the accent marker naming the selected row, float
+without rules or command-hint footers, and use slim headers
+(`panel_footer_hints = false`, `slim_picker_headers`,
+`show_panel_borders = false`), and the input suggestion list opens above the
+composer while the model/status row stays visible (`suggestions_above`,
+`suggestions_keep_status`). Every
+settled
+thinking segment between calls keeps a subdued `Thinking` or `Thought for Xs` label (`settled_thinking_labels`). Code blocks use
+the quiet single-fill well — a muted language label on the fill, no drawn
+border box (`code_borders = false`). The transcript
+and composer centre in a narrow `content_max_width` reading column with airy
+spacing, and the composer is a borderless shaded rectangle in `composer_bg`
+with a muted hint placeholder on empty drafts. Prompt bands keep their neutral
+fill while each chevron keeps the stored model colour of the turn that earned
+it. It's offered in `/theme` after `Still`.
+
+<details>
+<summary>Dock provenance, tokens and validation</summary>
+
+`prompt_wash = false` keeps cards neutral,
+`model.use_lab_color = "true"` keeps the chevron, composer marker and shimmer
+model-adaptive, and `splash_model_adaptive` with `splash_compact` give it the
+compact 8×2 startup mark. The `Dock` stem is reserved, so a local `Dock.toml`
+can neither shadow nor be shadowed by the built-in. Editing
+[`examples/themes/Dock.toml`](../examples/themes/Dock.toml) changes the
+built-in, and `dock_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
+validating for any terminal-background profile.
+
+</details>
+
+### Brief
+
+`examples/themes/Brief.toml` is compiled in the same way, as the built-in
+`Brief` selector:
+
+```console
+octet --theme Brief
+OCTET_THEME=Brief octet
+```
+
+`Brief` is the condensed-work theme. When a stretch of work produces no
+answer text, it collapses to one counting row — `1 command · 2 edits ·
+1 thought` — and the transcript stays a conversation between you, the
+answers, and short counts of everything in between. Reads, commands, edits,
+searches, fetches, MCP calls, computer actions and settled thoughts all join
+the same tally (`turn_tallies`); press Ctrl+O to reveal the individual calls.
+Thinking is never shown inline — it is counted — and the live status row is
+the small bouncing-dots spinner. There are no status dots, no durations, no
+drawn code boxes (a quiet single-fill well instead), and no per-model
+colours: one restrained violet accent on a monochrome page. It's offered in
+`/theme` after `Dock`.
+
+<details>
+<summary>Brief validation</summary>
+
+The `Brief` stem is reserved, so a local `Brief.toml` can neither shadow nor
+be shadowed by the built-in. Editing
+[`examples/themes/Brief.toml`](../examples/themes/Brief.toml) changes the
+built-in, and `brief_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
+validating for any terminal-background profile.
+`turn_tallies_collapse_a_silent_stretch_into_one_counting_row` in
+`crates/octet-coding-agent/src/tui/view/transcript_hydration.rs` pins the
+counting row itself.
+
+</details>
+
+### Chill
+
+`examples/themes/Chill.toml` is compiled in the same way, as the built-in
+`Chill` selector:
+
+```console
+octet --theme Chill
+OCTET_THEME=Chill octet
+```
+
+`Chill` is the panel look with condensed work: everything `Dock` does —
+content-hugging message bands in a narrow centred column, a borderless shaded
+composer with a placeholder, slim marker-based menus with the suggestion list
+opening above the input, quiet single-fill code wells, the dots-spinner status
+row — plus Brief's counting rows: a silent stretch of work collapses to one
+tally (`1 command · 2 edits · 1 thought`), thoughts are counted rather than
+shown, and Ctrl+O reveals the individual flat command cards behind a tally.
+It's offered in `/theme` after `Brief`.
+
+<details>
+<summary>Chill validation</summary>
+
+The `Chill` stem is reserved, so a local `Chill.toml` can neither shadow nor
+be shadowed by the built-in. Editing
+[`examples/themes/Chill.toml`](../examples/themes/Chill.toml) changes the
+built-in, and `chill_example_theme_is_valid_for_every_background_profile` in
+`crates/octet-coding-agent/src/tui/theme.rs` fails the build if it stops
+validating for any terminal-background profile.
 
 </details>
 

@@ -412,6 +412,58 @@ pub(super) fn project_pi_bash_call(
     result
 }
 
+/// A flat command card: a small muted tool label stacked above the command
+/// it runs. Selected by `flat_tool_cards`.
+pub(super) fn project_labeled_bash_call(
+    panel: &ToolPanel,
+    command: &str,
+    renderer: &RichRenderer,
+    theme: &OctetTheme,
+    width: u16,
+    expanded: bool,
+) -> ToolRows {
+    let mut rows = ToolRows::default();
+    // The label is decoration and never enters copied command text.
+    rows.decoration(fit_line(
+        &theme.fg("muted", super::tool_render::shell_row_label(&panel.name)),
+        width,
+    ));
+    let content_width = width.saturating_sub(2).max(1);
+    let highlighted = renderer.render_inline_syntax_wrapped(command, "bash", content_width);
+    let use_plain = theme.capabilities().color == crate::tui::terminal::ColorDepth::None;
+    let source_text = highlighted.copy_text;
+    let source_rows = highlighted.lines.len();
+    let command_lines = highlighted
+        .lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let content = if use_plain { line.plain } else { line.styled };
+            if index == 0 {
+                format!("$ {content}")
+            } else {
+                format!("  {content}")
+            }
+        })
+        .collect();
+    // Commands have their own visual-row budget, independent of output.
+    // Disclosure reveals the rest; copy follows the presented command window.
+    let mut command_lines =
+        tool_input_preview(command_lines, "command", "  ", theme, width, expanded);
+    let hint = (!expanded && source_rows > 12)
+        .then(|| command_lines.pop())
+        .flatten();
+    let mut projected = ToolRows::rich_literal(command_lines, source_text, 2, content_width);
+    projected.retain_rows(&(0..projected.lines.len()).collect::<Vec<_>>());
+    // Copy keeps the `$ ` prompt prefix, like the inline bash card.
+    projected.prefix("$ ");
+    if let Some(hint) = hint {
+        projected.decoration(hint);
+    }
+    rows.append(projected);
+    rows
+}
+
 // The caller styles the label with the shared tool_header role on its surface.
 // Pi: packages/coding-agent/src/core/tools/renderers/bash.ts:25 and read.ts:34
 // use the same bold toolTitle token. Native paint owns these locally cached roles.
@@ -513,6 +565,47 @@ mod tests {
             assert_eq!(&rows[1..], ["└ one", "  two", "└ Took 5.92s"]);
             assert!(rendered.copy_rows.last().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn flat_tool_cards_stack_a_muted_label_above_the_command() {
+        let theme = crate::tui::theme::test_theme_from_source("[colors]\nflat_tool_cards = true");
+        let mut panel = panel(
+            "cargo test --lib",
+            "exit=0 duration=1.2s\nstdout: 2 lines\nrunning 38 tests\ntest ok",
+        );
+        panel.duration = Some(std::time::Duration::from_millis(1_200));
+        let rendered = super::super::transcript_render::render_tool(
+            &panel,
+            &theme,
+            &theme.rich_renderer(),
+            80,
+            false,
+            "tool_output",
+        );
+        let rows = plain_rows(&rendered.lines);
+        assert_eq!(rows[0], "Bash");
+        assert_eq!(rows[1], "$ cargo test --lib");
+        assert!(
+            rows.iter().any(|row| row.starts_with("  running 38 tests")),
+            "output must indent without stems: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains('└') || row.starts_with('│')),
+            "flat cards have no connector bars: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Took")),
+            "flat cards show no timing: {rows:?}"
+        );
+        assert!(
+            rendered.text.starts_with("$ cargo test --lib"),
+            "{:?}",
+            rendered.text
+        );
+        assert!(!rendered.text.starts_with("Bash"), "{:?}", rendered.text);
     }
 
     #[test]

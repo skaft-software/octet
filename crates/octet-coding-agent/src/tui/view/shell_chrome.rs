@@ -27,6 +27,8 @@ pub(super) struct ShellChrome {
     pub(super) pending: Vec<String>,
     pub(super) subagents: Vec<String>,
     pub(super) suggestions: Vec<String>,
+    /// A `suggestions_above` theme opens the suggestion list above the composer.
+    pub(super) suggestions_above: bool,
     pub(super) error: Vec<String>,
     pub(super) transcript_rows: usize,
 }
@@ -282,6 +284,10 @@ fn shell_chrome_with_composer_rows(
                 pending: Vec::new(),
                 subagents: Vec::new(),
                 suggestions: Vec::new(),
+                suggestions_above: state
+                    .theme
+                    .resolve::<bool>("suggestions_above")
+                    .unwrap_or(false),
             },
             composer_rows,
         );
@@ -365,10 +371,20 @@ fn shell_chrome_with_composer_rows(
     remaining = remaining.saturating_sub(panel.len());
 
     // Let autocomplete reuse the status row, including in a short terminal
-    // where that reclaimed row is what makes a choice plus its hint fit.
-    let suggestion_limit = remaining.saturating_add(footer_rows).min(10);
+    // where that reclaimed row is what makes a choice plus its hint fit. A
+    // `suggestions_keep_status` theme keeps its status row instead.
+    let keep_status = state
+        .theme
+        .resolve::<bool>("suggestions_keep_status")
+        .unwrap_or(false);
+    let suggestion_limit = if keep_status {
+        remaining
+    } else {
+        remaining.saturating_add(footer_rows)
+    }
+    .min(10);
     let suggestions = render_input_suggestions(state, width, suggestion_limit);
-    if !suggestions.is_empty() {
+    if !suggestions.is_empty() && !keep_status {
         composer.truncate(composer.len().saturating_sub(footer_rows));
         footer_spans.clear();
         remaining = remaining.saturating_add(footer_rows);
@@ -398,6 +414,10 @@ fn shell_chrome_with_composer_rows(
             pending,
             subagents,
             suggestions,
+            suggestions_above: state
+                .theme
+                .resolve::<bool>("suggestions_above")
+                .unwrap_or(false),
             error,
             transcript_rows: remaining,
         },
@@ -513,25 +533,11 @@ fn render_chrome_composer(
             lines[content_end - 1].clear();
         }
     }
-    let border = state.theme.role_rgb("composer_border").unwrap_or_else(|| {
-        state
-            .theme
-            .model_rgb(state.model_lab)
-            .unwrap_or((128, 128, 128))
-    });
-    let vertical = state.theme.rgb_fg(border, state.theme.glyph("vertical"));
+    let vertical = state.theme.glyph("vertical");
     let inset = crate::tui::layout::PresentationLayout::new(&state.theme, width).inset;
     let left_border = format!("{}{vertical} ", " ".repeat(usize::from(inset)));
     let right_border = format!(" {vertical}");
     for line in &mut lines[..content_end] {
-        if width >= 12 && chrome == "framed" {
-            if let Some(content) = line.strip_prefix(&left_border) {
-                *line = format!("{}{content}", " ".repeat(visible_width(&left_border)));
-            }
-            if let Some(content) = line.strip_suffix(&right_border) {
-                *line = format!("{content}{}", " ".repeat(visible_width(&right_border)));
-            }
-        }
         // Strip presentation styles without stripping the trusted hardware
         // cursor token. Credential/setup text remains in its existing slot.
         *line = line
@@ -539,6 +545,15 @@ fn render_chrome_composer(
             .map(sexy_tui_rs::strip_terminal_sequences)
             .collect::<Vec<_>>()
             .join(sexy_tui_rs::CURSOR_MARKER);
+        if width >= 12 && chrome == "framed" {
+            // A filled frame opens with its background run before the rail.
+            if let Some(content) = line.strip_prefix(&left_border) {
+                *line = format!("{}{content}", " ".repeat(visible_width(&left_border)));
+            }
+            if let Some(content) = line.strip_suffix(&right_border) {
+                *line = format!("{content}{}", " ".repeat(visible_width(&right_border)));
+            }
+        }
     }
     (lines, Vec::new())
 }
@@ -592,8 +607,14 @@ pub(super) fn append_viewport_chrome(lines: &mut Vec<String>, chrome: ShellChrom
     lines.extend(chrome.extension_above);
     lines.extend(chrome.subagents);
     lines.extend(chrome.pending);
-    lines.extend(chrome.composer);
-    lines.extend(chrome.suggestions);
+    if chrome.suggestions_above {
+        // The suggestion list opens upward, hugging the composer's top.
+        lines.extend(chrome.suggestions);
+        lines.extend(chrome.composer);
+    } else {
+        lines.extend(chrome.composer);
+        lines.extend(chrome.suggestions);
+    }
     lines.extend(chrome.extension_below);
 }
 
@@ -613,10 +634,15 @@ pub(super) fn append_chrome(lines: &mut Vec<String>, chrome: ShellChrome, separa
     lines.extend(chrome.extension_above);
     lines.extend(chrome.subagents);
     lines.extend(chrome.pending);
-    lines.extend(chrome.composer);
     // Keep autocomplete adjacent to the composer in terminal-owned mode as
     // well as in the application-owned viewport above.
-    lines.extend(chrome.suggestions);
+    if chrome.suggestions_above {
+        lines.extend(chrome.suggestions);
+        lines.extend(chrome.composer);
+    } else {
+        lines.extend(chrome.composer);
+        lines.extend(chrome.suggestions);
+    }
     lines.extend(chrome.extension_below);
 }
 

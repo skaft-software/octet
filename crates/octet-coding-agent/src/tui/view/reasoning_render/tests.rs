@@ -35,6 +35,12 @@ fn thinking_slot(text: &str) -> AssistantBlock {
     slot
 }
 
+fn working_slot(text: &str) -> AssistantBlock {
+    let mut slot = thinking_slot(text);
+    slot.activity_started_at = Some(Instant::now());
+    slot
+}
+
 fn render_reasoning(
     reasoning: &AssistantBlock,
     renderer: &RichRenderer,
@@ -1806,7 +1812,7 @@ fn retry_status_keeps_interrupt_hint_without_run_elapsed() {
                 "Retrying 2/3 (Esc to interrupt)"
             };
             assert_eq!(
-                activity_status_line(&theme, &working, &label, 0, 0),
+                activity_status_line(&theme, &working, &label, 0, 0, false),
                 expected
             );
         }
@@ -1865,6 +1871,108 @@ fn settled_thinking_duration_follows_preference_without_hiding_the_trace() {
     reasoning.reasoning_expanded = true;
     let expanded = render_reasoning(&reasoning, &renderer, &theme, 80);
     assert!(strip_terminal_sequences(&expanded.join("\n")).contains("retained private trace"));
+}
+
+#[test]
+fn working_dots_reduced_motion_keeps_a_steady_centre_dot() {
+    // Without animation the dots hold a steady centre dot instead of
+    // bouncing, so every frame renders the same spinner.
+    let steady_theme = theme::test_theme_source_with(
+        "[colors]\nworking_dots = true",
+        TerminalCapabilities {
+            animation: false,
+            ..TerminalCapabilities::test(true, true, ColorDepth::TrueColor)
+        },
+        TerminalBackground::Dark,
+    );
+    let slot = working_slot("private detail");
+    let steady = collapsed_reasoning_lines_at(&steady_theme, &slot, 0, 0)[0].clone();
+    assert!(steady.contains("· • ·"), "{steady:?}");
+    for frame in [1usize, 2, 3, 5, 7] {
+        assert_eq!(
+            collapsed_reasoning_lines_at(&steady_theme, &slot, frame, 0)[0],
+            steady,
+            "frame {frame} must not animate"
+        );
+    }
+    // With animation the dots move: frame 0 lights the first dot instead.
+    let animated_theme = theme::test_theme_source_with(
+        "[colors]\nworking_dots = true",
+        TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+        TerminalBackground::Dark,
+    );
+    let bouncing = collapsed_reasoning_lines_at(&animated_theme, &slot, 0, 0)[0].clone();
+    assert!(bouncing.contains("• · ·"), "{bouncing:?}");
+}
+
+#[test]
+fn working_dots_spinner_replaces_the_swept_parenthesized_label() {
+    // `working_dots` replaces the swept parenthesized form with a dots
+    // spinner and chevron disclosure on the label.
+    let theme = theme::test_theme_from_source("[colors]\nworking_dots = true");
+    let renderer = theme.reasoning_renderer();
+    let slot = working_slot("private detail");
+    let rows = render_reasoning(&slot, &renderer, &theme, 80);
+    assert!(
+        rows.len() == 1 || rows[1].trim().is_empty(),
+        "no connector hint row: {rows:?}"
+    );
+    let first = strip_terminal_sequences(&rows[0]);
+    assert!(first.contains("Thinking"), "{first}");
+    assert!(first.contains("Esc to interrupt"), "{first}");
+    assert!(
+        first.contains("· ·") || first.contains(". ."),
+        "the dots spinner is missing: {first}"
+    );
+    assert!(
+        first.contains(theme.glyph("collapsed")),
+        "expandable thinking carries a chevron: {first}"
+    );
+    assert!(
+        !first.contains('('),
+        "no parentheses in the dots row: {first}"
+    );
+    let mut headed = working_slot("## Optimizing the parser\n\nprivate detail");
+    headed.reasoning_heading = Some("Optimizing the parser".into());
+    let rows = render_reasoning(&headed, &renderer, &theme, 80);
+    let second = strip_terminal_sequences(&rows[1]);
+    assert_eq!(second.trim(), "Optimizing the parser", "{second:?}");
+    let bare = theme::test_theme();
+    let renderer = bare.reasoning_renderer();
+    let rows = render_reasoning(&working_slot("private detail"), &renderer, &bare, 80);
+    let text = strip_terminal_sequences(&rows.join("\n"));
+    assert!(text.contains("Thinking ("), "{text}");
+    assert!(text.contains("Ctrl+T to expand"), "{text}");
+}
+
+#[test]
+fn settled_thinking_labels_keep_segments_visible_without_durations() {
+    // A settled segment can arrive without a recorded duration; the token
+    // keeps it visible while the default theme hides it.
+    let label_theme = theme::test_theme_from_source(
+        "[colors]\nsettled_thinking_labels = true\nshow_durations = true",
+    );
+    let mut reasoning = AssistantBlock::streaming_reasoning("private segment");
+    reasoning.finish_reasoning();
+    reasoning.reasoning_elapsed = None;
+    let renderer = label_theme.reasoning_renderer();
+    let settled = render_reasoning(&reasoning, &renderer, &label_theme, 80);
+    assert_eq!(
+        strip_terminal_sequences(&settled.join("\n")),
+        "Thinking",
+        "a durationless segment keeps a visible label"
+    );
+    reasoning.reasoning_elapsed = Some(Duration::from_secs(4));
+    let timed = render_reasoning(&reasoning, &renderer, &label_theme, 80);
+    assert_eq!(
+        strip_terminal_sequences(&timed.join("\n")),
+        "Thought for 4s"
+    );
+    let mut bare = theme::test_theme();
+    bare.set_duration_preference(Some(true));
+    reasoning.reasoning_elapsed = None;
+    let renderer = bare.reasoning_renderer();
+    assert!(render_reasoning(&reasoning, &renderer, &bare, 80).is_empty());
 }
 
 #[test]

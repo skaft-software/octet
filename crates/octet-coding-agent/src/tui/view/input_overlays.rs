@@ -204,6 +204,53 @@ fn slash_suggestion_footer(
     fit_prioritized_footer("  ", &separator, &mut segments, width)
 }
 
+/// Paint the input suggestion rows with a theme's `suggestions_bg` fill,
+/// padded to the reading column like the composer. Themes without the token
+/// keep plain rows.
+fn paint_suggestion_rows(
+    state: &ShellState,
+    mut lines: Vec<String>,
+    width: u16,
+    inset: usize,
+) -> Vec<String> {
+    let Some(background) = state.theme.role_rgb("suggestions_bg") else {
+        return lines;
+    };
+    let layout = crate::tui::layout::PresentationLayout::new(&state.theme, width);
+    // The painted region matches the shaded composer's fill span: the whole
+    // terminal width when it bleeds, otherwise the reading column.
+    let bleeds = layout.capped && state.theme.resolve::<bool>("surface_bleed").unwrap_or(true);
+    let fill_width = if bleeds {
+        usize::from(width)
+    } else {
+        usize::from(layout.content_width)
+    }
+    .min(usize::from(width));
+    let split = if bleeds { 0 } else { inset };
+    let mut painted = Vec::with_capacity(lines.len() + 1);
+    // One blank filled row above the first item, so the box is not glued to
+    // the word — the same cushion the shaded composer gives its draft.
+    let blank_prefix = " ".repeat(split);
+    painted.push(format!(
+        "{blank_prefix}{}",
+        state
+            .theme
+            .paint_row_background(background, &" ".repeat(fill_width))
+    ));
+    for row in &mut lines {
+        let prefix: String = row.chars().take(split).collect();
+        let content: String = row.chars().skip(split).collect();
+        let content = fit_line(&content, fill_width as u16);
+        let padding = fill_width.saturating_sub(visible_width(&content));
+        let padded = format!("{content}{}", " ".repeat(padding));
+        painted.push(format!(
+            "{prefix}{}",
+            state.theme.paint_row_background(background, &padded)
+        ));
+    }
+    painted
+}
+
 pub(super) fn render_slash_suggestions(
     state: &ShellState,
     width: u16,
@@ -228,10 +275,18 @@ pub(super) fn render_slash_suggestions(
     let popup_width = layout.content_width.saturating_sub(inner_inset * 2).max(1);
     let popup_prefix = " ".repeat(usize::from(layout.inset + inner_inset));
 
-    // Keep one compact hint row below the choices. Moving the metadata to the
-    // footer makes autocomplete read as an inline continuation of the composer
-    // rather than a second panel with its own heading.
-    let item_rows = max_rows.saturating_sub(1).max(1);
+    // Keep one compact hint row below the choices when the theme shows it.
+    // The footer makes autocomplete read as an inline continuation of the
+    // composer.
+    let show_footer = state
+        .theme
+        .resolve::<bool>("panel_footer_hints")
+        .unwrap_or(true);
+    // A filled popup spends one row on its top cushion.
+    let fill_pad = usize::from(state.theme.role_rgb("suggestions_bg").is_some());
+    let item_rows = max_rows
+        .saturating_sub(usize::from(show_footer) + fill_pad)
+        .max(1);
     let selected = state
         .slash_selection
         .min(suggestions.len().saturating_sub(1));
@@ -298,10 +353,13 @@ pub(super) fn render_slash_suggestions(
             width,
         ));
     }
-    let footer =
-        slash_suggestion_footer(state, popup_width, start, end, suggestions.len(), item_rows);
-    lines.push(fit_line(&format!("{popup_prefix}{footer}"), width));
-    lines
+    // A `panel_footer_hints = false` theme drops the compact hint row too.
+    if show_footer {
+        let footer =
+            slash_suggestion_footer(state, popup_width, start, end, suggestions.len(), item_rows);
+        lines.push(fit_line(&format!("{popup_prefix}{footer}"), width));
+    }
+    paint_suggestion_rows(state, lines, width, usize::from(layout.inset))
 }
 
 /// One bounded candidate list shared by painting, arrow navigation, and Tab.
@@ -338,6 +396,16 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
     if max_rows < 2 {
         return Vec::new();
     }
+    let layout = crate::tui::layout::PresentationLayout::new(&state.theme, width);
+    // The list opens level with the composer's input column, not the
+    // terminal edge.
+    let inner_inset: u16 = match state.theme.resolve::<String>("composer").as_deref() {
+        Some("shaded") => 1,
+        Some("framed") => 2,
+        _ => 0,
+    };
+    let popup_width = layout.content_width.saturating_sub(inner_inset * 2).max(1);
+    let popup_prefix = " ".repeat(usize::from(layout.inset + inner_inset));
     let matches = input_path_suggestions(state);
     if matches.is_empty() {
         // A scan in progress is reported rather than drawn as an empty popup:
@@ -351,7 +419,7 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
             let label = state
                 .theme
                 .fg("muted", &format!("{marker} scanning project files..."));
-            return vec![fit_line(&format!("  {label}"), width)];
+            return vec![fit_line(&format!("{popup_prefix}{label}"), width)];
         }
         return Vec::new();
     }
@@ -363,12 +431,14 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
         "paths"
     };
 
-    let item_rows = max_rows.saturating_sub(1).min(5);
+    // A filled popup spends one row on its top cushion.
+    let fill_pad = usize::from(state.theme.role_rgb("suggestions_bg").is_some());
+    let item_rows = max_rows.saturating_sub(1 + fill_pad).min(5);
     let selected = state.path_selection.min(matches.len() - 1);
     let start = selected.saturating_sub(item_rows - 1);
     let marker = state.theme.glyph("prompt");
     let marker_width = visible_width(marker).max(1);
-    let available_width = usize::from(width)
+    let available_width = usize::from(popup_width)
         .saturating_sub(2 + marker_width + 1)
         .max(1);
     let mut lines = Vec::with_capacity(item_rows.saturating_add(1));
@@ -387,7 +457,10 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
         } else {
             state.theme.fg("muted", &choice)
         };
-        lines.push(fit_line(&format!("  {choice}"), width));
+        lines.push(fit_line(
+            &format!("{popup_prefix}{}", fit_line(&choice, popup_width)),
+            width,
+        ));
     }
 
     let separator = suggestion_separator(state);
@@ -397,12 +470,12 @@ fn render_path_suggestions(state: &ShellState, width: u16, max_rows: usize) -> V
         FooterSegment::optional(suggestion_key_hint(state, "Up/Down", "navigate"), 1),
     ];
     lines.push(fit_prioritized_footer(
-        "  ",
+        &popup_prefix,
         &separator,
         &mut segments,
         width,
     ));
-    lines
+    paint_suggestion_rows(state, lines, width, usize::from(layout.inset))
 }
 
 /// Whether an extension autocomplete overlay is what the popup row shows.

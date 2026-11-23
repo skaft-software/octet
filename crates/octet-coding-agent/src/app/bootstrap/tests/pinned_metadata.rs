@@ -1655,6 +1655,64 @@ fn pinned_metadata_discovery_precedes_generic_and_messages_static_fallbacks() {
 }
 
 #[test]
+fn zai_coding_bare_inventory_models_take_reasoning_from_the_pinned_record() {
+    // The Z.AI coding `/models` inventory publishes identifiers only, so
+    // without the pinned fallback every GLM registered with thinking off.
+    // The provider-scoped record owns the reviewed contract: GLM-5.3 always
+    // reasons and accepts `reasoning_effort` low/high/max exactly. A provider
+    // outside the allowlist keeps failing closed on the same bare shape.
+    let declaration = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "zai-coding-cn")
+        .unwrap();
+    let mut catalog = metadata_fixture_catalog(declaration, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        declaration,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"glm-5.3"},{"id":"glm-5.3-flash"}]}),
+    )
+    .unwrap();
+    for api_name in ["glm-5.3", "glm-5.3-flash"] {
+        let model = catalog
+            .resolve(&ModelId(format!("zai-coding-cn/{api_name}")))
+            .unwrap();
+        let record = octet_ai::model_metadata::model_capability_metadata("zai-coding-cn", api_name)
+            .unwrap_or_else(|| panic!("pinned record missing for {api_name}"));
+        assert_pinned_exact_reasoning_options(&model.spec, &record);
+        let reasoning = model.spec.capabilities.reasoning.as_ref().unwrap();
+        assert_eq!(
+            reasoning.options.as_ref().unwrap().choices(),
+            vec![
+                ReasoningConfig::Effort(octet_ai::ReasoningEffort::Low),
+                ReasoningConfig::Effort(octet_ai::ReasoningEffort::High),
+                ReasoningConfig::Effort(octet_ai::ReasoningEffort::Max),
+            ],
+            "{api_name}: GLM-5.3 accepts exactly low, high and max"
+        );
+    }
+    let outsider = BUILTIN_PROVIDER_DECLARATIONS
+        .iter()
+        .find(|d| d.id == "baseten")
+        .unwrap();
+    let mut catalog = metadata_fixture_catalog(outsider, "https://fixture.invalid/");
+    register_openai_compatible_models_from_response(
+        &mut catalog,
+        outsider,
+        ModelFilter::All,
+        &serde_json::json!({"data":[{"id":"zai-org/GLM-5.3"}]}),
+    )
+    .unwrap();
+    let model = catalog
+        .resolve(&ModelId("baseten/zai-org/GLM-5.3".into()))
+        .unwrap();
+    assert!(
+        model.spec.capabilities.reasoning.is_none(),
+        "the pinned fallback stays keyed to the hosts that need it"
+    );
+}
+
+#[test]
 fn pinned_metadata_sparse_static_routes_keep_their_declared_wire_profiles() {
     for (provider, api_name, protocol) in [
         ("opencode", "deepseek-v4-pro", Protocol::OpenAiChat),

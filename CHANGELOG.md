@@ -4,10 +4,23 @@
 
 ### Added
 
+- New built-in `Dock` theme: panel-style chat with soft message bands, every tool call listed with its command, and a shaded composer (`/theme Dock`).
+- New built-in `Brief` theme: silent stretches of work collapse to one counting row (`1 command · 2 edits · 1 thought`), thoughts included (`/theme Brief`).
+- New built-in `Chill` theme: Dock's panel look with Brief's counting rows (`/theme Chill`).
+- Framed composers now paint `composer_bg`, and a theme's `composer_placeholder` shows a muted hint in an empty draft.
+- New theme tokens: `read_number_gutter`, `plain_read_tools`, `flat_tool_cards`, `turn_tallies`, `settled_thinking_labels`, `working_dots`, `code_borders`.
+- New menu and composer tokens: `suggestions_above`, `suggestions_keep_status`, `suggestions_bg`, `panel_footer_hints`, `slim_picker_headers`.
+- New surface tokens: `surface_bleed` keeps band fills inside the reading column, and `picker_selected_bg` fills the selected picker row.
+- Show the GLM-5.3 family's thinking levels (low, high, max) on the Z.AI coding provider via its pinned models.dev record.
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
+
+### Changed
+
+- Content-width band and rail fills hug their text instead of bleeding to the terminal edge; `surface_bleed = false` keeps fills inside the reading column.
 
 ### Fixed
 
+- Open the `@` file completion list level with the composer's input column instead of pinned to the terminal's left edge.
 - Open Pi custom components that pass `blocked`, and report octet as waiting on you until they close.
 - Report a Pi `pi.exec` command ended by a signal with exit code 128 plus the signal number, so a timeout or crash never reads as success.
 - Run a Pi Markdown transformer only on the message types it registers for with `messageTypes`.

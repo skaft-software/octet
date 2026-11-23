@@ -133,7 +133,8 @@ Native theme-discovery skips for ignored untrusted project roots retain
 informational severity and do not mark an otherwise successful reload as failed. Explicitly contributed paths refused by trust or validation remain
 reported problems; diagnostic severity never grants resource access. A refused
 default theme names the file and the reason. A default theme whose stem is a
-reserved built-in selector (`dark`, `light`, `pi`, `Cards`, `Still`) still loads
+reserved built-in selector (`dark`, `light`, `pi`, `Cards`, `Still`, `Dock`,
+`Brief`, `Chill`) still loads
 its own admitted file, because Pi ships its built-in palettes as files named
 after those selectors.
 

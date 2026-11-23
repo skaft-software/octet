@@ -22,8 +22,9 @@ use std::path::PathBuf;
 
 use super::{
     load_theme_source_for, CompiledFileTheme, OctetTheme, TerminalBackground, TerminalCapabilities,
-    TerminalThemeChoice, ThemeSource, CARDS_THEME_NAME, CARDS_THEME_SOURCE, COMPILED_FILE_THEMES,
-    DEFAULT_THEME_NAME, STILL_THEME_NAME, STILL_THEME_SOURCE,
+    TerminalThemeChoice, ThemeSource, BRIEF_THEME_NAME, BRIEF_THEME_SOURCE, CARDS_THEME_NAME,
+    CARDS_THEME_SOURCE, CHILL_THEME_NAME, CHILL_THEME_SOURCE, COMPILED_FILE_THEMES,
+    DEFAULT_THEME_NAME, DOCK_THEME_NAME, DOCK_THEME_SOURCE, STILL_THEME_NAME, STILL_THEME_SOURCE,
 };
 use crate::config::Config;
 use crate::resource_resolver::{ResourceKind, ResourceResolver};
@@ -110,6 +111,57 @@ pub(super) fn still_theme_for(
         STILL_THEME_NAME,
         ThemeSource::CompiledStill,
         STILL_THEME_NAME,
+        capabilities,
+        background,
+    )
+}
+
+/// Compile the embedded `Dock` theme for one background profile. A built-in
+/// that fails to compile is a build-time defect the example test already
+/// covers, so surface it as a load error rather than a silent fallback.
+pub(super) fn dock_theme_for(
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> anyhow::Result<OctetTheme> {
+    load_theme_source_for(
+        DOCK_THEME_SOURCE,
+        DOCK_THEME_NAME,
+        ThemeSource::CompiledDock,
+        DOCK_THEME_NAME,
+        capabilities,
+        background,
+    )
+}
+
+/// Compile the embedded `Brief` theme for one background profile. A built-in
+/// that fails to compile is a build-time defect the example test already
+/// covers, so surface it as a load error rather than a silent fallback.
+pub(super) fn brief_theme_for(
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> anyhow::Result<OctetTheme> {
+    load_theme_source_for(
+        BRIEF_THEME_SOURCE,
+        BRIEF_THEME_NAME,
+        ThemeSource::CompiledBrief,
+        BRIEF_THEME_NAME,
+        capabilities,
+        background,
+    )
+}
+
+/// Compile the embedded `Chill` theme for one background profile. A built-in
+/// that fails to compile is a build-time defect the example test already
+/// covers, so surface it as a load error rather than a silent fallback.
+pub(super) fn chill_theme_for(
+    capabilities: TerminalCapabilities,
+    background: TerminalBackground,
+) -> anyhow::Result<OctetTheme> {
+    load_theme_source_for(
+        CHILL_THEME_SOURCE,
+        CHILL_THEME_NAME,
+        ThemeSource::CompiledChill,
+        CHILL_THEME_NAME,
         capabilities,
         background,
     )

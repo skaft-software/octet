@@ -1,0 +1,469 @@
+# Chill — Dock's panel look with Brief's condensed work.
+#
+# Everything from Dock: soft single-tone bands spanning the reading column,
+# a borderless shaded composer, slim menus, the dots spinner, and no drawn
+# boxes. Plus Brief's counting row: a silent stretch of work collapses to
+# one tally — `1 command · 2 edits · 1 thought` — with Ctrl+O revealing the
+# calls and Ctrl+T expanding a trace.
+#
+# Use:
+#   octet --theme Chill
+#   OCTET_THEME=Chill octet
+#   /theme Chill   (inside the TUI; /theme reload previews edits)
+
+[metadata]
+name = "Chill"
+description = "The panel look with condensed work: silent turns collapse to one counting row"
+author = "octet"
+version = "1"
+terminal = "light-dark"
+adaptive = false
+
+[colors]
+# Base text and neutral chrome. "default" inherits the terminal.
+foreground = "default"
+muted = "#9aa0a6"
+dim = "#6e7480"
+border = "#3f4045"
+border_idle = "#3f4045"
+border_focused = "#5b8fd4"
+
+# One calm accent (focus, links) + muted signal colours.
+accent = "#5b8fd4"
+success = "#74a37f"
+info = "default"
+error = "#cf7079"
+warning = "#c49a54"
+
+# The startup splash follows the active model family, like the prompt
+# chevron and composer marker. It claims the whole splash, so no `splash`
+# colour is set.
+splash_model_adaptive = true
+# The compact 8×2 startup mark rather than the larger file-theme presentation.
+splash_compact = true
+
+# Composer: borderless shaded rectangle in `composer_bg`, like an input
+# field on a panel. No rules, no box.
+composer = "shaded"
+composer_bg = "#24252a"
+# The command/file suggestion popups share the input box's fill, so they
+# read as one surface with the composer.
+suggestions_bg = "#24252a"
+# Muted hint painted where an empty draft would be (paint-only, never part
+# of the draft or a submission).
+composer_placeholder = "Message octet — @ to include context, / for commands"
+
+# Prompt bands keep the neutral fill; the chevron keeps the model colour.
+prompt_wash = false
+# Bands fill the reading column like a panel pane, not the whole window:
+# fills stop at the column edge with the terminal canvas beside them.
+surface_bleed = false
+# Tool calls group into tally rows; Ctrl+O reveals the individual calls as
+# flat cards.
+quiet_tool_summaries = true
+# One row per silent stretch: commands, edits, reads, searches and thoughts
+# are counted together instead of summarized per class.
+turn_tallies = true
+# Flat command cards behind the tallies: a small muted `Bash` label stacked
+# above the command, output indented without connector stems or elbows.
+flat_tool_cards = true
+# No command-hint footers in menus: pickers and the composer's slash
+# popup carry themselves. The accent marker names the selected row.
+panel_footer_hints = false
+# Slim menu headers everywhere: no purpose sentences under titles, no scope
+# suffix or sort display on the session picker.
+slim_picker_headers = true
+# The input suggestion list (slash commands, @ files) opens above the
+# composer, like a dropdown opening upward, and the model/status row stays
+# visible while it is open.
+suggestions_above = true
+suggestions_keep_status = true
+# No `Took <duration>` rows anywhere: the tally counts the work instead.
+show_durations = false
+# Expanded read output (Ctrl+O) projects its line numbers into one
+# right-aligned muted gutter instead of inline `N: ` prefixes.
+read_number_gutter = true
+# Thinking is counted in the tally, never shown inline; Ctrl+T expands a
+# trace. The live status row keeps the dots spinner below.
+thinking_expanded = false
+# The live status row uses a small bouncing-dots spinner and a plain label
+# with dot separators instead of the swept word-in-parentheses form.
+working_dots = true
+# No margin status dots: the panel look carries state in text, not glyphs.
+margin_markers = false
+
+# Code blocks use the quiet single-fill look: muted language label on the
+# well, no drawn border box.
+code_borders = false
+# Centre transcript and composer in a narrow reading column, like a pane.
+content_max_width = 80
+
+# Fills. One neutral elevation for the prompt band and composer so blocks
+# read as raised paper, not slabs; the code well sits one step deeper.
+user_msg_text = "default"
+user_msg_bg = "#24252a"
+assistant_msg_text = "default"
+tool_title = "default"
+tool_output = "#b6bac1"
+diff_added = "default"
+diff_removed = "default"
+diff_context = "default"
+diff_added_marker = "#74a37f"
+diff_removed_marker = "#cf7079"
+diff_added_bg = "#1c2a22"
+diff_removed_bg = "#2d1d20"
+diff_hunk = "#7f9fd4"
+
+# Markdown chrome. Code blocks use the compiled default's quiet single-fill
+# look: a muted language label on the well, no drawn border box.
+md_heading = "default"
+md_link = "#5b8fd4"
+md_code = "#c9ccd3"
+md_code_block = "default"
+md_code_bg = "#1b1c20"
+md_code_inline_bg = "default"
+md_quote = "default"
+md_quote_border = "#3f4045"
+md_hr = "#3f4045"
+md_list_bullet = "#9aa0a6"
+
+# Syntax highlighting. A restrained One-Dark-leaning set: quiet structure,
+# colour where it aids reading.
+syntax_comment = "#6b7280"
+syntax_keyword = "#c678dd"
+syntax_function = "#61afef"
+syntax_variable = "#d0d3da"
+syntax_string = "#98c379"
+syntax_number = "#d19a66"
+syntax_type = "#e5c07b"
+syntax_operator = "#96a0ad"
+syntax_punctuation = "#8b929b"
+
+# Context-report legend (each category keeps its own channel).
+context_system = "#4aa8c7"
+context_skills = "#d19a35"
+context_tools = "#7f9fd4"
+context_messages = "#d8dee8"
+context_pending = "#d47d3f"
+context_framing = "#73808f"
+context_adjustment = "#a978c5"
+context_tokenizer_adjustment = "#c36f99"
+context_output = "#df6f7c"
+context_free = "#52c878"
+context_buffer = "#8678ba"
+
+# Model styling: the chevron, composer marker, and shimmer follow the active
+# model family; `model_accent` is the neutral fallback.
+model_accent = "#5b8fd4"
+model_assistant = "default"
+model.use_lab_color = "true"
+
+# Semantic roles. Restrained: bold headings, italic emphasis, underline links.
+[roles.heading]
+bold = true
+
+[roles.strong]
+bold = true
+
+[roles.emphasis]
+italic = true
+
+[roles.quote]
+dim = true
+
+[roles.link]
+underline = true
+
+# The prompt band fill. The background of `surface.user` paints the band and
+# its cushion rows: elevation without an outline, the way a panel card reads.
+# Tool and shell bands share the same single-tone elevation.
+[roles."surface.user"]
+background = "#24252a"
+
+[roles."surface.tool"]
+background = "#24252a"
+
+[roles."surface.shell"]
+background = "#24252a"
+
+[roles."surface.assistant.border"]
+foreground = "#3f4045"
+
+[roles."surface.reasoning.border"]
+foreground = "#3f4045"
+
+[roles."surface.tool.border"]
+foreground = "#3f4045"
+
+[roles."surface.shell.border"]
+foreground = "#3f4045"
+
+[roles."surface.notice.border"]
+foreground = "#3f4045"
+
+[roles."surface.outcome.border"]
+foreground = "#3f4045"
+
+[roles."surface.compaction.border"]
+foreground = "#3f4045"
+
+[glyphs]
+top_left = "╭"
+top_right = "╮"
+bottom_left = "╰"
+bottom_right = "╯"
+horizontal = "─"
+vertical = "│"
+branch = "│"
+last_branch = "└"
+rail = "│"
+prompt = "›"
+shell = "$"
+success = "✓"
+warning = "!"
+note = "i"
+error = "×"
+interrupt = "■"
+pending = "·"
+reasoning = "·"
+collapsed = "▸"
+expanded = "▾"
+separator = " · "
+ellipsis = "…"
+bullet = "-"
+wordmark = "octet"
+
+[glyphs_ascii]
+top_left = "+"
+top_right = "+"
+bottom_left = "+"
+bottom_right = "+"
+horizontal = "-"
+vertical = "|"
+branch = "|-"
+last_branch = "`-"
+rail = "|"
+prompt = ">"
+shell = "$"
+success = "+"
+warning = "!"
+note = "i"
+error = "x"
+interrupt = "!"
+pending = "."
+reasoning = "."
+collapsed = "[+]"
+expanded = "[-]"
+separator = " | "
+ellipsis = "..."
+bullet = "-"
+wordmark = "octet"
+
+# Transcript surfaces. Soft bands spanning the reading column — the pane's
+# width, never the whole window — for user prompts, working-set tool calls,
+# and shell blocks; read calls and quiet events run plain. Narrow terminals
+# stay plain automatically.
+[surfaces.user]
+chrome = "band"
+width = "full"
+align = "left"
+padding = 1
+
+[surfaces.assistant]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.reasoning]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.tool]
+chrome = "band"
+width = "full"
+align = "left"
+padding = 1
+
+[surfaces.notice]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.outcome]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[surfaces.shell]
+chrome = "band"
+width = "full"
+align = "left"
+padding = 1
+
+[surfaces.compaction]
+chrome = "plain"
+width = "full"
+align = "left"
+padding = 0
+
+[layout]
+# Airy density puts two blank rows between blocks: the panel's rhythm.
+density = "airy"
+show_header = false
+show_footer = true
+show_status_line = true
+show_reasoning = true
+# No rules around pickers and documents: the list floats on the pane,
+# like a popover.
+show_panel_borders = false
+# Breathing rows above/below user prompt bands.
+prompt_padding = true
+transcript_inset = 2
+composer_padding = 1
+narrow_breakpoint = 64
+narrow_show_header = false
+narrow_show_footer = true
+narrow_show_status_line = true
+narrow_show_reasoning = true
+narrow_show_panel_borders = false
+
+# Background overlays. `dark` restates the base design; `light` swaps in
+# paper fills and darker text-safe hues. Both are pinned so neither is
+# inherited by accident.
+[variants.dark.colors]
+muted = "#9aa0a6"
+dim = "#6e7480"
+border = "#3f4045"
+border_idle = "#3f4045"
+border_focused = "#5b8fd4"
+accent = "#5b8fd4"
+success = "#74a37f"
+error = "#cf7079"
+warning = "#c49a54"
+composer_bg = "#24252a"
+suggestions_bg = "#24252a"
+user_msg_bg = "#24252a"
+tool_output = "#b6bac1"
+diff_added_marker = "#74a37f"
+diff_removed_marker = "#cf7079"
+diff_added_bg = "#1c2a22"
+diff_removed_bg = "#2d1d20"
+diff_hunk = "#7f9fd4"
+md_link = "#5b8fd4"
+md_code = "#c9ccd3"
+md_code_bg = "#1b1c20"
+md_quote_border = "#3f4045"
+md_hr = "#3f4045"
+md_list_bullet = "#9aa0a6"
+syntax_comment = "#6b7280"
+syntax_keyword = "#c678dd"
+syntax_function = "#61afef"
+syntax_variable = "#d0d3da"
+syntax_string = "#98c379"
+syntax_number = "#d19a66"
+syntax_type = "#e5c07b"
+syntax_operator = "#96a0ad"
+syntax_punctuation = "#8b929b"
+model_accent = "#5b8fd4"
+
+[variants.dark.roles."surface.user"]
+background = "#24252a"
+
+[variants.dark.roles."surface.tool"]
+background = "#24252a"
+
+[variants.dark.roles."surface.shell"]
+background = "#24252a"
+
+[variants.dark.roles."surface.assistant.border"]
+foreground = "#3f4045"
+
+[variants.dark.roles."surface.reasoning.border"]
+foreground = "#3f4045"
+
+[variants.dark.roles."surface.tool.border"]
+foreground = "#3f4045"
+
+[variants.dark.roles."surface.shell.border"]
+foreground = "#3f4045"
+
+[variants.dark.roles."surface.notice.border"]
+foreground = "#3f4045"
+
+[variants.dark.roles."surface.outcome.border"]
+foreground = "#3f4045"
+
+[variants.dark.roles."surface.compaction.border"]
+foreground = "#3f4045"
+
+[variants.light.colors]
+muted = "#6b7280"
+dim = "#8a8f98"
+border = "#d6d7da"
+border_idle = "#d6d7da"
+border_focused = "#2f6fdb"
+accent = "#2f6fdb"
+success = "#2e7d4f"
+error = "#a33a45"
+warning = "#8a5f00"
+composer_bg = "#ececef"
+suggestions_bg = "#ececef"
+user_msg_bg = "#ececef"
+tool_output = "#4a4f55"
+diff_added_marker = "#2e7d4f"
+diff_removed_marker = "#a33a45"
+diff_added_bg = "#e8f3ec"
+diff_removed_bg = "#fbe9eb"
+diff_hunk = "#355f9e"
+md_link = "#2f6fdb"
+md_code = "#5b616a"
+md_code_bg = "#f4f4f6"
+md_quote_border = "#d6d7da"
+md_hr = "#d6d7da"
+md_list_bullet = "#6b7280"
+syntax_comment = "#8a8f98"
+syntax_keyword = "#964ec9"
+syntax_function = "#2f6fdb"
+syntax_variable = "#383a42"
+syntax_string = "#4a8a4e"
+syntax_number = "#a86a1f"
+syntax_type = "#a07c1f"
+syntax_operator = "#5b616a"
+syntax_punctuation = "#6b7280"
+model_accent = "#2f6fdb"
+
+[variants.light.roles."surface.user"]
+background = "#ececef"
+
+[variants.light.roles."surface.tool"]
+background = "#ececef"
+
+[variants.light.roles."surface.shell"]
+background = "#ececef"
+
+[variants.light.roles."surface.assistant.border"]
+foreground = "#d6d7da"
+
+[variants.light.roles."surface.reasoning.border"]
+foreground = "#d6d7da"
+
+[variants.light.roles."surface.tool.border"]
+foreground = "#d6d7da"
+
+[variants.light.roles."surface.shell.border"]
+foreground = "#d6d7da"
+
+[variants.light.roles."surface.notice.border"]
+foreground = "#d6d7da"
+
+[variants.light.roles."surface.outcome.border"]
+foreground = "#d6d7da"
+
+[variants.light.roles."surface.compaction.border"]
+foreground = "#d6d7da"
+

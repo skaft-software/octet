@@ -351,6 +351,172 @@ fn wide_session_picker_gives_titles_and_metadata_separate_rows() {
 }
 
 #[test]
+fn session_picker_selected_row_takes_the_theme_fill() {
+    let theme =
+        crate::tui::theme::test_theme_from_source("[colors]\npicker_selected_bg = \"#2d2e35\"");
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(100, 24);
+    shell.open_panel(Panel::SessionPicker {
+        picker: Box::new(PickerState::new(
+            vec![
+                picker_session("one", "First session", 1, 1),
+                picker_session("two", "Second session", 7, 1),
+            ],
+            None,
+        )),
+    });
+
+    let rows = render_panel(&shell.state.borrow(), 100);
+    let selected = rows
+        .iter()
+        .find(|row| row.contains("\u{1b}[48;2;45;46;53m"))
+        .expect("the selected session row carries its fill");
+    assert!(
+        strip_terminal_sequences(selected).contains("First session"),
+        "{selected:?}"
+    );
+    assert_eq!(visible_width(selected), 100, "fill spans the whole row");
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains("Second session") && row.contains("\u{1b}[48;2;45;46;53m")),
+        "only the selected row is filled"
+    );
+    // The default theme keeps the accent marker cursor on session rows.
+    let mut bare = InteractiveShell::test_shell();
+    bare.set_size(100, 24);
+    bare.open_panel(Panel::SessionPicker {
+        picker: Box::new(PickerState::new(
+            vec![picker_session("one", "First session", 1, 1)],
+            None,
+        )),
+    });
+    let rows = render_panel(&bare.state.borrow(), 100);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains(bare.theme().glyph("prompt"))),
+        "default theme keeps the marker cursor"
+    );
+}
+
+#[test]
+fn decluttered_picker_drops_rules_and_hint_footers() {
+    // No rules around the panel, no hint footer, and a slim header.
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\npanel_footer_hints = false\nslim_picker_headers = true\n[layout]\nshow_panel_borders = false",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(100, 24);
+    shell.open_panel(Panel::SessionPicker {
+        picker: Box::new(PickerState::new(
+            vec![
+                picker_session("one", "First session", 1, 1),
+                picker_session("two", "Second session", 7, 1),
+            ],
+            None,
+        )),
+    });
+    let plain = render_panel(&shell.state.borrow(), 100)
+        .into_iter()
+        .map(|row| strip_terminal_sequences(&row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("First session"), "{plain}");
+    assert!(plain.contains("Filter"), "{plain}");
+    assert!(
+        plain.contains("Current Folder | "),
+        "scope toggles stay: {plain}"
+    );
+    assert!(!plain.contains("Select a saved session"), "{plain}");
+    assert!(!plain.contains("(Current Folder)"), "{plain}");
+    assert!(!plain.contains("Sort:"), "{plain}");
+    assert!(!plain.contains("transcripts"), "{plain}");
+    assert!(!plain.contains('─'), "no rules around the panel: {plain}");
+    // Themes without the tokens keep their hints, purpose, and sort display.
+    let mut bare = InteractiveShell::test_shell();
+    bare.set_size(100, 24);
+    bare.open_panel(Panel::SessionPicker {
+        picker: Box::new(PickerState::new(
+            vec![picker_session("one", "First session", 1, 1)],
+            None,
+        )),
+    });
+    let plain = render_panel(&bare.state.borrow(), 100)
+        .into_iter()
+        .map(|row| strip_terminal_sequences(&row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("Ctrl+F transcripts"), "{plain}");
+    assert!(plain.contains("Select a saved session"), "{plain}");
+    assert!(plain.contains("Sort:"), "{plain}");
+}
+
+#[test]
+fn slim_headers_apply_to_every_menu_kind() {
+    // Purpose sentences drop from generic list panels (/model, /theme, …)
+    // and the fork picker too, and the composer's slash popup loses its
+    // compact hint footer row.
+    let mut surface = OrdinarySurfaceMetadata::new("Pick a model");
+    surface.purpose = Some("Pick a model to use for new turns".into());
+    let theme = crate::tui::theme::test_theme_from_source(
+        "[colors]\npanel_footer_hints = false\nslim_picker_headers = true",
+    );
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(80, 20);
+    shell.open_panel(Panel::SelectList {
+        surface,
+        items: vec!["model-one".into(), "model-two".into()],
+        descriptions: vec![None, None],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectModel(vec![]),
+    });
+    let rendered = render_panel(&shell.state.borrow(), 80)
+        .into_iter()
+        .map(|row| strip_terminal_sequences(&row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("model-one"), "{rendered}");
+    assert!(
+        !rendered.contains("Pick a model to use"),
+        "no purpose sentence: {rendered}"
+    );
+    let mut surface = OrdinarySurfaceMetadata::new("Pick a model");
+    surface.purpose = Some("Pick a model to use for new turns".into());
+    let mut bare = InteractiveShell::test_shell();
+    bare.set_size(80, 20);
+    bare.open_panel(Panel::SelectList {
+        surface,
+        items: vec!["model-one".into()],
+        descriptions: vec![None],
+        selected: 0,
+        filter: String::new(),
+        action: PanelAction::SelectModel(vec![]),
+    });
+    let rendered = render_panel(&bare.state.borrow(), 80)
+        .into_iter()
+        .map(|row| strip_terminal_sequences(&row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Pick a model to use"), "{rendered}");
+
+    // The slash popup drops its hint footer row too.
+    shell.close_panel();
+    shell.state.borrow_mut().editor.set_text("/");
+    let suggestions = input_overlays::render_slash_suggestions(&shell.state.borrow(), 80, 6);
+    let plain = suggestions
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!plain.is_empty(), "suggestions still render: {plain:?}");
+    assert!(
+        !plain.contains("Up/Down") && !plain.contains("Esc"),
+        "no hint footer in the slash popup: {plain}"
+    );
+}
+
+#[test]
 fn session_picker_hides_advanced_filter_hints_until_used() {
     let mut shell = InteractiveShell::test_shell();
     shell.open_panel(Panel::SessionPicker {
@@ -372,6 +538,55 @@ fn session_picker_hides_advanced_filter_hints_until_used() {
     });
     let plain = strip_terminal_sequences(&render_panel(&shell.state.borrow(), 100).join("\n"));
     assert!(plain.contains("re:<pattern>"), "{plain:?}");
+}
+
+#[test]
+fn picker_selected_bg_fills_the_selected_row_without_a_marker() {
+    // `picker_selected_bg` fills the selected row instead of a marker chevron.
+    let theme =
+        crate::tui::theme::test_theme_from_source("[colors]\npicker_selected_bg = \"#2d2e35\"");
+    let mut shell = InteractiveShell::test_shell_with_theme(theme);
+    shell.set_size(80, 20);
+    shell.open_panel(Panel::SelectList {
+        surface: OrdinarySurfaceMetadata::new("Pick a session"),
+        items: vec!["first session".into(), "second session".into()],
+        descriptions: vec![Some("3 messages".into()), Some("7 messages".into())],
+        selected: 1,
+        filter: String::new(),
+        action: PanelAction::SelectSession(Vec::new()),
+    });
+
+    let rows = render_panel(&shell.state.borrow(), 80);
+    let selected = rows
+        .iter()
+        .find(|row| row.contains("\u{1b}[48;2;45;46;53m"))
+        .expect("the selected row carries its fill");
+    assert!(
+        strip_terminal_sequences(selected).contains("second session"),
+        "{selected:?}"
+    );
+    assert_eq!(visible_width(selected), 80, "fill spans the whole row");
+    assert!(
+        !strip_terminal_sequences(selected)
+            .trim_start()
+            .starts_with(shell.theme().glyph("prompt")),
+        "no marker chevron on the filled row: {:?}",
+        selected
+    );
+    let plain_rows: Vec<String> = rows
+        .iter()
+        .map(|row| strip_terminal_sequences(row))
+        .collect();
+    assert!(
+        plain_rows.iter().any(|row| row.contains("first session")),
+        "unselected row renders"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains("first session") && row.contains("\u{1b}[48;2;45;46;53m")),
+        "only the selected row is filled"
+    );
 }
 
 #[test]

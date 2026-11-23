@@ -857,13 +857,69 @@ struct ActivityGroupView {
     failures: Vec<String>,
     open: bool,
     kind: crate::hydrate::ToolActivityKind,
+    /// Thoughts already settled when this group opened, so one thought is
+    /// never counted in two tally rows.
+    base_thoughts: usize,
+}
+
+/// The `turn_tallies` label: one counting row per silent stretch of work.
+fn tally_label(
+    group: &crate::hydrate::ToolActivityGroup,
+    failures: &[String],
+    thoughts: usize,
+) -> String {
+    let plural =
+        |count: usize, unit: &str| format!("{count} {unit}{}", if count == 1 { "" } else { "s" });
+    let mut parts = Vec::new();
+    if group.read_files > 0 {
+        parts.push(plural(group.read_files, "read"));
+    }
+    if group.commands > 0 {
+        parts.push(plural(group.commands, "command"));
+    }
+    if group.edited_files > 0 {
+        parts.push(plural(group.edited_files, "edit"));
+    }
+    if group.web_searches > 0 {
+        parts.push(plural(group.web_searches, "search"));
+    }
+    if group.web_fetches > 0 {
+        parts.push(plural(group.web_fetches, "fetch"));
+    }
+    if group.mcp_calls > 0 {
+        parts.push(plural(group.mcp_calls, "MCP call"));
+    }
+    if group.computer_use_actions > 0 {
+        parts.push(plural(group.computer_use_actions, "computer action"));
+    }
+    if thoughts > 0 {
+        parts.push(plural(thoughts, "thought"));
+    }
+    let mut label = if parts.is_empty() {
+        "ran tools".to_owned()
+    } else {
+        parts.join(" · ")
+    };
+    if !failures.is_empty() {
+        label.push_str(&format!(" · {} failed", failures.len()));
+        for reason in failures {
+            label.push_str("\n  × ");
+            label.push_str(reason);
+        }
+    }
+    label
 }
 
 fn activity_group_label(
+    theme: &OctetTheme,
     group: &crate::hydrate::ToolActivityGroup,
     failures: &[String],
     kind: crate::hydrate::ToolActivityKind,
+    thoughts: usize,
 ) -> String {
+    if theme.resolve::<bool>("turn_tallies").unwrap_or(false) {
+        return tally_label(group, failures, thoughts);
+    }
     let mut label = match kind {
         crate::hydrate::ToolActivityKind::Explore if group.read_files > 0 => format!(
             "Explored {} file{}",
@@ -1930,6 +1986,9 @@ pub(crate) struct ShellState {
     active_reasoning: Option<usize>,
     /// Run liveness is composer-adjacent chrome, never streamed reasoning.
     working_status: Option<Box<AssistantBlock>>,
+    /// Reasoning segments settled since the last user prompt, for the
+    /// `turn_tallies` thought count.
+    turn_thoughts: usize,
     /// Stable identity boundary, so settlement visits only this run's blocks.
     run_transcript_start: u64,
     /// Once keyboard navigation requests a semantic viewport, rendering stays
@@ -2397,6 +2456,7 @@ impl ShellState {
             tool_panels: Default::default(),
             activity_groups: Default::default(),
             pending_activity_groups: Default::default(),
+            turn_thoughts: 0,
             active_text: Default::default(),
             provisional_blocks: Default::default(),
             active_reasoning: Default::default(),
@@ -2778,6 +2838,10 @@ impl ShellState {
     }
 
     fn push_block(&mut self, mut block: TranscriptBlock) -> usize {
+        // A new prompt opens the next turn.
+        if matches!(block, TranscriptBlock::User { .. }) {
+            self.turn_thoughts = 0;
+        }
         let old_renderer_window = self
             .transcript
             .len()
@@ -3286,8 +3350,9 @@ impl ShellState {
 
     fn start_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
         let kind = group.kind();
+        let base_thoughts = self.turn_thoughts;
         let index = self.push_block(TranscriptBlock::NoticeStatus {
-            text: activity_group_label(&group, &[], kind),
+            text: activity_group_label(&self.theme, &group, &[], kind, 0),
             tone: NoticeTone::ToolActive,
             // The separate trailing Working row now owns the live height.
             reserved_rows: 0,
@@ -3300,6 +3365,7 @@ impl ShellState {
             failures: Vec::new(),
             open: true,
             kind,
+            base_thoughts,
         });
     }
 
@@ -3349,7 +3415,10 @@ impl ShellState {
 
     fn extend_activity_group(&mut self, group: crate::hydrate::ToolActivityGroup) {
         if let Some(position) = self.activity_groups.iter().rposition(|view| view.open) {
-            if self.activity_groups[position].kind == group.kind() {
+            // A `turn_tallies` theme merges every class into the open tally.
+            if self.theme.resolve::<bool>("turn_tallies").unwrap_or(false)
+                || self.activity_groups[position].kind == group.kind()
+            {
                 self.activity_groups[position].group.merge(group);
                 let index = self.activity_groups[position].index;
                 self.register_active_event(index);
@@ -3393,7 +3462,14 @@ impl ShellState {
     fn refresh_activity_group(&mut self, position: usize) {
         let view = &self.activity_groups[position];
         let index = view.index;
-        let text = activity_group_label(&view.group, &view.failures, view.kind);
+        let thoughts = self.turn_thoughts.saturating_sub(view.base_thoughts);
+        let text = activity_group_label(
+            &self.theme,
+            &view.group,
+            &view.failures,
+            view.kind,
+            thoughts,
+        );
         let all_settled = view.settled.len() == view.group.member_ids.len();
         let complete = !view.open && all_settled;
         if let Some(TranscriptBlock::NoticeStatus {
@@ -3567,6 +3643,9 @@ impl ShellState {
                     if let Some(TranscriptBlock::Reasoning(reasoning)) =
                         self.transcript.get_mut(index)
                     {
+                        if !reasoning.text.is_empty() {
+                            self.turn_thoughts += 1;
+                        }
                         reasoning.finish_reasoning();
                         self.touch_block(index);
                     }
@@ -3689,6 +3768,9 @@ impl ShellState {
             } else if let Some(TranscriptBlock::Reasoning(reasoning)) =
                 self.transcript.get_mut(index)
             {
+                if !reasoning.text.is_empty() {
+                    self.turn_thoughts += 1;
+                }
                 reasoning.finish_reasoning();
                 self.touch_block(index);
             }

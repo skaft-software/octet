@@ -558,12 +558,14 @@ fn ctrl_o_toggles_tool_and_chrome_blocks_without_revealing_thinking() {
 fn still_activity_labels_are_quiet_for_web_mcp_and_computer_use() {
     use crate::hydrate::{ToolActivityGroup, ToolActivityKind};
 
+    // The default (non-tally) vocabulary is unchanged.
+    let theme = crate::tui::theme::test_theme();
     let group = ToolActivityGroup {
         web_searches: 5,
         ..Default::default()
     };
     assert_eq!(
-        activity_group_label(&group, &[], ToolActivityKind::WebSearch),
+        activity_group_label(&theme, &group, &[], ToolActivityKind::WebSearch, 0),
         "Searched web · 5 queries"
     );
     let group = ToolActivityGroup {
@@ -571,7 +573,7 @@ fn still_activity_labels_are_quiet_for_web_mcp_and_computer_use() {
         ..Default::default()
     };
     assert_eq!(
-        activity_group_label(&group, &[], ToolActivityKind::WebFetch),
+        activity_group_label(&theme, &group, &[], ToolActivityKind::WebFetch, 0),
         "Fetched 3 pages"
     );
     let group = ToolActivityGroup {
@@ -579,7 +581,7 @@ fn still_activity_labels_are_quiet_for_web_mcp_and_computer_use() {
         ..Default::default()
     };
     assert_eq!(
-        activity_group_label(&group, &[], ToolActivityKind::Mcp),
+        activity_group_label(&theme, &group, &[], ToolActivityKind::Mcp, 0),
         "Used MCP · 2 calls"
     );
     let group = ToolActivityGroup {
@@ -587,7 +589,7 @@ fn still_activity_labels_are_quiet_for_web_mcp_and_computer_use() {
         ..Default::default()
     };
     assert_eq!(
-        activity_group_label(&group, &[], ToolActivityKind::ComputerUse),
+        activity_group_label(&theme, &group, &[], ToolActivityKind::ComputerUse, 0),
         "Used computer · 4 actions"
     );
 }

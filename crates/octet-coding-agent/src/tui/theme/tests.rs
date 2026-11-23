@@ -605,6 +605,519 @@ fn still_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
 }
 
 #[test]
+fn dock_example_theme_is_valid_for_every_background_profile() {
+    // `examples/themes/Dock.toml` is the source for the `Dock` built-in.
+    // Every release build compiles it in, so a change to the example must
+    // never break schema validation, the bounded size limit, or any
+    // background profile it claims to support.
+    const DOCK: &str = include_str!("../../../../../examples/themes/Dock.toml");
+    assert!(
+        DOCK.len() as u64 <= MAX_THEME_BYTES,
+        "Dock.toml exceeds MAX_THEME_BYTES"
+    );
+    // Only string values are schema-checked for control bytes; ordinary
+    // newlines and tabs in comments and whitespace are fine.
+    for line in DOCK.lines() {
+        if line.trim_start().starts_with('#') {
+            assert!(
+                !line.chars().any(|ch| ch.is_control() && ch != '\t'),
+                "control byte in comment: {line:?}"
+            );
+            continue;
+        }
+        assert!(
+            !line.chars().any(char::is_control),
+            "control byte in {DOCK}: {line:?}"
+        );
+    }
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = load_theme_source_for(
+            DOCK,
+            "Dock",
+            ThemeSource::CompiledDock,
+            "Dock",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            background,
+        )
+        .expect("Dock example theme must compile for every background");
+        assert_eq!(theme.background(), background);
+        assert_eq!(theme.metadata().name, "Dock");
+        assert!(!theme.is_compiled_default());
+        // The panel look: prose and quiet events stay plain; user prompts,
+        // working-set tool calls, and shell blocks sit on single-tone bands
+        // spanning the reading column — never the whole window.
+        for kind in ["assistant", "reasoning", "notice", "outcome", "compaction"] {
+            let surface = theme.surface_for_width(kind, 100);
+            assert_eq!(surface.chrome, ThemeSurfaceChrome::Plain, "{kind}");
+            assert_eq!(surface.padding, 0, "{kind}");
+        }
+        for kind in ["user", "tool", "shell"] {
+            let surface = theme.surface_for_width(kind, 100);
+            assert_eq!(surface.chrome, ThemeSurfaceChrome::Band, "{kind}");
+            assert_eq!(surface.width, ThemeSurfaceWidth::Full, "{kind}");
+            assert_eq!(surface.padding, 1, "{kind}");
+        }
+        // Fills stop at the column edge; read calls are sleek plain rows.
+        assert_eq!(
+            theme.resolve::<String>("surface_bleed").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("plain_read_tools").as_deref(),
+            Some("true")
+        );
+        // No margin status dots: state lives in text, not glyphs.
+        assert_eq!(
+            theme.resolve::<String>("margin_markers").as_deref(),
+            Some("false")
+        );
+        // Neutral bands: prompt rows keep the band fill instead of the
+        // per-turn model wash, while the chevron keeps the model colour.
+        assert_eq!(
+            theme.resolve::<String>("prompt_wash").as_deref(),
+            Some("false")
+        );
+        assert!(theme.uses_model_lab_color());
+        // Every call visible: commands list as their own rows (output
+        // collapses until Ctrl+O); thinking collapses to one line.
+        assert_eq!(
+            theme.resolve::<String>("quiet_tool_summaries").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("thinking_expanded").as_deref(),
+            Some("false")
+        );
+        // Settled thinking segments keep a visible label between calls.
+        assert_eq!(
+            theme
+                .resolve::<String>("settled_thinking_labels")
+                .as_deref(),
+            Some("true")
+        );
+        // The live status row is a bouncing-dots spinner with a plain label.
+        assert_eq!(
+            theme.resolve::<String>("working_dots").as_deref(),
+            Some("true")
+        );
+        // Pickers float without rules or command-hint footers; the accent
+        // marker names the selected row, and headers stay slim.
+        assert_eq!(
+            theme.resolve::<String>("panel_footer_hints").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("slim_picker_headers").as_deref(),
+            Some("true")
+        );
+        // The input suggestion list opens above the composer.
+        assert_eq!(
+            theme.resolve::<String>("suggestions_above").as_deref(),
+            Some("true")
+        );
+        // The model/status row stays visible while it is open.
+        assert_eq!(
+            theme
+                .resolve::<String>("suggestions_keep_status")
+                .as_deref(),
+            Some("true")
+        );
+        // The suggestion popups share the composer's fill.
+        assert_eq!(
+            theme.role_rgb("suggestions_bg"),
+            theme.role_rgb("composer_bg"),
+            "popup fill matches the input box"
+        );
+        assert!(!theme.layout_for_width(100).show_panel_borders);
+        assert_eq!(theme.resolve::<String>("picker_selected_bg"), None);
+        // Commands sit on flat cards: muted label above the command, no
+        // connector stems; no completed-call durations anywhere.
+        assert_eq!(
+            theme.resolve::<String>("flat_tool_cards").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("show_durations").as_deref(),
+            Some("false")
+        );
+        // A borderless shaded composer in a narrow centred reading column.
+        assert_eq!(
+            theme.resolve::<String>("composer").as_deref(),
+            Some("shaded")
+        );
+        assert!(theme.role_rgb("composer_bg").is_some());
+        assert_eq!(theme.resolve::<u16>("content_max_width"), Some(80));
+        assert_eq!(theme.layout().density, ThemeDensity::Airy);
+        // Code blocks use the quiet single-fill well, not a drawn box.
+        assert_eq!(
+            theme.resolve::<String>("code_borders").as_deref(),
+            Some("false")
+        );
+        // The empty draft paints a muted discovery hint; expanded read
+        // output gains a number gutter.
+        assert_eq!(
+            theme.resolve::<String>("composer_placeholder").as_deref(),
+            Some("Message octet — @ to include context, / for commands")
+        );
+        assert_eq!(
+            theme.resolve::<String>("read_number_gutter").as_deref(),
+            Some("true")
+        );
+        // The adaptive splash claims the whole mark, so `Dock` must not
+        // also pin a `splash` colour.
+        assert_eq!(
+            theme.resolve::<String>("splash_model_adaptive").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("splash_compact").as_deref(),
+            Some("true")
+        );
+        assert_eq!(theme.resolve::<String>("splash"), None);
+    }
+}
+
+#[test]
+fn dock_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path().to_owned());
+    let themes = directory.path().join("themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    // A user's own `Dock.toml` must not replace, or be replaced by, the
+    // compiled-in selector.
+    std::fs::write(
+        themes.join("Dock.toml"),
+        "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
+    )
+    .unwrap();
+    config.theme_paths.push(themes);
+
+    let names = available_themes(&config);
+    assert!(names.contains(&DOCK_THEME_NAME.to_owned()));
+    for selector in ["Dock", "dock", "DOCK", "Dock.toml"] {
+        let theme = load_named_theme(selector, &config)
+            .unwrap_or_else(|error| panic!("{selector}: {error}"));
+        assert!(!theme.is_compiled_default(), "{selector}");
+        assert_eq!(theme.metadata().name, "Dock", "{selector}");
+        assert!(matches!(theme.source(), ThemeSource::CompiledDock));
+        assert_eq!(theme.source_path(), None, "{selector}");
+    }
+    // The impostor file stays out of the file picker and out of reach.
+    assert!(
+        !selectable_file_themes(&config, TerminalBackground::Unknown)
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(DOCK_THEME_NAME))
+    );
+    assert!(is_reserved_theme_name("Dock"));
+    assert!(is_reserved_theme_name("dock"));
+
+    // Startup honours the selector and keeps its own background profile.
+    config.theme = Some(DOCK_THEME_NAME.to_owned());
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = load_theme_for_background(&config, background);
+        assert!(!theme.is_compiled_default(), "{background:?}");
+        assert_eq!(theme.background(), background);
+        assert_eq!(theme.metadata().name, "Dock");
+        // A compiled-in theme never creates a reload watcher.
+        assert!(theme.source_path().is_none(), "{background:?}");
+    }
+}
+
+#[test]
+fn brief_example_theme_is_valid_for_every_background_profile() {
+    // `examples/themes/Brief.toml` is the source for the `Brief` built-in.
+    // Every release build compiles it in, so a change to the example must
+    // never break schema validation, the bounded size limit, or any
+    // background profile it claims to support.
+    const BRIEF: &str = include_str!("../../../../../examples/themes/Brief.toml");
+    assert!(
+        BRIEF.len() as u64 <= MAX_THEME_BYTES,
+        "Brief.toml exceeds MAX_THEME_BYTES"
+    );
+    for line in BRIEF.lines() {
+        if line.trim_start().starts_with('#') {
+            assert!(
+                !line.chars().any(|ch| ch.is_control() && ch != '\t'),
+                "control byte in comment: {line:?}"
+            );
+            continue;
+        }
+        assert!(
+            !line.chars().any(char::is_control),
+            "control byte in {BRIEF}: {line:?}"
+        );
+    }
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = load_theme_source_for(
+            BRIEF,
+            "Brief",
+            ThemeSource::CompiledBrief,
+            "Brief",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            background,
+        )
+        .expect("Brief example theme must compile for every background");
+        assert_eq!(theme.background(), background);
+        assert_eq!(theme.metadata().name, "Brief");
+        assert!(!theme.is_compiled_default());
+        // The condensed-work contract: tool calls group into one tally row
+        // per silent stretch, thoughts are counted rather than shown, and
+        // the page stays monochrome.
+        assert_eq!(
+            theme.resolve::<String>("quiet_tool_summaries").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("turn_tallies").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("thinking_expanded").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("working_dots").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("margin_markers").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("code_borders").as_deref(),
+            Some("false")
+        );
+        assert!(!theme.uses_model_lab_color());
+        for kind in [
+            "user",
+            "assistant",
+            "reasoning",
+            "tool",
+            "notice",
+            "outcome",
+            "shell",
+            "compaction",
+        ] {
+            let surface = theme.surface_for_width(kind, 100);
+            assert_eq!(surface.chrome, ThemeSurfaceChrome::Plain, "{kind}");
+            assert_eq!(surface.padding, 0, "{kind}");
+        }
+    }
+}
+
+#[test]
+fn brief_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path().to_owned());
+    let themes = directory.path().join("themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    // A user's own `Brief.toml` must not replace, or be replaced by, the
+    // compiled-in selector.
+    std::fs::write(
+        themes.join("Brief.toml"),
+        "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
+    )
+    .unwrap();
+    config.theme_paths.push(themes);
+
+    let names = available_themes(&config);
+    assert!(names.contains(&BRIEF_THEME_NAME.to_owned()));
+    for selector in ["Brief", "brief", "BRIEF", "Brief.toml"] {
+        let theme = load_named_theme(selector, &config)
+            .unwrap_or_else(|error| panic!("{selector}: {error}"));
+        assert!(!theme.is_compiled_default(), "{selector}");
+        assert_eq!(theme.metadata().name, "Brief", "{selector}");
+        assert!(matches!(theme.source(), ThemeSource::CompiledBrief));
+        assert_eq!(theme.source_path(), None, "{selector}");
+    }
+    assert!(
+        !selectable_file_themes(&config, TerminalBackground::Unknown)
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(BRIEF_THEME_NAME))
+    );
+    assert!(is_reserved_theme_name("Brief"));
+    assert!(is_reserved_theme_name("brief"));
+
+    // Startup honours the selector and keeps its own background profile.
+    config.theme = Some(BRIEF_THEME_NAME.to_owned());
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = load_theme_for_background(&config, background);
+        assert!(!theme.is_compiled_default(), "{background:?}");
+        assert_eq!(theme.background(), background);
+        assert_eq!(theme.metadata().name, "Brief");
+        assert!(theme.source_path().is_none(), "{background:?}");
+    }
+}
+
+#[test]
+fn chill_example_theme_is_valid_for_every_background_profile() {
+    // `examples/themes/Chill.toml` is the source for the `Chill` built-in:
+    // Dock's panel look plus Brief's counting rows.
+    const CHILL: &str = include_str!("../../../../../examples/themes/Chill.toml");
+    assert!(
+        CHILL.len() as u64 <= MAX_THEME_BYTES,
+        "Chill.toml exceeds MAX_THEME_BYTES"
+    );
+    for line in CHILL.lines() {
+        if line.trim_start().starts_with('#') {
+            assert!(
+                !line.chars().any(|ch| ch.is_control() && ch != '\t'),
+                "control byte in comment: {line:?}"
+            );
+            continue;
+        }
+        assert!(
+            !line.chars().any(char::is_control),
+            "control byte in {CHILL}: {line:?}"
+        );
+    }
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = load_theme_source_for(
+            CHILL,
+            "Chill",
+            ThemeSource::CompiledChill,
+            "Chill",
+            TerminalCapabilities::test(true, true, ColorDepth::TrueColor),
+            background,
+        )
+        .expect("Chill example theme must compile for every background");
+        assert_eq!(theme.background(), background);
+        assert_eq!(theme.metadata().name, "Chill");
+        assert!(!theme.is_compiled_default());
+        // Brief's counting rows on Dock's panel surfaces.
+        assert_eq!(
+            theme.resolve::<String>("quiet_tool_summaries").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("turn_tallies").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("thinking_expanded").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("settled_thinking_labels"),
+            None,
+            "thoughts are counted, not labelled"
+        );
+        // Dock's panel look.
+        assert_eq!(
+            theme.resolve::<String>("composer").as_deref(),
+            Some("shaded")
+        );
+        assert!(theme.role_rgb("composer_bg").is_some());
+        assert_eq!(theme.resolve::<u16>("content_max_width"), Some(80));
+        assert_eq!(theme.layout().density, ThemeDensity::Airy);
+        assert_eq!(
+            theme.resolve::<String>("surface_bleed").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("flat_tool_cards").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("code_borders").as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            theme.resolve::<String>("working_dots").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.resolve::<String>("suggestions_above").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme
+                .resolve::<String>("suggestions_keep_status")
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            theme.role_rgb("suggestions_bg"),
+            theme.role_rgb("composer_bg"),
+            "popup fill matches the input box"
+        );
+        for kind in ["user", "tool", "shell"] {
+            let surface = theme.surface_for_width(kind, 100);
+            assert_eq!(surface.chrome, ThemeSurfaceChrome::Band, "{kind}");
+            assert_eq!(surface.padding, 1, "{kind}");
+        }
+    }
+}
+
+#[test]
+fn chill_is_a_compiled_builtin_that_reserved_files_cannot_shadow() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = config(directory.path().to_owned());
+    let themes = directory.path().join("themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    // A user's own `Chill.toml` must not replace, or be replaced by, the
+    // compiled-in selector.
+    std::fs::write(
+        themes.join("Chill.toml"),
+        "[metadata]\nname = \"Impostor\"\n[colors]\naccent = '#123456'\n",
+    )
+    .unwrap();
+    config.theme_paths.push(themes);
+
+    let names = available_themes(&config);
+    assert!(names.contains(&CHILL_THEME_NAME.to_owned()));
+    for selector in ["Chill", "chill", "CHILL", "Chill.toml"] {
+        let theme = load_named_theme(selector, &config)
+            .unwrap_or_else(|error| panic!("{selector}: {error}"));
+        assert!(!theme.is_compiled_default(), "{selector}");
+        assert_eq!(theme.metadata().name, "Chill", "{selector}");
+        assert!(matches!(theme.source(), ThemeSource::CompiledChill));
+        assert_eq!(theme.source_path(), None, "{selector}");
+    }
+    assert!(
+        !selectable_file_themes(&config, TerminalBackground::Unknown)
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(CHILL_THEME_NAME))
+    );
+    assert!(is_reserved_theme_name("Chill"));
+    assert!(is_reserved_theme_name("chill"));
+
+    // Startup honours the selector and keeps its own background profile.
+    config.theme = Some(CHILL_THEME_NAME.to_owned());
+    for background in [
+        TerminalBackground::Dark,
+        TerminalBackground::Light,
+        TerminalBackground::Unknown,
+    ] {
+        let theme = load_theme_for_background(&config, background);
+        assert!(!theme.is_compiled_default(), "{background:?}");
+        assert_eq!(theme.background(), background);
+        assert_eq!(theme.metadata().name, "Chill");
+        assert!(theme.source_path().is_none(), "{background:?}");
+    }
+}
+
+#[test]
 fn pi_builtin_is_reserved_standalone_and_retains_terminal_colors_on_reload() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = config(directory.path().to_owned());
@@ -619,7 +1132,7 @@ fn pi_builtin_is_reserved_standalone_and_retains_terminal_colors_on_reload() {
         assert!(!theme.prompt_wash());
         assert!(!theme.uses_model_lab_color());
     }
-    assert!(compiled_file_theme_names().eq(["Cards", "Still", "pi"]));
+    assert!(compiled_file_theme_names().eq(["Cards", "Still", "Dock", "Brief", "Chill", "pi"]));
     assert!(!selectable_file_themes(&config, TerminalBackground::Dark)
         .iter()
         .any(|(name, _)| name == "pi"));
