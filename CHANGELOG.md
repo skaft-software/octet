@@ -16,6 +16,7 @@
 - Update url to fix a stack overflow when reading the origin of nested `blob:` URLs.
 - Show very long URLs as plain text so wrapping a multi-megabyte URL cannot exhaust memory by repeating its hyperlink on every row.
 - Load symlinked skill files, directories and roots, so skills managed by Nix and similar tools work.
+- Check for updates with a small fixed-size request, independent of the number of files in a release.
 
 ### Removed
 

@@ -114,6 +114,10 @@ installation, provider request, credentials, periodic polling or persistent
 update cache. Proxy-only networks don't get this optional direct-HTTPS startup
 notice.
 
+The check reads the stable tag from GitHub's latest-release redirect without downloading the release page or asset list.
+
+octet 0.10.1 and older can't read the current release metadata; reinstall once with the installer from the [release page](https://github.com/skaft-software/octet/releases/latest).
+
 From 0.7.5 onward, `/changelog` opens the current binary's bundled release notes
 in the TUI as rich Markdown. Up and Down, PageUp and PageDown, Home and End
 scroll, and Escape or Left returns to the input. It works offline and doesn't

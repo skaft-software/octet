@@ -125,88 +125,20 @@ async fn installed_version_probe_has_a_bounded_deadline() {
     assert!(error.to_string().contains("timed out"), "{error:#}");
 }
 
-fn stable_release(tag: &str) -> serde_json::Value {
-    serde_json::json!({ "tag_name": tag, "draft": false, "prerelease": false })
-}
-
-#[test]
-fn startup_only_reports_newer_stable_semver_precedence() {
-    for (current, tag, expected) in [
-        ("0.7.4", "v0.7.5", Some((0, 7, 5))),
-        ("0.7.4", "0.8.0", Some((0, 8, 0))),
-        ("0.9.0", "v0.10.0", Some((0, 10, 0))),
-        ("0.7.5-rc.1", "v0.7.5", Some((0, 7, 5))),
-        ("0.7.4", "v0.7.5+remote.text", Some((0, 7, 5))),
-        ("0.7.4", "v0.7.4", None),
-        ("0.7.4", "v0.7.3", None),
-        ("0.10.0", "v0.9.0", None),
-        ("0.7.4", "v0.7.4+remote.text", None),
-        ("0.7.4+aaa", "v0.7.4+zzz", None),
-        ("0.7.4", "v0.7.5-rc.1", None),
-        ("0.7.4", "v1.0.0-alpha", None),
-        ("0.7.4", "vv0.7.5", None),
-        ("0.7.4", " v0.7.5 ", None),
-        ("0.7.4", "v0.07.5", None),
-        ("0.7.4", "v0.7", None),
-        ("0.7.4", "v0.7.5\ninstall something", None),
-        ("0.7.4", "v0.7.5+\u{1b}[31m", None),
-        ("0.7.4", "v18446744073709551616.0.0", None),
-    ] {
-        let body = serde_json::to_vec(&stable_release(tag)).unwrap();
-        assert_eq!(
-            newer_stable_release(&body, &current.parse().unwrap()),
-            expected.map(|(major, minor, patch)| semver::Version::new(major, minor, patch)),
-            "current={current}, tag={tag:?}",
-        );
-    }
-}
-
-#[test]
-fn startup_rejects_draft_prerelease_and_malformed_metadata() {
-    let current = semver::Version::new(0, 7, 4);
-    for (field, value) in [
-        ("draft", serde_json::json!(true)),
-        ("prerelease", serde_json::json!(true)),
-        ("draft", serde_json::json!("false")),
-        ("prerelease", serde_json::Value::Null),
-        ("tag_name", serde_json::json!(75)),
-    ] {
-        let mut release = stable_release("v0.7.5");
-        release[field] = value;
-        assert_eq!(
-            newer_stable_release(&serde_json::to_vec(&release).unwrap(), &current),
-            None,
-            "{release}",
-        );
-    }
-    for field in ["draft", "prerelease", "tag_name"] {
-        let mut release = stable_release("v0.7.5");
-        release.as_object_mut().unwrap().remove(field);
-        assert_eq!(
-            newer_stable_release(&serde_json::to_vec(&release).unwrap(), &current),
-            None,
-        );
-    }
-    for body in [b"not json".as_slice(), b"[]", b"null", b"\xff"] {
-        assert_eq!(newer_stable_release(body, &current), None);
-    }
-}
-
 #[tokio::test]
 async fn startup_requests_once_without_credentials_and_returns_only_version_numbers() {
     assert_eq!(
         LATEST_RELEASE_URL,
-        "https://api.github.com/repos/skaft-software/octet/releases/latest"
+        "https://github.com/skaft-software/octet/releases/latest"
     );
     let server = MockServer::start().await;
-    let mut release = stable_release("v0.7.5+remote.build.metadata");
-    release["html_url"] = serde_json::json!("\u{1b}]8;;https://evil.test\u{7}click");
-    release["name"] = serde_json::json!("run a remote installer");
-    release["body"] = serde_json::json!("\u{1b}[31mremote instructions");
-    Mock::given(method("GET"))
+    Mock::given(method("HEAD"))
         .and(path("/latest"))
         .and(header("user-agent", "octet/0.7.4"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(release))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "/skaft-software/octet/releases/tag/v0.7.5"),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -268,52 +200,7 @@ fn startup_ignores_environment_proxy_credentials() {
 }
 
 #[tokio::test]
-async fn startup_is_quiet_for_http_errors_and_redirects_even_with_valid_metadata() {
-    let server = MockServer::start().await;
-    let destination = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(stable_release("v9.0.0")))
-        .expect(0)
-        .mount(&destination)
-        .await;
-    for status in [301, 302, 303, 307, 308, 403, 404, 429, 500, 503] {
-        let route = format!("/status/{status}");
-        Mock::given(method("GET"))
-            .and(path(&route))
-            .respond_with(
-                ResponseTemplate::new(status)
-                    .insert_header("location", destination.uri())
-                    .set_body_json(stable_release("v9.0.0")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        assert_eq!(
-            startup_available_update_url(
-                &format!("{}{route}", server.uri()),
-                "0.7.4",
-                CHECK_TIMEOUT,
-            )
-            .await,
-            None,
-            "status={status}",
-        );
-    }
-    assert!(destination.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn startup_is_quiet_for_bad_json_and_unavailable_network() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    assert_eq!(
-        startup_available_update_url(&server.uri(), "0.7.4", CHECK_TIMEOUT).await,
-        None,
-    );
+async fn startup_is_quiet_for_unavailable_network() {
     // A bound, non-listening socket keeps the failed connection local without
     // a port-reuse race. Some platforms time out rather than refusing it.
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
@@ -330,109 +217,12 @@ async fn startup_is_quiet_for_bad_json_and_unavailable_network() {
 }
 
 #[tokio::test]
-async fn startup_enforces_declared_response_size_limit() {
-    let server = MockServer::start().await;
-    for (size, expected) in [
-        (
-            MAX_RELEASE_RESPONSE_BYTES,
-            Some(semver::Version::new(0, 7, 5)),
-        ),
-        (MAX_RELEASE_RESPONSE_BYTES + 1, None),
-    ] {
-        let mut body = serde_json::to_vec(&stable_release("v0.7.5")).unwrap();
-        body.resize(size, b' ');
-        let route = format!("/size/{size}");
-        Mock::given(method("GET"))
-            .and(path(&route))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
-            .expect(1)
-            .mount(&server)
-            .await;
-        assert_eq!(
-            startup_available_update_url(
-                &format!("{}{route}", server.uri()),
-                "0.7.4",
-                CHECK_TIMEOUT,
-            )
-            .await,
-            expected,
-            "size={size}",
-        );
-    }
-}
-
-async fn chunked_release_server(
-    size: usize,
-    delay: Duration,
-) -> (
-    String,
-    tokio::task::JoinHandle<()>,
-    tokio::sync::oneshot::Receiver<()>,
-) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let (started, ready) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = [0_u8; 4096];
-        let received = stream.read(&mut request).await.unwrap();
-        assert!(received > 0, "client must start the release request");
-        if stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let _ = started.send(());
-        let mut body = serde_json::to_vec(&stable_release("v0.7.5")).unwrap();
-        body.resize(size, b' ');
-        for chunk in body.chunks(1024) {
-            let mut frame = format!("{:x}\r\n", chunk.len()).into_bytes();
-            frame.extend_from_slice(chunk);
-            frame.extend_from_slice(b"\r\n");
-            if stream.write_all(&frame).await.is_err() {
-                return;
-            }
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-        }
-        let _ = stream.write_all(b"0\r\n\r\n").await;
-    });
-    (url, task, ready)
-}
-
-#[tokio::test]
-async fn startup_enforces_chunked_response_size_limit() {
-    for (size, expected) in [
-        (
-            MAX_RELEASE_RESPONSE_BYTES,
-            Some(semver::Version::new(0, 7, 5)),
-        ),
-        (MAX_RELEASE_RESPONSE_BYTES + 1, None),
-    ] {
-        let (url, task, _) = chunked_release_server(size, Duration::ZERO).await;
-        assert_eq!(
-            startup_available_update_url(&url, "0.7.4", CHECK_TIMEOUT).await,
-            expected,
-            "size={size}",
-        );
-        task.await.unwrap();
-    }
-}
-
-#[tokio::test]
 async fn startup_deadline_bounds_slow_headers_without_retrying() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
+    Mock::given(method("HEAD"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(stable_release("v0.7.5"))
+            ResponseTemplate::new(302)
+                .insert_header("location", "/skaft-software/octet/releases/tag/v0.7.5")
                 .set_delay(Duration::from_secs(10)),
         )
         .expect(1)
@@ -447,32 +237,19 @@ async fn startup_deadline_bounds_slow_headers_without_retrying() {
 }
 
 #[tokio::test]
-async fn startup_deadline_bounds_slow_streaming_body() {
-    let (url, task, ready) = chunked_release_server(16 * 1024, Duration::from_millis(100)).await;
-    let started = std::time::Instant::now();
-    let result = startup_available_update_url(&url, "0.7.4", Duration::from_millis(250)).await;
-    task.abort();
-    let _ = task.await;
-    assert_eq!(result, None);
-    assert!(started.elapsed() < Duration::from_secs(2));
-    ready.await.unwrap();
-}
-
-#[tokio::test]
 async fn startup_check_can_be_cancelled_on_exit() {
-    let (url, server, ready) = chunked_release_server(16 * 1024, Duration::from_secs(1)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let check =
         tokio::spawn(
             async move { startup_available_update_url(&url, "0.7.4", CHECK_TIMEOUT).await },
         );
-    tokio::time::timeout(Duration::from_secs(2), ready)
+    let _connection = tokio::time::timeout(Duration::from_secs(2), listener.accept())
         .await
         .unwrap()
         .unwrap();
     check.abort();
     assert!(check.await.unwrap_err().is_cancelled());
-    server.abort();
-    let _ = server.await;
 }
 
 #[tokio::test]
@@ -698,205 +475,130 @@ fn startup_pending_dns_does_not_delay_runtime_or_process_exit() {
 }
 
 #[tokio::test]
-async fn reports_newer_release_without_treating_older_tags_as_updates() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/latest"))
-        .and(header("user-agent", "octet/0.1.1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tag_name": "v0.2.0",
-            "html_url": "https://example.test/octet/v0.2.0"
-        })))
-        .mount(&server)
-        .await;
-    assert!(matches!(
-        check_url(&format!("{}/latest", server.uri()), "0.1.1")
-            .await
-            .unwrap(),
-        UpdateStatus::Available { latest, .. } if latest == semver::Version::new(0, 2, 0)
-    ));
-
-    let old = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/latest"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tag_name": "v0.1.0-alpha",
-            "html_url": null
-        })))
-        .mount(&old)
-        .await;
-    assert!(matches!(
-        check_url(&format!("{}/latest", old.uri()), "0.1.1")
-            .await
-            .unwrap(),
-        UpdateStatus::Current { .. }
-    ));
-}
-
-#[tokio::test]
-async fn rejects_malformed_release_metadata() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tag_name": "not a version"
-        })))
-        .mount(&server)
-        .await;
-    assert!(check_url(&server.uri(), "0.1.1").await.is_err());
-}
-
-#[tokio::test]
-async fn rejects_chunked_release_metadata_over_the_hard_limit() {
-    use std::io::{Read, Write};
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request);
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        let chunk = vec![b'x'; 4096];
-        for _ in 0..=(MAX_RELEASE_RESPONSE_BYTES / chunk.len()) {
-            if write!(stream, "{:x}\r\n", chunk.len()).is_err()
-                || stream.write_all(&chunk).is_err()
-                || stream.write_all(b"\r\n").is_err()
-            {
-                return;
-            }
+async fn accepts_tag_redirect_without_a_release_body() {
+    let relative = "/skaft-software/octet/releases/tag/v0.10.0";
+    let absolute = format!("https://github.com{relative}");
+    for status in [301, 302, 303, 307, 308] {
+        for location in [relative, absolute.as_str()] {
+            let server = MockServer::start().await;
+            Mock::given(method("HEAD"))
+                .and(header("user-agent", "octet/0.9.0"))
+                .respond_with(ResponseTemplate::new(status).insert_header("location", location))
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert_eq!(
+                check_url(&server.uri(), "0.9.0").await.unwrap(),
+                UpdateStatus::Available {
+                    current: semver::Version::new(0, 9, 0),
+                    latest: semver::Version::new(0, 10, 0),
+                    url: absolute.clone(),
+                }
+            );
         }
-        let _ = stream.write_all(b"0\r\n\r\n");
-    });
-
-    let result = check_url(&format!("http://{address}/latest"), "0.1.1").await;
-    server.join().unwrap();
-    let error = result.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("{MAX_RELEASE_RESPONSE_BYTES}-byte limit")),
-        "{error:#}"
-    );
+    }
 }
 
-/// The live v0.10.1 releases payload measured 75,595 bytes — 30 asset entries
-/// plus a 13.5 KiB notes body — so the previous 64 KiB bound refused a healthy
-/// release and `octet update` failed for every user. Rebuild that payload here:
-/// accepting it is the regression, and the hostile-response tests still prove
-/// the bound holds.
 #[tokio::test]
-async fn accepts_a_realistic_thirty_asset_release_payload() {
-    let uploader = serde_json::json!({
-        "login": "github-actions[bot]",
-        "id": 41_898_282u64,
-        "node_id": "MDM6Qm90NDE4OTgyODI=",
-        "avatar_url": "https://avatars.githubusercontent.com/in/15368?v=4",
-        "gravatar_id": "",
-        "url": "https://api.github.com/users/github-actions%5Bbot%5D",
-        "html_url": "https://github.com/apps/github-actions",
-        "followers_url": "https://api.github.com/users/github-actions%5Bbot%5D/followers",
-        "following_url": "https://api.github.com/users/github-actions%5Bbot%5D/following{/other_user}",
-        "gists_url": "https://api.github.com/users/github-actions%5Bbot%5D/gists{/gist_id}",
-        "starred_url": "https://api.github.com/users/github-actions%5Bbot%5D/starred{/owner}{/repo}",
-        "subscriptions_url": "https://api.github.com/users/github-actions%5Bbot%5D/subscriptions",
-        "organizations_url": "https://api.github.com/users/github-actions%5Bbot%5D/orgs",
-        "repos_url": "https://api.github.com/users/github-actions%5Bbot%5D/repos",
-        "events_url": "https://api.github.com/users/github-actions%5Bbot%5D/events{/privacy}",
-        "received_events_url": "https://api.github.com/users/github-actions%5Bbot%5D/received_events",
-        "type": "Bot",
-        "user_view_type": "public",
-        "site_admin": false
-    });
-    let assets = (0..30)
-        .map(|index| {
-            let name = format!("octet-0.10.1-target-{index}-very-long-asset-name.tar.gz");
-            serde_json::json!({
-                "url": format!("https://api.github.com/repos/skaft-software/octet/releases/assets/{index}"),
-                "id": index,
-                "node_id": format!("RA_kwDOTT61gM4Abc{index}"),
-                "name": name,
-                "label": "",
-                "uploader": uploader,
-                "content_type": "application/gzip",
-                "state": "uploaded",
-                "size": 38_000_000u64 + index,
-                "digest": format!("sha256:{}", "885fb8fc1bacc1a9809cf92cc22015d3ffe5aae500a7398f91210ec62f12e5b2".repeat(2)),
-                "download_count": index,
-                "created_at": "2026-11-06T21:00:00Z",
-                "updated_at": "2026-11-06T21:00:01Z",
-                "browser_download_url": format!("https://github.com/skaft-software/octet/releases/download/v0.10.1/octet-0.10.1-target-{index}-very-long-asset-name.tar.gz"),
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload = serde_json::json!({
-        "url": "https://api.github.com/repos/skaft-software/octet/releases/1",
-        "assets_url": "https://api.github.com/repos/skaft-software/octet/releases/1/assets",
-        "tag_name": "v0.10.1",
-        "target_commitish": "release/v0.10.0-tooling-followup",
-        "name": "octet 0.10.1",
-        "draft": false,
-        "prerelease": false,
-        "created_at": "2026-11-06T20:25:58Z",
-        "published_at": "2026-11-06T20:25:58Z",
-        "html_url": "https://github.com/skaft-software/octet/releases/tag/v0.10.1",
-        "body": "n".repeat(13_567),
-        "assets": assets,
-    })
-    .to_string();
-    assert!(
-        payload.len() > 64 * 1024,
-        "fixture must exceed the old 64 KiB bound (measured {})",
-        payload.len()
-    );
-    assert!(
-        payload.len() < MAX_RELEASE_RESPONSE_BYTES,
-        "a realistic payload must fit the current bound (measured {})",
-        payload.len()
-    );
-
+async fn only_reports_newer_semver_precedence() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/latest"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(payload))
-        .mount(&server)
-        .await;
-    let status = check_url(&format!("{}/latest", server.uri()), "0.10.0")
-        .await
-        .expect("a realistic 30-asset release payload must be accepted");
-    assert!(
-        matches!(status, UpdateStatus::Available { .. }),
-        "{status:?}"
-    );
-}
-
-#[tokio::test]
-async fn does_not_follow_release_metadata_redirects() {
-    let origin = MockServer::start().await;
-    let destination = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/latest"))
+    Mock::given(method("HEAD"))
         .respond_with(
             ResponseTemplate::new(302)
-                .insert_header("location", format!("{}/sink", destination.uri())),
+                .insert_header("location", "/skaft-software/octet/releases/tag/v0.10.0"),
         )
-        .mount(&origin)
+        .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/sink"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tag_name": "v9.0.0"
-        })))
-        .mount(&destination)
-        .await;
+    for (current, newer) in [
+        ("0.10.0-rc.1", true),
+        ("0.10.0", false),
+        ("0.10.0+local", false),
+        ("0.11.0", false),
+    ] {
+        assert_eq!(
+            matches!(
+                check_url(&server.uri(), current).await.unwrap(),
+                UpdateStatus::Available { .. }
+            ),
+            newer
+        );
+        assert_eq!(
+            startup_available_update_url(&server.uri(), current, CHECK_TIMEOUT)
+                .await
+                .is_some(),
+            newer
+        );
+    }
+}
 
-    assert!(check_url(&format!("{}/latest", origin.uri()), "0.1.1")
-        .await
-        .is_err());
-    assert!(destination.received_requests().await.unwrap().is_empty());
+#[tokio::test]
+async fn rejects_invalid_release_redirects_without_following_or_echoing_remote_text() {
+    let sink = MockServer::start().await;
+    let target = format!("{}/remote-text", sink.uri());
+    let long = "a".repeat(1025);
+    let valid = Some("/skaft-software/octet/releases/tag/v1.0.0");
+    for (status, location, reason) in [
+        (200, valid, "HTTP 200"),
+        (304, valid, "HTTP 304"),
+        (503, valid, "HTTP 503"),
+        (302, None, "no Location"),
+        (302, Some(long.as_str()), "1 KiB"),
+        (302, Some(target.as_str()), "tag URL"),
+        (
+            302,
+            Some("https://github.invalid/skaft-software/octet/releases/tag/v1.0.0"),
+            "tag URL",
+        ),
+        (302, Some("/other/octet/releases/tag/v1.0.0"), "tag URL"),
+        (
+            302,
+            Some("/skaft-software/other/releases/tag/v1.0.0"),
+            "tag URL",
+        ),
+        (
+            302,
+            Some("/skaft-software/octet/releases/tag/1.0.0"),
+            "tag URL",
+        ),
+        (
+            302,
+            Some("/skaft-software/octet/releases/tag/vremote-text"),
+            "invalid release tag version",
+        ),
+        (
+            302,
+            Some("/skaft-software/octet/releases/tag/v1.0.0-rc.1"),
+            "prerelease",
+        ),
+        (
+            302,
+            Some("/skaft-software/octet/releases/tag/v1.0.0+remote-text"),
+            "build metadata",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_string("remote-text");
+        if let Some(location) = location {
+            response = response.insert_header("location", location);
+        }
+        Mock::given(method("HEAD"))
+            .respond_with(response)
+            .expect(2)
+            .mount(&server)
+            .await;
+        let error = format!("{:#}", check_url(&server.uri(), "0.9.0").await.unwrap_err());
+        assert!(
+            error.contains("update check")
+                && error.contains(reason)
+                && !error.contains("remote-text"),
+            "{error}"
+        );
+        assert_eq!(
+            startup_available_update_url(&server.uri(), "0.9.0", CHECK_TIMEOUT).await,
+            None
+        );
+    }
+    assert!(sink.received_requests().await.unwrap().is_empty());
 }
 
 fn home_environment(home: &Path) -> InstallEnvironment {

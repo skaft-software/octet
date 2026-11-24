@@ -1,7 +1,7 @@
 //! Bounded startup release notice, explicit update check, and self-update.
 //!
-//! The check fetches the latest GitHub release with a short timeout, a hard
-//! response-size limit, and no redirects. The update delegates to the channel
+//! The check reads the latest stable tag from a GitHub redirect header without
+//! following the redirect or downloading the release page. The update delegates to the channel
 //! that installed the running binary: the version-pinned installer for
 //! installer installs, a pinned `cargo install` for Cargo installs, or an exact
 //! npm install for a validated global npm package. The update itself never
@@ -27,22 +27,8 @@ mod progress;
 
 const REPOSITORY: &str = "https://github.com/skaft-software/octet";
 const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/skaft-software/octet/releases/download";
-const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/skaft-software/octet/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://github.com/skaft-software/octet/releases/latest";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-/// The GitHub releases payload carries every asset entry and the whole release
-/// notes body, so it grows with the release itself: v0.10.1 measured 75,595
-/// bytes against the previous 64 KiB bound, which made `octet update` fail on a
-/// healthy release. Keep a real bound against a hostile response, with headroom
-/// for future assets, notes and their webhook metadata.
-const MAX_RELEASE_RESPONSE_BYTES: usize = 256 * 1024;
-
-#[derive(Debug, serde::Deserialize)]
-struct LatestRelease {
-    tag_name: String,
-    html_url: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UpdateStatus {
     Current {
@@ -83,8 +69,8 @@ pub(crate) async fn check() -> anyhow::Result<UpdateStatus> {
 /// This performs no installation, provider access, retries, polling, or writes.
 /// Network/metadata failures quietly return `None`. Only parsed major/minor/patch
 /// numbers cross into the UI; release URLs and other remote text never do.
-/// A single five-second deadline bounds the whole check, with a 64-KiB body
-/// limit and no redirects. Proxy auto-discovery is disabled to avoid acquiring
+/// A single five-second deadline bounds the whole check, without following redirects
+/// or reading a body. Proxy auto-discovery is disabled to avoid acquiring
 /// environment proxy credentials. No persisted cache is created. OS DNS may
 /// outlive cancellation or the deadline, but runs at most one job on a detached
 /// standard thread, never Tokio's shutdown-blocking pool. Its late result cannot
@@ -102,8 +88,8 @@ async fn startup_available_update_url(
 ) -> Option<semver::Version> {
     use std::net::ToSocketAddrs;
 
-    let resolver = StartupResolver::new("api.github.com", || {
-        ("api.github.com", 0)
+    let resolver = StartupResolver::new("github.com", || {
+        ("github.com", 0)
             .to_socket_addrs()
             .map(|addrs| Box::new(addrs) as reqwest::dns::Addrs)
     });
@@ -175,49 +161,61 @@ async fn startup_available_update_with_resolver(
             .retry(reqwest::retry::never())
             .build()
             .ok()?;
-        let response = client
-            .get(url)
-            .header(reqwest::header::USER_AGENT, format!("octet/{current}"))
-            .send()
-            .await
-            .ok()?;
-        // error_for_status alone accepts redirects with a plausible JSON body.
-        if !response.status().is_success() {
-            return None;
-        }
-        let body = read_release_body(response).await.ok()?;
-        newer_stable_release(&body, &current)
+        let latest = latest_release(&client, url, &current).await.ok()?;
+        latest.cmp_precedence(&current).is_gt().then_some(latest)
     })
     .await
     .ok()?
 }
 
-fn newer_stable_release(body: &[u8], current: &semver::Version) -> Option<semver::Version> {
-    #[derive(serde::Deserialize)]
-    struct StableRelease {
-        tag_name: String,
-        draft: bool,
-        prerelease: bool,
-    }
-
-    let release: StableRelease = serde_json::from_slice(body).ok()?;
-    if release.draft || release.prerelease {
-        return None;
-    }
-    let tag = release
-        .tag_name
-        .strip_prefix('v')
-        .unwrap_or(&release.tag_name);
-    let latest = semver::Version::parse(tag).ok()?;
-    if !latest.pre.is_empty() || !latest.cmp_precedence(current).is_gt() {
-        return None;
-    }
-    // Build metadata is neither release precedence nor trusted display text.
-    Some(semver::Version::new(
-        latest.major,
-        latest.minor,
-        latest.patch,
-    ))
+async fn latest_release(
+    client: &reqwest::Client,
+    url: &str,
+    current: &semver::Version,
+) -> anyhow::Result<semver::Version> {
+    let response = client
+        .head(url)
+        .header(reqwest::header::USER_AGENT, format!("octet/{current}"))
+        .send()
+        .await
+        .context("update check: release HEAD request failed")?;
+    let status = response.status().as_u16();
+    anyhow::ensure!(
+        matches!(status, 301 | 302 | 303 | 307 | 308),
+        "update check: expected a release redirect, received HTTP {status}"
+    );
+    let mut locations = response.headers().get_all(reqwest::header::LOCATION).iter();
+    let location = locations
+        .next()
+        .context("update check: release redirect has no Location header")?;
+    anyhow::ensure!(
+        locations.next().is_none(),
+        "update check: multiple Location headers"
+    );
+    anyhow::ensure!(
+        location.as_bytes().len() <= 1024,
+        "update check: Location exceeds 1 KiB"
+    );
+    let location = location
+        .to_str()
+        .context("update check: invalid Location header")?;
+    let path = location
+        .strip_prefix("https://github.com")
+        .unwrap_or(location);
+    let tag = path
+        .strip_prefix("/skaft-software/octet/releases/tag/v")
+        .context("update check: expected an octet release tag URL")?;
+    let latest = semver::Version::parse(tag)
+        .map_err(|_| anyhow::anyhow!("update check: invalid release tag version"))?;
+    anyhow::ensure!(
+        latest.pre.is_empty(),
+        "update check: prerelease tag is not stable"
+    );
+    anyhow::ensure!(
+        latest.build.is_empty(),
+        "update check: release tag contains build metadata"
+    );
+    Ok(latest)
 }
 
 async fn check_url(url: &str, current: &str) -> anyhow::Result<UpdateStatus> {
@@ -227,55 +225,16 @@ async fn check_url(url: &str, current: &str) -> anyhow::Result<UpdateStatus> {
         .timeout(CHECK_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client
-        .get(url)
-        .header(reqwest::header::USER_AGENT, format!("octet/{current}"))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body = read_release_body(response).await?;
-    let release: LatestRelease = serde_json::from_slice(&body)?;
-    let latest = semver::Version::parse(release.tag_name.trim().trim_start_matches('v'))?;
-    if latest > current {
+    let latest = latest_release(&client, url, &current).await?;
+    if latest.cmp_precedence(&current).is_gt() {
         Ok(UpdateStatus::Available {
             current,
+            url: format!("{REPOSITORY}/releases/tag/v{latest}"),
             latest,
-            url: release.html_url.unwrap_or_else(|| {
-                format!(
-                    "https://github.com/skaft-software/octet/releases/tag/{}",
-                    release.tag_name
-                )
-            }),
         })
     } else {
         Ok(UpdateStatus::Current { version: current })
     }
-}
-
-async fn read_release_body(mut response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RELEASE_RESPONSE_BYTES as u64)
-    {
-        anyhow::bail!("release metadata exceeds the {MAX_RELEASE_RESPONSE_BYTES}-byte limit");
-    }
-    let mut body = Vec::with_capacity(
-        response
-            .content_length()
-            .unwrap_or(0)
-            .min(MAX_RELEASE_RESPONSE_BYTES as u64) as usize,
-    );
-    while let Some(chunk) = response.chunk().await? {
-        if body
-            .len()
-            .checked_add(chunk.len())
-            .is_none_or(|length| length > MAX_RELEASE_RESPONSE_BYTES)
-        {
-            anyhow::bail!("release metadata exceeds the {MAX_RELEASE_RESPONSE_BYTES}-byte limit");
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 /// How the running octet binary was installed.
