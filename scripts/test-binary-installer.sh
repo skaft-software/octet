@@ -17,6 +17,7 @@ import tomllib
 print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["workspace"]["package"]["version"])
 PYVERSION
 )
+unset XDG_CACHE_HOME OCTET_INSTALL_NO_CACHE
 export OCTET_TEST_VERSION="$version"
 identity_version=${version//./\\.}
 expected_identity="^https://github\\.com/skaft-software/octet/\\.github/workflows/release-octet\\.yml@refs/tags/(v${identity_version}|octet-binaries-v${identity_version})$"
@@ -437,6 +438,38 @@ test -f "$positive_home/share/octet/examples/README.md"
 test -f "$positive_home/share/octet/sdk/README.md"
 test "$(cat "$positive_home/share/octet/.octet-version")" = "$version"
 grep -Fx verified "$work_directory/cosign.log" >/dev/null
+
+cache_dir="$positive_home/.cache/octet/verifiers"
+cached="$cache_dir/cosign-3.1.3-cosign-darwin-arm64-${cosign_sha256:0:16}"
+cache_log="$work_directory/cache-curl.log"
+verifier_url=https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-darwin-arm64
+cache_install() {
+    : > "$cache_log"
+    run_installer "$positive_home" OCTET_TEST_CURL_LOG="$cache_log" "$@" >/dev/null
+}
+check_cache() {
+    test "$(find "$cache_dir" -prune -type d -perm 0700 -print)" = "$cache_dir"
+    test "$(find "$cached" -type f -perm 0700 -print)" = "$cached"
+    cmp "$cached" "$fake_bin/cosign-template"
+}
+check_cache
+cache_install
+if grep -Fq "$verifier_url" "$cache_log"; then echo 'cache hit downloaded cosign' >&2; exit 1; fi
+cache_install OCTET_INSTALL_NO_CACHE=1
+grep -Fq "$verifier_url" "$cache_log"
+rm "$cached"
+cache_install OCTET_INSTALL_NO_CACHE=1
+test ! -e "$cached"
+for invalid in corrupt writable symlink; do
+    case "$invalid" in
+        corrupt) echo corrupt > "$cached" ;;
+        writable) chmod g+w "$cached" ;;
+        symlink) rm "$cached"; ln -s "$fake_bin/cosign-template" "$cached" ;;
+    esac
+    cache_install
+    grep -Fq "$verifier_url" "$cache_log"
+    if [ "$invalid" != symlink ]; then check_cache; fi
+done
 
 upgrade_home="$work_directory/upgrade-home"
 mkdir -p \

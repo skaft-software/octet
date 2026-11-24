@@ -100,6 +100,7 @@ class InstallerProgressTests(unittest.TestCase):
                     if not key.startswith("OCTET_") or key.startswith("OCTET_TEST_")}
         self.env.update(HOME=str(self.root), SHELL="/bin/sh", TERM="xterm-256color",
                         LC_ALL="C", LANG="C", COLUMNS="999", TMPDIR=str(self.root / "tmp"),
+                        OCTET_INSTALL_NO_CACHE="1",  # exercise all four transfers on every run
                         OCTET_INSTALL_DIR=str(self.root / "bin"), OCTET_NO_MODIFY_PATH="1",
                         OCTET_TEST_CURL_LOG=str(self.root / "curl.log"), NO_PROXY="*", no_proxy="*")
         for key in list(self.env):

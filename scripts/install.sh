@@ -30,6 +30,7 @@ The default installation downloads the binary matching this machine. Use
 Environment:
   OCTET_INSTALL_DIR     Binary directory (default: \$HOME/.local/bin)
   OCTET_DATA_DIR        Packaged docs directory (default: sibling share/octet)
+  OCTET_INSTALL_NO_CACHE  Set to 1 to skip the signature verifier cache
   OCTET_NO_MODIFY_PATH  Set to 1 to leave shell profiles unchanged
 EOF
 }
@@ -279,6 +280,12 @@ validate_release_source_commit() {
     esac
 }
 
+store_cached_cosign() (
+    temporary=$(mktemp "$cache_dir/.cosign.XXXXXX") || exit 1
+    trap 'rm -f "$temporary"' 0
+    cp "$cosign_path" "$temporary" && chmod 0700 "$temporary" && mv -f "$temporary" "$cached"
+)
+
 install_pinned_cosign() {
     operating_system=$(uname -s)
     machine=$(uname -m)
@@ -306,17 +313,47 @@ install_pinned_cosign() {
             ;;
     esac
 
-    ui_stage "Downloading signature verifier"
     cosign_path="$work_directory/cosign"
-    download_release_file \
-        "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_asset" \
-        "$cosign_path"
+    cached=
+    cache_hit=false
+    if [ "${OCTET_INSTALL_NO_CACHE:-0}" != 1 ] && [ -n "${XDG_CACHE_HOME:-${HOME:-}}" ]; then
+        cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/octet/verifiers"
+        uid=$(id -u)
+        if (umask 077; mkdir -p -m 0700 "$cache_dir") &&
+            [ "$(find "$cache_dir" -prune -type d -user "$uid" -perm 0700 -print)" = "$cache_dir" ]; then
+            cached="$cache_dir/cosign-$cosign_version-$cosign_asset-$(printf '%.16s' "$cosign_sha256")"
+            if [ -f "$cached" ] && [ ! -L "$cached" ] &&
+                [ "$(find "$cached" -prune -type f -user "$uid" -print)" = "$cached" ]; then
+                if [ "$(find "$cached" -prune ! -perm -020 ! -perm -002 -print)" = "$cached" ] &&
+                    bounded_file "$cached" 167772160 && [ "$(sha256_file "$cached")" = "$cosign_sha256" ] &&
+                    cp "$cached" "$cosign_path"; then
+                    cache_hit=true
+                else
+                    rm -f "$cached" || printf 'warning: could not remove invalid cached verifier\n' >&2
+                fi
+            elif [ -e "$cached" ] || [ -L "$cached" ]; then
+                printf 'warning: not replacing unsafe verifier cache entry\n' >&2
+                cached=
+            fi
+        else
+            printf 'warning: could not use private verifier cache directory\n' >&2
+        fi
+    fi
+    if [ "$cache_hit" = false ]; then
+        ui_stage "Downloading signature verifier"
+        download_release_file \
+            "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_asset" \
+            "$cosign_path" || return 1
+    fi
     ui_stage "Verifying signature verifier checksum"
-    bounded_file "$cosign_path" 167772160
+    bounded_file "$cosign_path" 167772160 || return 1
     actual_cosign_sha256=$(sha256_file "$cosign_path")
     if [ "$actual_cosign_sha256" != "$cosign_sha256" ]; then
         printf 'checksum mismatch for the pinned cosign verifier\n' >&2
         return 1
+    fi
+    if [ "$cache_hit" = false ] && [ -n "$cached" ]; then
+        store_cached_cosign || printf 'warning: could not cache the verified signature verifier\n' >&2
     fi
     chmod 0700 "$cosign_path"
 }
@@ -326,7 +363,7 @@ verified_archive_sha256() {
     bundle=$2
     archive_name=$3
     validate_release_source_commit
-    install_pinned_cosign
+    install_pinned_cosign || return 1
     ui_stage "Verifying release signature and checksums"
 
     # The published v0.7.0 checksum signature predates the repository rename.

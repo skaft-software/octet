@@ -6,6 +6,10 @@
 
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
 
+### Changed
+
+- Reuse the verified signature checker between installs and updates instead of downloading it every time.
+
 ### Fixed
 
 - Support xhigh thinking on Gemini 4 Hydrogen and Neon, recognize prefixed Gemini 3+ models, and report Google prompt blocks clearly.

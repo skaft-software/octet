@@ -38,6 +38,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 octet --version   # octet 0.10.6
 ```
 
+On macOS and Linux, the updated installer keeps the verified signature checker in
+`${XDG_CACHE_HOME:-$HOME/.cache}/octet/verifiers`. On later installs and updates,
+it checks the pinned SHA-256 before reuse and checks the working copy again before
+running it. Set `OCTET_INSTALL_NO_CACHE=1` to skip both reading and writing the cache.
+
 When moving from Ygg, install octet afresh. Older installations and data stay
 untouched, and there's no automatic migration. Homebrew, crates.io and SDK
 registries remain separate, unpublished channels. CLI installation with Bun is unqualified.
