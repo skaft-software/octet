@@ -66,15 +66,14 @@ A project root that's also a user skill root is scanned only in the user tier.
 For example, starting in your home directory keeps `~/.agents/skills` and
 `~/.octet/skills` user-installed, with no untrusted-project warning for those
 roots. That doesn't trust the workspace: distinct project roots, including
-nested `.agents/skills` and the invocation's `.pi/skills`, stay gated. Root
-symlinks are still rejected.
+nested `.agents/skills` and the invocation's `.pi/skills`, stay gated.
 
 A later definition replaces an earlier one with the same skill name, and
 collisions go in the diagnostics. Discovery never activates a skill. The native
 entrypoints are `~/.octet/skills/*/SKILL.md`, `.octet/skills/*/SKILL.md` and
-managed `~/.octet/extensions/*/skills/*/SKILL.md`. These locations don't promise
-full Agent Skills or Pi parser compatibility, or extra symlink support. Those
-shapes need their own source contract.
+managed `~/.octet/extensions/*/skills/*/SKILL.md`. Like Pi, octet follows symlinked
+skill files, directories and roots in every tier and loads the same file only
+once. This doesn't imply full Agent Skills or Pi parser compatibility.
 
 ### Skill catalog budgets
 
@@ -105,8 +104,8 @@ retained catalog also has these caps:
 
 Description caps and omitted counts appear in discovery diagnostics. Winning
 source locations stay indexed, so a known `/skill:NAME` or `/skills load NAME`
-can still load an omitted skill, with the usual trust, required-tool, symlink
-and 256 KiB file limits. An omitted header is parsed on demand, and a changed
+can still load an omitted skill, with the usual trust and required-tool checks
+and the 256 KiB file limit. An omitted header is parsed on demand, and a changed
 skill ID needs rediscovery. Listing and search use the bounded descriptors, not
 the full source index. These limits bound retained descriptors and model
 context, not total discovery work or RSS: the lightweight source index and
@@ -116,9 +115,10 @@ diagnostics still grow with discovered inputs.
 
 ## Reads and diagnostics
 
-octet-native resource roots, selected files and directory entrypoints must be
-regular, non-symlink files. Parser reads use descriptor-bound no-follow opens
-and fixed byte limits:
+Prompt and extension discovery reject symlinks. Skills resolve links before
+reading entrypoints or files under `references/` and `templates/`. Parser reads
+still require regular files and use descriptor-bound no-follow opens and fixed
+byte limits:
 
 | Kind | Maximum parser input |
 | --- | ---: |

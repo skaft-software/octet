@@ -612,30 +612,20 @@ fn valid_agent_skill_name(name: &str) -> bool {
         })
 }
 
-fn check_symlinks(root: &Path, target: &Path) -> Result<(), SkillLoadError> {
+fn resolve_skill_path(root: &Path, target: &Path) -> Result<PathBuf, SkillLoadError> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| SkillLoadError::SecurityViolation("Target path escapes skill root".into()))?;
 
-    let mut current = root.to_path_buf();
-    let meta = fs::symlink_metadata(&current).map_err(|e| SkillLoadError::Io(e.to_string()))?;
-    if meta.file_type().is_symlink() {
-        return Err(SkillLoadError::SymlinkRejected);
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(SkillLoadError::InvalidResourcePath);
     }
-
-    for component in relative.components() {
-        if let std::path::Component::Normal(c) = component {
-            current.push(c);
-            let meta =
-                fs::symlink_metadata(&current).map_err(|e| SkillLoadError::Io(e.to_string()))?;
-            if meta.file_type().is_symlink() {
-                return Err(SkillLoadError::SymlinkRejected);
-            }
-        } else {
-            return Err(SkillLoadError::InvalidResourcePath);
-        }
-    }
-    Ok(())
+    target
+        .canonicalize()
+        .map_err(|error| SkillLoadError::Io(error.to_string()))
 }
 
 fn check_allowed_subdirs(root: &Path, target: &Path) -> Result<(), SkillLoadError> {
@@ -939,7 +929,7 @@ fn scan_skill_root(
     candidates: &mut Vec<SkillCandidate>,
     diagnostics: &mut Vec<SkillDiagnostic>,
 ) {
-    let metadata = match fs::symlink_metadata(path) {
+    let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(error) => {
@@ -950,10 +940,6 @@ fn scan_skill_root(
             return;
         }
     };
-    if metadata.file_type().is_symlink() {
-        diagnostics.push(skill_diagnostic(path, "skill root must not be a symlink"));
-        return;
-    }
     if metadata.is_file() {
         if policy.direct_markdown && path.extension().and_then(|value| value.to_str()) == Some("md")
         {
@@ -1006,6 +992,8 @@ fn scan_skill_root(
         }
     };
 
+    // Pi v1.6.0 packages/coding-agent/src/core/skills.ts:202-246 follows linked files
+    // and directories; lines 428-434 deduplicate real paths as in from_candidates.
     let mut builder = ignore::WalkBuilder::new(&canonical_root);
     builder
         .hidden(true)
@@ -1014,24 +1002,14 @@ fn scan_skill_root(
         .git_global(false)
         .git_exclude(false)
         .ignore(true)
-        .follow_links(false)
+        .follow_links(true)
         .sort_by_file_path(|left, right| left.cmp(right))
         .add_custom_ignore_filename(".fdignore");
 
     let mut discovered = Vec::<PathBuf>::new();
     let mut visited = 0usize;
     for result in builder.build() {
-        let entry = match result {
-            Ok(entry) => entry,
-            Err(error) => {
-                diagnostics.push(skill_diagnostic(
-                    &canonical_root,
-                    format!("cannot scan skill root: {error}"),
-                ));
-                continue;
-            }
-        };
-        if entry.depth() == 0 {
+        if result.as_ref().is_ok_and(|entry| entry.depth() == 0) {
             continue;
         }
         visited = visited.saturating_add(1);
@@ -1042,17 +1020,28 @@ fn scan_skill_root(
             ));
             return;
         }
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(ignore::Error::WithDepth { err, .. })
+                if matches!(*err, ignore::Error::Loop { .. }) =>
+            {
+                continue
+            }
+            Err(ignore::Error::WithPath { path, .. }) if path.is_symlink() && !path.exists() => {
+                continue
+            }
+            Err(error) => {
+                diagnostics.push(skill_diagnostic(
+                    &canonical_root,
+                    format!("cannot scan skill root: {error}"),
+                ));
+                continue;
+            }
+        };
         let file_type = match entry.file_type() {
             Some(file_type) => file_type,
             None => continue,
         };
-        if file_type.is_symlink() {
-            diagnostics.push(skill_diagnostic(
-                entry.path(),
-                "symlinked skill candidate was ignored",
-            ));
-            continue;
-        }
         if !file_type.is_file() {
             continue;
         }
@@ -1097,9 +1086,8 @@ fn scan_skill_root(
 }
 
 fn canonical_skill_directory(path: &Path) -> Option<PathBuf> {
-    // Match the scanner's root boundary: a rejected symlink must not make its
-    // target look like an already-admitted user root.
-    if fs::symlink_metadata(path).ok()?.is_dir() {
+    // Linked roots count as their target when comparing user and project tiers.
+    if path.is_dir() {
         path.canonicalize().ok()
     } else {
         None
@@ -1259,7 +1247,7 @@ impl FileSystemSkillRegistry {
         gated_project_roots.push(workspace_root.join(".octet/skills"));
         // A workspace can be the user's home. Keep overlapping roots in their
         // user tier instead of scanning or warning about them again as project
-        // resources. Canonical aliases count only for non-symlink directories.
+        // resources.
         let user_roots = roots
             .iter()
             .flat_map(|(root, _)| {
@@ -1510,6 +1498,7 @@ impl SkillRegistry for FileSystemSkillRegistry {
         if source.policy.trust == SkillTrust::Workspace && !self.workspace_trusted {
             return Err(SkillLoadError::UntrustedWorkspace);
         }
+        let entrypoint = resolve_skill_path(&source.root, &source.entrypoint)?;
         let descriptor = match self
             .descriptors
             .iter()
@@ -1520,11 +1509,10 @@ impl SkillRegistry for FileSystemSkillRegistry {
                 // Omission is a catalog budget decision, not deactivation.
                 // Parse the winning bounded header on demand under the same
                 // trust/link boundary as an ordinary explicit load.
-                check_symlinks(&source.root, &source.entrypoint)?;
                 let descriptor = parse_manifest_header_with_diagnostics(
-                    &source.entrypoint,
+                    &entrypoint,
                     source.policy.trust,
-                    &source.root,
+                    entrypoint.parent().unwrap_or(&source.root),
                     source.policy.legacy_octet,
                     &mut Vec::new(),
                 )?;
@@ -1536,15 +1524,8 @@ impl SkillRegistry for FileSystemSkillRegistry {
                 descriptor
             }
         };
-        let (root, entrypoint) = match &descriptor.source {
-            SkillSource::BuiltIn => {
-                return Err(SkillLoadError::UnsupportedSource("built-in".into()));
-            }
-            SkillSource::FileSystem { root, entrypoint } => (root, entrypoint),
-        };
-        check_symlinks(root, entrypoint)?;
         let bytes =
-            octet_agent::secure_fs::read_regular_file_bounded(entrypoint, MAX_SKILL_FILE_BYTES)
+            octet_agent::secure_fs::read_regular_file_bounded(&entrypoint, MAX_SKILL_FILE_BYTES)
                 .map_err(|error| match error {
                     octet_agent::secure_fs::SecureFileError::TooLarge { actual, .. } => {
                         SkillLoadError::ResourceTooLarge(actual)
@@ -1577,7 +1558,7 @@ impl SkillRegistry for FileSystemSkillRegistry {
         }
         let target = root.join(relative);
         check_allowed_subdirs(root, &target)?;
-        check_symlinks(root, &target)?;
+        let target = resolve_skill_path(root, &target)?;
         let bytes = octet_agent::secure_fs::read_regular_file_bounded(&target, 512 * 1024)
             .map_err(|error| match error {
                 octet_agent::secure_fs::SecureFileError::TooLarge { actual, .. } => {

@@ -649,12 +649,14 @@ fn many_skill_roots_share_descriptor_limits_and_preserve_explicit_winners() {
     ));
     #[cfg(unix)]
     {
+        // A link is followed, like in Pi; the linked file names a different
+        // skill, so the on-demand load still refuses the changed identity.
         fs::remove_file(omitted_path).unwrap();
         std::os::unix::fs::symlink(&registry.sources["skill-000"].entrypoint, omitted_path)
             .unwrap();
         assert!(matches!(
             registry.load(&omitted_id),
-            Err(SkillLoadError::SymlinkRejected)
+            Err(SkillLoadError::InvalidManifest(_))
         ));
     }
 }
@@ -1022,7 +1024,7 @@ fn distinct_project_skill_roots_still_require_trust_and_keep_precedence() {
 
 #[cfg(unix)]
 #[test]
-fn rejected_user_skill_root_symlink_does_not_hide_project_trust_boundary() {
+fn user_skill_root_linked_into_a_project_stays_in_the_user_tier() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let project = home.join("project");
@@ -1046,23 +1048,14 @@ fn rejected_user_skill_root_symlink_does_not_hide_project_trust_boundary() {
             Some(home.clone()),
         )
         .unwrap();
+        // The user linked their own skills root to this directory, so its
+        // skills are user-installed whether or not the workspace is trusted,
+        // and the same directory is not scanned or warned about again as a
+        // project root.
         let diagnostics = registry.diagnostics();
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.path == user_root && diagnostic.message == "skill root must not be a symlink"
-        }));
-        if workspace_trusted {
-            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-            let loaded = registry.load(&"project-skill".to_owned()).unwrap();
-            assert_eq!(loaded.descriptor.trust, SkillTrust::Workspace);
-        } else {
-            assert!(registry.descriptors().is_empty());
-            assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
-            assert!(diagnostics.iter().any(|diagnostic| {
-                diagnostic.path == project_root
-                    && diagnostic.message
-                        == "ignored project skills because the workspace is not trusted"
-            }));
-        }
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let loaded = registry.load(&"project-skill".to_owned()).unwrap();
+        assert_eq!(loaded.descriptor.trust, SkillTrust::UserInstalled);
     }
 }
 
@@ -1241,27 +1234,22 @@ fn explicit_skill_invocation_enforces_required_tools() {
 }
 
 #[test]
-fn test_symlink_rejection() {
+fn symlinked_skill_resource_is_read_through_the_link() {
     let temp = tempfile::tempdir().unwrap();
     let skill_dir = temp.path().join(".octet/skills/test-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-
-    // Create references directory
     let ref_dir = skill_dir.join("references");
     std::fs::create_dir_all(&ref_dir).unwrap();
+    let linked_file = temp.path().join("shared-notes.txt");
+    std::fs::write(&linked_file, "shared notes").unwrap();
 
-    // Create a symlink to outside directory inside references
-    let secret_file = temp.path().join("secret.txt");
-    std::fs::write(&secret_file, "secret data").unwrap();
-
-    let symlink_target = ref_dir.join("symlink.txt");
+    let link = ref_dir.join("notes.txt");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&secret_file, &symlink_target).unwrap();
+    std::os::unix::fs::symlink(&linked_file, &link).unwrap();
     #[cfg(windows)]
-    match std::os::windows::fs::symlink_file(&secret_file, &symlink_target) {
+    match std::os::windows::fs::symlink_file(&linked_file, &link) {
         Ok(()) => {}
         // Standard accounts without Developer Mode lack the symlink
-        // privilege; without a link there is nothing to reject.
+        // privilege; without a link there is nothing to follow.
         Err(error)
             if error.kind() == std::io::ErrorKind::PermissionDenied
                 || error.raw_os_error() == Some(1314) =>
@@ -1270,8 +1258,6 @@ fn test_symlink_rejection() {
         }
         Err(error) => panic!("could not create test symlink: {error}"),
     }
-
-    // Setup SKILL.md
     std::fs::write(
         skill_dir.join("SKILL.md"),
         "---\nid: test-skill\nname: Test\ndescription: Test\n---\nInstructions",
@@ -1281,9 +1267,152 @@ fn test_symlink_rejection() {
     let registry = FileSystemSkillRegistry::new(temp.path().to_path_buf(), vec![], true).unwrap();
     let loaded = registry.load(&"test-skill".to_string()).unwrap();
 
-    // Reading resource that is a symlink should fail!
-    let resource_res = registry.read_resource(&loaded, "references/symlink.txt");
-    assert!(matches!(resource_res, Err(SkillLoadError::SymlinkRejected)));
+    // Pi reads skill files through links (packages/coding-agent/src/core/skills.ts:235-246).
+    assert_eq!(
+        registry
+            .read_resource(&loaded, "references/notes.txt")
+            .unwrap(),
+        "shared notes"
+    );
+    // Lexical escapes are still refused, link or not.
+    assert!(matches!(
+        registry.read_resource(&loaded, "references/../SKILL.md"),
+        Err(SkillLoadError::InvalidResourcePath)
+    ));
+}
+
+#[cfg(unix)]
+fn write_named_skill(dir: &Path, name: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!(
+            "---\nname: {name}\ndescription: Linked skill {name}.\n---\nInstructions for {name}."
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn discover_in_home(home: &Path) -> FileSystemSkillRegistry {
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    FileSystemSkillRegistry::discover(
+        project.clone(),
+        project,
+        vec![],
+        false,
+        Some(home.to_owned()),
+    )
+    .unwrap()
+}
+
+/// Nix and other managers link skills into place instead of copying them
+/// (#732). Pi follows a linked `SKILL.md`, a linked skill directory and a
+/// linked root (packages/coding-agent/src/core/skills.ts:202-246).
+#[cfg(unix)]
+#[test]
+fn symlinked_skill_files_directories_and_roots_load_like_pi() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let store = temp.path().join("store");
+
+    // A linked SKILL.md inside a real skill directory.
+    write_named_skill(&store.join("file-linked"), "file-linked");
+    let pi_root = home.join(".pi/agent/skills");
+    std::fs::create_dir_all(pi_root.join("file-linked")).unwrap();
+    symlink(
+        store.join("file-linked/SKILL.md"),
+        pi_root.join("file-linked/SKILL.md"),
+    )
+    .unwrap();
+
+    // A linked skill directory.
+    write_named_skill(&store.join("dir-linked"), "dir-linked");
+    symlink(store.join("dir-linked"), pi_root.join("dir-linked")).unwrap();
+
+    // A whole skill root that is itself a link.
+    write_named_skill(&store.join("agents-root/root-linked"), "root-linked");
+    std::fs::create_dir_all(home.join(".agents")).unwrap();
+    symlink(store.join("agents-root"), home.join(".agents/skills")).unwrap();
+
+    let registry = discover_in_home(&home);
+    let mut ids = registry
+        .descriptors()
+        .iter()
+        .map(|descriptor| descriptor.id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(ids, ["dir-linked", "file-linked", "root-linked"]);
+    assert!(
+        registry.diagnostics().is_empty(),
+        "{:?}",
+        registry.diagnostics()
+    );
+    for id in ids {
+        let loaded = registry.load(&id).unwrap();
+        assert_eq!(
+            loaded.instructions.trim(),
+            format!("Instructions for {id}.")
+        );
+        assert_eq!(loaded.descriptor.trust, SkillTrust::UserInstalled);
+    }
+}
+
+/// Pi skips a file it already loaded through another path, silently
+/// (packages/coding-agent/src/core/skills.ts:428-434).
+#[cfg(unix)]
+#[test]
+fn a_skill_reached_through_two_links_loads_once_without_a_collision() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let store = temp.path().join("store");
+    write_named_skill(&store.join("shared"), "shared");
+    std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
+    std::fs::create_dir_all(home.join(".pi/agent/skills")).unwrap();
+    symlink(store.join("shared"), home.join(".agents/skills/shared")).unwrap();
+    symlink(store.join("shared"), home.join(".pi/agent/skills/shared")).unwrap();
+
+    let registry = discover_in_home(&home);
+    assert_eq!(registry.descriptors().len(), 1);
+    assert!(
+        registry.diagnostics().is_empty(),
+        "{:?}",
+        registry.diagnostics()
+    );
+}
+
+/// A broken link is skipped like in Pi (skills.ts:244), and a link cycle
+/// ends the walk instead of looping; neither hides the other skills.
+#[cfg(unix)]
+#[test]
+fn broken_and_cyclic_skill_links_do_not_hide_other_skills() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join(".agents/skills");
+    write_named_skill(&root.join("healthy"), "healthy");
+    symlink(temp.path().join("missing"), root.join("broken")).unwrap();
+    std::fs::create_dir_all(root.join("cycle")).unwrap();
+    symlink(&root, root.join("cycle/back-to-root")).unwrap();
+
+    let registry = discover_in_home(&home);
+    let ids = registry
+        .descriptors()
+        .iter()
+        .map(|descriptor| descriptor.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["healthy"]);
+    assert!(
+        registry.diagnostics().is_empty(),
+        "{:?}",
+        registry.diagnostics()
+    );
 }
 
 #[test]

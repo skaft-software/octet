@@ -133,9 +133,6 @@ pub enum SkillLoadError {
     /// Target resource path is invalid (contains traversal components like `..`).
     #[error("Invalid resource path")]
     InvalidResourcePath,
-    /// Symlink encountered in path resolution was rejected.
-    #[error("Symlink rejected")]
-    SymlinkRejected,
     /// File size limit exceeded.
     #[error("Resource too large: {0} bytes")]
     ResourceTooLarge(u64),

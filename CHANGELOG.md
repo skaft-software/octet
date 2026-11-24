@@ -15,6 +15,7 @@
 - Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.
 - Update url to fix a stack overflow when reading the origin of nested `blob:` URLs.
 - Show very long URLs as plain text so wrapping a multi-megabyte URL cannot exhaust memory by repeating its hyperlink on every row.
+- Load symlinked skill files, directories and roots, so skills managed by Nix and similar tools work.
 
 ### Removed
 
