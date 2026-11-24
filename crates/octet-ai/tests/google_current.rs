@@ -697,3 +697,32 @@ async fn gemini_current_error_and_drop_cancellation_fixtures() {
     // cancellation boundary and must not decode the trailing malformed frame.
     drop(stream);
 }
+
+#[tokio::test]
+async fn google_stream_requires_a_candidate_finish_reason() {
+    for tail in ["", "data: [DONE]\n\n"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string(format!("data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"partial\"}}]}}}}]}}\n\n{tail}")))
+            .mount(&server).await;
+        let error = AiClient::new()
+            .complete(
+                &fixture_model(&format!("{}/v1beta/", server.uri())),
+                plain_fixture_request(),
+            )
+            .await
+            .unwrap_err();
+        let root = match &error {
+            AiError::StreamFailure { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(
+                root,
+                AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish)
+            ),
+            "{root:?}"
+        );
+    }
+}

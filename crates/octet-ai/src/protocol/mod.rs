@@ -150,7 +150,10 @@ pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
     if model.spec.protocol == Protocol::BedrockConverse {
         return false;
     }
-    // Google, Mistral and future routes retain their existing defaults.
+    if model.spec.protocol == Protocol::GoogleGenerativeAi {
+        return google::gemini_3_or_later(&model.spec.api_name);
+    }
+    // Mistral and future routes retain their existing defaults.
     true
 }
 

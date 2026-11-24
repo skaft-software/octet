@@ -126,14 +126,9 @@ fn unsupported_google_audio_is_rejected_or_diagnosed_and_omitted() {
 }
 
 #[test]
-fn tool_result_media_follows_the_function_responses_as_inline_data() {
-    // History recorded on a route with native tool-result media (Claude,
-    // Responses) or a hook replacement can put an image or audio clip inside
-    // a tool result. functionResponse carries text only, so the codec sends
-    // the bytes after the turn's function responses instead of failing the
-    // request with "Media in tool results is unsupported".
+fn prefixed_gemini_versions_route_tool_result_images_without_moving_audio() {
     use crate::types::{AudioFormat, Modality};
-    let mut model = model_with_api_name("gemini-4-argon-contributor");
+    let mut model = model_with_api_name("vendor-gemini-2.5-flash");
     std::sync::Arc::make_mut(&mut model.spec)
         .capabilities
         .input_modalities = ModalitySet::none()
@@ -206,6 +201,15 @@ fn tool_result_media_follows_the_function_responses_as_inline_data() {
         serde_json::json!({"inlineData": {"mimeType": "audio/mp3", "data": "c291bmQ="}})
     );
     assert_eq!(turn.as_array().unwrap().len(), 4);
+
+    std::sync::Arc::make_mut(&mut model.spec).api_name = "vendor-gemini-4-argon".into();
+    let body: Value =
+        serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+    let parts = &body["contents"][2]["parts"];
+    assert_eq!(parts[0]["functionResponse"]["id"], "call_1");
+    assert_eq!(parts[0]["functionResponse"]["parts"][0], turn[2]);
+    assert_eq!(parts[2], turn[3]);
+    assert_eq!(parts.as_array().unwrap().len(), 3);
 
     // A route without the matching input modality still refuses in Strict.
     let text_only = model_with_api_name("gemini-4-argon-contributor");
@@ -1044,4 +1048,100 @@ fn reports_native_provider_errors_without_stream_events() {
     let error = decode_stream_event(&stream_model, &frame, &mut builder).unwrap_err();
     assert!(matches!(error, AiError::Provider(_)));
     assert!(!builder.started);
+}
+
+#[test]
+fn xhigh_level_models_register_and_send_xhigh() {
+    for id in ["gemini-4-hydrogen", "gemini-4-neon"] {
+        let mut model = model_with_api_name(id);
+        let cap = crate::providers::reasoning::pinned_reasoning_capability(&serde_json::json!({
+            "reasoning": true, "reasoning_options": [{"type":"effort", "values":["low","medium","high","xhigh"]}]
+        }), id, model.spec.protocol, 65536).unwrap();
+        std::sync::Arc::make_mut(&mut model.spec)
+            .capabilities
+            .reasoning = Some(cap);
+        crate::catalog::validate_model_spec(&model.spec).unwrap();
+        let request = Request {
+            reasoning: ReasoningConfig::Effort(crate::ReasoningEffort::Xhigh),
+            ..base_request()
+        };
+        let body: Value =
+            serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"],
+            serde_json::json!({"thinkingLevel":"XHIGH","includeThoughts":true})
+        );
+    }
+}
+
+#[test]
+fn xhigh_budget_uses_high_for_validation_and_encoding() {
+    let mut model = model();
+    let mut cap = crate::test_fixtures::token_budget_capability();
+    cap.max_effort = crate::ReasoningEffort::Xhigh;
+    std::sync::Arc::make_mut(&mut model.spec)
+        .capabilities
+        .reasoning = Some(cap);
+    let request = Request {
+        reasoning: ReasoningConfig::Effort(crate::ReasoningEffort::Xhigh),
+        max_output_tokens: Some(9000),
+        ..base_request()
+    };
+    let body: Value =
+        serde_json::from_slice(&build_request(&model, &request).unwrap().body).unwrap();
+    assert_eq!(
+        body["generationConfig"]["thinkingConfig"],
+        serde_json::json!({"thinkingBudget":8192,"includeThoughts":true})
+    );
+}
+
+fn decode_fixture(data: Value) -> Result<Vec<StreamEvent>, AiError> {
+    let model = model();
+    let mut builder = ResponseBuilder::new(model.spec.id.clone(), model.spec.protocol, None);
+    decode_stream_event(
+        &model,
+        &SseEvent {
+            event: None,
+            data: data.to_string(),
+        },
+        &mut builder,
+    )
+}
+
+#[test]
+fn google_error_finishes_preserve_the_reason_as_other() {
+    for reason in [
+        "MISSING_THOUGHT_SIGNATURE",
+        "MALFORMED_RESPONSE",
+        "ESCALATION",
+        "PUP_LIMITED_DISABLED",
+        "MODEL_ARMOR",
+    ] {
+        let events =
+            decode_fixture(serde_json::json!({"candidates":[{"finishReason":reason}]})).unwrap();
+        assert!(
+            matches!(events.last(), Some(StreamEvent::Finished(response)) if response.stop_reason == StopReason::Other(reason.to_owned())),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn prompt_block_is_permanent_but_incomplete_frame_is_not_terminal() {
+    let events = decode_fixture(serde_json::json!({"candidates":[]})).unwrap();
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Finished(_))));
+    for (reason, label) in [
+        ("PROHIBITED_CONTENT", "PROHIBITED_CONTENT"),
+        ("private upstream text", "unknown"),
+    ] {
+        let Err(AiError::Provider(error)) = decode_fixture(serde_json::json!({"promptFeedback":{
+            "blockReason":reason, "blockReasonMessage":"private", "safetyRatings":[{"category":"private"}]}}))
+        else {
+            panic!("expected provider error")
+        };
+        assert!(error.is_permanent());
+        assert_eq!(error.message, format!("Google prompt blocked: {label}"));
+    }
 }

@@ -131,15 +131,13 @@ fn google_contents(
     let mut pending_calls = Vec::new();
     let include_tool_call_id = google_requires_tool_call_id(&model.spec.api_name);
 
+    let nest_result_images = gemini_3_or_later(&model.spec.api_name);
+
     for message in &req.messages {
         match message {
             Message::User(user) => {
                 let user = crate::video::prepare_user_message(model, user)?;
                 let mut parts = Vec::new();
-                // functionResponse carries text only. Tool-result media (from
-                // history recorded on a route with native tool-result media,
-                // or a hook replacement) follows the turn's function
-                // responses as `inlineData`, like agent-placed adjacent media.
                 let mut tool_result_media = Vec::new();
                 for part in &user.content {
                     match part {
@@ -194,12 +192,7 @@ fn google_contents(
                                 // deliberately omitted rather than guessed.
                                 continue;
                             };
-                            parts.push(function_response_part(
-                                name,
-                                &id,
-                                result,
-                                include_tool_call_id,
-                            ));
+                            let mut images = Vec::new();
                             pending_calls.retain(|pending| pending != &id);
                             for part in &result.content {
                                 let media = match part {
@@ -210,7 +203,12 @@ fn google_contents(
                                             .input_modalities
                                             .contains(crate::types::Modality::Image) =>
                                     {
-                                        google_inline_image_part(image)
+                                        let image = google_inline_image_part(image);
+                                        if nest_result_images {
+                                            images.extend(image);
+                                            continue;
+                                        }
+                                        image
                                     }
                                     ToolResultPart::Media(Media::Audio(audio))
                                         if model.spec.supports_audio_input(audio.format) =>
@@ -221,6 +219,13 @@ fn google_contents(
                                 };
                                 tool_result_media.extend(media);
                             }
+                            parts.push(function_response_part(
+                                name,
+                                &id,
+                                result,
+                                include_tool_call_id,
+                                images,
+                            ));
                         }
                     }
                 }
@@ -336,7 +341,7 @@ fn flush_missing_function_responses(
                 added_tool_names: None,
                 tool_name: None,
             };
-            function_response_part(&names[&id], &id, &result, include_tool_call_id)
+            function_response_part(&names[&id], &id, &result, include_tool_call_id, Vec::new())
         })
         .collect();
     push_content(contents, "user", parts);
@@ -423,6 +428,7 @@ fn function_response_part(
     id: &str,
     result: &crate::types::ToolResult,
     include_tool_call_id: bool,
+    images: Vec<Value>,
 ) -> Value {
     let text = result
         .content
@@ -443,6 +449,9 @@ fn function_response_part(
     if include_tool_call_id {
         function_response.insert("id".to_owned(), Value::String(id.to_owned()));
     }
+    if !images.is_empty() {
+        function_response.insert("parts".into(), Value::Array(images));
+    }
     function_response.insert("response".to_owned(), Value::Object(response));
     let mut part = Map::new();
     part.insert(
@@ -456,23 +465,22 @@ fn function_response_part(
 /// Gemini 3+, Claude, and gpt-oss require them. Keep this model-family gate
 /// aligned with the pinned Pi Google adapter rather than sending IDs universally.
 fn google_requires_tool_call_id(model_id: &str) -> bool {
-    let model_id = model_id.to_ascii_lowercase();
-    if model_id.starts_with("claude-") || model_id.starts_with("gpt-oss-") {
-        return true;
-    }
-    let Some(version) = model_id
-        .strip_prefix("gemini-live-")
-        .or_else(|| model_id.strip_prefix("gemini-"))
-    else {
-        return false;
-    };
-    let major = version
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>()
-        .parse::<u32>()
-        .ok();
-    major.is_some_and(|major| major >= 3)
+    let id = model_id.to_ascii_lowercase();
+    id.starts_with("claude-") || id.starts_with("gpt-oss-") || gemini_3_or_later(&id)
+}
+
+// Pi compatibility: packages/ai/src/api/google-shared.ts:176-181 (fe8a6f5dc).
+// Match the first versioned Gemini token, even behind a vendor prefix.
+pub(super) fn gemini_3_or_later(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    id.match_indices("gemini-")
+        .find_map(|(offset, prefix)| {
+            let suffix = &id[offset + prefix.len()..];
+            let version = suffix.strip_prefix("live-").unwrap_or(suffix);
+            let end = version.bytes().take_while(u8::is_ascii_digit).count();
+            version[..end].parse::<u32>().ok()
+        })
+        .is_some_and(|major| major >= 3)
 }
 
 fn content_value(role: &str, parts: Vec<Value>) -> Value {
@@ -617,6 +625,18 @@ fn google_generation_config(model: &crate::catalog::Model, req: &Request) -> Map
     config
 }
 
+// Pi compatibility: packages/ai/src/api/google-shared.ts:105-113 (001ffff32).
+pub(crate) fn effort_budget(
+    cap: &crate::ReasoningCapability,
+    effort: crate::ReasoningEffort,
+) -> Option<u64> {
+    cap.budget(if effort == crate::ReasoningEffort::Xhigh {
+        crate::ReasoningEffort::High
+    } else {
+        effort
+    })
+}
+
 fn google_thinking_config(
     model: &crate::catalog::Model,
     reasoning: &ReasoningConfig,
@@ -629,7 +649,7 @@ fn google_thinking_config(
             Some(0)
         }
         ReasoningConfig::Budget(budget) => Some(*budget),
-        ReasoningConfig::Effort(effort) => cap.budget(*effort),
+        ReasoningConfig::Effort(effort) => effort_budget(cap, *effort),
         _ => None,
     };
     let _ = requested_output_limit; // shared validation reserves answer space
@@ -721,7 +741,7 @@ struct GoogleUsageMetadata {
 #[derive(Deserialize)]
 struct GooglePromptFeedback {
     #[serde(default, rename = "blockReason")]
-    block_reason: Option<Value>,
+    block_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -746,10 +766,9 @@ pub(crate) fn decode_stream_event(
         return Ok(Vec::new());
     }
     if raw_data == "[DONE]" {
-        let mut events = Vec::new();
-        ensure_started(&mut events, builder)?;
-        finish_google(&mut events, builder, StopReason::EndTurn)?;
-        return Ok(events);
+        return Err(AiError::StreamProtocol(
+            crate::StreamProtocolError::MissingFinish,
+        ));
     }
 
     let data: GoogleStreamResponse = serde_json::from_str(raw_data)
@@ -763,6 +782,33 @@ pub(crate) fn decode_stream_event(
             kind: error.status,
             message: error.message,
             request_id: data.response_id,
+        }));
+    }
+
+    // Pi compatibility: packages/ai/src/api/google-generative-ai.ts:101-113
+    // (117eac3a0). Only report known enum values, never free-form feedback.
+    if let Some(reason) = data
+        .prompt_feedback
+        .and_then(|feedback| feedback.block_reason)
+        .filter(|s| !s.is_empty())
+    {
+        let label = match reason.as_str() {
+            "BLOCK_REASON_UNSPECIFIED"
+            | "BLOCKED_REASON_UNSPECIFIED"
+            | "SAFETY"
+            | "OTHER"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "IMAGE_SAFETY"
+            | "MODEL_ARMOR"
+            | "JAILBREAK" => reason.as_str(),
+            _ => "unknown",
+        };
+        return Err(AiError::Provider(ProviderError {
+            code: Some("invalid_prompt".into()),
+            kind: None,
+            message: format!("Google prompt blocked: {label}"),
+            request_id: None,
         }));
     }
 
@@ -814,12 +860,6 @@ pub(crate) fn decode_stream_event(
                 map_stop_reason(&reason, has_tool_calls),
             )?;
         }
-    } else if data
-        .prompt_feedback
-        .and_then(|feedback| feedback.block_reason)
-        .is_some()
-    {
-        finish_google(&mut events, builder, StopReason::Refusal)?;
     }
 
     Ok(events)
@@ -1168,6 +1208,7 @@ fn map_stop_reason(reason: &str, has_tool_calls: bool) -> StopReason {
         "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY" => {
             StopReason::Refusal
         }
+        // Pi maps these finishes to "error" (packages/ai/src/api/google-shared.ts:593-601 at 001ffff32); they end the turn as Other here.
         other => StopReason::Other(other.to_owned()),
     }
 }

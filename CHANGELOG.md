@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Support xhigh thinking on Gemini 4 Hydrogen and Neon, recognize prefixed Gemini 3+ models, and report Google prompt blocks clearly.
 - Open Pi custom components that pass `blocked`, and report octet as waiting on you until they close.
 - Report a Pi `pi.exec` command ended by a signal with exit code 128 plus the signal number, so a timeout or crash never reads as success.
 - Run a Pi Markdown transformer only on the message types it registers for with `messageTypes`.

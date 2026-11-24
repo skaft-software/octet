@@ -552,10 +552,12 @@ pub(crate) fn validate_model_spec(spec: &ModelSpec) -> Result<(), ConfigError> {
                             | "LOW"
                             | "MEDIUM"
                             | "HIGH"
+                            | "XHIGH"
                             | "minimal"
                             | "low"
                             | "medium"
                             | "high"
+                            | "xhigh"
                     )
                 })
             });

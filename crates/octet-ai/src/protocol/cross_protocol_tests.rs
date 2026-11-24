@@ -435,7 +435,8 @@ fn constrained_sampling_wire_shape_across_codecs() {
     );
 
     // Google: strict rewrite plus VALIDATED function-calling mode.
-    let google = make_model(Protocol::GoogleGenerativeAi, false, false, false, false);
+    let mut google = make_model(Protocol::GoogleGenerativeAi, false, false, false, false);
+    Arc::make_mut(&mut google.spec).api_name = "vendor-gemini-4-argon".into();
     let body: serde_json::Value = serde_json::from_slice(
         &crate::protocol::google::build_request(&google, &req_for())
             .unwrap()
@@ -645,11 +646,11 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         true
     );
 
-    // Google: VALIDATED by default, plainly AUTO when the model refuses strict.
+    // Google: version detection works behind a vendor prefix; declarations can opt out.
     let google = body(
         Protocol::GoogleGenerativeAi,
         vec![strict_tool.clone()],
-        none,
+        |model| Arc::make_mut(&mut model.spec).api_name = "vendor-gemini-4-argon".into(),
     );
     assert_eq!(
         google["toolConfig"]["functionCallingConfig"]["mode"],
@@ -659,6 +660,7 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         Protocol::GoogleGenerativeAi,
         vec![strict_tool.clone()],
         |model| {
+            Arc::make_mut(&mut model.spec).api_name = "vendor-gemini-4-argon".into();
             Arc::make_mut(&mut model.spec).preset.supports_strict_mode = Some(false);
         },
     );
@@ -666,6 +668,15 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
         google_plain["toolConfig"]["functionCallingConfig"]["mode"],
         "AUTO"
     );
+
+    let older = body(
+        Protocol::GoogleGenerativeAi,
+        vec![strict_tool.clone()],
+        |model| {
+            Arc::make_mut(&mut model.spec).api_name = "vendor-gemini-2.5-flash".into();
+        },
+    );
+    assert_eq!(older["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
 
     // Native Mistral Conversations keeps Pi's compliant strict default.
     let mistral = body(Protocol::MistralConversations, vec![strict_tool], none);

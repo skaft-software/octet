@@ -810,13 +810,13 @@ pub(super) async fn stream_http(
                     ))?;
                 }
             }
-            // Native Conversations and pi-messages entries settle only on their
+            // Google, Conversations and pi-messages entries settle only on their
             // own terminal event, even when their deltas already form valid
             // JSON. Classify the missing native terminal here before the generic
             // guard handles raw EOF.
             if matches!(
                 model_clone.spec.protocol,
-                Protocol::MistralConversations | Protocol::PiMessages
+                Protocol::GoogleGenerativeAi | Protocol::MistralConversations | Protocol::PiMessages
             ) && !terminal_seen {
                 Err(annotate_stream_failure(
                     AiError::StreamProtocol(StreamProtocolError::MissingFinish),

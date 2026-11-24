@@ -148,8 +148,7 @@ pub fn pinned_reasoning_capability(
     };
     match protocol {
         Protocol::GoogleGenerativeAi => {
-            // `thinkingLevel` has exactly MINIMAL, LOW, MEDIUM and HIGH.
-            let levels = ["minimal", "low", "medium", "high"];
+            let levels = ["minimal", "low", "medium", "high", "xhigh"];
             if efforts.is_empty()
                 || has("toggle")
                 || efforts

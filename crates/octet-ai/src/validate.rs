@@ -846,6 +846,11 @@ pub(crate) fn validate_request(
     validate_reasoning_selection(&req.reasoning, caps, protocol)?;
     let budget = match (&req.reasoning, &caps.reasoning) {
         (ReasoningConfig::Budget(budget), _) => Some(*budget),
+        (ReasoningConfig::Effort(effort), Some(cap))
+            if protocol == Protocol::GoogleGenerativeAi =>
+        {
+            crate::protocol::google::effort_budget(cap, *effort)
+        }
         (ReasoningConfig::Effort(effort), Some(cap)) => cap.budget(*effort),
         _ => None,
     };
