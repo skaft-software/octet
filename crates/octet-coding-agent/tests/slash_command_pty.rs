@@ -140,10 +140,15 @@ impl PtyOctet {
     }
 
     fn spawn_with_provider(binary: &Path, base_url: &str) -> Self {
-        Self::spawn_with_shortcut_fixture(binary, base_url, false)
+        Self::spawn_fixture(binary, base_url, false, None)
     }
 
-    fn spawn_with_shortcut_fixture(binary: &Path, base_url: &str, shortcut: bool) -> Self {
+    fn spawn_fixture(
+        binary: &Path,
+        base_url: &str,
+        shortcut: bool,
+        scope: Option<(&str, Option<&str>)>,
+    ) -> Self {
         let root = tempfile::tempdir().expect("PTY fixture tempdir");
         let root_path = root
             .path()
@@ -156,13 +161,19 @@ impl PtyOctet {
         fs::create_dir_all(&workspace).expect("workspace directory");
         fs::create_dir_all(&sessions).expect("session directory");
         let credential = home.join(".octet/credentials/custom.json");
-        fs::write(
-            &credential,
+        let registry = if let Some((patterns, _)) = scope {
+            fs::write(
+                home.join(".octet/config.toml"),
+                format!("models = {patterns:?}\n"),
+            )
+            .unwrap();
+            r#"{"version":1,"providers":{"dummy":{"label":"Dummy","base_url":"http://127.0.0.1:9/v1/","auth":{"kind":"none"},"auto_discover":false,"models":[{"api_name":"probe","context_window":32000,"max_output_tokens":8000,"tools":true,"parallel_tool_calls":false,"vision":false,"structured_output":false,"reasoning":false}]}}}"#.to_owned()
+        } else {
             format!(
                 r#"{{"base_url":"{base_url}","api_key":"","api_name":"probe","headers":[],"models":[{{"api_name":"probe","context_window":32768}}],"auto_discover":false}}"#
-            ),
-        )
-        .expect("custom-provider fixture");
+            )
+        };
+        fs::write(&credential, registry).expect("custom-provider fixture");
         let mut permissions = fs::metadata(&credential)
             .expect("credential fixture metadata")
             .permissions();
@@ -195,7 +206,16 @@ impl PtyOctet {
             .arg(&workspace)
             .arg("--session-dir")
             .arg(&sessions)
-            .args(["--model", "custom/probe", "--theme", "dark"])
+            .args([
+                "--model",
+                if scope.is_some() {
+                    "openai/gpt-4o"
+                } else {
+                    "custom/probe"
+                },
+                "--theme",
+                "dark",
+            ])
             .current_dir(&workspace)
             .env_clear()
             .env("HOME", &home)
@@ -209,6 +229,14 @@ impl PtyOctet {
             .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr);
+        if let Some((_, cli)) = scope {
+            command
+                .env("OPENAI_API_KEY", "offline-fixture")
+                .stderr(fs::File::create(root.path().join("stderr")).unwrap());
+            if let Some(cli) = cli {
+                command.args(["--models", cli]);
+            }
+        }
         if shortcut {
             command.env("OCTET_EXTENSIONS", "shortcut-fixture");
         }
@@ -533,11 +561,8 @@ ext.run()
 #[test]
 fn real_octet_shortcuts_report_results_and_errors_without_dispatch_notices() {
     let api = StreamApi::start();
-    let mut octet = PtyOctet::spawn_with_shortcut_fixture(
-        Path::new(env!("CARGO_BIN_EXE_octet")),
-        &api.url,
-        true,
-    );
+    let mut octet =
+        PtyOctet::spawn_fixture(Path::new(env!("CARGO_BIN_EXE_octet")), &api.url, true, None);
     octet.pty.wait_for(b"probe");
     // Stage 1: the extension subprocess is launched asynchronously and its
     // interpreter may be slow to start. Wait for the fixture's own marker so
@@ -907,4 +932,62 @@ fn visible_bytes(bytes: &[u8]) -> String {
     } else {
         escaped
     }
+}
+
+fn scoped_fixture(patterns: &str, cli: Option<&str>) -> PtyOctet {
+    PtyOctet::spawn_fixture(
+        Path::new(env!("CARGO_BIN_EXE_octet")),
+        "http://127.0.0.1:9/v1/",
+        false,
+        Some((patterns, cli)),
+    )
+}
+
+#[test]
+fn config_custom_scope_populates_the_cycling_ring() {
+    let mut octet = scoped_fixture("custom/dummy/probe", None);
+    octet.pty.wait_for(b"gpt-4o");
+    octet.pty.write_input(b"/scoped-models\r");
+    octet.pty.wait_for(b"1. custom/dummy/probe");
+    assert!(!fs::read_to_string(octet._root.path().join("stderr"))
+        .unwrap()
+        .contains("no credential-configured models match"));
+    octet.shutdown_with_input(&[PICKER_ESCAPE, b"\x04"].concat());
+}
+
+#[test]
+fn config_custom_scope_refreshes_the_cycling_ring_on_reload() {
+    let mut octet = scoped_fixture("openai/gpt-4o", None);
+    octet.pty.wait_for(b"gpt-4o");
+    fs::write(
+        octet._root.path().join("home/.octet/config.toml"),
+        "models = 'custom/dummy/probe'\n",
+    )
+    .unwrap();
+    octet.pty.write_input(b"/reload\r");
+    octet.pty.wait_for(b"reload succeeded");
+    octet.pty.write_input(b"/scoped-models\r");
+    octet.pty.wait_for(b"1. custom/dummy/probe");
+    octet.shutdown_with_input(&[PICKER_ESCAPE, b"\x04"].concat());
+}
+
+#[test]
+fn config_custom_scope_cli_override_warns_once_for_a_real_miss() {
+    let mut octet = scoped_fixture(
+        "ignore-this-config",
+        Some("missing-route,custom/dummy/probe"),
+    );
+    octet.pty.wait_for(b"gpt-4o");
+    octet.pty.write_input(b"/scoped-models\r");
+    octet.pty.wait_for(b"1. custom/dummy/probe");
+    let stderr = fs::read_to_string(octet._root.path().join("stderr")).unwrap();
+    assert_eq!(
+        stderr
+            .matches("no credential-configured models match")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("missing-route"), "{stderr}");
+    octet.shutdown_with_input(&[PICKER_ESCAPE, b"\x04"].concat());
 }

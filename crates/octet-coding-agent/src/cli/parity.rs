@@ -91,31 +91,20 @@ impl ParityOptions {
     /// Apply the `--models` scope: resolve every pattern against the
     /// credential-filtered catalog and select the first scoped model only when
     /// no explicit model was requested for a new session.
-    ///
-    /// The ordered scope is returned for frontends that cycle models; it is not
-    /// persisted, because the shared session ledger has no scope record.
-    pub fn resolve_models(&self, config: &mut Config) -> anyhow::Result<Vec<ModelId>> {
-        if self.models.is_none() {
-            return Ok(Vec::new());
-        }
+    pub fn resolve_models(&self, config: &mut Config) -> anyhow::Result<()> {
+        let Some(patterns) = self.models.as_deref() else {
+            return Ok(());
+        };
         let catalog = crate::app::bootstrap::model_catalog_with_offline(config.offline)?;
-        self.resolve_models_in_catalog(config, &catalog)
+        let scope = resolve_catalog_scope(&model_patterns(patterns)?, &catalog)?;
+        self.select_scoped_default(config, &scope)
     }
 
-    pub(crate) fn resolve_models_in_catalog(
+    pub(crate) fn select_scoped_default(
         &self,
         config: &mut Config,
-        catalog: &octet_ai::ModelCatalog,
-    ) -> anyhow::Result<Vec<ModelId>> {
-        let Some(patterns) = self.models.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let parsed = model_patterns(patterns)?;
-        let available = catalog
-            .models()
-            .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
-            .collect::<Vec<_>>();
-        let scope = select_scoped_models(&parsed, &available)?;
+        scope: &[ScopedModel],
+    ) -> anyhow::Result<()> {
         let resumes_explicit_session = self
             .session_id
             .as_deref()
@@ -143,7 +132,7 @@ impl ParityOptions {
                 ));
             }
         }
-        Ok(scope.into_iter().map(|scoped| scoped.id).collect())
+        Ok(())
     }
 
     /// `--no-session` is headless-only, and the frontend must be chosen
@@ -345,6 +334,17 @@ pub fn model_patterns(value: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("--models patterns must not contain control characters");
     }
     Ok(patterns)
+}
+
+pub(crate) fn resolve_catalog_scope(
+    patterns: &[String],
+    catalog: &octet_ai::ModelCatalog,
+) -> anyhow::Result<Vec<ScopedModel>> {
+    let available = catalog
+        .models()
+        .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
+        .collect::<Vec<_>>();
+    select_scoped_models(patterns, &available)
 }
 
 fn split_pattern(pattern: &str) -> (&str, Option<&str>) {

@@ -4507,6 +4507,8 @@ pub struct InteractiveShell {
     /// Exact display discovery/configuration roots, retained by the input owner
     /// only; never cloned into renderer publications.
     runtime_config: Option<Config>,
+    /// Reread the saved cycling scope on explicit reloads when launched without `--models`.
+    pub(crate) reload_config_model_scope: bool,
     /// The user's own keybinding file, captured at construction and refreshed
     /// by an explicit reload. Session-only overrides contributed by a live
     /// resource binding are layered on top and can be withdrawn without losing
@@ -4599,6 +4601,7 @@ impl InteractiveShell {
             terminal_ceded: Arc::new(AtomicBool::new(false)),
             terminal_interceptors,
             runtime_config: None,
+            reload_config_model_scope: false,
             base_user_bindings,
             session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,
@@ -4681,6 +4684,7 @@ impl InteractiveShell {
             // Renderer tests must never report to a real Herdr pane, even when
             // the test process inherits one.
             runtime_config: None,
+            reload_config_model_scope: false,
             base_user_bindings,
             session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,

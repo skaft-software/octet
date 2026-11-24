@@ -7252,6 +7252,19 @@ pub fn bootstrap(config: Config) -> anyhow::Result<Bootstrap> {
     })
 }
 
+/// Completing a narrowed catalog must keep its selected model. An offline
+/// fleet may not list the pinned model that made the narrowed launch ready.
+pub(super) fn enriched_model_catalog(
+    offline: bool,
+    selected: Option<&ModelId>,
+) -> anyhow::Result<(ModelCatalog, CodexContextNotes)> {
+    let (mut catalog, notes) = model_catalog_for_readiness(offline, &CatalogReadiness::Fleet)?;
+    if let Some(selected) = selected.filter(|id| catalog.resolve(id).is_err()) {
+        register_selected_pinned_model(&mut catalog, selected);
+    }
+    Ok((catalog, notes))
+}
+
 impl Bootstrap {
     /// Whether this launch initialized the full provider fleet.
     #[cfg(test)]
@@ -7276,7 +7289,7 @@ impl Bootstrap {
         }
         startup_phase("catalog.enrich");
         let (catalog, notes) =
-            model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+            enriched_model_catalog(self.config.offline, self.config.model.as_ref())?;
         self.catalog = catalog;
         // Notes were recorded for the deferred Codex route; merge rather than
         // replace so a note already delivered for this session stays delivered.

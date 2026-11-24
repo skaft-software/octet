@@ -5877,11 +5877,23 @@ where
     let _diagnostics = crate::output::defer_tui_diagnostics();
     let current_theme = shell.theme();
     let background = current_theme.background();
+    let reload_config_scope = announce_success && shell.reload_config_model_scope;
     let mut app = run_blocking_lifecycle(shell, input, "reloading resources…", move || {
         let mut app = app;
         app.system = compose_instructions(&app.config)?;
         app.system_tokens = estimate_text_tokens(&app.system);
         let mut app = crate::app::bootstrap::rebuild_app_for_reload_with_timing(app, timing)?;
+        if reload_config_scope {
+            app.model_scope = if let Some(patterns) = persisted_model_patterns() {
+                app.enrich_catalog()?;
+                Some(crate::cli::parity::resolve_catalog_scope(
+                    &patterns,
+                    &app.catalog,
+                )?)
+            } else {
+                None
+            };
+        }
         app.mark_resource_paths_reload();
         Ok(app)
     })
@@ -13336,6 +13348,18 @@ pub(crate) async fn run_interactive_with_options(
     }
 }
 
+fn persisted_model_patterns() -> Option<Vec<String>> {
+    crate::cli::persisted_scoped_models().and_then(
+        |saved| match crate::cli::parity::model_patterns(&saved) {
+            Ok(patterns) => Some(patterns),
+            Err(error) => {
+                crate::output::stderr_line(format!("ignored the persisted model scope: {error}"));
+                None
+            }
+        },
+    )
+}
+
 /// One interactive process lifetime. Returns after the terminal was left.
 async fn run_interactive_once(
     config: Config,
@@ -13343,7 +13367,6 @@ async fn run_interactive_once(
     restart_notice: Option<RestartNotice>,
     reexec: &mut Option<crate::reexec::ReexecController>,
 ) -> anyhow::Result<InteractiveExit> {
-    let model_scope_patterns = options.models.clone();
     let mut config = config;
     let initial_prompt = config.initial_prompt.clone();
     let theme = load_theme(&config);
@@ -13357,6 +13380,7 @@ async fn run_interactive_once(
         config.mouse.captures_mouse_on(crate::cli::tui_mode()),
         Some(&config),
     )?;
+    shell.reload_config_model_scope = options.models.is_none();
     shell.set_tui_fullscreen(crate::cli::tui_mode() == crate::config::TuiMode::Fullscreen)?;
     shell.set_runtime_config(config.clone());
     let _update_task = startup_update_task(
@@ -13398,18 +13422,33 @@ async fn run_interactive_once(
     // startup below. Editing is live; submission still waits for full startup.
     // Startup renders nothing: the phase is named only in diagnostics, and its
     // duration stays attributable through `OCTET_STARTUP_TRACE=1`.
-    let mut boot = run_blocking_startup_lifecycle(
+    let (mut boot, model_scope) = run_blocking_startup_lifecycle(
         &mut shell,
         &mut input,
         STARTUP_MODELS_OPERATION,
         move || {
             let mut boot = crate::app::bootstrap::bootstrap(config)?;
-            if options.models.is_some() {
+            // Pi packages/coding-agent/src/main.ts:877-882 resolves CLI or saved
+            // patterns, in that order, against the available model registry.
+            let patterns = options
+                .models
+                .as_deref()
+                .map(crate::cli::parity::model_patterns)
+                .transpose()?
+                .or_else(persisted_model_patterns);
+            let scope = if let Some(patterns) = patterns {
                 boot.enrich_catalog()?;
-                options.resolve_models_in_catalog(&mut boot.config, &boot.catalog)?;
-            }
+                let scope = crate::cli::parity::resolve_catalog_scope(&patterns, &boot.catalog)?;
+                // Only the invocation flag selects a default; config scopes cycling alone.
+                if options.models.is_some() {
+                    options.select_scoped_default(&mut boot.config, &scope)?;
+                }
+                Some(scope)
+            } else {
+                None
+            };
             options.select_session(&mut boot.config)?;
-            Ok(boot)
+            Ok((boot, scope))
         },
     )
     .await?;
@@ -13454,20 +13493,7 @@ async fn run_interactive_once(
             build_app_first_frame_first(boot, launch, system)
         })
         .await?;
-    // `--models` always wins. Without it, the interactive launch reads the
-    // user-level ordered scope persisted by `/scoped-models`; headless modes
-    // never consult it. A hand-edited invalid value warns instead of breaking
-    // startup, and the command line still fails closed on the same input.
-    match model_scope_patterns.clone() {
-        Some(patterns) => app.set_model_scope_patterns(Some(&patterns))?,
-        None => {
-            if let Some(persisted) = crate::cli::persisted_scoped_models() {
-                if let Err(error) = app.set_model_scope_patterns(Some(&persisted)) {
-                    shell.notice(format!("ignored the persisted model scope: {error}"));
-                }
-            }
-        }
-    }
+    app.model_scope = model_scope;
     refresh_resource_paths(&mut app, &mut shell, &mut input).await?;
     let mut startup_prompt = initial_prompt;
     if let Some(name) = app.config.prompt_template.clone() {

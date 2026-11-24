@@ -51,7 +51,7 @@ Defaults are marked. Other values are examples.
 | `plain` | `false` | Chronological frontend. |
 | `show_images` | default `false` | `true` shows tool-result images inline on compatible terminals. Display only: not upload or attachment consent. Same as `--show-images`. [Limits](terminal.md#tool-evidence-and-worker-activity). |
 | `show_durations` | follows theme | User-only boolean for completed tool call and thinking durations. Remove the key to follow the theme again. [Settings menu](commands.md#settings-menu). |
-| `models` | | Optional user-level ordered model scope, written by `/scoped-models` as one comma-separated pattern string (such as `"openai/*:high,custom/alpha-model"`). It only affects Ctrl+P cycling in the interactive UI. Headless modes ignore it, `--models` wins if both are set, and a trusted project layer can't override it. |
+| `models` | | Optional user-level ordered model scope, written by `/scoped-models` as one comma-separated pattern string (such as `"openai/*:high,custom/alpha-model"`). It only affects Ctrl+P cycling in the interactive UI. Patterns include registered custom models and are resolved again on `/reload`. Headless modes ignore it, `--models` wins if both are set, and a trusted project layer can't override it. |
 | `effect_policy` | default `"unsafe_host"` | Or `"controlled"` or `"controlled_bash_approval"`. [Permissions](tools.md#authority-profiles). |
 | `allow_external_paths` | default `true` in full-access CLI launches | `false` keeps the built-in file tools in the workspace. Safe mode forces `false`. It doesn't contain shell commands or extension processes. |
 | `allow_edit`, `allow_write` | `true` for both | Separate file-change switches. `--no-edit` removes both tools. |

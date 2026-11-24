@@ -718,16 +718,15 @@ impl App {
 
     /// Resolve an invocation's ordered patterns against this effective catalog.
     /// This only controls cycling; explicit model selection remains available.
-    pub fn set_model_scope_patterns(&mut self, patterns: Option<&str>) -> anyhow::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn set_model_scope_patterns(
+        &mut self,
+        patterns: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.model_scope = patterns
             .map(|patterns| {
                 let patterns = crate::cli::parity::model_patterns(patterns)?;
-                let available = self
-                    .catalog
-                    .models()
-                    .map(|spec| (spec.id.0.clone(), spec.endpoint.0.clone()))
-                    .collect::<Vec<_>>();
-                crate::cli::parity::select_scoped_models(&patterns, &available)
+                crate::cli::parity::resolve_catalog_scope(&patterns, &self.catalog)
             })
             .transpose()?;
         Ok(())
@@ -839,12 +838,12 @@ impl App {
     }
 
     pub fn enrich_catalog(&mut self) -> anyhow::Result<()> {
-        use crate::app::bootstrap::{model_catalog_for_readiness, CatalogReadiness};
+        use crate::app::bootstrap::{enriched_model_catalog, CatalogReadiness};
         if self.readiness.is_fleet() {
             return Ok(());
         }
         let (catalog, notes) =
-            model_catalog_for_readiness(self.config.offline, &CatalogReadiness::Fleet)?;
+            enriched_model_catalog(self.config.offline, Some(&self.model.spec.id))?;
         self.catalog = catalog;
         self.codex_context_notes.merge(notes);
         self.readiness = CatalogReadiness::Fleet;

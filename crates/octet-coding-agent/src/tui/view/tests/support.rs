@@ -187,6 +187,7 @@ pub(super) fn emulated_shell_with_mode(
             terminal_ceded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             terminal_interceptors: Default::default(),
             runtime_config: None,
+            reload_config_model_scope: false,
             base_user_bindings: std::collections::BTreeMap::new(),
             session_keybindings: std::collections::BTreeMap::new(),
             theme_preview: None,

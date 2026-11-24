@@ -523,9 +523,7 @@ fn model_scope_does_not_override_an_existing_explicit_session() {
             models: Some("gpt-5.4-mini-responses:high".into()),
             ..Default::default()
         };
-        options
-            .resolve_models_in_catalog(&mut config, &octet_ai::ModelCatalog::builtin().unwrap())
-            .unwrap();
+        options.resolve_models(&mut config).unwrap();
         assert_eq!(config.model.is_none(), existing);
         assert_eq!(config.model_explicit, !existing);
         options.select_session(&mut config).unwrap();
