@@ -13,6 +13,7 @@
 - Run a Pi Markdown transformer only on the message types it registers for with `messageTypes`.
 - Report a failing Pi `pi.events` listener as its own extension issue instead of failing the extension that emitted the event.
 - Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.
+- Update url to fix a stack overflow when reading the origin of nested `blob:` URLs.
 
 ## [0.10.6] - 2026-11-20
 
