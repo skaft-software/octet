@@ -1,6 +1,19 @@
 # Pi extension compatibility: release status and merge notes
 
-This is a **dated development-evidence record**, not current artifact status.
+## v0.10.5 — qualified on the maintainer’s large installed Pi setup
+
+**Pass.** The maintainer tested [Octet v0.10.5](https://github.com/skaft-software/octet/releases/tag/v0.10.5)
+with the large, extension-heavy Pi setup used for release qualification. All
+qualifications for that setup passed. This was a real installed setup, not a
+load-only or synthetic harness run. See the [maintainer qualification record](https://github.com/skaft-software/octet/issues/671#issuecomment-7022153445).
+
+The next release’s Pi work is to integrate the remaining parity changes and
+verify them on the integrated candidate, not to requalify the unchanged
+v0.10.5 baseline. This result does not certify other setups or platforms.
+
+## Historical v0.10.0 development evidence
+
+The remainder of this page is a **dated development-evidence record**, not current artifact status.
 See the [v0.10.0 release notes](releases/v0.10.0.md) for the community launch,
 the [Pi guide](pi-compatibility.md) for setup, and the versioned release page for
 actual downloads and qualification. Historical results below retain their scope.

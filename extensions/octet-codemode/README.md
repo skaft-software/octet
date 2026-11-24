@@ -176,6 +176,13 @@ offer (it requires the older key set), so it is measured on the offer it
 accepts, while this extension runs the real 0.9.6 offer. The bundled Pi runtime
 is the behaviour reference, not a claim of bit-identical ECMAScript output.
 
+**Still unmeasured:** Does giving a script the full tool result while sending
+only a short projection to the model reduce tokens or turns on real tasks?
+Compare matched tasks with and without that split, holding the engine, model,
+tools and success criteria fixed. Report `system_tokens`, `tool_result_tokens`,
+turns per task and whether the task succeeded. The runtime timings above do not
+answer this question ([original brief](https://github.com/skaft-software/octet/issues/479)).
+
 ## Persistence, output and limits
 
 - Code: at most 65,536 Unicode characters. VM heap: 256 MiB.
