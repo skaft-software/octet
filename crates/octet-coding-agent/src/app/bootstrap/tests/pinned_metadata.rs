@@ -2247,9 +2247,10 @@ fn pinned_opencode_reasoning_refresh_preserves_exact_controls_or_fails_closed() 
                         && match route.protocol {
                             Protocol::OpenAiChat | Protocol::OpenAiResponses => true,
                             Protocol::GoogleGenerativeAi => {
+                                // xhigh is a Google level since Pi 001ffff32 (Gemini 4 Hydrogen and Neon).
                                 !has("toggle")
                                     && options.values.iter().all(|value| {
-                                        ["minimal", "low", "medium", "high"]
+                                        ["minimal", "low", "medium", "high", "xhigh"]
                                             .contains(&value.to_ascii_lowercase().as_str())
                                     })
                             }
