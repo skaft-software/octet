@@ -2185,40 +2185,6 @@
     "reasoning": false,
     "tool_call": false
   },
-  "groq/llama-3.1-8b-instant": {
-    "limit": {
-      "context": 131072,
-      "output": 131072
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.1 8B",
-    "reasoning": false,
-    "tool_call": true
-  },
-  "groq/llama-3.3-70b-versatile": {
-    "limit": {
-      "context": 131072,
-      "output": 32768
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Llama 3.3 70B",
-    "reasoning": false,
-    "tool_call": true
-  },
   "groq/meta-llama/llama-prompt-guard-2-22m": {
     "limit": {
       "context": 512,
@@ -2331,34 +2297,6 @@
           "low",
           "medium",
           "high"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "groq/qwen/qwen3.6-27b": {
-    "limit": {
-      "context": 131072,
-      "output": 16384
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Qwen3.6 27B",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "none",
-          "default"
         ]
       }
     ],

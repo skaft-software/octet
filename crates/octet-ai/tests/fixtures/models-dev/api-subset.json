@@ -288,6 +288,18 @@
       }
     }
   },
+  "groq": {
+    "models": {
+      "deprecated/example": {"name": "Deprecated", "status": "deprecated", "cost": {"input": 1, "output": 1}}
+    }
+  },
+  "mistral": {
+    "models": {
+      "devstral-medium-latest": {"name": "Retired Devstral"},
+      "pixtral-12b": {"name": "Retired Pixtral"},
+      "mistral-medium-3.5": {"name": "Undocumented Medium"}
+    }
+  },
   "openai": {
     "models": {
       "Mixed-Case": {
@@ -355,6 +367,7 @@
         "structured_output": true,
         "tool_call": false
       },
+      "gpt-5-chat-latest": {"name": "Retired Chat", "cost": {"input": 1, "output": 1}},
       "gpt-5.6": {
         "cost": {
           "cache_read": 0.003,

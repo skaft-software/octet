@@ -26,7 +26,14 @@ const CAPABILITY_FIELDS: &[&str] = &[
     "reasoning_options",
     "interleaved",
 ];
-const UNSUPPORTED_MODEL_IDS: &[(&str, &str)] = &[("openai", "gpt-5.6")];
+const UNSUPPORTED_MODEL_IDS: &[(&str, &str)] = &[
+    ("openai", "gpt-5.6"),
+    ("openai", "gpt-5-chat-latest"),
+    ("azure", "gpt-5-chat-latest"),
+    ("mistral", "mistral-medium-3.5"),
+    ("mistral", "devstral-medium-latest"),
+    ("mistral", "pixtral-12b"),
+];
 const TEXT_ONLY_MODEL_IDS: &[(&str, &str)] = &[
     ("baseten", "zai-org/GLM-5.2"),
     ("baseten", "zai-org/GLM-5.2-Fast"),
@@ -86,7 +93,7 @@ const MODEL_REQUIRES_TOOL_CALL: &[&str] = &[
     "qwen-token-plan-individual",
     "zai-coding-cn",
 ];
-const MODEL_SKIPS_DEPRECATED: &[&str] = &["baseten"];
+const MODEL_SKIPS_DEPRECATED: &[&str] = &["baseten", "groq"];
 const EXCLUDED_MODEL_IDS: &[(&str, &str)] = &[
     ("alibaba-token-plan", "qwen3.8-max-preview"),
     ("alibaba-token-plan-cn", "qwen3.8-max-preview"),

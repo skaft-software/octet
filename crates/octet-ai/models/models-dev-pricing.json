@@ -440,20 +440,6 @@
     "output": 0,
     "reasoning": null
   },
-  "groq/llama-3.1-8b-instant": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 50000,
-    "output": 80000,
-    "reasoning": null
-  },
-  "groq/llama-3.3-70b-versatile": {
-    "cache_read": 0,
-    "cache_write_5m": 0,
-    "input": 590000,
-    "output": 790000,
-    "reasoning": null
-  },
   "groq/meta-llama/llama-prompt-guard-2-22m": {
     "cache_read": 0,
     "cache_write_5m": 0,
@@ -487,13 +473,6 @@
     "cache_write_5m": 0,
     "input": 75000,
     "output": 300000,
-    "reasoning": null
-  },
-  "groq/qwen/qwen3.6-27b": {
-    "cache_read": 300000,
-    "cache_write_5m": 0,
-    "input": 600000,
-    "output": 3000000,
     "reasoning": null
   },
   "groq/qwen/qwen3.8-27b": {

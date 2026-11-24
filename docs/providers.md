@@ -614,6 +614,9 @@ A pinned models.dev supplement fills in what a provider's model list leaves out:
 only models that built-in discovery actually returns, and it's looked up per
 provider. It never supplies tool or structured-output flags or reasoning
 controls, and it never replaces a value the endpoint states.
+The supplement skips Groq models marked deprecated and omits the retired OpenAI
+and Azure `gpt-5-chat-latest` and Mistral `devstral-medium-latest` and `pixtral-12b`
+IDs, as well as Mistral’s undocumented `mistral-medium-3.5` alias.
 
 <details>
 <summary>How the supplement and its live refresh work</summary>

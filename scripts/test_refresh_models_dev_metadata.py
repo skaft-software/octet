@@ -192,6 +192,23 @@ class MetadataRefreshTests(unittest.TestCase):
     def output_state(self, outputs):
         return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in outputs.values()}
 
+    def test_filter_pinned_removes_only_reviewed_routes_without_fetching(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, outputs, argv = self.prepare_check(Path(temporary))
+            receipt = outputs.pop("--source-output")
+            before = receipt.read_bytes()
+            for path in outputs.values():
+                path.write_text(json.dumps({"groq/qwen/qwen3.6-27b": {},
+                                            "openrouter/qwen/qwen3.6-27b": {},
+                                            "mistral/pixtral-12b": {}}))
+            with patch.object(sys, "argv", argv + ["--filter-pinned"]), \
+                 patch.object(refresh, "download_source", side_effect=AssertionError), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                refresh.main()
+            for path in outputs.values():
+                self.assertEqual(json.loads(path.read_text()), {"openrouter/qwen/qwen3.6-27b": {}})
+            self.assertEqual(receipt.read_bytes(), before)
+
     def test_live_unrelated_provider_change_passes_without_writing(self):
         with tempfile.TemporaryDirectory() as temporary:
             source, outputs, argv = self.prepare_check(Path(temporary))

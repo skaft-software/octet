@@ -36,7 +36,15 @@ CAPABILITY_FIELDS = (
 # exclusions beside the refresh boundary so stale upstream data cannot make a
 # dead route look supported or priced.
 UNSUPPORTED_MODEL_IDS = {
-    "openai": {"gpt-5.6"},
+    # Pi b3adbc804, packages/ai/catalog/providers/openai.ts:96-105: shut down July 23.
+    "openai": {"gpt-5.6", "gpt-5-chat-latest"},
+    "azure": {"gpt-5-chat-latest"},
+    "mistral": {
+        # Pi 8c47efc7b, packages/ai/catalog/providers/mistral.ts:7-14: undocumented ID.
+        "mistral-medium-3.5",
+        # Pi 4d6a37d08, packages/ai/test/{context-overflow,image-tool-result}.test.ts:388,289.
+        "devstral-medium-latest", "pixtral-12b",
+    },
 }
 
 # A reviewed source correction, like the exclusions above: pi keeps Baseten's
@@ -120,7 +128,8 @@ MODEL_REQUIRES_TOOL_CALL = {
     "qwen-token-plan-individual",
     "zai-coding-cn",
 }
-MODEL_SKIPS_DEPRECATED = {"baseten"}
+# Pi 8c47efc7b, packages/ai/catalog/providers/groq.ts:9-11.
+MODEL_SKIPS_DEPRECATED = {"baseten", "groq"}
 # Retired Alibaba Token Plan alias excluded for every variant
 # (`scripts/generate-models.ts` `QWEN_TOKEN_PLAN_EXCLUDED_MODEL_IDS`).
 EXCLUDED_MODEL_IDS = {
@@ -357,17 +366,7 @@ def validate_source_receipt(path: Path) -> None:
         raise SystemExit(f"invalid models.dev source receipt: {path}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=Path,
-                        help="local api.json fixture; downloads models.dev when omitted")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--names-output", type=Path, default=DEFAULT_NAMES_OUTPUT)
-    parser.add_argument("--capabilities-output", type=Path, default=DEFAULT_CAPABILITIES_OUTPUT)
-    parser.add_argument("--source-output", type=Path, default=DEFAULT_SOURCE_OUTPUT)
-    parser.add_argument("--check", action="store_true",
-                        help="compare deterministic outputs without writing")
-    args = parser.parse_args()
+def source_outputs(args: argparse.Namespace) -> dict:
     if args.source:
         with args.source.open("rb") as source:
             raw = source.read(MAX_SNAPSHOT_BYTES + 1)
@@ -378,7 +377,7 @@ def main() -> None:
     catalog = json.loads(raw, parse_constant=reject_json_constant)
     if not isinstance(catalog, dict):
         raise SystemExit("models.dev api.json must contain an object")
-    outputs = {
+    return {
         args.output: snapshot(catalog),
         args.names_output: names_snapshot(catalog),
         args.capabilities_output: capabilities_snapshot(catalog),
@@ -388,6 +387,34 @@ def main() -> None:
             "unverified_pricing_providers": sorted(UNVERIFIED_PRICING_PROVIDERS),
         },
     }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--filter-pinned", action="store_true",
+                        help="apply reviewed ID exclusions to existing snapshots offline")
+    inputs.add_argument("--source", type=Path,
+                        help="local api.json fixture; downloads models.dev when omitted")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--names-output", type=Path, default=DEFAULT_NAMES_OUTPUT)
+    parser.add_argument("--capabilities-output", type=Path, default=DEFAULT_CAPABILITIES_OUTPUT)
+    parser.add_argument("--source-output", type=Path, default=DEFAULT_SOURCE_OUTPUT)
+    parser.add_argument("--check", action="store_true",
+                        help="compare deterministic outputs without writing")
+    args = parser.parse_args()
+    if args.filter_pinned:
+        # The projections omit status. These are the Groq shutdowns confirmed
+        # by Pi 8c47efc7b; normal refreshes use the source status instead.
+        deprecated = {"groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile",
+                      "groq/qwen/qwen3.6-27b"}
+        outputs = {
+            path: {key: value for key, value in json.loads(path.read_text()).items()
+                   if supported_model(*key.split("/", 1)) and key not in deprecated}
+            for path in (args.output, args.names_output, args.capabilities_output)
+        }
+    else:
+        outputs = source_outputs(args)
     for path, result in outputs.items():
         if not result:
             raise SystemExit(f"models.dev api.json contained no records for {path}")

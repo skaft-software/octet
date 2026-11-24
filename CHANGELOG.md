@@ -15,6 +15,10 @@
 - Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.
 - Update url to fix a stack overflow when reading the origin of nested `blob:` URLs.
 
+### Removed
+
+- Remove metadata for `gpt-5-chat-latest` on OpenAI and Azure, deprecated Groq models, and retired or undocumented Mistral IDs.
+
 ## [0.10.6] - 2026-11-20
 
 ### Added
