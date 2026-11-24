@@ -43,3 +43,15 @@ fn hyperlinks_show_the_destination_and_reject_active_content() {
     let unicode = SafeUrl::parse("https://example.com/界").unwrap();
     assert_eq!(unicode.as_str(), "https://example.com/%E7%95%8C");
 }
+
+#[test]
+fn hyperlink_url_byte_limit() {
+    let prefix = "https://example.com/";
+    let mut url = format!("{prefix}{}", "a".repeat(8192 - prefix.len()));
+    assert_eq!(
+        safe_hyperlink(&url, &url, true, false),
+        format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
+    );
+    url.push('a');
+    assert_eq!(safe_hyperlink(&url, &url, true, false), url);
+}

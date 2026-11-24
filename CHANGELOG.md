@@ -14,6 +14,7 @@
 - Report a failing Pi `pi.events` listener as its own extension issue instead of failing the extension that emitted the event.
 - Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.
 - Update url to fix a stack overflow when reading the origin of nested `blob:` URLs.
+- Show very long URLs as plain text so wrapping a multi-megabyte URL cannot exhaust memory by repeating its hyperlink on every row.
 
 ### Removed
 

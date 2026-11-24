@@ -200,7 +200,8 @@ available to the application for logs/forensics.
 
 `SafeUrl` allows `http`, `https`, `mailto`, `file`, `ssh`, and `git`, rejects
 controls/bidi overrides/active schemes, and percent-encodes unsafe payload bytes.
-OSC 8 is emitted only when both capability and validation succeed. Link targets
+Targets over 8192 bytes (before or after encoding) remain visible as text without
+a terminal hyperlink. OSC 8 is emitted only when both capability and validation succeed. Link targets
 remain visible even when OSC 8 is active, preventing label-only destination
 spoofing.
 

@@ -138,6 +138,9 @@ pub fn sanitize_line(input: &str, ascii: bool) -> Cow<'_, str> {
     )
 }
 
+// Match Pi packages/tui/src/terminal-image.ts:812 (6ca01d1e9), counting payload bytes.
+pub(crate) const MAX_HYPERLINK_URL_BYTES: usize = 8192;
+
 /// A destination that is safe to place inside an OSC 8 payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeUrl(String);
@@ -146,6 +149,9 @@ impl SafeUrl {
     /// Validate a caller-provided URL. Network, mail, and local-file schemes are
     /// accepted; active-content schemes are rejected.
     pub fn parse(target: &str) -> Option<Self> {
+        if target.len() > MAX_HYPERLINK_URL_BYTES {
+            return None;
+        }
         let target = target.trim();
         if target.is_empty()
             || target.chars().any(|character| {
@@ -186,7 +192,7 @@ impl SafeUrl {
                 escaped.push(char::from(byte));
             }
         }
-        Some(Self(escaped))
+        (escaped.len() <= MAX_HYPERLINK_URL_BYTES).then_some(Self(escaped))
     }
 
     pub fn as_str(&self) -> &str {

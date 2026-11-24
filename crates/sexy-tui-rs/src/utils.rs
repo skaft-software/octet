@@ -4,6 +4,7 @@
 //! In particular Pi assigns every visible tab three cells and carries exact
 //! style state across wrapping and overlay boundaries.
 
+use crate::sanitize::MAX_HYPERLINK_URL_BYTES;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -300,11 +301,12 @@ impl AnsiState {
             let Some((params, url)) = body.split_once(';') else {
                 return;
             };
-            self.hyperlink = (!url.is_empty()).then(|| Hyperlink {
-                params: params.into(),
-                url: url.into(),
-                terminator: terminator.into(),
-            });
+            self.hyperlink =
+                (!url.is_empty() && url.len() <= MAX_HYPERLINK_URL_BYTES).then(|| Hyperlink {
+                    params: params.into(),
+                    url: url.into(),
+                    terminator: terminator.into(),
+                });
             return;
         }
         let Some(parameters) = code
@@ -985,7 +987,8 @@ pub fn hyperlink_at_column(line: &str, column: usize) -> Option<String> {
                     .or_else(|| body.strip_suffix("\x1b\\"));
                 if let Some(body) = body {
                     if let Some((_params, url)) = body.split_once(';') {
-                        active = (!url.is_empty()).then(|| url.to_owned());
+                        active = (!url.is_empty() && url.len() <= MAX_HYPERLINK_URL_BYTES)
+                            .then(|| url.to_owned());
                     }
                 }
             }

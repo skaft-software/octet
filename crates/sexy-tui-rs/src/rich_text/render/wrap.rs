@@ -20,7 +20,9 @@ use super::RichRenderer;
 use crate::capabilities::SupportLevel;
 use crate::glyphs::GlyphSet;
 use crate::rich_text::{Inline, StatusKind};
-use crate::sanitize::{sanitize_text, ControlPictures, SafeUrl, SanitizeOptions};
+use crate::sanitize::{
+    sanitize_text, ControlPictures, SafeUrl, SanitizeOptions, MAX_HYPERLINK_URL_BYTES,
+};
 use crate::style::{Color, TextRole, TextStyle};
 
 impl RichRenderer {
@@ -100,24 +102,27 @@ impl RichRenderer {
                     push_run(output, self.sanitize(code), style, link.map(str::to_owned));
                 }
                 Inline::Link { label, target } => {
-                    let before = output.len();
-                    self.flatten_inline(
-                        label,
-                        base.merge(self.theme.style(TextRole::Link)),
-                        Some(target),
-                        output,
-                    );
-                    let label_text = output[before..]
+                    // Drop oversized destinations before wrapping can copy them into each row.
+                    let link = (target.len() <= MAX_HYPERLINK_URL_BYTES).then_some(target.as_str());
+                    let style = if link.is_some() {
+                        base.merge(self.theme.style(TextRole::Link))
+                    } else {
+                        base
+                    };
+                    let mut label_runs = Vec::new();
+                    self.flatten_inline(label, style, link, &mut label_runs);
+                    let label_text = label_runs
                         .iter()
                         .map(|run| run.text.as_str())
                         .collect::<String>();
+                    output.extend(label_runs);
                     let safe_target = self.sanitize(target);
                     if label_text.trim() != safe_target.trim() {
                         push_run(
                             output,
                             format!(" ({safe_target})"),
-                            base.merge(self.theme.style(TextRole::Link)),
-                            Some(target.clone()),
+                            style,
+                            link.map(str::to_owned),
                         );
                     }
                 }
