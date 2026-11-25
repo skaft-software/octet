@@ -991,3 +991,48 @@ fn config_custom_scope_cli_override_warns_once_for_a_real_miss() {
     assert!(stderr.contains("missing-route"), "{stderr}");
     octet.shutdown_with_input(&[PICKER_ESCAPE, b"\x04"].concat());
 }
+
+#[test]
+fn job_control_restores_and_redraws_for_key_and_signal() {
+    let mut octet = PtyOctet::spawn(Path::new(env!("CARGO_BIN_EXE_octet")));
+    octet.pty.wait_for(b"probe");
+    octet.pty.write_input(b"retained draft");
+    octet.pty.wait_for(b"retained draft");
+    let pid = octet.child.id() as libc::pid_t;
+    for external in [false, true] {
+        octet.pty.output.clear();
+        if external {
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGTSTP) }, 0);
+        } else {
+            octet.pty.write_input(b"\x1a");
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        let mut status = 0;
+        loop {
+            // A real emulator consumes the final frame while the job restores the tty.
+            octet.pty.read_available();
+            if unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) } == pid {
+                assert!(libc::WIFSTOPPED(status));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "job did not stop (external signal: {external})"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut termios = std::mem::MaybeUninit::uninit();
+        assert_eq!(
+            unsafe { libc::tcgetattr(octet.pty.slave.as_raw_fd(), termios.as_mut_ptr()) },
+            0
+        );
+        let cooked = libc::ECHO | libc::ICANON;
+        assert_eq!(unsafe { termios.assume_init() }.c_lflag & cooked, cooked);
+        octet.pty.read_available();
+        assert!(contains_bytes(&octet.pty.output, b"\x1b[?2004l"));
+        octet.pty.output.clear();
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+        octet.pty.wait_for(b"retained draft");
+    }
+    octet.shutdown();
+}

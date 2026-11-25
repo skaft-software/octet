@@ -6,6 +6,7 @@
 
 - Show GLM-5.3 thinking levels (low, high, max) on the Z.AI coding provider. ([#746](https://github.com/skaft-software/octet/pull/746) by [@Wateir](https://github.com/Wateir))
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
+- Suspend octet with Ctrl+Z or `kill -TSTP`, and redraw the screen when it resumes with `fg`.
 
 ### Changed
 

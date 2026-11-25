@@ -261,6 +261,7 @@ Key IDs in `keybindings.json` keep their existing spelling.
 | Ctrl+C | Clear a draft. With no draft, abort active work; when idle, close octet. |
 | Ctrl+Shift+C | Copy the in-app transcript selection (also copied when a drag is released). |
 | Ctrl+Shift+A | Select the semantic transcript; focused panels retain their own input. |
+| Ctrl+Z | Suspend octet on Unix. An external `kill -TSTP PID` does the same while octet owns the terminal. Run `fg` to resume and redraw. |
 | Ctrl+D | Close octet from any input, after active work and child processes are cleaned up. |
 | Ctrl+P / Ctrl+Shift+P | Cycle models within the resolved `--models` scope (or the available catalog with no scope). Backward is Alt+P on Windows and WSL. Drafts are kept. |
 | Ctrl+L | Open the model selector. |

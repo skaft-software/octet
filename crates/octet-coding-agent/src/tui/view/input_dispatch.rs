@@ -788,6 +788,11 @@ impl InteractiveShell {
                 if let Some(action) = keymap::editor_binding(key, &bindings, true) {
                     return InputAction::Edit(action);
                 }
+                #[cfg(unix)]
+                if key.kind == KeyEventKind::Press && bindings.matches(key, "app.suspend") {
+                    super::job_control::request();
+                    return InputAction::Ignore;
+                }
                 if key.kind == KeyEventKind::Press && bindings.matches(key, "app.message.copy") {
                     self.copy_last_assistant();
                     return InputAction::Ignore;
