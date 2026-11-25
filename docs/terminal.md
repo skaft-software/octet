@@ -354,6 +354,7 @@ where the terminal supports it.
 
 ### Markdown selection copy
 
+Rendered Markdown hides HTML comments, but keeps comment syntax inside code.
 Assistant selections copy the corresponding retained original Markdown source,
 never Markdown regenerated from plain text. Fully selected headings, emphasis,
 links, list items, fenced code blocks (including language), and table rows keep

@@ -34,6 +34,7 @@
 - Send tools that prefer strict sampling with their original non-strict schema when they contain untyped nodes.
 - Send Mistral Conversations tools as non-strict by default.
 - Print the resume command on its own line when octet exits.
+- Hide HTML comments in rendered Markdown.
 
 ### Removed
 

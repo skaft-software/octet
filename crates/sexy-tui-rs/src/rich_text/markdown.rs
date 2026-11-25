@@ -315,6 +315,7 @@ struct Builder<'a> {
     source: &'a str,
     math: &'a [MathToken],
     next_math: usize,
+    trim_after_comment: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -324,6 +325,7 @@ impl<'a> Builder<'a> {
             source,
             math,
             next_math: 0,
+            trim_after_comment: false,
         }
     }
 
@@ -343,6 +345,7 @@ impl<'a> Builder<'a> {
     }
 
     fn event(&mut self, event: Event<'_>, range: Option<Range<usize>>) {
+        let trim = std::mem::take(&mut self.trim_after_comment);
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(_) => self.close_top(range),
@@ -350,7 +353,15 @@ impl<'a> Builder<'a> {
                 if let Some(Frame::Code { code, .. } | Frame::Html(code)) = self.stack.last_mut() {
                     code.push_str(&text);
                 } else {
-                    self.text(&text, range);
+                    let visible = if trim {
+                        text.trim_start_matches([' ', '\t'])
+                    } else {
+                        &text
+                    };
+                    self.text(
+                        visible,
+                        range.map(|r| (r.start + text.len() - visible.len())..r.end),
+                    );
                 }
             }
             Event::Code(code) => self.append_inline(Inline::Code(code.into_string())),
@@ -359,6 +370,14 @@ impl<'a> Builder<'a> {
             }
             Event::DisplayMath(math) => {
                 self.append_block(Block::Plain(format!("$${}$$", math.into_string())))
+            }
+            // Pi packages/tui/src/components/markdown.ts:863-872 hides inline comments
+            // without doubling the space between adjacent words.
+            Event::InlineHtml(html) if html.starts_with("<!--") => {
+                self.trim_after_comment = trim
+                    || range.is_some_and(|r| {
+                        r.start == 0 || self.source[..r.start].ends_with([' ', '\t', '\n'])
+                    });
             }
             Event::Html(html) | Event::InlineHtml(html) => {
                 self.append_inline(Inline::Raw(html.into_string()))
@@ -572,7 +591,23 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            Frame::Html(html) => self.append_block(Block::Plain(html)),
+            Frame::Html(html) => {
+                // Block HTML can arrive in pieces, including a multiline or unfinished comment.
+                if !html.contains("<!--") {
+                    self.append_block(Block::Plain(html));
+                    return;
+                }
+                let mut rest = html.as_str();
+                let mut visible = String::new();
+                while let Some((before, comment)) = rest.split_once("<!--") {
+                    visible.push_str(before);
+                    rest = comment.split_once("-->").map_or("", |(_, after)| after);
+                }
+                visible.push_str(rest);
+                if !visible.trim().is_empty() {
+                    self.append_block(Block::Plain(visible.trim_start().to_owned()));
+                }
+            }
             Frame::List { kind, items } => self.append_block(Block::List(List { kind, items })),
             Frame::Item(item) => {
                 if let Some(Frame::List { items, .. }) = self.stack.last_mut() {

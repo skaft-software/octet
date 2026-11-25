@@ -997,3 +997,13 @@ fn rich_literal_continuation_retains_rows_and_append_local_layout() {
         assert!(work(large) <= work(small) * 5 / 2, "{small:?} -> {large:?}");
     }
 }
+
+#[test]
+fn comment_preview_keeps_source_without_painting_it() {
+    let mut stream = StreamingMarkdown::default();
+    stream.push_str("<!-- hidden");
+    assert!(stream.preview().is_empty());
+    stream.push_str("\nmetadata -->\nSee <!-- note --> this.");
+    assert_eq!(stream.preview().plain_text(), "See this.\n");
+    assert!(stream.raw_text().contains("metadata"));
+}

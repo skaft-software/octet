@@ -586,7 +586,9 @@ impl StreamingMarkdown {
             Block::Plain(_) => true,
             _ => true,
         });
-        if rich {
+        // A comment-only parse can be empty or plain prose. Publishing its
+        // literal source here would bring the hidden comment back.
+        if rich || self.tail[..end].contains("<!--") {
             self.preview_prose = false;
             self.prose_pending_soft_break = false;
             self.prose_at_boundary = false;
@@ -1279,7 +1281,8 @@ fn display_math_opening(line: &str) -> Option<(&'static str, &str)> {
 
 fn likely_complete_inline(source: &str) -> bool {
     let paired = |marker: char| source.matches(marker).nth(1).is_some();
-    source.contains('$')
+    source.contains("<!--")
+        || source.contains('$')
         || source.contains("\\(")
         || source.contains("\\[")
         || paired('*')

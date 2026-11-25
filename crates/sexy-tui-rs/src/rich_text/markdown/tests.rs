@@ -97,3 +97,24 @@ fn html_like_and_malformed_markdown_remain_visible() {
     assert!(plain.contains("visible"));
     assert!(plain.contains("unfinished"));
 }
+
+#[test]
+fn hides_html_comments_but_not_code() {
+    for (source, visible) in [
+        ("before <!-- note --> after", "before after"),
+        ("a<!-- inline -->b", "ab"),
+        (
+            "> quote\n>\n> <!-- skip -->\n>\n> text",
+            "> quote\n>\n> text",
+        ),
+        ("- one\n\n  <!-- skip -->\n\n  two", "- one\n\n  two"),
+        ("<!-- skip --> trailing text", "trailing text"),
+        ("<!-- multi\nline -->\n\n> text\n\n<!-- streaming", "> text"),
+        ("<div>\n<!-- hidden -->ok</div>", "<div>\nok</div>"),
+    ] {
+        assert_eq!(parse(source).plain_text(), parse(visible).plain_text());
+    }
+    assert!(parse("`<!-- literal -->`")
+        .plain_text()
+        .contains("<!-- literal -->"));
+}
