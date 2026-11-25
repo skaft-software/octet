@@ -1213,15 +1213,13 @@ impl CompactionContext<'_> {
                 "active history contains bitmap frames; switch to a vision-capable model before continuing".into(),
             ));
         }
-        let context_window = self.model.spec.limits.context_window;
+        let model = self.model;
+        let context_window = model.spec.limits.context_window;
         let budget = context_window.saturating_sub(compaction_reserve_tokens);
         let threshold = ((context_window as f64) * self.threshold_fraction).floor() as u64;
         let resolve = |input_tokens, active_system, mut effective_request: Option<Request>| {
-            let max_output_tokens = resolve_request_max_output_tokens(
-                context_window,
-                input_tokens,
-                provider_output_ceiling,
-            );
+            let max_output_tokens =
+                resolve_request_max_output_tokens(model, input_tokens, provider_output_ceiling);
             if let Some(request) = effective_request.as_mut() {
                 request.max_output_tokens = Some(max_output_tokens);
             }

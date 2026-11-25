@@ -1726,16 +1726,48 @@ fn idle_session_replacement_updates_the_durable_owner() {
     assert_ne!(agent.resource_owner, first_owner);
 }
 
+fn output_budget_model(url: &str, window: u64) -> Model {
+    let mut model = octet_ai::ModelCatalog::builtin()
+        .unwrap()
+        .resolve(&octet_ai::ModelId("gpt-4o-mini".into()))
+        .unwrap();
+    Arc::make_mut(&mut model.endpoint).base_url = url.parse().unwrap();
+    Arc::make_mut(&mut model.spec).limits.context_window = window;
+    model
+}
+
+#[test]
+fn openrouter_output_leaves_room_for_input_overcount() {
+    let model = output_budget_model("https://openrouter.ai/api/v1/", 1_048_576);
+    for (input, ceiling, expected) in [
+        (220_815, 943_718, 794_638),
+        (220_815, 64_000, 64_000),
+        (912_000, 943_718, 32_768),
+        (1_030_000, 943_718, 14_480),
+    ] {
+        assert_eq!(
+            resolve_request_max_output_tokens(&model, input, ceiling),
+            expected
+        );
+    }
+    let other = output_budget_model("https://example.org/", 1_048_576);
+    assert_eq!(
+        resolve_request_max_output_tokens(&other, 220_815, 943_718),
+        823_665
+    );
+}
+
 #[test]
 fn request_output_uses_provider_ceiling_then_clamps_to_remaining_context() {
+    let model = output_budget_model("http://localhost/", 200_000);
     assert_eq!(
-        resolve_request_max_output_tokens(200_000, 20_000, 65_536),
+        resolve_request_max_output_tokens(&model, 20_000, 65_536),
         65_536
     );
     // The remaining window is 30_000; the reserved headroom is 1% of the
     // window (2_000), so the request never sits on the boundary.
     assert_eq!(
-        resolve_request_max_output_tokens(200_000, 170_000, 65_536),
+        resolve_request_max_output_tokens(&model, 170_000, 65_536),
         28_000
     );
 }
@@ -1748,8 +1780,9 @@ fn request_output_uses_provider_ceiling_then_clamps_to_remaining_context() {
 #[test]
 fn request_output_keeps_estimator_slack_for_a_locally_served_model() {
     let window = 131_072;
+    let model = output_budget_model("http://localhost/", window);
     let estimated_input = 100_176;
-    let requested = resolve_request_max_output_tokens(window, estimated_input, window);
+    let requested = resolve_request_max_output_tokens(&model, estimated_input, window);
     assert_eq!(requested, 29_586);
     // Provider-side counting differences of this size are covered.
     for provider_input in [
@@ -1764,9 +1797,9 @@ fn request_output_keeps_estimator_slack_for_a_locally_served_model() {
     }
     // A prompt that already fills or exceeds the window reserves nothing and
     // cannot fabricate a negative cap.
-    assert_eq!(resolve_request_max_output_tokens(window, window, window), 0);
+    assert_eq!(resolve_request_max_output_tokens(&model, window, window), 0);
     assert_eq!(
-        resolve_request_max_output_tokens(window, window + 5_000, window),
+        resolve_request_max_output_tokens(&model, window + 5_000, window),
         0
     );
     // Small windows keep a proportionate reserve rather than a fixed bite.

@@ -31,7 +31,10 @@ no extra percentage buffer. `max_active_tokens` sets a smaller working set if
 you want one. The model's advertised maximum output is still the request
 ceiling, and it only shrinks when the input leaves less room in the window. When
 it does shrink, octet keeps a small headroom (1% of the window, clamped to 256
-to 4096 tokens), because the provider counts tokens its own way.
+to 4096 tokens), because the provider counts tokens its own way. On OpenRouter,
+octet leaves at least 15% of the estimated input as headroom when that still
+leaves 32,768 tokens for output. Otherwise it requests at most 32,768 output
+tokens and keeps the usual fixed margin.
 
 If a provider rejects a request for size, octet recovers where it can. Local
 compaction runs at the next reducible boundary and the request is retried,

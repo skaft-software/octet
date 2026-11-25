@@ -394,8 +394,7 @@ impl InferenceDriver {
             .unwrap_or(self.limits.max_output_tokens)
             .min(self.limits.max_output_tokens)
             .min(model.spec.limits.max_output_tokens);
-        let output =
-            resolve_request_max_output_tokens(model.spec.limits.context_window, input, requested);
+        let output = resolve_request_max_output_tokens(&model, input, requested);
         if output == 0 {
             return Err(refused("tool inference has no output capacity"));
         }

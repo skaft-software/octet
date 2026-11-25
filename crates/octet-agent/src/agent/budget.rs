@@ -67,15 +67,12 @@ pub(super) fn request_output_headroom(context_window: u64) -> u64 {
 }
 
 pub(super) fn resolve_request_max_output_tokens(
-    context_window: u64,
+    model: &Model,
     input_tokens: u64,
     provider_output_ceiling: u64,
 ) -> u64 {
-    provider_output_ceiling.min(
-        context_window
-            .saturating_sub(input_tokens)
-            .saturating_sub(request_output_headroom(context_window)),
-    )
+    let fixed_margin = request_output_headroom(model.spec.limits.context_window);
+    provider_output_ceiling.min(model.output_room_for_estimate(input_tokens, fixed_margin))
 }
 
 pub(super) fn add_usage(total: &mut Usage, turn: &Usage) {

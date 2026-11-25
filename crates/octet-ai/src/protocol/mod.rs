@@ -6,6 +6,23 @@ use crate::error::{AiError, ConfigError};
 use crate::stream::{ResponseBuilder, StreamEvent};
 use crate::types::{CacheCompatibility, CacheRetention, Request};
 
+impl crate::Model {
+    /// Output room after the estimated input and the caller's safety margin.
+    pub fn output_room_for_estimate(&self, input_tokens: u64, fixed_margin: u64) -> u64 {
+        let remaining = self.spec.limits.context_window.saturating_sub(input_tokens);
+        let fixed_room = remaining.saturating_sub(fixed_margin);
+        if self.endpoint.base_url.host_str() != Some("openrouter.ai") {
+            return fixed_room;
+        }
+
+        // Pi packages/ai/src/api/simple-options.ts:28-34 (0a4fad548): reserve
+        // 15% of estimated input for OpenRouter's tokenizer overcount. Near a
+        // full window, allow up to 32K output without eating the fixed margin.
+        let margin = (u128::from(input_tokens) * 15).div_ceil(100) as u64;
+        fixed_room.min(remaining.saturating_sub(margin).max(32_768))
+    }
+}
+
 /// Wire cache-control marker shared by Anthropic and compatible endpoints.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct CacheControl {

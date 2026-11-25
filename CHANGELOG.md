@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Leave room for input when octet sets an OpenRouter output limit.
 - Send the system role instead of developer to OpenAI-compatible Chat Completions hosts other than api.openai.com.
 - Check for updates with a small fixed-size request, so `octet update` keeps working as releases grow.
 - Replay Responses tool calls as completed, so GPT-6.2 keeps earlier reasoning after a reconnect.
