@@ -4,7 +4,7 @@
 
 ### Added
 
-- Show the GLM-5.3 family's thinking levels (low, high, max) on the Z.AI coding provider via its pinned models.dev record. ([#746](https://github.com/skaft-software/octet/pull/746) by [@Wateir](https://github.com/Wateir))
+- Show GLM-5.3 thinking levels (low, high, max) on the Z.AI coding provider. ([#746](https://github.com/skaft-software/octet/pull/746) by [@Wateir](https://github.com/Wateir))
 - Support installed Pi 1.5.2 and 1.6.0 as reviewed releases, without the untested-release warning.
 
 ### Changed
@@ -13,22 +13,22 @@
 
 ### Fixed
 
+- Check for updates with a small fixed-size request, so `octet update` keeps working as releases grow.
+- Replay Responses tool calls as completed, so GPT-6.2 keeps earlier reasoning after a reconnect.
+- Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.
+- Load symlinked skill files, directories and roots, so skills managed by Nix and similar tools work.
+- Include custom provider models named by `models` in config.toml in the Ctrl+P ring.
 - Support xhigh thinking on Gemini 4 Hydrogen and Neon, recognize prefixed Gemini 3+ models, and report Google prompt blocks clearly.
 - Open Pi custom components that pass `blocked`, and report octet as waiting on you until they close.
 - Report a Pi `pi.exec` command ended by a signal with exit code 128 plus the signal number, so a timeout or crash never reads as success.
 - Run a Pi Markdown transformer only on the message types it registers for with `messageTypes`.
 - Report a failing Pi `pi.events` listener as its own extension issue instead of failing the extension that emitted the event.
-- Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.
-- Update url to fix a stack overflow when reading the origin of nested `blob:` URLs.
-- Show very long URLs as plain text so wrapping a multi-megabyte URL cannot exhaust memory by repeating its hyperlink on every row.
-- Load symlinked skill files, directories and roots, so skills managed by Nix and similar tools work.
-- Check for updates with a small fixed-size request, independent of the number of files in a release.
-- Include custom provider models named by `models` in config.toml in the Ctrl+P ring.
-- Replay Responses tool calls as completed, so GPT-6.2 keeps earlier reasoning after a reconnect.
+- Show very long URLs as plain text, so a multi-megabyte URL can't exhaust memory.
+- Fix a stack overflow when octet reads nested `blob:` URLs.
 
 ### Removed
 
-- Remove metadata for `gpt-5-chat-latest` on OpenAI and Azure, deprecated Groq models, and retired or undocumented Mistral IDs.
+- Remove `gpt-5-chat-latest` on OpenAI and Azure, deprecated Groq models and retired Mistral IDs, which their providers shut down.
 
 ## [0.10.6] - 2026-11-20
 
