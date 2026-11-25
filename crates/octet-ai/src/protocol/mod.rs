@@ -113,8 +113,8 @@ pub(crate) mod sse;
 /// Pi's per-API `supportsStrictMode` default with a model's explicit
 /// declaration applied.
 ///
-/// Responses defaults off except Azure/Codex; Google and Mistral default on;
-/// Anthropic and Bedrock default off. Public OpenAI Chat accepts strict tools,
+/// Responses defaults off except Azure/Codex; Google depends on the model;
+/// Anthropic, Bedrock and Mistral default off. Public OpenAI Chat accepts strict tools,
 /// but unknown compatible Chat endpoints do not inherit that guarantee. A model
 /// preset may override the route default in either direction.
 pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
@@ -147,13 +147,17 @@ pub(crate) fn strict_mode_for(model: &crate::catalog::Model) -> bool {
     if model.spec.protocol == Protocol::AnthropicMessages {
         return anthropic_strict_tools_for(model);
     }
-    if model.spec.protocol == Protocol::BedrockConverse {
+    // Pi packages/ai/src/api/mistral-conversations.ts:532-534 (2c2a77f9f):
+    // strict tools can stall Mistral Large 4 before a call.
+    if matches!(
+        model.spec.protocol,
+        Protocol::BedrockConverse | Protocol::MistralConversations
+    ) {
         return false;
     }
     if model.spec.protocol == Protocol::GoogleGenerativeAi {
         return google::gemini_3_or_later(&model.spec.api_name);
     }
-    // Mistral and future routes retain their existing defaults.
     true
 }
 

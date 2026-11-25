@@ -1068,6 +1068,9 @@ resolver.
 
 ## Native Mistral Conversations (experimental codec)
 
+Mistral Conversations sends tools in non-strict mode by default, leaving
+optional parameters optional. This avoids delays before tool calls on Mistral Large 4.
+
 The native Conversations codec passes its deterministic request and SSE
 fixtures, including rejection of credential-bearing or non-TLS destinations
 before credential resolution (literal loopback HTTP is allowed for local

@@ -734,12 +734,12 @@ fn strict_and_grammar_tool_support_are_per_route_declared_defaults() {
     );
     assert_eq!(older["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
 
-    // Native Mistral Conversations keeps Pi's compliant strict default.
+    // Native Mistral Conversations keeps the original schema for preferred tools.
+    let original = strict_tool.parameters.clone();
     let mistral = body(Protocol::MistralConversations, vec![strict_tool], none);
-    assert_eq!(
-        mistral["tools"][0]["function"]["parameters"]["additionalProperties"],
-        false
-    );
+    let function = &mistral["tools"][0]["function"];
+    assert_eq!(function["strict"], false);
+    assert_eq!(function["parameters"], original);
 }
 
 #[test]

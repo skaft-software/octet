@@ -367,7 +367,7 @@ async fn interleaved_native_calls_round_trip_as_entries_with_exact_ids() {
     assert_eq!(
         body["tools"][0],
         json!({"type": "function", "function": {
-            "name": "lookup", "description": "Look up a city.", "parameters": {
+            "name": "lookup", "description": "Look up a city.", "strict": false, "parameters": {
                 "type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]
             }
         }})
