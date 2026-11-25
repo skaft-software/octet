@@ -98,3 +98,34 @@ fn grammar_uses_lark_then_regex_and_infers_input_property() {
     assert_eq!(resolved.input_property, "input");
     assert!(resolve_grammar(&tool_def, false).unwrap().is_none());
 }
+
+#[test]
+fn untyped_nodes_fall_back_only_when_strict_is_preferred() {
+    for property in [
+        json!({"type": "array", "items": {}}),
+        json!({"const": "fast"}),
+        json!({"description": "Any value"}),
+    ] {
+        let schema = json!({"type": "object", "properties": {"value": property}});
+        let mut tool = tool(
+            "sample",
+            schema.clone(),
+            Some(ConstrainedSampling::JsonSchema {
+                strict: ConstrainedSamplingStrict::Prefer,
+            }),
+        );
+        assert_eq!(
+            function_tool_parameters(&tool, true).unwrap(),
+            (schema, false)
+        );
+        tool.constrained_sampling = Some(ConstrainedSampling::JsonSchema {
+            strict: ConstrainedSamplingStrict::Require,
+        });
+        assert!(function_tool_parameters(&tool, true)
+            .unwrap_err()
+            .to_string()
+            .contains("schemas without a type"));
+    }
+    let schema = json!({"type": "object", "properties": {"value": {"anyOf": [{"enum": ["fast", "slow"]}, {"type": "null"}]}}});
+    assert!(make_strict_json_schema(&schema).is_ok());
+}

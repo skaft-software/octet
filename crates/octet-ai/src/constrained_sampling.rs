@@ -364,6 +364,15 @@ fn make_node_strict(value: &mut Value) -> Result<(), StrictSchemaError> {
         }
     }
 
+    // Pi packages/ai/src/api/constrained-sampling.ts:73-76 (406e719a6):
+    // enum and anyOf can stand alone in a strict schema, but const cannot.
+    if !object.contains_key("type") && !object.contains_key("anyOf") && !object.contains_key("enum")
+    {
+        return Err(StrictSchemaError::new(
+            "schemas without a type are unsupported",
+        ));
+    }
+
     if let Some(any_of) = object.get_mut("anyOf") {
         let variants = match any_of.as_array_mut() {
             Some(variants) if !variants.is_empty() => variants,

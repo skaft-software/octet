@@ -878,6 +878,12 @@ structured output, output limits and reasoning. Google uses native
 translation. Knowing a protocol doesn't imply [native audio
 support](media.md#formats-and-limits).
 
+When a tool prefers strict JSON-schema sampling but has an untyped node (such
+as `items: {}` or a bare `const`), octet sends that tool's original schema
+without strict sampling. Other tools keep their own strict settings. A tool
+that requires strict sampling fails locally instead. An `enum` or `anyOf` node
+doesn't need a separate `type`.
+
 Codex inference uses ordinary Responses with `parallel_tool_calls: true`, like
 Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
 `parallel_tool_calls: false`. Host execution is independent of the wire flag:

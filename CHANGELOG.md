@@ -29,6 +29,7 @@
 - Retry dropped connections and Cloudflare 525 errors before any output arrives.
 - Retry temporary provider and gateway failures, including empty responses and Chat Completions streams that end with an error.
 - Retry temporary throttling when a provider reports that the request rate increased too quickly.
+- Send tools that prefer strict sampling with their original non-strict schema when they contain untyped nodes.
 
 ### Removed
 
