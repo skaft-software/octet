@@ -963,7 +963,9 @@ fn completed_opaque_async_history_survives_tool_removal_or_advertisement_changes
             );
             let body: serde_json::Value =
                 serde_json::from_slice(&build_request(&model, &later).unwrap().body).unwrap();
-            assert_eq!(body["input"][0], call);
+            let mut expected_call = call.clone();
+            expected_call["status"] = "completed".into();
+            assert_eq!(body["input"][0], expected_call);
             assert_eq!(body["input"][1], result);
             let mut unqualified = model.clone();
             Arc::make_mut(&mut unqualified.endpoint)

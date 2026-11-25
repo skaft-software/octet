@@ -197,6 +197,9 @@ async fn compact_codex_posts_rich_exact_body_and_preserves_complete_output() {
             "call_id": "call_exact",
             "output": "instructions"
         })),
+        input_item(
+            serde_json::json!({"type":"custom_tool_call", "call_id":"custom", "name":"language", "input":"text"}),
+        ),
     ]);
     let expected_body = serde_json::json!({
         "model": "gpt-compact",
@@ -206,13 +209,15 @@ async fn compact_codex_posts_rich_exact_body_and_preserves_complete_output() {
                 "call_id": "call_exact",
                 "name": "read",
                 "arguments": "{\"path\":\"AGENTS.md\"}",
+                "status": "completed",
                 "unknown_input": true
             },
             {
                 "type": "function_call_output",
                 "call_id": "call_exact",
                 "output": "instructions"
-            }
+            },
+            {"type":"custom_tool_call", "call_id":"custom", "name":"language", "input":"text", "status":"completed"}
         ],
         "instructions": "retain exact state",
         "tools": [{

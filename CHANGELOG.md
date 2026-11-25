@@ -23,6 +23,7 @@
 - Load symlinked skill files, directories and roots, so skills managed by Nix and similar tools work.
 - Check for updates with a small fixed-size request, independent of the number of files in a release.
 - Include custom provider models named by `models` in config.toml in the Ctrl+P ring.
+- Replay Responses tool calls as completed, so GPT-6.2 keeps earlier reasoning after a reconnect.
 
 ### Removed
 

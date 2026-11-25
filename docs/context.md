@@ -142,6 +142,9 @@ design](design/octet-agent.md#sessions).
 <details>
 <summary>Responses replay, the tool-schema budget and snap-compact</summary>
 
+- When a reconnect requires the full Responses history, octet replays completed
+  function and custom tool calls with their status so GPT-6.2 keeps the reasoning
+  that followed those calls.
 - When a normal Responses turn has no complete same-route output sidecar (older
   sessions, or a completed response without terminal `output`), octet replays
   the canonical conversation instead and sends the current effective reasoning

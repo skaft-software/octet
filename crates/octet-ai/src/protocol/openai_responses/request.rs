@@ -583,6 +583,7 @@ pub(crate) fn build_request(
         items.extend(input.into_items());
         input = crate::responses::ResponsesInput::new(items);
     }
+    input.complete_replayed_tool_calls();
     let mut wire_input = into_wire_input(input);
     if !responses_lite {
         map_grammar_replay(

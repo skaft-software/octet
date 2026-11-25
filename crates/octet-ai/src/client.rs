@@ -1620,6 +1620,7 @@ impl AiClient {
             .join("responses/compact")
             .map_err(|error| crate::error::ConfigError::Parse(error.to_string()))?;
         let proxy = self.request_proxy(&url)?;
+        request.input.complete_replayed_tool_calls();
         let body = serde_json::to_vec(&request)
             .map_err(|error| AiError::Decode(DecodeError::Json(error.to_string())))?;
         let mut headers = model.endpoint.default_headers.clone();

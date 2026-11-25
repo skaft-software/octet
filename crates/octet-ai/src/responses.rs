@@ -268,6 +268,20 @@ impl ResponsesInput {
         self.0.iter().any(ResponsesItem::is_compaction)
     }
 
+    /// Match the provider's stored prefix when full history is resent after a reconnect.
+    /// Pi: packages/ai/src/api/openai-responses-shared.ts:387 at 69a699348.
+    pub(crate) fn complete_replayed_tool_calls(&mut self) {
+        for item in &mut self.0 {
+            if matches!(
+                item.0["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            ) && item.0.get("status").is_none()
+            {
+                item.0["status"] = "completed".into();
+            }
+        }
+    }
+
     /// Removes image detail hints that the Responses Lite input contract does
     /// not accept. This mirrors Codex request preparation for both messages and
     /// function-call outputs while leaving all other opaque provider fields

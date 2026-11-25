@@ -641,15 +641,26 @@ fn moved_input_keeps_canonical_and_opaque_grammar_replay_distinct() {
     assert_eq!(serde_json::to_value(&req).unwrap(), original);
     let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
     assert_eq!(body["input"][1]["type"], "custom_tool_call");
+    assert_eq!(body["input"][1]["status"], "completed");
     assert_eq!(body["input"][1]["input"], source);
     assert!(body["input"][1].get("arguments").is_none());
     assert_eq!(body["input"][2]["type"], "custom_tool_call_output");
+
+    let mut plain = req.clone();
+    plain.tools[0].constrained_sampling = None;
+    let body: serde_json::Value =
+        serde_json::from_slice(&build_request(&model, &plain).unwrap().body).unwrap();
+    assert_eq!(body["input"][1]["type"], "function_call");
+    assert_eq!(body["input"][1]["status"], "completed");
 
     let mut raw = vec![
         serde_json::json!({"type":"function_call", "name":"language", "call_id":"function|exact", "arguments":"{\"source\":\"unchanged\"}", "future":true}),
         serde_json::json!({"type":"custom_tool_call", "name":"language", "call_id":"custom|exact", "input":source, "future":[null, true]}),
         serde_json::json!({"type":"function_call_output", "call_id":"custom|exact", "output":"ok", "future":{"keep":true}}),
         serde_json::json!({"type":"function_call_output", "call_id":"function|exact", "output":"unconverted"}),
+        serde_json::json!({"type":"custom_tool_call", "call_id":"other", "name":"language", "input":source, "status":"incomplete"}),
+        serde_json::json!({"type":"computer_call", "call_id":"desktop"}),
+        serde_json::json!({"type":"reasoning", "id":"rs_exact"}),
     ];
     req.responses = Some(ResponsesOptions::full_replay(ResponsesInput::new(
         raw.iter()
@@ -662,6 +673,8 @@ fn moved_input_keeps_canonical_and_opaque_grammar_replay_distinct() {
     assert_eq!(first.body, build_request(&model, &req).unwrap().body);
     assert_eq!(serde_json::to_value(&req).unwrap(), original);
     let body: serde_json::Value = serde_json::from_slice(&first.body).unwrap();
+    raw[0]["status"] = "completed".into();
+    raw[1]["status"] = "completed".into();
     raw[2]["type"] = "custom_tool_call_output".into();
     assert_eq!(body["input"], serde_json::Value::Array(raw));
 }
