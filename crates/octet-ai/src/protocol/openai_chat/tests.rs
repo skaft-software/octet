@@ -98,6 +98,25 @@ fn make_test_model(
 }
 
 #[test]
+fn reasoning_instruction_role_depends_on_endpoint_host() {
+    let mut model = make_test_model(false, false, false, false, true, false);
+    let req = Request {
+        system: Some("instructions".into()),
+        ..base_request()
+    };
+    for (base_url, role) in [
+        ("https://api.openai.com/v1/", "developer"),
+        ("https://api.groq.com/openai/v1/", "system"),
+        ("https://api.openai.com.example/v1/", "system"),
+    ] {
+        Arc::make_mut(&mut model.endpoint).base_url = base_url.parse().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&build_request(&model, &req).unwrap().body).unwrap();
+        assert_eq!(body["messages"][0]["role"], role, "{base_url}");
+    }
+}
+
+#[test]
 fn openrouter_summary_reasoning_never_invents_a_disable() {
     use crate::types::{ReasoningControl, ReasoningOptions};
     let mut model = make_test_model(false, false, false, false, true, false);

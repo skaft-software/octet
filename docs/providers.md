@@ -884,6 +884,9 @@ without strict sampling. Other tools keep their own strict settings. A tool
 that requires strict sampling fails locally instead. An `enum` or `anyOf` node
 doesn't need a separate `type`.
 
+Chat Completions sends instructions as `system` on compatible hosts such as Groq.
+Only reasoning models on `api.openai.com` can receive the `developer` role.
+
 Codex inference uses ordinary Responses with `parallel_tool_calls: true`, like
 Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
 `parallel_tool_calls: false`. Host execution is independent of the wire flag:

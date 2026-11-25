@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Send the system role instead of developer to OpenAI-compatible Chat Completions hosts other than api.openai.com.
 - Check for updates with a small fixed-size request, so `octet update` keeps working as releases grow.
 - Replay Responses tool calls as completed, so GPT-6.2 keeps earlier reasoning after a reconnect.
 - Keep the system prompt cached on GPT-6.2 after native compaction by sending it as the leading developer message.

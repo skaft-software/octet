@@ -372,7 +372,10 @@ pub(crate) fn build_request(
                 }])
             },
         );
+        // Pi packages/ai/src/api/openai-completions.ts:1641-1648 (b82477b7b):
+        // other hosts may reject developer even for reasoning models.
         if has_reasoning
+            && model.endpoint.base_url.host_str() == Some("api.openai.com")
             && custom_profile.is_none_or(|profile| profile.supports_developer_role)
             && !deepseek_thinking
             && !matches!(reasoning_mode, Some(OpenAiChatReasoningMode::SystemMessage))

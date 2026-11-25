@@ -1113,14 +1113,8 @@ async fn custom_chat_continuation_uses_captured_baseline_or_actual_helper_overri
         assert_eq!(requests.len(), 1);
         let payload: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(payload["model"], "wire-model");
-        assert_eq!(
-            payload["messages"][0]["role"],
-            if profile.supports_developer_role {
-                "developer"
-            } else {
-                "system"
-            }
-        );
+        // The custom host uses system even if the helper advertises developer support.
+        assert_eq!(payload["messages"][0]["role"], "system");
         assert_eq!(payload["tool_choice"], "auto");
         let tool = &payload["tools"][0]["function"];
         assert_eq!(tool["name"], "native_tool");
