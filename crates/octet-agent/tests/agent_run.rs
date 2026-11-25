@@ -10367,7 +10367,7 @@ async fn unknown_responses_terminals_have_eleven_replacements_in_main_and_auxili
         for incomplete in [false, true] {
             for failures in [11, 12] {
                 let failed = if incomplete {
-                    String::from("data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"future_unknown_reason\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+                    interrupted_responses_prefix("started") + "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"future_unknown_reason\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
                 } else {
                     interrupted_responses_prefix("started")
                         + &format!(

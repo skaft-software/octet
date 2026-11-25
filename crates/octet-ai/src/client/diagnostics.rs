@@ -240,7 +240,19 @@ fn sanitize_http_error(redactor: &CredentialRedactor, error: &mut crate::error::
             _ => "The provider rejected the request. Check the model and request settings.",
         }
     };
+    // Preserve classification, not remote prose, across the HTTP diagnostic boundary.
     error.provider_code = code.clone().or_else(|| kind.clone());
+    if error.provider_code.as_deref() == Some("slow_down")
+        && error.status == http::StatusCode::TOO_MANY_REQUESTS
+        && remote_message.is_some_and(crate::error::mentions_rate_ramp)
+    {
+        error.provider_code = Some(
+            kind.as_deref()
+                .filter(|kind| *kind != "slow_down" && crate::error::permanent_provider_code(kind))
+                .unwrap_or("rate_limit_exceeded")
+                .into(),
+        );
+    }
     if raw.is_some() || error.provider_code.is_some() {
         let mut fields = serde_json::Map::from_iter([("message".into(), message.into())]);
         if let Some(code) = code {

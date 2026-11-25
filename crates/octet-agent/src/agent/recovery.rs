@@ -148,7 +148,8 @@ pub(super) fn retryable_provider_error(error: &octet_ai::ProviderError) -> bool 
     if text.contains("quota exceeded") || text.contains("insufficient_quota") {
         return false;
     }
-    if error.kind.as_deref() == Some("api_error")
+    if octet_ai::error::mentions_rate_ramp(&error.message)
+        || error.kind.as_deref() == Some("api_error")
         || (error.kind.as_deref() == Some("finish_reason")
             && error.code.as_deref() == Some("error"))
     {

@@ -947,7 +947,8 @@ an accepted POST or a body disconnect. A stream that drops before any text, reas
 or tool call arrives can be retried, as can transient socket errors and HTTP
 520, 524 or 525. Temporary provider and gateway errors, including Anthropic
 `api_error`, upstream empty responses, queue admission ceilings and Chat
-Completions `finish_reason: "error"`, follow the same pre-output rule. Once output has started, the agent reports the interruption
+Completions `finish_reason: "error"`, follow the same pre-output rule. So do throttles that say
+the request rate increased too quickly, including `slow_down` with that wording. Once output has started, the agent reports the interruption
 instead of repeating it. A fresh request can still duplicate remote work and
 incur unknown charges even when nothing was shown. The agent keeps finite streamed-inference replacement
 and HTTP-admission retry budgets separate, without resetting on transport

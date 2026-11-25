@@ -138,7 +138,7 @@ request failures do not qualify. Only codec-owned `StreamFailure` wrapping
 raw decode errors do not. Typed `ResponsesFailed` provenance authorizes unknown
 qualified terminal errors, not arbitrary `Provider` errors. Explicit permanent
 provider codes outrank retry- or context-sounding messages, including policy,
-auth, quota, `server_is_overloaded`, and `slow_down` denials. The counter survives re-preparation and WebSocket-to-HTTP fallback;
+auth, quota, `server_is_overloaded`, and `slow_down` denials without rate-ramp wording. The counter survives re-preparation and WebSocket-to-HTTP fallback;
 it resets only on a completed assistant response. The failed stream is dropped
 before hooks, compaction, waiting, or opening another attempt. Remote cancellation
 and exactly-once provider charges are not promised.
@@ -166,7 +166,7 @@ JSON null, and its kind is `waiting_for_network`; qualified inference replacemen
 uses `interrupted_inference`. `ProviderRetryContext.operation` is the typed
 auxiliary operation, or `None` (JSON null) for a main assistant request. Hooks
 receive the owning run/resource identity and cannot shorten host/provider delay.
-Post-generation `rate_limit_exceeded` is retryable on the qualified route, with
+Before output, `rate_limit_exceeded` is retryable on the qualified route, with
 Codex-style "try again in" seconds/milliseconds hints honored; permanent quota,
 usage-not-included and request codes remain excluded.
 

@@ -247,8 +247,16 @@ pub struct ProviderError {
     pub request_id: Option<String>,
 }
 
+// Pi compatibility: packages/ai/src/utils/retry.ts:49-50 (0888fd79a).
+#[doc(hidden)]
+pub fn mentions_rate_ramp(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("rate increased too quickly")
+}
+
 impl ProviderError {
-    /// Typed code/kind retry veto, independent of provider message text.
+    /// Typed code/kind retry veto, except a slow_down explicitly describing a rate ramp.
     /// Includes pinned Responses overload denials (`server_is_overloaded`,
     /// `slow_down`), not ordinary transient `overloaded_error`.
     pub fn is_permanent(&self) -> bool {
@@ -256,7 +264,10 @@ impl ProviderError {
             .as_deref()
             .into_iter()
             .chain(self.kind.as_deref())
-            .any(permanent_provider_code)
+            .any(|code| {
+                permanent_provider_code(code)
+                    && !(code == "slow_down" && mentions_rate_ramp(&self.message))
+            })
     }
 }
 

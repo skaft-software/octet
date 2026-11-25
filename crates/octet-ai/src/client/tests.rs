@@ -673,3 +673,18 @@ async fn google_files_rejects_an_oversized_clip_before_uploading_earlier_clips()
         .to_string();
     assert!(error.contains("20 MiB"), "{error}");
 }
+
+#[test]
+fn http_slow_down_with_rate_ramp_preserves_only_retry_evidence() {
+    for (kind, retry) in [("slow_down", true), ("insufficient_quota", false)] {
+        let error = sanitize_ai_error(&CredentialRedactor::default(), AiError::Http(HttpError {
+            status: http::StatusCode::TOO_MANY_REQUESTS, request_id: None, retry_after: None, provider_code: Some("slow_down".into()), retryable: true,
+            body_snippet: Some(serde_json::json!({"error":{"type":kind,"message":"Your request rate increased too quickly (private details)"}}).to_string()),
+        }));
+        let AiError::Http(http) = error else {
+            unreachable!()
+        };
+        assert_eq!(http.is_safe_to_retry(), retry);
+        assert!(!http.to_string().contains("private details"));
+    }
+}

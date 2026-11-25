@@ -805,3 +805,15 @@ fn temporary_provider_frames_retry_without_permanent_denials() {
         "provider unavailable for this model"
     )));
 }
+
+#[test]
+fn temporary_rate_ramp_retries_even_with_slow_down_code() {
+    for code in [None, Some("slow_down"), Some("insufficient_quota")] {
+        let mut error = frame_error(None, "Your request rate increased too quickly");
+        error.code = code.map(str::to_owned);
+        assert_eq!(
+            retryable_provider_error(&error),
+            code != Some("insufficient_quota")
+        );
+    }
+}

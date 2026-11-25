@@ -165,7 +165,7 @@ host policy can treat unknown failed terminals separately without broadening
 arbitrary provider-error retry. `ProviderError::is_permanent()` shares typed
 code/kind vetoes with HTTP classification, including policy/quota/context/auth
 errors and pinned Codex `server_is_overloaded` / `slow_down` denials (not generic
-`overloaded_error`). `HttpError::is_transient_server_error()` covers all 5xx,
+`overloaded_error`). A `slow_down` that explicitly reports a rate ramp is transient. `HttpError::is_transient_server_error()` covers all 5xx,
 including 520, with the same veto; it is solely a hint for host-qualified finite
 replacement and does not broaden the legacy `is_safe_to_retry()` whitelist.
 
