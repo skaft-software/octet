@@ -27,6 +27,7 @@
 - Fix a stack overflow when octet reads nested `blob:` URLs.
 - Continue a conversation on a different model without a reasoning-state error, as Pi does.
 - Retry dropped connections and Cloudflare 525 errors before any output arrives.
+- Retry temporary provider and gateway failures, including empty responses and Chat Completions streams that end with an error.
 
 ### Removed
 

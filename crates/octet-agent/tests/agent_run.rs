@@ -12605,3 +12605,44 @@ mod cache_audit;
 
 #[path = "agent_run/cross_model_resume.rs"]
 mod cross_model_resume;
+
+#[tokio::test]
+async fn chat_finish_reason_error_retries_before_output_only() {
+    for partial in [false, true] {
+        let server = MockServer::start().await;
+        let delta = if partial {
+            r#"{"content":"partial"}"#
+        } else {
+            "{}"
+        };
+        let failed = format!("data: {{\"id\":\"chat\",\"choices\":[{{\"delta\":{delta},\"finish_reason\":\"error\"}}]}}\n\ndata: [DONE]\n\n");
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(Script {
+                bodies: vec![failed, openai_text_turn("recovered")],
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let mut agent = build_responses_agent_from_session(
+            openai_multimodal_model(&server.uri()),
+            Session::create(workspace.path().join("session.jsonl")).unwrap(),
+            workspace.path(),
+            Some(4),
+            "system",
+            ReasoningConfig::Off,
+        );
+        let result = agent.complete("finish").await;
+        if partial {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().text, "recovered");
+        }
+        assert_eq!(
+            wire_requests(&server).await.len(),
+            if partial { 1 } else { 2 }
+        );
+        assert!(agent.session().has_uncertain_usage());
+    }
+}

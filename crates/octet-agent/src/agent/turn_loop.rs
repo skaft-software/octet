@@ -1395,7 +1395,7 @@ impl Agent {
                     if matches!(next, Next::Event(Some(Ok(StreamEvent::Started { .. })))) { native.started(response_stream.response_id()); }
                     let next = match next {
                         Next::Event(Some(Ok(StreamEvent::Finished(response)))) => {
-                            match incomplete_responses_error(&model, &response) {
+                            match terminal_provider_error(&model, &response) {
                                 Some(error) => Next::Event(Some(Err(error))),
                                 None => Next::Event(Some(Ok(StreamEvent::Finished(response)))),
                             }

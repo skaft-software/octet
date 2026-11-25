@@ -461,7 +461,7 @@ impl InferenceDriver {
             ))
         } else if !output_bounded {
             Err(refused("tool inference output exceeds the host byte limit"))
-        } else if incomplete_responses_error(&flight.model, &response).is_some()
+        } else if terminal_provider_error(&flight.model, &response).is_some()
             || response.deferred.is_some()
         {
             Err(refused(

@@ -767,3 +767,41 @@ fn socket_error_frames_retry_only_for_known_words() {
         );
     }
 }
+
+#[test]
+fn temporary_provider_frames_retry_without_permanent_denials() {
+    for (kind, message) in [
+        (Some("api_error"), "Internal failure"),
+        (None, "Provider returned an empty response"),
+        (None, "The model stopped before completing the response."),
+        (None, "Repeat the request later"),
+        (None, "admission ceiling"),
+        (None, "The provider is temporarily unavailable."),
+        (
+            None,
+            "The provider ended the response before it was complete.",
+        ),
+        (None, "The connection to the provider was reset."),
+        (
+            None,
+            "The provider reported a failure while generating the response.",
+        ),
+    ] {
+        assert!(
+            retryable_provider_error(&frame_error(kind, message)),
+            "{message}"
+        );
+        assert!(!retryable_provider_error(&frame_error(
+            Some("insufficient_quota"),
+            message
+        )));
+    }
+    assert!(!retryable_provider_error(&frame_error(
+        Some("api_error"),
+        "Monthly quota exceeded"
+    )));
+    assert!(!retryable_provider_error(&frame_error(
+        None,
+        "provider unavailable for this model"
+    )));
+}
