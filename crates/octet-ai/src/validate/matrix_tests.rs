@@ -422,11 +422,9 @@ fn reasoning_state_mismatch() {
         protocol: Protocol::AnthropicMessages,
     })];
     let c = caps(false, false, false, false, true, false);
-    assert!(matches!(
-        run(&req, &c, Protocol::OpenAiResponses),
-        Err(AiError::Unsupported(
-            UnsupportedError::ReasoningStateMismatch { .. }
-        ))
+    assert!(has_code(
+        &run(&req, &c, Protocol::OpenAiResponses).unwrap(),
+        "dropped_reasoning_state"
     ));
     req.compatibility = Lossy;
     assert!(has_code(
@@ -450,7 +448,7 @@ fn reasoning_state_same_protocol_mismatch_names_both_models() {
                 },
             }),
         })],
-        model: ModelId("codex/gpt-6.1-terra".into()),
+        model: ModelId("codex/gpt-6.1-sol".into()),
         protocol: Protocol::OpenAiResponses,
     })];
     let error = validate_request(

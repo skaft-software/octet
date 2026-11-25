@@ -1297,6 +1297,28 @@ pub struct AssistantMessage {
     pub protocol: Protocol,
 }
 
+impl AssistantMessage {
+    // Pi v1.6.0 packages/ai/src/api/transform-messages.ts:122-137: only
+    // the producing model can replay its thinking, including readable text.
+    pub(crate) fn produced_by(&self, protocol: Protocol, model: &ModelId) -> bool {
+        self.protocol == protocol && &self.model == model
+    }
+
+    pub(crate) fn replay_parts<'a>(
+        &'a self,
+        target: &'a crate::Model,
+    ) -> impl Iterator<Item = &'a AssistantPart> {
+        let spec = &target.spec;
+        let same = self.produced_by(spec.protocol, &spec.id);
+        self.content.iter().filter(move |part| match part {
+            AssistantPart::Reasoning(reasoning) => {
+                same && reasoning.replayable_on(spec.protocol, &spec.id)
+            }
+            _ => true,
+        })
+    }
+}
+
 /// Part of a user message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UserPart {
@@ -1458,6 +1480,34 @@ pub struct ReasoningPart {
     pub text: Option<String>,
     /// Opaque continuation metadata for replaying context.
     pub state: Option<ReasoningState>,
+}
+
+impl ReasoningPart {
+    pub(crate) fn replayable_on(&self, protocol: Protocol, model: &ModelId) -> bool {
+        let Some(state) = &self.state else {
+            return matches!(
+                protocol,
+                Protocol::OpenAiChat | Protocol::GoogleGenerativeAi | Protocol::ExtensionStream
+            );
+        };
+        state.protocol == protocol
+            && &state.model == model
+            && match (&state.kind, protocol) {
+                (ReasoningStateKind::OpenAiReasoning { .. }, Protocol::OpenAiResponses)
+                | (ReasoningStateKind::ChatReasoningDetails { .. }, Protocol::OpenAiChat)
+                | (
+                    ReasoningStateKind::AnthropicSignature { .. }
+                    | ReasoningStateKind::AnthropicRedacted { .. },
+                    Protocol::AnthropicMessages | Protocol::PiMessages,
+                )
+                | (ReasoningStateKind::AnthropicRedacted { .. }, Protocol::BedrockConverse) => true,
+                (
+                    ReasoningStateKind::AnthropicSignature { signature },
+                    Protocol::BedrockConverse,
+                ) => !signature.is_empty(),
+                _ => false,
+            }
+    }
 }
 
 /// Opaque reasoning continuation state.

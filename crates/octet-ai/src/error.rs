@@ -630,5 +630,14 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+impl Diagnostic {
+    pub(crate) fn dropped_reasoning_state() -> Self {
+        Self {
+            code: "dropped_reasoning_state".into(),
+            message: "Reasoning cannot be replayed on the target model".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

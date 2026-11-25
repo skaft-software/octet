@@ -381,7 +381,7 @@ pub(super) fn map_assistant_input(
     // Preserve canonical part order: buffered assistant text is flushed as a
     // `message` item immediately before each function/reasoning item.
     let mut text_parts = Vec::new();
-    for part in &assistant.content {
+    for part in assistant.replay_parts(model) {
         match part {
             AssistantPart::Text(text) => text_parts.push(text.clone()),
             AssistantPart::ToolCall(tool_call) => {

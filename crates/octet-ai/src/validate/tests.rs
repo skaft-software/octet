@@ -222,3 +222,92 @@ fn test_audio_input_gate() {
     .unwrap();
     assert_eq!(res_lossy[0].code, "dropped_audio");
 }
+
+#[test]
+fn responses_requires_state_only_for_its_own_reasoning() {
+    let model = ModelId("codex/target".into());
+    for (source, protocol) in [
+        (ModelId("deepseek/chat".into()), Protocol::OpenAiChat),
+        (ModelId("codex/other".into()), Protocol::OpenAiResponses),
+        (model.clone(), Protocol::OpenAiResponses),
+    ] {
+        let same_model = source == model;
+        let request = Request {
+            messages: vec![Message::Assistant(AssistantMessage {
+                protocol,
+                model: source,
+                content: vec![AssistantPart::Reasoning(crate::ReasoningPart {
+                    text: Some("private".into()),
+                    state: None,
+                })],
+            })],
+            ..base_request()
+        };
+        let result = validate_request(
+            &request,
+            &dummy_caps(false, false, false, false, true, false),
+            &dummy_limits(),
+            Protocol::OpenAiResponses,
+            &model,
+            CompatibilityMode::Strict,
+        );
+        if same_model {
+            assert!(matches!(
+                result,
+                Err(AiError::Unsupported(
+                    UnsupportedError::ReasoningStateMismatch { .. }
+                ))
+            ));
+        } else {
+            assert_eq!(result.unwrap()[0].code, "dropped_reasoning_state");
+        }
+    }
+}
+
+#[test]
+fn strict_rejects_corrupt_same_model_reasoning_state() {
+    let model = ModelId("target".into());
+    for (protocol, kind) in [
+        (
+            Protocol::BedrockConverse,
+            crate::ReasoningStateKind::AnthropicSignature {
+                signature: String::new(),
+            },
+        ),
+        (
+            Protocol::OpenAiResponses,
+            crate::ReasoningStateKind::AnthropicRedacted {
+                data: "opaque".into(),
+            },
+        ),
+    ] {
+        let req = Request {
+            messages: vec![Message::Assistant(AssistantMessage {
+                protocol,
+                model: model.clone(),
+                content: vec![AssistantPart::Reasoning(crate::ReasoningPart {
+                    text: None,
+                    state: Some(crate::ReasoningState {
+                        protocol,
+                        model: model.clone(),
+                        kind,
+                    }),
+                })],
+            })],
+            ..base_request()
+        };
+        assert!(matches!(
+            validate_request(
+                &req,
+                &dummy_caps(false, false, false, false, true, false),
+                &dummy_limits(),
+                protocol,
+                &model,
+                CompatibilityMode::Strict
+            ),
+            Err(AiError::Unsupported(
+                UnsupportedError::ReasoningStateMismatch { .. }
+            ))
+        ));
+    }
+}

@@ -243,7 +243,7 @@ fn google_contents(
                     && assistant.model == model.spec.id;
                 let mut pending_signature = None;
                 let mut parts = Vec::new();
-                for part in &assistant.content {
+                for part in assistant.replay_parts(model) {
                     match part {
                         AssistantPart::ProviderMetadata(
                             ProviderPartMetadata::GoogleThoughtSignature { signature },

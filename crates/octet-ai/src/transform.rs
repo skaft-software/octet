@@ -63,13 +63,35 @@ pub fn transform_messages(messages: &[Message], target: &Model) -> Vec<Message> 
     if target.spec.protocol == Protocol::MistralConversations {
         // Native entries have unconstrained string call IDs. Keep content intact
         // for explicit Strict/Lossy handling by the codec, not Chat placeholders.
-        return insert_missing_tool_results(messages.to_vec());
+        return mistral_history(messages.to_vec(), target, &mut Vec::new());
     }
     let transformed = messages
         .iter()
         .map(|message| transform_message(message, target))
         .collect();
     insert_missing_tool_results(transformed)
+}
+
+fn mistral_history(
+    mut messages: Vec<Message>,
+    target: &Model,
+    diagnostics: &mut Vec<crate::Diagnostic>,
+) -> Vec<Message> {
+    for message in &mut messages {
+        if let Message::Assistant(assistant) = message {
+            if !assistant.produced_by(target.spec.protocol, &target.spec.id) {
+                assistant.content.retain(|part| {
+                    if matches!(part, AssistantPart::Reasoning(_)) {
+                        diagnostics.push(crate::Diagnostic::dropped_reasoning_state());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+    }
+    insert_missing_tool_results(messages)
 }
 
 /// Normalizes replay history while preserving the pending user-input suffix for
@@ -80,7 +102,7 @@ pub fn transform_messages(messages: &[Message], target: &Model) -> Vec<Message> 
 #[cfg(test)]
 pub(crate) fn transform_request_messages(messages: &[Message], target: &Model) -> Vec<Message> {
     if target.spec.protocol == Protocol::MistralConversations {
-        return insert_missing_tool_results(messages.to_vec());
+        return mistral_history(messages.to_vec(), target, &mut Vec::new());
     }
     let final_assistant = messages
         .iter()
@@ -111,6 +133,19 @@ pub(crate) fn transform_request_messages(messages: &[Message], target: &Model) -
     insert_missing_tool_results(transformed)
 }
 
+pub(crate) fn prepare_request_history(
+    request: &mut crate::Request,
+    target: &Model,
+) -> Vec<crate::Diagnostic> {
+    let mut diagnostics = Vec::new();
+    request.messages = transform_request_messages_owned(
+        std::mem::take(&mut request.messages),
+        target,
+        &mut diagnostics,
+    );
+    diagnostics
+}
+
 /// Owned request-history normalization used on the send path.
 ///
 /// A request is consumed by [`crate::AiClient`], so copying every text block,
@@ -120,9 +155,10 @@ pub(crate) fn transform_request_messages(messages: &[Message], target: &Model) -
 pub(crate) fn transform_request_messages_owned(
     messages: Vec<Message>,
     target: &Model,
+    diagnostics: &mut Vec<crate::Diagnostic>,
 ) -> Vec<Message> {
     if target.spec.protocol == Protocol::MistralConversations {
-        return insert_missing_tool_results(messages);
+        return mistral_history(messages, target, diagnostics);
     }
     let final_assistant = messages
         .iter()
@@ -149,7 +185,7 @@ pub(crate) fn transform_request_messages_owned(
                         .collect(),
                 })
             }
-            message => transform_message_owned(message, target),
+            message => transform_message_owned(message, target, diagnostics),
         })
         .collect();
     insert_missing_tool_results(transformed)
@@ -162,7 +198,7 @@ pub(crate) fn transform_request_preserving_media(
     target: &Model,
 ) -> Vec<Message> {
     if target.spec.protocol == Protocol::MistralConversations {
-        return insert_missing_tool_results(messages);
+        return mistral_history(messages, target, &mut Vec::new());
     }
     let transformed = messages
         .into_iter()
@@ -175,15 +211,19 @@ pub(crate) fn transform_request_preserving_media(
                     .collect(),
             }),
             Message::Assistant(assistant) => {
-                let same_model =
-                    assistant.model == target.spec.id && assistant.protocol == target.spec.protocol;
+                let same_model = assistant.produced_by(target.spec.protocol, &target.spec.id);
                 Message::Assistant(AssistantMessage {
                     content: assistant
                         .content
                         .into_iter()
                         .filter_map(|part| match part {
                             AssistantPart::Media(_) => Some(part),
-                            other => transform_assistant_part_owned(other, same_model, target),
+                            other => transform_assistant_part_owned(
+                                other,
+                                same_model,
+                                target,
+                                &mut || {},
+                            ),
                         })
                         .collect(),
                     model: assistant.model,
@@ -240,7 +280,11 @@ fn transform_message(message: &Message, target: &Model) -> Message {
     }
 }
 
-fn transform_message_owned(message: Message, target: &Model) -> Message {
+fn transform_message_owned(
+    message: Message,
+    target: &Model,
+    diagnostics: &mut Vec<crate::Diagnostic>,
+) -> Message {
     match message {
         Message::User(user) => Message::User(UserMessage {
             content: user
@@ -250,13 +294,16 @@ fn transform_message_owned(message: Message, target: &Model) -> Message {
                 .collect(),
         }),
         Message::Assistant(assistant) => {
-            let same_model =
-                assistant.model == target.spec.id && assistant.protocol == target.spec.protocol;
+            let same_model = assistant.produced_by(target.spec.protocol, &target.spec.id);
             Message::Assistant(AssistantMessage {
                 content: assistant
                     .content
                     .into_iter()
-                    .filter_map(|part| transform_assistant_part_owned(part, same_model, target))
+                    .filter_map(|part| {
+                        transform_assistant_part_owned(part, same_model, target, &mut || {
+                            diagnostics.push(crate::Diagnostic::dropped_reasoning_state())
+                        })
+                    })
                     .collect(),
                 model: assistant.model,
                 protocol: assistant.protocol,
@@ -506,8 +553,7 @@ fn transform_assistant_part(
             Some(AssistantPart::ToolCall(call))
         }
         AssistantPart::Reasoning(reasoning) => {
-            let same_model =
-                source.model == target.spec.id && source.protocol == target.spec.protocol;
+            let same_model = source.produced_by(target.spec.protocol, &target.spec.id);
             if same_model {
                 return Some(AssistantPart::Reasoning(reasoning.clone()));
             }
@@ -544,6 +590,7 @@ fn transform_assistant_part_owned(
     part: AssistantPart,
     same_model: bool,
     target: &Model,
+    on_dropped_reasoning: &mut impl FnMut(),
 ) -> Option<AssistantPart> {
     match part {
         AssistantPart::Text(_) => Some(part),
@@ -561,8 +608,7 @@ fn transform_assistant_part_owned(
             if same_model {
                 return Some(AssistantPart::Reasoning(reasoning));
             }
-            // Same rule as the borrowed transform; never turn foreign thinking
-            // into assistant text on the owned dispatch path.
+            on_dropped_reasoning();
             None
         }
         AssistantPart::Media(Media::Image(_)) => {

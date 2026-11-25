@@ -339,7 +339,7 @@ fn encode_context(
             Message::Assistant(assistant) => {
                 let mut content = Vec::new();
                 let mut has_tool_call = false;
-                for part in &assistant.content {
+                for part in assistant.replay_parts(model) {
                     if matches!(part, crate::types::AssistantPart::ToolCall(_)) {
                         has_tool_call = true;
                     }

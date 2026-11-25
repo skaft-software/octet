@@ -119,7 +119,7 @@ pub(crate) fn build_request(model: &Model, req: &Request) -> Result<HttpRequestP
                 }
             }
             Message::Assistant(assistant) => {
-                for part in &assistant.content {
+                for part in assistant.replay_parts(model) {
                     match part {
                         AssistantPart::Text(text) => inputs.push(json!({
                             "object": "entry", "type": "message.output",

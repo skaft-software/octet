@@ -246,7 +246,7 @@ pub(crate) fn build_request(
                     );
                 }
                 let mut content = Vec::new();
-                for part in &assistant.content {
+                for part in assistant.replay_parts(model) {
                     match part {
                         AssistantPart::Text(text) => content.push(json!({"text": text})),
                         AssistantPart::ToolCall(call) => {

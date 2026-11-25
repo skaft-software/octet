@@ -678,88 +678,27 @@ pub(crate) fn validate_request(
                 for part in &assistant.content {
                     match part {
                         AssistantPart::Reasoning(rp) => {
-                            // Extension-owned streams may emit visible thinking,
-                            // but cannot confer opaque replay authority. That
-                            // text must not block the next tool-result request.
-                            if !matches!(
-                                protocol,
-                                Protocol::OpenAiChat
-                                    | Protocol::GoogleGenerativeAi
-                                    | Protocol::ExtensionStream
-                            ) && rp.state.is_none()
-                            {
-                                if mode == CompatibilityMode::Strict {
-                                    return Err(AiError::Unsupported(
-                                        UnsupportedError::ReasoningStateMismatch {
-                                            have: assistant.protocol,
-                                            have_model: assistant.model.clone(),
-                                            want: protocol,
-                                            want_model: target_model.clone(),
-                                        },
-                                    ));
-                                }
-                                diagnostics.push(Diagnostic {
-                                    code: "dropped_reasoning_state".to_string(),
-                                    message: "Target protocol requires replayable reasoning state"
-                                        .to_string(),
-                                });
+                            let same_model = assistant.produced_by(protocol, target_model);
+                            if same_model && rp.replayable_on(protocol, target_model) {
+                                continue;
                             }
-                            if let Some(state) = &rp.state {
-                                // The pi-messages codec retains the provider's
-                                // opaque continuation payload as the canonical
-                                // signature carriers and stamps the state with
-                                // its own protocol/model, so this route must be
-                                // able to replay those kinds (see
-                                // `protocol::pi_messages::decode_stream_event`
-                                // and `assistant_part_value`).
-                                let kind_matches = matches!(
-                                    (protocol, &state.kind),
-                                    (
-                                        Protocol::OpenAiResponses,
-                                        crate::types::ReasoningStateKind::OpenAiReasoning { .. }
-                                    ) | (
-                                        Protocol::AnthropicMessages,
-                                        crate::types::ReasoningStateKind::AnthropicSignature { .. }
-                                    ) | (
-                                        Protocol::AnthropicMessages | Protocol::BedrockConverse,
-                                        crate::types::ReasoningStateKind::AnthropicRedacted { .. }
-                                    ) | (
-                                        Protocol::BedrockConverse,
-                                        crate::types::ReasoningStateKind::AnthropicSignature { .. }
-                                    ) | (
-                                        Protocol::PiMessages,
-                                        crate::types::ReasoningStateKind::AnthropicSignature { .. }
-                                            | crate::types::ReasoningStateKind::AnthropicRedacted { .. }
-                                    ) | (
-                                        Protocol::OpenAiChat,
-                                        crate::types::ReasoningStateKind::ChatReasoningDetails { .. }
-                                    )
-                                );
-                                let empty_bedrock_signature = protocol == Protocol::BedrockConverse
-                                    && matches!(&state.kind, crate::types::ReasoningStateKind::AnthropicSignature { signature } if signature.is_empty());
-                                if empty_bedrock_signature
-                                    || state.protocol != protocol
-                                    || &state.model != target_model
-                                    || !kind_matches
-                                {
-                                    if mode == CompatibilityMode::Strict {
-                                        return Err(AiError::Unsupported(
-                                            UnsupportedError::ReasoningStateMismatch {
-                                                have: state.protocol,
-                                                have_model: state.model.clone(),
-                                                want: protocol,
-                                                want_model: target_model.clone(),
-                                            },
-                                        ));
-                                    }
-                                    diagnostics.push(Diagnostic {
-                                        code: "dropped_reasoning_state".to_string(),
-                                        message:
-                                            "Reasoning state protocol, kind, or model mismatch"
-                                                .to_string(),
+                            if same_model && mode == CompatibilityMode::Strict {
+                                let (have, have_model) = rp
+                                    .state
+                                    .as_ref()
+                                    .map_or((assistant.protocol, &assistant.model), |state| {
+                                        (state.protocol, &state.model)
                                     });
-                                }
+                                return Err(AiError::Unsupported(
+                                    UnsupportedError::ReasoningStateMismatch {
+                                        have,
+                                        have_model: have_model.clone(),
+                                        want: protocol,
+                                        want_model: target_model.clone(),
+                                    },
+                                ));
                             }
+                            diagnostics.push(Diagnostic::dropped_reasoning_state());
                         }
                         AssistantPart::Media(Media::Audio(audio)) => {
                             let reference = match &audio.payload {

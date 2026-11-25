@@ -330,8 +330,9 @@ pub fn validate_provider_projection(
         validate_provider_request(model, &probe)?;
     }
     let mut normalized = request.clone();
-    normalized.messages = transform::transform_request_messages_owned(normalized.messages, model);
-    validate_provider_request(model, &normalized)
+    let mut replay_diagnostics = transform::prepare_request_history(&mut normalized, model);
+    replay_diagnostics.extend(validate_provider_request(model, &normalized)?);
+    Ok(replay_diagnostics)
 }
 
 /// Strictness for cross-protocol / capability degradation.

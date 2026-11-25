@@ -5,46 +5,39 @@ async fn deepseek_reasoning_session_resumes_on_codex_with_tools() {
     let server = MockServer::start().await;
     let workspace = tempfile::tempdir().unwrap();
     let session_path = workspace.path().join("deepseek.jsonl");
-    let call_id = octet_ai::ToolCallId("deepseek.call|foreign-item".into());
-    let mut session = Session::create(&session_path).unwrap();
-    session
-        .append(EntryValue::Message(Message::User(UserMessage {
-            content: vec![UserPart::Text("inspect the file".into())],
-        })))
-        .unwrap();
-    // DeepSeek's reasoning_content is canonical readable thinking with no opaque
-    // state (octet-ai/tests/fixtures/openai_chat/reasoning.sse).
-    session
-        .append(EntryValue::Message(Message::Assistant(AssistantMessage {
-            model: ModelId("deepseek/deepseek-chat".into()),
-            protocol: Protocol::OpenAiChat,
-            content: vec![
-                AssistantPart::Reasoning(octet_ai::ReasoningPart {
-                    text: Some("private DeepSeek reasoning_content".into()),
-                    state: None,
-                }),
-                AssistantPart::ToolCall(ToolCall {
-                    id: call_id.clone(),
-                    name: "read".into(),
-                    arguments_json: r#"{"path":"lifecycle.txt"}"#.into(),
-                    async_execution: false,
-                    argument_error: None,
-                }),
+    let chat_server = MockServer::start().await;
+    let tool_turn = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private DeepSeek reasoning_content\"}}]}\n\n",
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"deepseek.call|foreign-item","type":"function","function":{"name":"read","arguments":"{\"path\":\"lifecycle.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        "\n\ndata: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(Script {
+            bodies: vec![
+                tool_turn.into(),
+                include_str!("../../../octet-ai/tests/fixtures/openai_chat/reasoning.sse").into(),
             ],
-        })))
-        .unwrap();
-    session
-        .append(EntryValue::Message(Message::User(UserMessage {
-            content: vec![UserPart::ToolResult(octet_ai::ToolResult {
-                tool_call_id: call_id.clone(),
-                tool_name: Some("read".into()),
-                content: vec![octet_ai::ToolResultPart::Text("previous result".into())],
-                is_error: false,
-                added_tool_names: None,
-            })],
-        })))
-        .unwrap();
-    drop(session);
+            next: AtomicUsize::new(0),
+        })
+        .expect(2)
+        .mount(&chat_server)
+        .await;
+    std::fs::write(workspace.path().join("lifecycle.txt"), "previous result").unwrap();
+    let mut chat = openai_multimodal_model(&chat_server.uri());
+    Arc::make_mut(&mut chat.spec).id = ModelId("deepseek/deepseek-chat".into());
+    let mut agent = build_agent_from_session_with_model(
+        chat,
+        workspace.path(),
+        Session::create(&session_path).unwrap(),
+        ReasoningConfig::Off,
+        Some(3),
+    );
+    assert_eq!(
+        agent.complete("inspect the file").await.unwrap().text,
+        "Answer: 42"
+    );
+    drop(agent);
     let saved = std::fs::read(&session_path).unwrap();
     std::fs::write(workspace.path().join("lifecycle.txt"), "current result").unwrap();
     let responses = Arc::new(vec![
@@ -85,6 +78,10 @@ async fn deepseek_reasoning_session_resumes_on_codex_with_tools() {
         let wire = body.to_string();
         assert!(
             !wire.contains("private DeepSeek reasoning_content"),
+            "{wire}"
+        );
+        assert!(
+            wire.contains("Answer: 42") && wire.contains("previous result"),
             "{wire}"
         );
         assert!(!wire.contains("deepseek.call|foreign-item"), "{wire}");

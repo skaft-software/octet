@@ -108,10 +108,16 @@ fn cross_model_reasoning_is_dropped_without_becoming_visible_text() {
         panic!("expected assistant")
     };
     assert!(assistant.content.is_empty());
+    let mut diagnostics = Vec::new();
     let owned = transform_request_messages_owned(
         messages.clone(),
         &model("target", Protocol::OpenAiResponses, false),
+        &mut diagnostics,
     );
+    assert_eq!(diagnostics.len(), 3);
+    assert!(diagnostics
+        .iter()
+        .all(|d| d.code == "dropped_reasoning_state"));
     assert_eq!(
         serde_json::to_value(&transformed).unwrap(),
         serde_json::to_value(owned).unwrap()
@@ -251,7 +257,7 @@ fn audio_transcripts_replace_unreplayable_user_tool_and_assistant_media() {
             if matches!(&content[0], AssistantPart::Text(text) if text == "assistant spoke the answer (provider test, model target)")
     ));
 
-    let owned = transform_request_messages_owned(messages, &target);
+    let owned = transform_request_messages_owned(messages, &target, &mut Vec::new());
     assert_eq!(
         serde_json::to_value(owned).unwrap(),
         serde_json::to_value(transformed).unwrap()
@@ -293,7 +299,12 @@ fn google_audio_history_survives_borrowed_and_owned_request_transforms() {
         expected
     );
     assert_eq!(
-        serde_json::to_value(transform_request_messages_owned(messages, &target)).unwrap(),
+        serde_json::to_value(transform_request_messages_owned(
+            messages,
+            &target,
+            &mut Vec::new()
+        ))
+        .unwrap(),
         expected
     );
 }
@@ -360,7 +371,7 @@ fn owned_request_transform_matches_borrowed_and_moves_pending_text() {
     ];
     let target = model("target", Protocol::AnthropicMessages, false);
     let expected = transform_request_messages(&messages, &target);
-    let actual = transform_request_messages_owned(messages, &target);
+    let actual = transform_request_messages_owned(messages, &target, &mut Vec::new());
     assert_eq!(
         serde_json::to_value(&actual).unwrap(),
         serde_json::to_value(&expected).unwrap()
@@ -467,7 +478,7 @@ fn history_pdfs_replay_only_to_models_that_read_them() {
 
     for transformed in [
         transform_request_messages(&messages, &reader),
-        transform_request_messages_owned(messages.clone(), &reader),
+        transform_request_messages_owned(messages.clone(), &reader, &mut Vec::new()),
     ] {
         let Message::User(user) = &transformed[0] else {
             panic!("expected user")
@@ -486,7 +497,7 @@ fn history_pdfs_replay_only_to_models_that_read_them() {
     for target in [model("vision", Protocol::OpenAiChat, true), pi] {
         for transformed in [
             transform_request_messages(&messages, &target),
-            transform_request_messages_owned(messages.clone(), &target),
+            transform_request_messages_owned(messages.clone(), &target, &mut Vec::new()),
         ] {
             let Message::User(user) = &transformed[0] else {
                 panic!("expected user")

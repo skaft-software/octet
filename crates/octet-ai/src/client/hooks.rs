@@ -192,7 +192,7 @@ pub(super) fn prepare_host_request(
     req: Request,
 ) -> Result<(Request, Vec<crate::error::Diagnostic>), AiError> {
     let mut request = req;
-    request.messages = crate::transform::transform_request_messages_owned(request.messages, model);
+    let mut replay_diagnostics = crate::transform::prepare_request_history(&mut request, model);
     let request = crate::video::prepare_request_owned(model, request)?;
     let request = crate::validate::normalize_request_reasoning(&request, &model.spec.capabilities)
         .into_owned();
@@ -204,7 +204,8 @@ pub(super) fn prepare_host_request(
         &model.spec.id,
         crate::CompatibilityMode::Strict,
     )?;
-    Ok((request, diagnostics))
+    replay_diagnostics.extend(diagnostics);
+    Ok((request, replay_diagnostics))
 }
 
 pub(super) fn open_native_continuation(

@@ -532,8 +532,11 @@ fn video_model_switch_uses_placeholder_without_changing_original() {
         .input_modalities = crate::ModalitySet::none();
     let request = request();
     let transformed = crate::transform_messages(&request.messages, &target);
-    let pending =
-        crate::transform::transform_request_messages_owned(request.messages.clone(), &target);
+    let pending = crate::transform::transform_request_messages_owned(
+        request.messages.clone(),
+        &target,
+        &mut Vec::new(),
+    );
     assert_eq!(
         serde_json::to_value(&pending).unwrap(),
         serde_json::to_value(&transformed).unwrap()

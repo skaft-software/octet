@@ -667,7 +667,7 @@ pub(crate) fn build_request(
                     );
                 }
                 let mut blocks = Vec::new();
-                for part in &assistant.content {
+                for part in assistant.replay_parts(model) {
                     match part {
                         AssistantPart::Text(ref text) => {
                             blocks.push(AnthropicContentBlock::Text {

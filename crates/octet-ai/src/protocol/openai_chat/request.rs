@@ -535,7 +535,7 @@ pub(crate) fn build_request(
                     .filter(|details| !details.is_empty());
                 let mut details_reasoning_text = Vec::new();
 
-                for part in &assistant.content {
+                for part in assistant.replay_parts(model) {
                     match part {
                         AssistantPart::Reasoning(reasoning) if reasoning_details.is_some() => {
                             if let Some(text) = &reasoning.text {

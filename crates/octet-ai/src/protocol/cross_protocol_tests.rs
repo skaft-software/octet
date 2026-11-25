@@ -254,54 +254,110 @@ fn test_lossy_inserts_missing_tool_result_before_next_assistant() {
 }
 
 #[test]
-fn test_cross_protocol_reasoning_state_rejection() {
-    // OpenAI model
-    let model_openai = make_model(Protocol::OpenAiChat, false, false, false, true);
-
-    // Reasoning state from Anthropic (cross-protocol/model mismatch)
-    let state = ReasoningState {
-        model: ModelId("claude-model".to_string()),
-        protocol: Protocol::AnthropicMessages,
-        kind: ReasoningStateKind::AnthropicSignature {
-            signature: "sig_abc".to_string(),
-        },
-    };
-
-    let req = Request {
-        messages: vec![
-            Message::User(UserMessage {
-                content: vec![UserPart::Text("Hello".to_string())],
+fn cross_model_reasoning_is_omitted_from_wire_history() {
+    for (source, target, kind) in [
+        (Protocol::OpenAiChat, Protocol::OpenAiResponses, None),
+        (
+            Protocol::OpenAiResponses,
+            Protocol::OpenAiChat,
+            Some(ReasoningStateKind::OpenAiReasoning {
+                item_id: Some("private-id".into()),
+                encrypted_content: Some("private-ciphertext".into()),
             }),
-            Message::Assistant(AssistantMessage {
-                content: vec![
-                    AssistantPart::Reasoning(ReasoningPart {
-                        text: Some("Thinking".to_string()),
-                        state: Some(state),
-                    }),
-                    AssistantPart::Text("Hi".to_string()),
-                ],
-                model: ModelId("claude-model".to_string()),
-                protocol: Protocol::AnthropicMessages,
+        ),
+        (
+            Protocol::AnthropicMessages,
+            Protocol::OpenAiResponses,
+            Some(ReasoningStateKind::AnthropicSignature {
+                signature: "private-signature".into(),
             }),
-        ],
-        ..base_request()
-    };
-
-    // In Strict mode, it should be rejected
-    let res_strict = crate::protocol::openai_chat::build_request(&model_openai, &req);
-    assert!(
-        res_strict.is_err(),
-        "Expected Strict mode rejection of cross-model reasoning state"
-    );
-
-    // In Lossy mode, it should compile successfully and drop the mismatched state
-    let mut req_lossy = req.clone();
-    req_lossy.compatibility = Lossy;
-    let res_lossy = crate::protocol::openai_chat::build_request(&model_openai, &req_lossy);
-    assert!(
-        res_lossy.is_ok(),
-        "Expected Lossy mode to drop state and pass"
-    );
+        ),
+        (
+            Protocol::OpenAiResponses,
+            Protocol::OpenAiResponses,
+            Some(ReasoningStateKind::OpenAiReasoning {
+                item_id: Some("private-id".into()),
+                encrypted_content: None,
+            }),
+        ),
+    ] {
+        let model = make_model(target, false, false, false, true);
+        let producer = ModelId("source-model".into());
+        let mut req = Request {
+            messages: vec![
+                Message::Assistant(AssistantMessage {
+                    protocol: source,
+                    model: producer.clone(),
+                    content: vec![
+                        AssistantPart::Reasoning(ReasoningPart {
+                            text: Some("private-thinking".into()),
+                            state: kind.map(|kind| ReasoningState {
+                                protocol: source,
+                                model: producer,
+                                kind,
+                            }),
+                        }),
+                        AssistantPart::Text("visible reply".into()),
+                        AssistantPart::ToolCall(ToolCall {
+                            async_execution: false,
+                            id: ToolCallId("call_1".into()),
+                            name: "lookup".into(),
+                            arguments_json: "{}".into(),
+                            argument_error: None,
+                        }),
+                    ],
+                }),
+                Message::User(UserMessage {
+                    content: vec![UserPart::ToolResult(ToolResult {
+                        tool_call_id: ToolCallId("call_1".into()),
+                        tool_name: Some("lookup".into()),
+                        content: vec![ToolResultPart::Text("lookup result".into())],
+                        is_error: false,
+                        added_tool_names: None,
+                    })],
+                }),
+            ],
+            ..base_request()
+        };
+        for mode in [crate::CompatibilityMode::Strict, Lossy] {
+            req.compatibility = mode;
+            let parts = match target {
+                Protocol::OpenAiResponses => super::openai_responses::build_request(&model, &req),
+                Protocol::OpenAiChat => super::openai_chat::build_request(&model, &req),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            assert!(parts
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "dropped_reasoning_state"));
+            let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+            let history = if target == Protocol::OpenAiChat {
+                &body["messages"]
+            } else {
+                &body["input"]
+            };
+            let wire = history.to_string();
+            for absent in ["reasoning", "private-"] {
+                assert!(!wire.contains(absent), "{wire}");
+            }
+            if target == Protocol::OpenAiChat {
+                assert_eq!(history[0]["content"], "visible reply");
+                assert_eq!(history[0]["tool_calls"][0]["function"]["name"], "lookup");
+                assert_eq!(history[0]["tool_calls"][0]["id"], "call_1");
+                assert_eq!(history[1]["tool_call_id"], "call_1");
+                assert_eq!(history[1]["content"], "lookup result");
+            } else {
+                assert_eq!(history[0]["content"][0]["text"], "visible reply");
+                assert_eq!(history[1]["type"], "function_call");
+                assert_eq!(history[1]["name"], "lookup");
+                assert_eq!(history[1]["call_id"], "call_1");
+                assert_eq!(history[2]["type"], "function_call_output");
+                assert_eq!(history[2]["call_id"], "call_1");
+                assert!(history[2]["output"].to_string().contains("lookup result"));
+            }
+        }
+    }
 }
 
 /// Strict JSON-schema constrained sampling is applied across every codec family,

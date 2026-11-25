@@ -788,10 +788,11 @@ impl AiClient {
                 "route is not qualified for native Responses steering",
             ));
         }
-        req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
+        let replay_diagnostics = crate::transform::prepare_request_history(&mut req, model);
         crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
         crate::video::prepare_request_frames(model, &req).await;
-        let parts = crate::protocol::openai_responses::build_request(model, &req)?;
+        let mut parts = crate::protocol::openai_responses::build_request(model, &req)?;
+        parts.diagnostics.extend(replay_diagnostics);
         if parts.body.len() > 64 * 1024 * 1024 {
             return Err(DecodeError::ResponseTooLarge.into());
         }
@@ -967,7 +968,7 @@ impl AiClient {
             return Ok(());
         };
         let mut req = req;
-        req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
+        crate::transform::prepare_request_history(&mut req, model);
         crate::json_repair::validate_tool_definitions(&req.tools).map_err(AiError::Decode)?;
         crate::video::prepare_request_frames(model, &req).await;
         let parts = crate::protocol::openai_responses::build_request(model, &req)?;
@@ -1211,7 +1212,7 @@ impl AiClient {
         // cross-model reasoning, unsupported historical media, and interrupted
         // tool turns are normalized into valid canonical messages first.
         let mut req = req;
-        req.messages = crate::transform::transform_request_messages_owned(req.messages, model);
+        let replay_diagnostics = crate::transform::prepare_request_history(&mut req, model);
         // An inference hook is not authorization for a separate provider Files
         // operation. When a hook can veto or remove content, keep media inline.
         let files = if host_options.on_payload.is_none()
@@ -1280,6 +1281,8 @@ impl AiClient {
             };
             (None, parts)
         };
+
+        parts.diagnostics.extend(replay_diagnostics);
 
         if upload.is_none() {
             if let Some(trace) = &trace {
