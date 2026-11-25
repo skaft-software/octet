@@ -711,10 +711,7 @@ fn idle_interactive_sigterm_is_coordinated_and_restores_terminal() {
     assert_eq!(status.code(), Some(128 + libc::SIGTERM));
     assert!(elapsed < EXIT_DEADLINE, "shutdown took {elapsed:?}");
     assert!(contains_bytes(&output, b"\x1b[?1003l"));
-    assert!(!contains_bytes(
-        &output,
-        b"To resume this session: octet --resume "
-    ));
+    assert!(!contains_bytes(&output, b"To resume this session:"));
 }
 
 #[test]
@@ -1219,7 +1216,7 @@ fn assert_resume_notice(root: &Path, output: &[u8]) -> ResumeNotice {
 }
 
 fn assert_resume_notice_at(root: &Path, output: &[u8], invocation_cwd: &Path) -> ResumeNotice {
-    const PREFIX: &[u8] = b"To resume this session: octet --resume ";
+    const PREFIX: &[u8] = b"To resume this session:";
     let starts = output
         .windows(PREFIX.len())
         .enumerate()
@@ -1232,17 +1229,19 @@ fn assert_resume_notice_at(root: &Path, output: &[u8], invocation_cwd: &Path) ->
         String::from_utf8_lossy(output)
     );
     let start = starts[0];
-    let end = output[start..]
+    let command_start = start + PREFIX.len();
+    let rest = output[command_start..]
+        .strip_prefix(b"\r\n")
+        .or_else(|| output[command_start..].strip_prefix(b"\n"))
+        .expect("command on its own line");
+    let end = rest
         .iter()
         .position(|byte| matches!(byte, b'\r' | b'\n'))
         .expect("resume notice line terminator");
-    let line = &output[start..start + end];
+    let line = &rest[..end];
     let line = std::str::from_utf8(line).expect("resume notice is UTF-8");
-    let command = line
-        .strip_prefix("To resume this session: ")
-        .expect("resume notice prefix")
-        .to_owned();
-    let id = parse_resume_selector(&command, invocation_cwd);
+    assert!(line.starts_with("octet --resume "));
+    let id = parse_resume_selector(line, invocation_cwd);
     let sessions = root.join("sessions");
     let session_name = format!("{id}.jsonl");
     let in_root = sessions.join(&session_name).is_file();
@@ -1279,7 +1278,10 @@ fn assert_resume_notice_at(root: &Path, output: &[u8], invocation_cwd: &Path) ->
             String::from_utf8_lossy(output)
         );
     }
-    ResumeNotice { id, command }
+    ResumeNotice {
+        id,
+        command: line.to_owned(),
+    }
 }
 
 /// Let a POSIX shell parse the copied command while a shell function captures

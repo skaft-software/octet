@@ -22,6 +22,9 @@ octet --session run.jsonl     # create this file once, resume it afterwards
 octet --session pi.jsonl      # import a Pi v3 session, then resume the copy
 ```
 
+When you exit an interactive session, octet prints its resume command on a
+separate line so you can select and copy it.
+
 Resume restores the model, reasoning, prompt identity, tool panels, branches and
 prompt colors. An explicit `--model` or `--reasoning` overrides the recovered
 value.

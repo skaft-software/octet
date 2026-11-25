@@ -11537,10 +11537,7 @@ fn rendered_shell_captures(
 
 fn resume_command_for_session(session: &Session, config: &crate::config::Config) -> Option<String> {
     let id = crate::app::bootstrap::terminal_goal_session_id(session).ok()?;
-    let mut command = format!(
-        "To resume this session: octet --resume {}",
-        posix_shell_quote(&id)
-    );
+    let mut command = format!("octet --resume {}", posix_shell_quote(&id));
 
     let session_dir = absolute_resume_path(&config.session_dir, &config.invocation_cwd);
     let default_session_dir = absolute_resume_path(
@@ -11672,6 +11669,9 @@ fn print_resume_command(command: Option<&str>) {
     // frontend cleanup, so do not add output to that path.
     if crate::tui::terminal::received_shutdown_signal().is_none() {
         if let Some(command) = command {
+            // Pi packages/coding-agent/src/modes/interactive/interactive-mode.ts:4515-4516:
+            // the complete command is selectable independently of its label.
+            crate::output::stdout_line("To resume this session:");
             crate::output::stdout_line(command);
         }
     }
