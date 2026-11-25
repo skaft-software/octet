@@ -233,19 +233,6 @@ async fn collect_events(run: &mut octet_agent::Run<'_>) -> Vec<AgentEvent> {
     events
 }
 
-fn assert_completed(events: &[AgentEvent]) {
-    assert!(
-        matches!(
-            events.last(),
-            Some(AgentEvent::RunFinished {
-                reason: FinishReason::Completed,
-                ..
-            })
-        ),
-        "expected a completed run, got {events:?}"
-    );
-}
-
 #[tokio::test]
 async fn current_candidate_interrupted_codex_stream_discards_provisional_tool() {
     let server = MockServer::start().await;
@@ -279,26 +266,25 @@ async fn current_candidate_interrupted_codex_stream_discards_provisional_tool() 
     let events = collect_events(&mut run).await;
     drop(run);
 
-    assert_completed(&events);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
-            .count(),
-        1,
-        "only the committed replacement may execute a tool"
-    );
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("effects.txt")).unwrap(),
-        "x"
-    );
-    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::RunFinished {
+            reason: FinishReason::Failed(_),
+            ..
+        })
+    ));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStarted { .. } | AgentEvent::ProviderRetry { .. }
+    )));
+    assert!(!workspace.path().join("effects.txt").exists());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 
     drop(agent);
     let durable = std::fs::read_to_string(session_path).unwrap();
     assert!(!durable.contains("failed-call"));
     assert!(!durable.contains("synthetic provider interruption"));
-    assert!(durable.contains("accepted-call"));
+    assert!(!durable.contains("accepted-call"));
 }
 
 struct WsFallbackFixture {
@@ -374,7 +360,7 @@ async fn serve_ws_fallback_connection(
                 },
             );
             for frame in body.split("\n\n").filter(|frame| !frame.is_empty()) {
-                if attempt == 0 && frame.contains("response.completed") {
+                if attempt == 0 && !frame.contains("response.created") {
                     break;
                 }
                 socket

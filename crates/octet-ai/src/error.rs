@@ -129,18 +129,16 @@ impl HttpError {
                 .provider_code
                 .as_deref()
                 .is_some_and(permanent_provider_code)
-            && matches!(
-                self.status,
-                // Transient status eligibility is not proof of nonacceptance
-                // or zero usage. Callers own request-shape authorization,
-                // finite replacement budgets, and uncertain-usage accounting.
-                http::StatusCode::REQUEST_TIMEOUT
-                    | http::StatusCode::INTERNAL_SERVER_ERROR
-                    | http::StatusCode::TOO_MANY_REQUESTS
-                    | http::StatusCode::BAD_GATEWAY
-                    | http::StatusCode::SERVICE_UNAVAILABLE
-                    | http::StatusCode::GATEWAY_TIMEOUT
-            )
+            && Self::transient_generation_status(self.status)
+    }
+
+    // Pi compatibility: packages/ai/src/utils/retry.ts:47 (fb62c069b).
+    // Status eligibility does not establish nonacceptance or zero usage.
+    pub(crate) fn transient_generation_status(status: http::StatusCode) -> bool {
+        matches!(
+            status.as_u16(),
+            408 | 429 | 500 | 502 | 503 | 504 | 520 | 524 | 525
+        )
     }
 }
 

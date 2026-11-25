@@ -2376,10 +2376,10 @@ fn stream_failure_delegates_classification_to_inner_failure() {
     };
     assert_eq!(ai_error_phase(&disconnect), "response body");
     assert!(!retryable_before_generation(&disconnect));
-    assert!(!retryable_stream_start(&disconnect));
+    assert!(retryable_stream_start(&disconnect));
     assert!(!is_replayable_network_failure(&disconnect));
     assert!(!looks_like_context_error(&disconnect));
-    assert_eq!(provider_retry_limit(&disconnect), 0);
+    assert_eq!(provider_retry_limit(&disconnect), MAX_PROVIDER_RETRIES);
 
     // A stream that ended on a provider 503 frame keeps that frame's
     // retry budget instead of being demoted to the wrapper's behavior.
@@ -2889,7 +2889,7 @@ fn owner_images_come_only_from_accepted_durable_protocol_parts() {
 }
 
 #[test]
-fn ambiguous_stream_endings_have_no_retry_budget_and_actionable_hints() {
+fn ambiguous_stream_endings_have_finite_pre_output_retry_budget_and_actionable_hints() {
     for error in [
         AiError::StreamProtocol(octet_ai::StreamProtocolError::MissingFinish),
         AiError::StreamProtocol(octet_ai::StreamProtocolError::PrematureEof),
@@ -2900,9 +2900,9 @@ fn ambiguous_stream_endings_have_no_retry_budget_and_actionable_hints() {
         }),
     ] {
         assert!(!retryable_before_generation(&error));
-        assert!(!retryable_stream_start(&error));
+        assert!(retryable_stream_start(&error));
         assert!(!is_replayable_network_failure(&error));
-        assert_eq!(provider_retry_limit(&error), 0);
+        assert_eq!(provider_retry_limit(&error), MAX_PROVIDER_RETRIES);
         let diagnostic = public_ai_error_diagnostic(&error, "test", "test");
         assert!(
             diagnostic.contains("Inspect provider state before retrying explicitly"),

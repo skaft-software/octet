@@ -504,7 +504,7 @@ async fn handle_responses_connection_limit(
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"http-response\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n"
     );
     let failed_body =
-        interrupted_responses_prefix("text") + &recovery_provider_error("server_error");
+        interrupted_responses_prefix("started") + &recovery_provider_error("server_error");
     let body = if attempt < http_failures {
         failed_body.as_str()
     } else {
@@ -2146,8 +2146,8 @@ async fn body_disconnect_after_output_never_replays_ambiguous_generation() {
 }
 
 #[tokio::test]
-async fn body_disconnect_before_output_is_ambiguous_and_not_replayed() {
-    let (uri, calls) = interrupted_body_server(msg_start(), text_turn("must not replay")).await;
+async fn body_disconnect_before_output_retries_with_unknown_usage() {
+    let (uri, calls) = interrupted_body_server(msg_start(), text_turn("recovered")).await;
     let workspace_dir = tempfile::tempdir().unwrap();
     let session_dir = tempfile::tempdir().unwrap();
     let workspace = workspace_dir.path().canonicalize().unwrap();
@@ -2158,19 +2158,20 @@ async fn body_disconnect_before_output_is_ambiguous_and_not_replayed() {
     drop(run);
     assert!(matches!(
         assert_single_run_finished(&events),
-        FinishReason::Failed(_)
+        FinishReason::Completed
     ));
-    assert!(!events
+    assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         events
             .iter()
             .filter(|event| matches!(event, AgentEvent::TurnStarted))
             .count(),
-        1
+        2
     );
+    assert!(agent.session().has_uncertain_usage());
     drop(agent);
     assert!(Session::open_read_only(&session_path)
         .unwrap()
@@ -2185,12 +2186,12 @@ async fn body_disconnect_before_output_is_ambiguous_and_not_replayed() {
 }
 
 #[tokio::test]
-async fn missing_terminal_before_output_is_ambiguous_and_not_replayed() {
+async fn missing_terminal_before_output_retries_with_unknown_usage() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("messages"))
         .respond_with(Script {
-            bodies: vec![msg_start(), text_turn("must not replay")],
+            bodies: vec![msg_start(), text_turn("recovered")],
             next: AtomicUsize::new(0),
         })
         .mount(&server)
@@ -2208,12 +2209,13 @@ async fn missing_terminal_before_output_is_ambiguous_and_not_replayed() {
     drop(run);
     assert!(matches!(
         assert_single_run_finished(&events),
-        FinishReason::Failed(_)
+        FinishReason::Completed
     ));
-    assert!(!events
+    assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::ProviderRetry { .. })));
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert!(agent.session().has_uncertain_usage());
     drop(agent);
     assert!(
         Session::open_read_only(sessions.path().join("session.jsonl"))
@@ -8270,6 +8272,10 @@ fn recovery_codex_model(uri: &str) -> Model {
 
 fn interrupted_responses_prefix(kind: &str) -> String {
     let body = match kind {
+        "started" => {
+            return "data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed\"}}\n\n"
+                .into()
+        }
         "tool" => responses_tool_turn("failed", "failed-call"),
         "reasoning" => {
             include_str!("../../octet-ai/tests/fixtures/openai_responses/reasoning_summary.sse")
@@ -8335,7 +8341,7 @@ async fn recovery_harness_with_output_cap(
 }
 
 #[tokio::test]
-async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_replace_before_commit() {
+async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_stop_before_commit() {
     for kind in ["text", "reasoning", "tool"] {
         let (mut agent, server, _workspace, session_path) = recovery_harness(vec![
             interrupted_responses_prefix(kind) + &recovery_provider_error("server_error"),
@@ -8352,7 +8358,7 @@ async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_replace
         let events = collect(&mut run).await;
         drop(run);
         assert!(
-            matches!(assert_single_run_finished(&events), FinishReason::Completed),
+            matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
             "{kind}: {events:?}"
         );
         assert_eq!(
@@ -8360,7 +8366,7 @@ async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_replace
                 .iter()
                 .filter(|e| matches!(e, AgentEvent::ProviderRetry { .. }))
                 .count(),
-            1,
+            0,
             "{kind}"
         );
         assert_eq!(
@@ -8368,15 +8374,11 @@ async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_replace
                 .iter()
                 .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
                 .count(),
-            1,
+            0,
             "{kind}"
         );
         let requests = wire_requests(&server).await;
-        assert_eq!(requests.len(), 3, "{kind}");
-        let replacement = requests[1].to_string();
-        assert!(!replacement.contains("failed-call"));
-        assert!(!replacement.contains("discarded provisional text"));
-        assert!(!replacement.contains("Planning briefly."));
+        assert_eq!(requests.len(), 1, "{kind}");
         drop(agent);
         let durable = std::fs::read_to_string(session_path).unwrap();
         assert!(!durable.contains("failed-call"));
@@ -8389,7 +8391,7 @@ async fn qualified_codex_interrupted_text_reasoning_and_provisional_tool_replace
 #[tokio::test]
 async fn qualified_codex_premature_eof_replaces_without_user_prompt() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("text"),
+        interrupted_responses_prefix("started"),
         responses_text_turn("ok", "recovered", "response.completed", "accepted"),
     ])
     .await;
@@ -8400,7 +8402,7 @@ async fn qualified_codex_premature_eof_replaces_without_user_prompt() {
 #[tokio::test(start_paused = true)]
 async fn qualified_codex_exhaustion_is_finite_and_reports_unknown_usage_and_replacements() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+        interrupted_responses_prefix("started") + &recovery_provider_error("server_error"),
     ])
     .await;
     let mut run = agent.prompt("finish").await.unwrap();
@@ -8582,7 +8584,7 @@ async fn output_cap_without_input_bound_refuses_hard_cost_ceiling_before_interru
 #[tokio::test]
 async fn qualified_codex_replacement_wait_is_cancellable_without_tool_effects() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("tool") + &recovery_provider_error("server_error"),
+        interrupted_responses_prefix("started") + &recovery_provider_error("server_error"),
         responses_tool_turn("no", "never-execute"),
     ])
     .await;
@@ -8609,7 +8611,7 @@ async fn qualified_codex_replacement_wait_is_cancellable_without_tool_effects() 
 #[tokio::test]
 async fn qualified_codex_replacement_prepares_steering_and_finish_now_exactly_once() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("tool") + &recovery_provider_error("server_error"),
+        interrupted_responses_prefix("started") + &recovery_provider_error("server_error"),
         responses_text_turn(
             "ok",
             "finished without tools",
@@ -8665,7 +8667,7 @@ async fn qualified_codex_recovery_preserves_committed_mutations_without_replayin
     };
     let (mut agent, server, workspace, session_path) = recovery_harness(vec![
         mutation(responses_tool_turn("prior", "committed-call")),
-        mutation(interrupted_responses_prefix("tool")) + &recovery_provider_error("server_error"),
+        interrupted_responses_prefix("started") + &recovery_provider_error("server_error"),
         mutation(responses_tool_turn("accepted", "accepted-call")),
         responses_text_turn("final", "effects settled", "response.completed", "accepted"),
     ])
@@ -8718,7 +8720,7 @@ async fn qualified_codex_disabled_retries_remain_terminal() {
 #[tokio::test]
 async fn qualified_codex_body_disconnect_recovers_in_the_same_run() {
     let (uri, calls) = interrupted_body_server(
-        interrupted_responses_prefix("text"),
+        interrupted_responses_prefix("started"),
         responses_text_turn("ok", "recovered", "response.completed", "accepted"),
     )
     .await;
@@ -8810,7 +8812,7 @@ async fn collect_virtual_recovery(run: &mut octet_agent::Run<'_>) -> Vec<AgentEv
 
 #[tokio::test(start_paused = true)]
 async fn qualified_codex_four_eofs_then_success_preserves_unknown_usage() {
-    let mut bodies = vec![interrupted_responses_prefix("text"); 4];
+    let mut bodies = vec![interrupted_responses_prefix("started"); 4];
     bodies.push(responses_text_turn(
         "ok",
         "recovered",
@@ -9227,10 +9229,10 @@ async fn main_and_auxiliary_outage_limit_waits_until_actual_deadline() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn qualified_codex_postgeneration_rate_limit_honors_retry_hint() {
+async fn qualified_codex_stream_rate_limit_honors_retry_hint() {
     let error = "data: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Please try again in 11.054s.\"}\n\n";
     let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("text") + error,
+        interrupted_responses_prefix("started") + error,
         responses_text_turn("ok", "recovered", "response.completed", "accepted"),
     ])
     .await;
@@ -9386,7 +9388,7 @@ impl wiremock::Respond for HttpAdmissionScript {
         } else if call < self.http_failures + self.eof_failures {
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string(interrupted_responses_prefix("text"))
+                .set_body_string(interrupted_responses_prefix("started"))
         } else {
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -9478,6 +9480,8 @@ async fn http_failures_recover_without_ceilings_but_finite_input_budgets_refuse_
         (503, "server_error", true),
         (504, "server_error", true),
         (520, "server_error", true),
+        (524, "server_error", true),
+        (525, "server_error", true),
         (520, "cyber_policy", false),
         (520, "slow_down", false),
         (408, "request_timeout", true),
@@ -9545,13 +9549,8 @@ async fn http_failures_recover_without_ceilings_but_finite_input_budgets_refuse_
                 assert!(requests
                     .iter()
                     .all(|request| request["max_output_tokens"].as_u64().is_some()));
-                // Ordinary routes allow three replacements for their legacy
-                // HTTP statuses; HTTP 520 requires Codex qualification.
-                assert_eq!(
-                    requests.len(),
-                    if status == 520 { 1 } else { 4 },
-                    "{status} {code}"
-                );
+                // Ordinary routes allow three replacements for transient gateway statuses.
+                assert_eq!(requests.len(), 4, "{status} {code}");
                 assert!(agent.session().has_uncertain_usage());
                 assert!(agent.session().usage_uncertainty_exposure().is_none());
             }
@@ -9657,15 +9656,8 @@ async fn auxiliary_gate_and_local_http_admission_preserve_stream_budget_and_unce
                 match (capped, hard_budget) {
                     (false, _) => assert_eq!(outcome, (true, 23, 21), "{label}"),
                     (true, false) => {
-                        // HTTP 520 requires Codex qualification. Otherwise,
-                        // summaries allow three attempts and gates four.
-                        let attempts = if status == 520 {
-                            1
-                        } else if gate {
-                            4
-                        } else {
-                            3
-                        };
+                        // Summaries allow three attempts and gates four.
+                        let attempts = if gate { 4 } else { 3 };
                         assert_eq!(
                             outcome,
                             (false, attempts + usize::from(gate), attempts),
@@ -9862,11 +9854,11 @@ async fn qualified_provider_stream_json_recovery_never_dispatches_provisional_to
                 assert!(agent.session().usage_uncertainty_records().is_empty());
                 assert!(!events.iter().any(|event| matches!(event, AgentEvent::ProviderRetry { .. } | AgentEvent::ProviderUsageUncertain)));
             } else {
-                assert!(matches!(assert_single_run_finished(&events), FinishReason::Completed), "{events:?}");
-                assert_eq!(wire_requests(&server).await.len(), 2);
+                assert!(matches!(assert_single_run_finished(&events), FinishReason::Failed(_)), "{events:?}");
+                assert_eq!(wire_requests(&server).await.len(), 1);
                 assert_eq!(agent.session().usage_uncertainty_records().len(), 1, "{events:?}");
                 assert!(agent.session().usage_uncertainty_exposure().is_none());
-                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ProviderRetry { .. })).count(), 1);
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ProviderRetry { .. })).count(), 0);
             }
             assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
         }
@@ -9992,7 +9984,7 @@ struct InvalidUtf8ThenSuccess(AtomicUsize);
 impl wiremock::Respond for InvalidUtf8ThenSuccess {
     fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
         let body = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-            let mut bytes = interrupted_responses_prefix("tool").into_bytes();
+            let mut bytes = interrupted_responses_prefix("started").into_bytes();
             bytes.extend_from_slice(b"data: \xff\n\n");
             bytes
         } else {
@@ -10065,18 +10057,18 @@ async fn uncertainty_persistence_failure_still_warns_before_terminal_failure() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn qualified_unknown_responses_terminals_replace_partial_without_tool_replay() {
+async fn qualified_unknown_responses_terminals_stop_after_tool_output() {
     for incomplete in [false, true] {
-        for (code, succeeds) in [
-            ("future_unknown_reason", true),
-            ("cyber_policy", false),
-            ("bio_policy", false),
-            ("invalid_prompt", false),
-            ("misalignment_policy_violation", false),
-            ("server_is_overloaded", false),
-            ("slow_down", false),
-            ("insufficient_quota", false),
-            ("invalid_api_key", false),
+        for code in [
+            "future_unknown_reason",
+            "cyber_policy",
+            "bio_policy",
+            "invalid_prompt",
+            "misalignment_policy_violation",
+            "server_is_overloaded",
+            "slow_down",
+            "insufficient_quota",
+            "invalid_api_key",
         ] {
             let failed = if incomplete {
                 responses_tool_turn("failed", "failed-call")
@@ -10105,15 +10097,11 @@ async fn qualified_unknown_responses_terminals_replace_partial_without_tool_repl
                 .unwrap();
             let events = collect_virtual_recovery(&mut run).await;
             drop(run);
-            assert_eq!(
-                matches!(assert_single_run_finished(&events), FinishReason::Completed),
-                succeeds,
+            assert!(
+                matches!(assert_single_run_finished(&events), FinishReason::Failed(_)),
                 "incomplete={incomplete} code={code} {events:?}"
             );
-            assert_eq!(
-                wire_requests(&server).await.len(),
-                if succeeds { 2 } else { 1 }
-            );
+            assert_eq!(wire_requests(&server).await.len(), 1);
             assert!(!events
                 .iter()
                 .any(|event| matches!(event, AgentEvent::ToolStarted { .. })));
@@ -10379,10 +10367,9 @@ async fn unknown_responses_terminals_have_eleven_replacements_in_main_and_auxili
         for incomplete in [false, true] {
             for failures in [11, 12] {
                 let failed = if incomplete {
-                    responses_text_turn("failed", "partial", "response.incomplete", "failed-opaque")
-                        .replace("max_output_tokens", "future_unknown_reason")
+                    String::from("data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"future_unknown_reason\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
                 } else {
-                    interrupted_responses_prefix("text")
+                    interrupted_responses_prefix("started")
                         + &format!(
                             "data: {}\n\n",
                             serde_json::json!({
@@ -12575,7 +12562,7 @@ async fn turn_finished_cost_is_the_exact_settled_tier_cost_not_catalog_or_gate_c
 #[tokio::test]
 async fn turn_cost_after_retry_excludes_failed_attempt_uncertainty() {
     let (mut agent, server, _workspace, _) = recovery_harness(vec![
-        interrupted_responses_prefix("text") + &recovery_provider_error("server_error"),
+        interrupted_responses_prefix("started") + &recovery_provider_error("server_error"),
         responses_text_turn("settled", "settled", "response.completed", "settled"),
     ])
     .await;

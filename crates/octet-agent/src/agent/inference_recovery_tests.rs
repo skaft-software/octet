@@ -166,7 +166,14 @@ fn replacement_taxonomy_only_admits_explicit_transient_boundaries() {
             opened: true,
             exposure: None,
         };
-        assert_eq!(recovery.replacement_limit(), 0);
+        assert_eq!(
+            recovery.replacement_limit(),
+            if saw_generation {
+                0
+            } else {
+                MAX_PROVIDER_RETRIES
+            }
+        );
     }
 }
 
@@ -729,4 +736,34 @@ async fn text_only_video_replay_and_literal_placeholder_share_admission() {
         [1, 1],
         "identical Responses input, retained video vs literal text"
     );
+}
+
+fn frame_error(kind: Option<&str>, message: &str) -> octet_ai::ProviderError {
+    octet_ai::ProviderError {
+        kind: kind.map(str::to_owned),
+        code: None,
+        message: message.into(),
+        request_id: None,
+    }
+}
+
+#[test]
+fn socket_error_frames_retry_only_for_known_words() {
+    for word in [
+        "read ECONNRESET",
+        "write EPIPE",
+        "connect ETIMEDOUT",
+        "ECONNREFUSED",
+        "ECONNABORTED",
+        "Connection closed.",
+        "Connection reset by peer",
+    ] {
+        assert!(retryable_provider_error(&frame_error(None, word)), "{word}");
+    }
+    for word in ["EXECONNRESET", "ETIMEDOUTX", "ERR_EPIPE_ID"] {
+        assert!(
+            !retryable_provider_error(&frame_error(None, word)),
+            "{word}"
+        );
+    }
 }

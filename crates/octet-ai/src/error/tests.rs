@@ -92,8 +92,8 @@ fn qualified_server_status_hint_keeps_permanent_veto_and_legacy_whitelist() {
         assert!(error.is_transient_server_error(), "{status}");
         assert!(!error.is_safe_to_retry());
         error.retryable = true;
-        if status == 520 {
-            assert!(!error.is_safe_to_retry());
+        if matches!(status, 520 | 524 | 525) {
+            assert!(error.is_safe_to_retry());
         }
         for code in [
             "invalid_prompt",

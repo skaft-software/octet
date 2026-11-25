@@ -26,6 +26,7 @@
 - Show very long URLs as plain text, so a multi-megabyte URL can't exhaust memory.
 - Fix a stack overflow when octet reads nested `blob:` URLs.
 - Continue a conversation on a different model without a reasoning-state error, as Pi does.
+- Retry dropped connections and Cloudflare 525 errors before any output arrives.
 
 ### Removed
 

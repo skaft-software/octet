@@ -112,7 +112,7 @@ fail closed. The codec/transport owns wire facts and socket retirement; the
 agent alone owns autonomous replacement policy.
 
 Qualified unknown `response.failed` and `response.incomplete` reasons (before
-assistant persistence), transient provider `server_error`/internal/unavailable
+user-visible output), transient provider `server_error`/internal/unavailable
 errors,
 body interruptions, codec-annotated provider-frame JSON failures, HTTP 408, and
 terminal EOF errors permit at most **eleven stream replacements** per logical
@@ -153,8 +153,8 @@ shortened. `set_max_network_wait(Some(duration))` bounds elapsed outage recovery
 for embedding hosts; it does not extend external job/child deadlines. Ordinary
 cancellation remains level-triggered and wins same-poll races.
 
-`ProviderRetry` invalidates all provisional text, reasoning, media and tool
-presentation owned by the failed attempt. `ProviderWaitingForNetwork` represents
+Main-request recovery stops once text, reasoning, media or a tool call has streamed.
+Auxiliary requests do not stream output to the user. `ProviderWaitingForNetwork` represents
 unbounded-count pre-send waiting without a fictional retry denominator. Both
 leave the run, session, accepted controls, and children alive. Controls are
 received during main-request backoff; replacement re-enters the existing safe

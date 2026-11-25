@@ -943,13 +943,11 @@ Pi. Explicit Responses Lite selection by an `octet-ai` SDK caller still sends
 The [WebSocket code](../crates/octet-ai/src/responses_ws.rs) and the [recovery
 notes](tools.md#recovery-and-security) tell a recognized pre-generation
 connection-lifetime rejection (retire the socket, retry safely over HTTP) from
-an accepted POST or a body disconnect. By default, ambiguous accepted requests
-aren't replayed, even before visible output. The agent has a narrow exception
-for host-qualified Codex Responses requests (including Lite) with local function
-tools: before assistant commit it may discard provisional output and replace
-interrupted inference from durable context. That can duplicate remote generation
-and incur unknown charges, and it doesn't replay committed local tool effects or
-prove remote cancellation. The agent keeps finite streamed-inference replacement
+an accepted POST or a body disconnect. A stream that drops before any text, reasoning, media
+or tool call arrives can be retried, as can transient socket errors and HTTP
+520, 524 or 525. Once output has started, the agent reports the interruption
+instead of repeating it. A fresh request can still duplicate remote work and
+incur unknown charges even when nothing was shown. The agent keeps finite streamed-inference replacement
 and HTTP-admission retry budgets separate, without resetting on transport
 fallback. They bound attempts, not confirmed accepted generations or charges,
 and eligibility and hard ceilings can stop recovery earlier.

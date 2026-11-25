@@ -143,7 +143,22 @@ pub(super) fn retryable_provider_error(error: &octet_ai::ProviderError) -> bool 
         error.message
     )
     .to_ascii_lowercase();
+    // Pi compatibility: packages/ai/src/utils/retry.ts:83-87 (4699b5b26)
+    // and :74-76 (9b88b94e2). Do not match socket codes inside identifiers.
+    if text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| {
+            matches!(
+                word,
+                "econnreset" | "econnaborted" | "econnrefused" | "etimedout" | "epipe"
+            )
+        })
+    {
+        return true;
+    }
     [
+        "connection closed",
+        "connection reset by peer",
         "rate_limit",
         "rate limit",
         "throttl",
@@ -168,9 +183,17 @@ pub(super) fn retryable_stream_start(error: &AiError) -> bool {
     if let AiError::StreamFailure { inner, .. } = error {
         return retryable_stream_start(inner);
     }
-    // No visible output is not proof of nonacceptance. Only a safe connection
-    // failure or an explicit provider rejection can authorize another request.
+    // A dropped body before output may be replaced, but it is not a pre-send
+    // failure: usage_unknown() still charges the attempt's exposure.
     retryable_before_generation(error)
+        || matches!(error, AiError::Transport(transport) if transport.phase == octet_ai::TransportPhase::Body && !transport.timeout)
+        || matches!(
+            error,
+            AiError::StreamProtocol(
+                octet_ai::StreamProtocolError::MissingFinish
+                    | octet_ai::StreamProtocolError::PrematureEof
+            )
+        )
         || matches!(error, AiError::Provider(provider) | AiError::ResponsesFailed(provider) if retryable_provider_error(provider))
 }
 
