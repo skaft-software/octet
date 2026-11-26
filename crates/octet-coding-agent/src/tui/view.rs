@@ -4484,7 +4484,6 @@ fn application_history_budget_scales_with_viewport() {
 
 mod composer_pointer;
 mod composer_slot;
-mod job_control;
 pub(crate) use composer_slot::ComposerSlotWrite;
 
 /// Full-screen terminal shell. It owns all terminal I/O and no Agent state.
@@ -4545,9 +4544,12 @@ impl InteractiveShell {
             anyhow::bail!("interactive terminal capabilities are unavailable");
         }
         let image_store = TerminalImageStore::default();
-        let terminal =
-            job_control::OwnedTerminal::enter(size.clone(), capture_mouse, image_store.clone())?;
-        let image_capabilities = terminal.backend.image_capabilities();
+        let terminal = OctetTerminal::enter_with_mouse_and_images(
+            size.clone(),
+            capture_mouse,
+            image_store.clone(),
+        )?;
+        let image_capabilities = terminal.image_capabilities();
         let initial_size = *size.lock().expect("terminal size mutex poisoned");
         let state = SharedState::new(ShellState {
             size: initial_size,
@@ -4837,9 +4839,12 @@ impl InteractiveShell {
             return Ok(());
         }
         let image_store = self.state.borrow().terminal_images.clone();
-        let terminal =
-            job_control::OwnedTerminal::enter(self.size.clone(), self.capture_mouse, image_store)?;
-        let image_capabilities = terminal.backend.image_capabilities();
+        let terminal = OctetTerminal::enter_with_mouse_and_images(
+            self.size.clone(),
+            self.capture_mouse,
+            image_store,
+        )?;
+        let image_capabilities = terminal.image_capabilities();
         {
             let mut state = self.state.borrow_mut();
             let enabled = state.image_rendering.enabled;

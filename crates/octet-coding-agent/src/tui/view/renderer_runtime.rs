@@ -602,59 +602,24 @@ pub(super) fn reconcile_terminal_size(
 }
 
 pub(super) fn render_loop(
-    mut terminal: super::job_control::OwnedTerminal,
+    mut terminal: OctetTerminal,
     state: SharedState,
     size: TerminalSize,
     rx: Receiver<RenderCommand>,
     application_viewport: bool,
-    mut clear_on_start: bool,
-) {
-    loop {
-        if !render_until_handoff(
-            terminal,
-            &state,
-            &size,
-            &rx,
-            application_viewport,
-            clear_on_start,
-        ) {
-            return;
-        }
-        // The old renderer has finished all terminal writes and dropped its backend.
-        super::job_control::stop();
-        let images = state.borrow().terminal_images.clone();
-        match super::job_control::OwnedTerminal::enter(size.clone(), application_viewport, images) {
-            Ok(resumed) => terminal = resumed,
-            Err(error) => {
-                crate::output::stderr_line(format!("Could not resume terminal: {error}"));
-                state.borrow_mut().close_requested = true;
-                return;
-            }
-        }
-        clear_on_start = true;
-    }
-}
-
-// True only for a job-control stop, not an ordinary terminal handoff.
-fn render_until_handoff(
-    mut terminal: super::job_control::OwnedTerminal,
-    state: &SharedState,
-    size: &TerminalSize,
-    rx: &Receiver<RenderCommand>,
-    application_viewport: bool,
     clear_on_start: bool,
-) -> bool {
+) {
     let alternate_screen = state.fullscreen();
     state.borrow_mut().render_threaded = true;
     if super::tern::enabled_cached() {
         match render_native_loop(
-            &mut terminal.backend,
-            state,
-            size,
-            rx,
+            &mut terminal,
+            &state,
+            &size,
+            &rx,
             &synchronize_terminal_size,
         ) {
-            Ok(job_stop) => return job_stop,
+            Ok(()) => return,
             Err(error) => {
                 // Restore ANSI input ownership only after native negotiation or
                 // protocol I/O fails. A native surface never needs mouse capture.
@@ -669,14 +634,14 @@ fn render_until_handoff(
                 crate::output::stderr_line(format!(
                     "Native Tern rendering unavailable: {error}. Using terminal rendering."
                 ));
-                terminal.backend.show_cursor();
+                terminal.show_cursor();
             }
         }
     }
     render_loop_with_terminal(
-        terminal.backend,
-        state.clone(),
-        size.clone(),
+        terminal,
+        state,
+        size,
         rx,
         RenderLoopOptions {
             application_viewport,
@@ -684,7 +649,7 @@ fn render_until_handoff(
             alternate_screen,
         },
         synchronize_terminal_size,
-    )
+    );
 }
 
 /// The normal interactive renderer is fullscreen. The environment remains a
@@ -860,19 +825,18 @@ pub(super) fn render_loop_with_terminal(
     terminal: impl sexy_tui_rs::Terminal + 'static,
     state: SharedState,
     size: TerminalSize,
-    rx: impl std::borrow::Borrow<Receiver<RenderCommand>>,
+    rx: Receiver<RenderCommand>,
     options: RenderLoopOptions,
     synchronize_size: impl Fn(&SharedState, &TerminalSize) -> bool,
-) -> bool {
-    let rx = rx.borrow();
+) {
     let RenderLoopOptions {
         application_viewport,
         clear_on_start,
         alternate_screen,
     } = options;
     state.borrow_mut().render_threaded = true;
-    if !await_first_paint(&state, rx) {
-        return false;
+    if !await_first_paint(&state, &rx) {
+        return;
     }
     let mut tui = TUI::new(Box::new(terminal));
     // 2a.1: the alternate screen owns a fixed viewport; the emitted-presentation
@@ -932,11 +896,6 @@ pub(super) fn render_loop_with_terminal(
     // final frame and the terminal handback belong.
     let mut suspended: Option<mpsc::Sender<()>> = None;
     loop {
-        if super::job_control::requested() {
-            handoff_program_status(&mut tui, &state);
-            tui.stop();
-            return true;
-        }
         // A finished workspace walk changes what the mention popup offers, so
         // admit it as semantic work: the scan indicator has to clear on its own
         // frame while the composer is otherwise idle. The atomic is tested
@@ -980,7 +939,7 @@ pub(super) fn render_loop_with_terminal(
             let resized = state.borrow().resize_epoch != painted_resize_epoch;
             handoff_program_status(&mut tui, &state);
             suspend_terminal(&mut tui, reply, resized);
-            return false;
+            return;
         }
         if let Some(RenderCommand::DumpFrame(reply)) = command {
             // Diagnostics read the retained frame; they never request a repaint
@@ -1024,7 +983,7 @@ pub(super) fn render_loop_with_terminal(
         }
 
         if !coalesce_render_commands(
-            rx,
+            &rx,
             &pacer,
             &tui,
             &mut suspended,
@@ -1042,7 +1001,7 @@ pub(super) fn render_loop_with_terminal(
                 let resized = state.borrow().resize_epoch != painted_resize_epoch;
                 handoff_program_status(&mut tui, &state);
                 suspend_terminal(&mut tui, reply, resized);
-                return false;
+                return;
             }
             break;
         }
@@ -1121,7 +1080,6 @@ pub(super) fn render_loop_with_terminal(
     state.frame_written_at(tui.rendered_viewport_top());
     handoff_program_status(&mut tui, &state);
     tui.stop();
-    false
 }
 
 /// Native presentation has its own scheduler and the same lifecycle command
@@ -1133,7 +1091,7 @@ fn render_native_loop(
     size: &TerminalSize,
     rx: &Receiver<RenderCommand>,
     synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
-) -> std::io::Result<bool> {
+) -> std::io::Result<()> {
     let surface = super::tern::TernSurface::start()?;
     render_native_loop_with_surface(terminal, state, size, rx, synchronize_size, surface)
 }
@@ -1145,7 +1103,7 @@ fn render_native_loop_with_surface(
     rx: &Receiver<RenderCommand>,
     synchronize_size: &impl Fn(&SharedState, &TerminalSize) -> bool,
     mut surface: super::tern::TernSurface,
-) -> std::io::Result<bool> {
+) -> std::io::Result<()> {
     struct InputGuard(Arc<Mutex<super::tern_input::Mailbox>>);
     impl Drop for InputGuard {
         fn drop(&mut self) {
@@ -1165,11 +1123,6 @@ fn render_native_loop_with_surface(
     let mut last_title = None;
     let mut last_resize = Instant::now();
     loop {
-        if super::job_control::requested() {
-            surface.close(false)?;
-            terminal.stop();
-            return Ok(true);
-        }
         let notifications = std::mem::take(&mut state.borrow_mut().desktop_notifications);
         for (title, body) in notifications {
             terminal.desktop_notification(&title, &body);
@@ -1212,7 +1165,7 @@ fn render_native_loop_with_surface(
                 });
                 terminal.stop();
                 let _ = reply.send(());
-                return Ok(false);
+                return Ok(());
             }
             Ok(RenderCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 surface.flush(state)?;
@@ -1224,7 +1177,7 @@ fn render_native_loop_with_surface(
                     terminal.set_program_status(status, "octet", octet_tern::client::is_tern());
                 });
                 terminal.stop();
-                return Ok(false);
+                return Ok(());
             }
         }
     }
