@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-11-26
+
 ### Added
 
 - Show GLM-5.3 thinking levels (low, high, max) on the Z.AI coding provider. ([#746](https://github.com/skaft-software/octet/pull/746) by [@Wateir](https://github.com/Wateir))

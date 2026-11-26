@@ -1,13 +1,13 @@
 # octet-extension-sdk
 
-This SDK's source distribution is **0.10.6**. See the
-[0.10.6 notes](../../docs/releases/v0.10.6.md) for changes.
+This SDK's source distribution is **0.10.7**. See the
+[0.10.7 notes](../../docs/releases/v0.10.7.md) for changes.
 SDK packages remain unpublished on PyPI and npm.
 
 For new tools, `octet_extension.Extension` supports the current working-tree
 **API `0.4`** feature-negotiated JSON-RPC wire, alongside retained `0.1`/`0.2`.
 Use an exact `api_version="0.4"` constructor and matching manifest. This is
-source SDK support for octet 0.10.6, not a claim of SDK registry availability.
+source SDK support for octet 0.10.7, not a claim of SDK registry availability.
 Extensions add bounded tools/integrations; the SDK does not grant host policy,
 frontend ownership, or Pi execution parity.
 
@@ -25,7 +25,7 @@ python3 -m pip install ./sdk/python
 ```
 
 This installs the source package, not proof of installed-host qualification or
-registry publication. Its source distribution version is `0.10.6`, independent
+registry publication. Its source distribution version is `0.10.7`, independent
 of the extension API version. Native octet publication does not publish the SDK
 to PyPI. Imports and wire names
 use `octet_extension`, `octet_version`, `requires_octet`, and `OCTET_*`, with no

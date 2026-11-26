@@ -310,6 +310,7 @@ text docs/releases/v0.10.3.md
 text docs/releases/v0.10.4.md
 text docs/releases/v0.10.5.md
 text docs/releases/v0.10.6.md
+text docs/releases/v0.10.7.md
 text docs/releases/v0.10.2.md
 text docs/releases/v0.10.1.md
 text docs/resources.md

@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "octet-agent"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "octet-ai"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "octet-coding-agent"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "octet-migrate-types"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "octet-tern"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "libc",
  "serde",

@@ -1,6 +1,6 @@
 # TypeScript / JavaScript process authoring
 
-`@skaft-software/octet-extension-sdk` is the dependency-free **0.10.6 source
+`@skaft-software/octet-extension-sdk` is the dependency-free **0.10.7 source
 package** for current extension **API `0.4`**. It is a separate local package,
 not a rename of the live generated canonical API `0.3` bindings one directory
 above. No npm publication or installed-host release qualification is implied.
