@@ -498,6 +498,14 @@ const PERSISTENCE_METADATA_HOOK_BUDGET: Duration = Duration::from_millis(200);
 /// visible, cancellable replacement attempts give the connection time to
 /// recover without charging usage or consuming an autonomous model turn.
 const MAX_NETWORK_RETRIES: usize = 5;
+/// Rate-limit throttles clear on the provider's clock, often tens of seconds
+/// into a plan's throttle window. Ordinary sub-second backoff burns the whole
+/// replacement budget while the request is still throttled, so a pre-generation
+/// 429 without a lasting quota denial retries on a patient capped schedule:
+/// ten replacements with gaps of 2, 4, 8 then 10 seconds wait about 84 seconds
+/// in total, spanning a full per-minute provider window while staying bounded
+/// and cancellable.
+const MAX_RATE_LIMIT_RETRIES: usize = 10;
 /// UTF-8 byte budget for the opt-in model-visible "available tools" section
 /// rendered from the registered tools' `promptSnippet`/`promptGuidelines`
 /// contributions. A section that would exceed it is truncated on a character

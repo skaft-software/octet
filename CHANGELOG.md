@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover from 429 rate limits with ten patient capped backoff retries over about 84 seconds instead of failing the turn after three quick attempts.
+
 ## [0.10.7] - 2026-11-26
 
 ### Added

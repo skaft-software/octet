@@ -128,6 +128,14 @@ outer HTTP attempts. Octet's flattened host-owned policy is not a reproduction
 of Codex's nested scheduling or a promise of identical outcomes for every error
 sequence. No hidden HTTP replay is added to `octet-ai`.
 
+Ordinary routes cap transient gateway retries at three fast replacements. A
+pre-generation HTTP 429 rate-limit throttle instead uses a patient bounded
+schedule — ten replacements with 2, 4, 8 then 10-second gaps, about 84 seconds
+of waiting in total — because a throttle window clears on the provider's clock,
+not immediately. Lasting quota codes and quota-worded bodies keep the ordinary
+budget, and a provider-supplied `Retry-After` header still wins over the
+schedule.
+
 Admission retries do not consume the independent stream allowance: twenty HTTP
 503 failures followed by an EOF can still recover. The emitted cumulative
 `max_attempts` ceiling reflects the remaining allowance for the current failure
