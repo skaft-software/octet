@@ -2,14 +2,14 @@
 
 [Documentation](README.md) · [Tools](tools.md) · [Configuration](configuration.md) · [Terminal](terminal.md)
 
-> **Preview platform in v0.10.6**. Native MSVC artifact availability and automated release qualification are recorded on the release page. Attended desktop use
+> **Preview platform in v0.10.7**. Native MSVC artifact availability and automated release qualification are recorded on the release page. Attended desktop use
 > remains unqualified, and known
 > issues such as [#572](https://github.com/skaft-software/octet/issues/572)
 > remain open.
 
 octet builds and runs as a native Windows x64 program (`octet.exe` and
 `octet-host.exe`); WSL is not used or required. The
-[v0.10.6 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.6)
+[v0.10.7 release page](https://github.com/skaft-software/octet/releases/tag/v0.10.7)
 records actual MSVC artifact availability and qualification. Pull requests
 produce unsigned GNU test builds, described below; these do not qualify the
 MSVC release archive. Automated terminal checks are not physical-display or
@@ -19,8 +19,8 @@ person at an unlocked desktop.
 Install the release in PowerShell with either command:
 
 ```powershell
-irm https://github.com/skaft-software/octet/releases/download/v0.10.6/install-octet.ps1 | iex
-npm install -g @skaft/octet@0.10.6
+irm https://github.com/skaft-software/octet/releases/download/v0.10.7/install-octet.ps1 | iex
+npm install -g @skaft/octet@0.10.7
 ```
 
 ## Target and toolchain

@@ -80,7 +80,7 @@ configuration below.
 
 See [Getting started](getting-started.md#3-choose-one-provider-lane) and the
 [CLI alternatives](cli.md#provider-setup). This setup flow is part of octet
-0.10.6; availability in older published versions differs.
+0.10.7; availability in older published versions differs.
 
 ## Cloud setup
 
