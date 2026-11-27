@@ -172,12 +172,12 @@ prepares a private session catalog and discovers/runs enabled Pi factories.
 An empty config therefore does not mean stock activation is inert. Installation
 and discovery alone still execute nothing and never import credentials.
 
-octet 0.10.7 follows **Pi 1.4's extension API** and accepts every Pi release its
+octet 0.10.7 follows **Pi 1.6's extension API** and accepts every Pi release its
 shipped manifests cover: `PI_SUPPORTED_RANGE` is `>=1.0.2 <2.0.0`, a managed Pi
-1.0.2 through 1.x. Manifests for Pi 1.0.2 and 1.5.0 are shipped; a newer 1.x
+1.0.2 through 1.x. Manifests for Pi 1.0.2, 1.5.0, 1.5.2 and 1.6.0 are shipped; a newer 1.x
 release reuses the nearest older manifest and says so on stderr, and a version
 below 1.0.2, a pre-release, or another major series is refused. Dependencies are
-the versions Pi 1.0.2 through 1.4 ship: jiti 2.7.0 and `typebox` 1.3.27, plus
+the versions Pi 1.0.2 through 1.6 ship: jiti 2.7.0 and `typebox` 1.3.27, plus
 selected MIT Pi TUI 1.0.2 modules. Imports resolve through the same module
 table as Pi 1.4's extension loader:
 `@sinclair/typebox` maps onto the same TypeBox 1.x as `typebox`, the `pi-ai`
