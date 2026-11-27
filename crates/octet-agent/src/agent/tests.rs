@@ -2506,6 +2506,76 @@ fn websocket_connection_limit_is_retried_before_generation() {
 }
 
 #[test]
+fn rate_limit_throttles_earn_a_patient_bounded_budget() {
+    let throttle = |snippet: Option<&str>| octet_ai::HttpError {
+        status: http::StatusCode::TOO_MANY_REQUESTS,
+        request_id: Some("req-429".into()),
+        retry_after: None,
+        provider_code: None,
+        body_snippet: snippet.map(str::to_owned),
+        retryable: true,
+    };
+    // A windowed throttle clears on the provider's clock, not immediately, so
+    // it may not spend the ordinary sub-second budget before the window opens.
+    assert_eq!(
+        provider_retry_limit(&AiError::Http(throttle(None))),
+        MAX_RATE_LIMIT_RETRIES
+    );
+    // The wrapper inherits the throttle's patient budget.
+    let wrapped = AiError::StreamFailure {
+        inner: Box::new(AiError::Http(throttle(None))),
+        progress: octet_ai::StreamProgress {
+            provider_events: 1,
+            decoded_events: 0,
+            content_bytes: 0,
+            buffered_bytes: 0,
+            first_body_seen: true,
+            elapsed_ms: 1,
+            last_event_ms: Some(1),
+        },
+    };
+    assert_eq!(provider_retry_limit(&wrapped), MAX_RATE_LIMIT_RETRIES);
+    // Gaps grow to seconds and cap, so the budget spans a provider window.
+    for (attempt, expected) in [
+        (0, Duration::from_secs(2)),
+        (1, Duration::from_secs(4)),
+        (2, Duration::from_secs(8)),
+        (3, Duration::from_secs(10)),
+        (9, Duration::from_secs(10)),
+    ] {
+        assert_eq!(
+            retry_after(&AiError::Http(throttle(None)), attempt),
+            expected
+        );
+    }
+    // The provider's own Retry-After keeps precedence over the schedule.
+    let hinted = AiError::Http(octet_ai::HttpError {
+        retry_after: Some(Duration::from_secs(3)),
+        ..throttle(None)
+    });
+    assert_eq!(retry_after(&hinted, 0), Duration::from_secs(3));
+    // A 429 that reports a lasting quota denial keeps the ordinary budget.
+    assert_eq!(
+        provider_retry_limit(&AiError::Http(throttle(Some(
+            r#"{"error":{"message":"quota exceeded"}}"#
+        )))),
+        MAX_PROVIDER_RETRIES
+    );
+    let quota_code = AiError::Http(octet_ai::HttpError {
+        provider_code: Some("insufficient_quota".into()),
+        ..throttle(None)
+    });
+    assert_eq!(provider_retry_limit(&quota_code), 0);
+    // Ordinary gateway statuses keep the fast budget and sub-second backoff.
+    let gateway = AiError::Http(octet_ai::HttpError {
+        status: http::StatusCode::SERVICE_UNAVAILABLE,
+        ..throttle(None)
+    });
+    assert_eq!(provider_retry_limit(&gateway), MAX_PROVIDER_RETRIES);
+    assert!(retry_after(&gateway, 0) < Duration::from_secs(1));
+}
+
+#[test]
 fn stream_failure_public_diagnostic_omits_wire_progress() {
     let stream_failure = || AiError::StreamFailure {
         inner: Box::new(AiError::Provider(octet_ai::ProviderError {

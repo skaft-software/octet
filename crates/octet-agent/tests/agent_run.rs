@@ -603,6 +603,25 @@ impl Respond for DelayedHeaders {
     }
 }
 
+/// Replays bounded HTTP 429 rate limits, then one successful SSE body.
+struct RateLimitThenReply {
+    failures: usize,
+    next: AtomicUsize,
+}
+
+impl Respond for RateLimitThenReply {
+    fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+        if self.next.fetch_add(1, Ordering::SeqCst) < self.failures {
+            ResponseTemplate::new(429)
+                .set_body_string(r#"{"error":{"message":"temporarily rate limited"}}"#)
+        } else {
+            ResponseTemplate::new(200)
+                .set_body_string(openai_text_turn("recovered"))
+                .insert_header("content-type", "text/event-stream")
+        }
+    }
+}
+
 struct FailThenSucceed {
     calls: AtomicUsize,
 }
@@ -12644,5 +12663,81 @@ async fn chat_finish_reason_error_retries_before_output_only() {
             if partial { 1 } else { 2 }
         );
         assert!(agent.session().has_uncertain_usage());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn chat_http_rate_limits_recover_on_a_patient_bounded_budget() {
+    // A plan-tier throttle window can outlast the ordinary three fast
+    // replacements. Patient gaps let the same turn finish once the window
+    // opens, and the budget stays finite when it never does.
+    for (failures, requests, completed) in [(4, 5, true), (9, 10, true), (11, 11, false)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(RateLimitThenReply {
+                failures,
+                next: AtomicUsize::new(0),
+            })
+            .mount(&server)
+            .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let mut agent = build_responses_agent_from_session(
+            openai_multimodal_model(&server.uri()),
+            Session::create(workspace.path().join("session.jsonl")).unwrap(),
+            workspace.path(),
+            Some(4),
+            "system",
+            ReasoningConfig::Off,
+        );
+        let mut run = agent.prompt("finish the throttled work").await.unwrap();
+        let events = collect_virtual_recovery(&mut run).await;
+        drop(run);
+        assert_eq!(wire_requests(&server).await.len(), requests);
+        let retries: Vec<(usize, usize, Duration)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    ..
+                } => Some((*attempt, *max_attempts, *delay)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retries.len(), requests - 1, "{events:?}");
+        // The patient budget is larger than the ordinary three replacements,
+        // and every gap is measured in seconds so it can span a provider window.
+        assert!(
+            retries
+                .iter()
+                .all(|(_, max_attempts, delay)| *max_attempts == 10
+                    && *delay >= Duration::from_secs(2)),
+            "{retries:?}"
+        );
+        assert_eq!(
+            matches!(assert_single_run_finished(&events), FinishReason::Completed),
+            completed,
+            "{events:?}"
+        );
+        if !completed {
+            let FinishReason::Failed(error) = assert_single_run_finished(&events) else {
+                panic!("{events:?}")
+            };
+            assert!(
+                matches!(
+                    error,
+                    octet_agent::AgentError::ProviderRecovery { retries: 10, .. }
+                ),
+                "{error:?}"
+            );
+            let diagnostic = octet_agent::public_error_diagnostic(error, "test", "scripted");
+            assert!(diagnostic.contains("replacements=10"), "{diagnostic}");
+            assert!(
+                diagnostic.contains("status=429 (rate limited)"),
+                "{diagnostic}"
+            );
+        }
     }
 }

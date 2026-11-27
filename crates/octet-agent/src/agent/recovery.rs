@@ -231,6 +231,8 @@ pub(super) fn provider_retry_limit(error: &AiError) -> usize {
         0
     } else if is_replayable_network_failure(error) {
         MAX_NETWORK_RETRIES
+    } else if rate_limit_throttle(error) {
+        MAX_RATE_LIMIT_RETRIES
     } else {
         MAX_PROVIDER_RETRIES
     }
@@ -355,6 +357,32 @@ pub(super) fn http_usage_unknown(error: &AiError) -> bool {
     }
 }
 
+/// A pre-generation 429 reporting a windowed throttle rather than a lasting
+/// quota denial. Such limits clear on the provider's clock, so they earn the
+/// patient replacement budget instead of the ordinary one.
+pub(super) fn rate_limit_throttle(error: &AiError) -> bool {
+    if let AiError::StreamFailure { inner, .. } = error {
+        return rate_limit_throttle(inner);
+    }
+    matches!(error, AiError::Http(http) if http_rate_limit_throttle(http))
+}
+
+fn http_rate_limit_throttle(http: &octet_ai::HttpError) -> bool {
+    http.status.as_u16() == 429 && http.is_safe_to_retry() && !lasting_quota_denial(http)
+}
+
+/// Quota codes are already vetoed by `is_safe_to_retry`; the text check keeps
+/// denials that only carry the phrase on the ordinary fast budget.
+// Pi compatibility: packages/ai/src/utils/retry.ts:65-69 (a00a5048d).
+fn lasting_quota_denial(http: &octet_ai::HttpError) -> bool {
+    let text = http
+        .body_snippet
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    text.contains("quota exceeded") || text.contains("insufficient_quota")
+}
+
 #[derive(Default)]
 pub(super) struct ProviderRecoveryBudget {
     pub(super) admission: usize,
@@ -472,6 +500,14 @@ pub(super) fn retry_after(error: &AiError, attempt: usize) -> Duration {
     if let AiError::Http(error) = error {
         if let Some(delay) = error.retry_after {
             return delay;
+        }
+        if http_rate_limit_throttle(error) {
+            // A windowed throttle clears on the provider's clock, so a gap must
+            // be able to outlast it: capped exponential seconds keep the
+            // replacement budget spanning the window instead of spending every
+            // attempt at once.
+            let base = 2_000u64.saturating_mul(1u64 << attempt.min(3));
+            return Duration::from_millis(base.min(10_000));
         }
     }
     if let AiError::Provider(error) | AiError::ResponsesFailed(error) = error {
