@@ -533,10 +533,11 @@ resets individual tool choices; Ctrl+T changes reasoning, not tool cards.
 A nested Codemode status row belongs to its parent; it is not another header.
 
 `--show-images` (or `show_images = true`) shows tool-result images inline. It's
-off by default and works on Kitty-compatible terminals. Others fall back to
-text. It never loads a URL or path, copied, plain and print output never contain
-image data, and it doesn't upload anything or replace [attachment
-consent](media.md#attach-explicitly). The model must still support the format.
+off by default and works on Kitty-compatible terminals, including Rex on
+Windows. Others fall back to text. It never loads a URL or path, copied, plain
+and print output never contain image data, and it doesn't upload anything or
+replace [attachment consent](media.md#attach-explicitly). The model must still
+support the format.
 
 Active shell cards use the event dot and show real output as it arrives. In the
 default layout with durations enabled, `└ Took …` aligns with the tool's output

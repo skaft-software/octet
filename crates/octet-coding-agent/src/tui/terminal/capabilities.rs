@@ -8,9 +8,12 @@
 //! Native Windows consoles do not export `TERM`. There, console handles with
 //! virtual-terminal output processing are the negotiated contract, Windows
 //! Terminal is identified by `WT_SESSION`, and a `TERM` exported by an
-//! MSYS/Cygwin shell is trusted only over real console handles.
+//! MSYS/Cygwin shell is trusted only over real console handles. Rex identifies
+//! a direct pane with `REX_BLOCK`; its Windows server does not export the
+//! `REX_SESSION` that its Unix servers add.
 #![allow(missing_docs)]
 
+use std::ffi::OsStr;
 use std::io::IsTerminal;
 
 use sexy_tui_rs::{
@@ -113,6 +116,16 @@ fn windows_console() -> Option<WindowsConsole> {
     None
 }
 
+/// Whether this process runs inside a Rex block.
+///
+/// Rex exports `REX_BLOCK` in every block on every platform, so a nonempty
+/// value is the pane identity. Its Windows server does not export
+/// `REX_SESSION`, and requiring that session identity silently turned Rex's
+/// verified Kitty images into the text fallback there.
+fn rex_block(block: Option<&OsStr>) -> bool {
+    block.is_some_and(|value| !value.is_empty())
+}
+
 fn known_terminal(term: &str) -> bool {
     [
         "xterm",
@@ -177,8 +190,7 @@ impl TerminalCapabilities {
                 term_program: std::env::var("TERM_PROGRAM")
                     .ok()
                     .filter(|value| !value.is_empty()),
-                rex: std::env::var_os("REX_SESSION").is_some_and(|value| !value.is_empty())
-                    && std::env::var_os("REX_BLOCK").is_some_and(|value| !value.is_empty()),
+                rex: rex_block(std::env::var_os("REX_BLOCK").as_deref()),
                 multiplexed: ["TMUX", "STY"]
                     .iter()
                     .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
@@ -363,7 +375,8 @@ pub(super) fn sexy_terminal_capabilities(
     // authority for every other frontend capability.
     let image_hints = SexyTerminalCapabilities::detect();
     // Rex reports xterm-256color on hosts without its terminfo installed, but
-    // its Kitty graphics query replies OK. Name-based image detection misses it.
+    // its Kitty graphics query replies OK. Name-based image detection misses it,
+    // and its Windows server exports only `REX_BLOCK`, not `REX_SESSION`.
     rendered.kitty_graphics = image_hints.kitty_graphics || capabilities.rex;
     rendered.iterm2_images = image_hints.iterm2_images;
     rendered.cell_pixel_size = image_hints.cell_pixel_size;

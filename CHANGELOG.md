@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Show inline tool images in Rex on Windows, where only `REX_BLOCK` identifies the pane.
+
 ## [0.10.7] - 2026-11-26
 
 ### Added
