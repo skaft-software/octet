@@ -84,6 +84,7 @@ pub struct ThemeLayout {
     pub block_padding_x: Option<u16>,
     pub tool_body_indent: u16,
     pub composer_padding: u16,
+    pub queued_input_padding: u16,
     pub working_indicator: WorkingIndicatorPlacement,
     pub status_footer: StatusFooterLayout,
     pub composer_effort_color: bool,
@@ -114,6 +115,7 @@ impl Default for ThemeLayout {
             block_padding_x: None,
             tool_body_indent: 2,
             composer_padding: 1,
+            queued_input_padding: 0,
             working_indicator: WorkingIndicatorPlacement::Above,
             status_footer: StatusFooterLayout::Compact,
             composer_effort_color: false,
@@ -854,6 +856,9 @@ fn parse_layout(value: Option<&Value>, source_name: &str) -> anyhow::Result<Them
             }
             "composer_padding" => {
                 layout.composer_padding = bounded_u16(value, source_name, key, 0, 4)?
+            }
+            "queued_input_padding" => {
+                layout.queued_input_padding = bounded_u16(value, source_name, key, 0, 4)?
             }
             "working_indicator" => {
                 layout.working_indicator = match string(value, source_name, key)?.as_str() {

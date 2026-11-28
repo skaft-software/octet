@@ -192,6 +192,32 @@ fn queued_steering_uses_active_model_color() {
 }
 
 #[test]
+fn queued_input_role_and_padding_are_theme_controlled() {
+    let mut shell = InteractiveShell::test_shell();
+    shell.set_theme(crate::tui::theme::test_theme_from_source(
+        r##"
+            [roles.queued_input]
+            foreground = "#123456"
+            bold = false
+            italic = true
+
+            [layout]
+            queued_input_padding = 2
+        "##,
+    ));
+    shell.queue_steering(&ComposedInput::from_text("check the docs".into()));
+
+    let rendered = input_overlays::render_pending_steering(&shell.state.borrow(), 80, 8);
+    assert_eq!(rendered.len(), 4, "{rendered:?}");
+    assert!(rendered[0].contains("38;2;18;52;86"), "{rendered:?}");
+    assert!(rendered[1].contains("38;2;18;52;86"), "{rendered:?}");
+    assert!(!rendered[0].contains("\x1b[1m"), "{rendered:?}");
+    assert!(rendered[2..]
+        .iter()
+        .all(|row| strip_terminal_sequences(row).is_empty()));
+}
+
+#[test]
 fn steering_preview_clips_a_long_first_line() {
     let mut shell = InteractiveShell::test_shell();
     shell.queue_steering(&ComposedInput::from_text(

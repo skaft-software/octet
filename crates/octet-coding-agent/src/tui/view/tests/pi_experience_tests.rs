@@ -116,6 +116,35 @@ fn pi_prompt_is_a_three_row_full_width_band_without_a_chevron_or_model_wash() {
 }
 
 #[test]
+fn pi_queued_input_is_muted_unbold_and_separated_from_the_composer() {
+    for theme in themes() {
+        assert_eq!(theme.layout().queued_input_padding, 1);
+        let role = theme.semantic_style("queued_input");
+        assert_eq!(role.foreground, theme.semantic_style("muted").foreground);
+        assert!(!role.attributes.bold);
+
+        let mut shell = InteractiveShell::test_shell();
+        shell.set_theme(theme);
+        shell.queue_steering(&ComposedInput::from_text("check the docs".into()));
+        let rows = input_overlays::render_pending_steering(&shell.state.borrow(), 80, 8);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert!(!rows[0].contains("\x1b[1m"), "{rows:?}");
+        assert!(!rows[1].contains("\x1b[1m"), "{rows:?}");
+        assert_eq!(strip_terminal_sequences(&rows[2]), "");
+
+        let frame = render_shell(&shell.state.borrow(), 80)
+            .iter()
+            .map(|row| strip_terminal_sequences(row))
+            .collect::<Vec<_>>();
+        let preview = frame
+            .iter()
+            .position(|row| row.contains("└ check the docs"))
+            .expect("queued preview");
+        assert_eq!(frame[preview + 1], "", "{frame:?}");
+    }
+}
+
+#[test]
 fn pi_tool_lifecycle_selects_pending_success_and_error_fills_before_framing() {
     for theme in themes() {
         let renderer = theme.rich_renderer();

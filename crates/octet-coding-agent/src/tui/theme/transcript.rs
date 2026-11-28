@@ -11,6 +11,7 @@ pub(super) enum TranscriptRole {
     Thinking,
     ToolHeader,
     ScrollHint,
+    QueuedInput,
 }
 
 impl TranscriptRole {
@@ -19,6 +20,7 @@ impl TranscriptRole {
             "thinking" => Some(Self::Thinking),
             "tool_header" => Some(Self::ToolHeader),
             "scroll_hint" => Some(Self::ScrollHint),
+            "queued_input" => Some(Self::QueuedInput),
             _ => None,
         }
     }
@@ -43,6 +45,7 @@ impl TranscriptRole {
                 legacy_fg_style(theme, role).bold()
             }
             Self::ScrollHint => legacy_fg_style(theme, "accent").bold(),
+            Self::QueuedInput => legacy_fg_style(theme, "model_accent").bold(),
         }
     }
 }
