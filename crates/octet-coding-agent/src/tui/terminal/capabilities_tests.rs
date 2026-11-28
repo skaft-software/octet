@@ -99,6 +99,45 @@ fn rex_environment_selects_verified_capabilities_without_changing_other_terminal
 }
 
 #[test]
+fn rex_block_identity_is_sufficient_without_a_session_variable() {
+    use std::ffi::OsStr;
+    // Rex's Windows server exports REX_BLOCK but not REX_SESSION.
+    assert!(rex_block(Some(OsStr::new("block:01a2-7138"))));
+    assert!(!rex_block(None));
+    assert!(!rex_block(Some(OsStr::new(""))));
+}
+
+#[test]
+fn rex_block_on_windows_selects_verified_kitty_images() {
+    use std::ffi::OsStr;
+    let mut rex = probe(Some("xterm-256color"));
+    rex.term_program = Some("rex".into());
+    rex.colorterm = Some("truecolor".into());
+    rex.rex = rex_block(Some(OsStr::new("block:01a2-7138")));
+    rex.windows = Some(WindowsConsole {
+        input_console: true,
+        output_vt: true,
+        windows_terminal: false,
+    });
+    let caps = TerminalCapabilities::from_probe(ColorMode::Auto, rex);
+    assert!(caps.interactive);
+    assert!(caps.rex);
+    assert!(sexy_terminal_capabilities(caps, (80, 24)).kitty_graphics);
+
+    // A plain conhost window announces no Rex block and stays text-only.
+    let mut conhost = probe(None);
+    conhost.windows = Some(WindowsConsole {
+        input_console: true,
+        output_vt: true,
+        windows_terminal: false,
+    });
+    let caps = TerminalCapabilities::from_probe(ColorMode::Auto, conhost);
+    assert!(caps.interactive);
+    assert!(!caps.rex);
+    assert!(!sexy_terminal_capabilities(caps, (80, 24)).kitty_graphics);
+}
+
+#[test]
 fn rex_capabilities_plan_png_as_kitty_while_plain_mode_falls_back() {
     use sexy_tui_rs::images::{
         ImageCapabilities, ImageCapabilityOverrides, ImageFallbackReason, ImageId, ImageLimits,

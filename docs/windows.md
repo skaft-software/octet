@@ -197,8 +197,9 @@ Known differences on Windows:
   console host turns the reply into key records, and Windows Terminal's reply
   reached the composer as typed text. Auto uses its neutral fallback; choose
   `--theme dark`, `--theme light` or `/theme` instead.
-- Inline images are shown only on Kitty-compatible terminals, so tool images
-  use the text fallback in Windows Terminal.
+- Inline images are shown only on Kitty-compatible terminals. Rex identifies
+  a direct pane with `REX_BLOCK`, so its tool images are placed inline;
+  Windows Terminal and conhost use the text fallback.
 - Resizing replays the retained transcript once, as on other platforms.
 
 ### Windows Terminal visual checklist
