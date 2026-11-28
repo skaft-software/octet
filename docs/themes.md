@@ -161,6 +161,7 @@ its presentation policy:
 | --- | --- |
 | Tool/activity gutter | `[colors] margin_markers`, `event_marker_gutter`, `tool_dot_breathing`, `tool_dot_dim`, `tool_dot_bright` |
 | Composer | `[colors] composer` (`boxed`, `framed`, `shaded`, `topline`), `composer_border`, `composer_bg`; `[layout] working_indicator`, `composer_effort_color`, `composer_show_prompt`; `[glyphs]` border characters |
+| Queued input | `[roles.queued_input]` for heading and marker text; `[layout] queued_input_padding` for blank rows before the composer |
 | Prompt/tool fill and padding | `prompt_wash`, `[roles."surface.user"]`, `[roles."surface.tool"]`, tool/shell state roles, `[surfaces.user]`, `[surfaces.tool]` |
 | Thinking/tool text and animation | `[roles.thinking]`, `[roles.tool_header]`, `[roles.scroll_hint]`; `[colors] activity_shimmer`, `thinking_spinner` |
 | Spacing and narrow layouts | `[layout] density`, `transcript_inset`, `block_padding_x`, `tool_body_indent`, `composer_padding`, `narrow_*`; per-surface `padding`, `narrow_padding`, `marker_gutter`, `prompt_marker` |
@@ -372,6 +373,7 @@ TOML theme, including per terminal appearance in `[variants.*.layout]`:
 | `status_footer` | `"compact"` | `"two_line"` | Use one Octet metadata row or the two-line workspace/usage footer. Short or very narrow panes omit the workspace row. The `topline` composer keeps its single embedded metadata row. |
 | `composer_effort_color` | `false` | `true` | Use the palette's `extension.pi.thinking*` roles for composer rules when present. An explicit `composer_border` color wins. |
 | `composer_show_prompt` | `true` | `false` | Show the draft chevron and its continuation gutter. |
+| `queued_input_padding` | `0` | `1` | Add this many blank rows (0–4) between queued steering/follow-up input and the composer when viewport space permits. |
 | `tool_cards` | `"octet"` | `"pi"` | Choose native tool headers, preview windows and duration decoration. Custom extension renderers retain ownership. |
 
 `[colors] thinking_placeholder` sets the transcript label for a collapsed or
@@ -568,8 +570,12 @@ so on) resolve to the same underlying role.
 
 ### Transcript roles
 
-In addition to the text-role vocabulary above, `thinking`, `tool_header` and
-`scroll_hint` accept the same style fields. `tool_header` styles native tool
+In addition to the text-role vocabulary above, `thinking`, `tool_header`,
+`scroll_hint` and `queued_input` accept the same style fields. `queued_input`
+styles queued-input headings and branch markers and defaults to bold
+model-accent text; message bodies use `muted`, and edit hints use the subdued
+metadata style. Set `foreground = "muted"` and `bold = false` for Pi's quiet
+queue presentation. `tool_header` styles native tool
 labels, including Bash; Pi palettes inherit their bold `toolTitle` styling unless
 an explicit `tool_header` override is set. `scroll_hint` styles the centered
 Jump control, defaulting to bold theme-accent text; reported hover

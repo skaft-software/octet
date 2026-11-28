@@ -129,6 +129,12 @@ underline = true
 foreground = "accent"
 bold = true
 
+# Queued-input headings and branch markers. These defaults are shown as comments
+# so the reference retains live model-accent updates when models change.
+# [roles.queued_input]
+# foreground = "model_accent"
+# bold = true
+
 # Typed structural and status glyphs. ASCII fallbacks are mandatory for
 # conservative terminals and must stay ASCII.
 [glyphs]
@@ -244,6 +250,7 @@ show_panel_borders = true
 prompt_padding = false
 transcript_inset = 2
 composer_padding = 1
+queued_input_padding = 0
 narrow_breakpoint = 64
 narrow_show_header = false
 narrow_show_footer = true

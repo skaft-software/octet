@@ -27,7 +27,12 @@ working_indicator = "composer"
 status_footer = "two_line"
 composer_effort_color = true
 composer_show_prompt = false
+queued_input_padding = 1
 tool_cards = "pi"
+
+[roles.queued_input]
+foreground = "muted"
+bold = false
 
 [roles.thinking]
 foreground = "reasoning_text"

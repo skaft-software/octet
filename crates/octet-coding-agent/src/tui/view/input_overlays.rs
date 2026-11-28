@@ -667,13 +667,17 @@ pub(super) fn render_pending_steering(
             )
         )
     };
-    let mut lines = vec![fit_line(
-        &format!(
-            "{ACTIVITY_DETAIL_INDENT}{}{hint}",
+    let queued_input = |text: &str| {
+        if state.theme.has_semantic_style("queued_input") {
+            state.theme.apply_semantic_role("queued_input", text)
+        } else {
             state
                 .theme
-                .bold(&state.theme.model_fg(state.model_lab, &heading))
-        ),
+                .bold(&state.theme.model_fg(state.model_lab, text))
+        }
+    };
+    let mut lines = vec![fit_line(
+        &format!("{ACTIVITY_DETAIL_INDENT}{}{hint}", queued_input(&heading)),
         width,
     )];
     if max_rows == 1 {
@@ -681,10 +685,7 @@ pub(super) fn render_pending_steering(
     }
 
     let elbow = activity_elbow(&state.theme);
-    let prefix = format!(
-        "{ACTIVITY_DETAIL_INDENT}{} ",
-        state.theme.model_fg(state.model_lab, elbow)
-    );
+    let prefix = format!("{ACTIVITY_DETAIL_INDENT}{} ", queued_input(elbow));
     let continuation = format!("{ACTIVITY_DETAIL_INDENT}  ");
     let mut content = Vec::new();
     let available = usize::from(width).saturating_sub(visible_width(&prefix));
@@ -722,6 +723,9 @@ pub(super) fn render_pending_steering(
         ));
     }
     lines.extend(content);
+    let padding = usize::from(state.theme.layout().queued_input_padding)
+        .min(max_rows.saturating_sub(lines.len()));
+    lines.extend(std::iter::repeat_n(String::new(), padding));
     lines
 }
 
